@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 
 ARTIFACT_KIND_IMAGE = "image"
@@ -288,8 +287,3 @@ class ArtifactContentSearchResult:
             "selector": dict(self.selector),
             "locations": [dict(item) for item in self.locations],
         }
-
-
-class ArtifactTranscriberPort(Protocol):
-    def transcribe(self, path: Path, *, mime_type: str = "") -> str | None:
-        ...

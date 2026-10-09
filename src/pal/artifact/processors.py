@@ -20,14 +20,12 @@ from pal.artifact.contracts import (
     ArtifactPolicy,
     ArtifactRecord,
     ArtifactRepresentation,
-    ArtifactTranscriberPort,
     REPRESENTATION_CHUNK_TEXT,
     REPRESENTATION_METADATA,
     REPRESENTATION_NORMALIZED_IMAGE,
     REPRESENTATION_PAGE_IMAGE,
     REPRESENTATION_PAGE_TEXT,
     REPRESENTATION_TEXT,
-    REPRESENTATION_TRANSCRIPT,
 )
 
 
@@ -44,7 +42,6 @@ class ArtifactProcessingContext:
     root: Path
     repository: object
     policy: ArtifactPolicy
-    transcriber: ArtifactTranscriberPort | None = None
 
     @property
     def original_path(self) -> Path:
@@ -310,30 +307,7 @@ class AudioArtifactProcessor:
 
     def process(self, context: ArtifactProcessingContext) -> ArtifactRecord:
         record = context.record
-        transcript = None
-        if context.transcriber is not None:
-            transcript = context.transcriber.transcribe(context.original_path, mime_type=record.original_mime_type)
-        if transcript:
-            transcript_path = context.representations_dir() / "transcript.txt"
-            transcript_path.write_text(transcript, encoding="utf-8")
-            context.put_representation(
-                ArtifactRepresentation(
-                    representation_id=_representation_id(record.artifact_id, REPRESENTATION_TRANSCRIPT, "default"),
-                    artifact_id=record.artifact_id,
-                    representation_kind=REPRESENTATION_TRANSCRIPT,
-                    path=str(transcript_path),
-                    mime_type="text/plain",
-                    size_bytes=transcript_path.stat().st_size,
-                    text_preview=_preview(transcript),
-                    summary=_preview(transcript),
-                    status=ARTIFACT_STATUS_READY,
-                )
-            )
-            status = ARTIFACT_STATUS_READY
-            summary = _preview(transcript) or f"audio artifact {record.file_name}"
-        else:
-            status = ARTIFACT_STATUS_PARTIAL
-            summary = f"audio artifact {record.file_name}; transcript unavailable"
+        summary = f"audio artifact {record.file_name}; not transcribed"
         context.put_representation(
             ArtifactRepresentation(
                 representation_id=_representation_id(record.artifact_id, REPRESENTATION_METADATA, "audio"),
@@ -343,10 +317,10 @@ class AudioArtifactProcessor:
                 size_bytes=record.original_size_bytes,
                 summary=summary,
                 status=ARTIFACT_STATUS_READY,
-                metadata={"needs_transcription": transcript is None},
+                metadata={"transcription_status": "not_requested"},
             )
         )
-        return replace(record, summary=summary, status=status)
+        return replace(record, summary=summary, status=ARTIFACT_STATUS_READY)
 
 
 def prepare_inline_image_file(input_path: Path, output_path: Path, *, policy: ArtifactPolicy) -> tuple[Path, str]:

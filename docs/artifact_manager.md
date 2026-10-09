@@ -145,7 +145,11 @@ Artifact capabilities:
 - `artifact_search`: search artifact objects by filename, kind, time, caption, or summary.
 - `select_artifact`: mark one artifact as chosen and refresh TTL.
 - `grep_artifact`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
-- `transcribe_artifact`: request transcript generation; V1 returns `needs_transcription` without an ASR provider.
+
+Audio is stored without automatic transcription. The model receives its local file path, MIME type,
+and an explicit audio notice. When speech content is needed, discover a separate transcription tool
+with `search_tools`; prefer a remote service to a local speech-recognition model. Existing transcript
+representations remain readable through `read_artifact` or their supplied text file paths.
 
 Artifact capabilities are indirect: discover their current aliases with
 `search_tools` and invoke them through `call_tool`.
@@ -164,7 +168,7 @@ Future additions should register new behavior through tables/registries:
 - Add a processor for a MIME/extension/kind in `ArtifactProcessorRegistry`.
 - Add a representation kind in `ArtifactRepresentationRegistry`.
 - Adjust prompt exposure by policy, not by adding type branches to `PromptCompiler`.
-- Add ASR by providing an `ArtifactTranscriberPort`.
+- Expose transcription as a separately discoverable tool that accepts an audio file; artifact ingestion does not run ASR.
 
 ## Invariants
 

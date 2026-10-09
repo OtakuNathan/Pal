@@ -5,8 +5,8 @@ usage() {
   cat <<'EOF'
 Install a packaged Pal release.
 
-The wheel and pal_v2-runtime-root-overlay.tar.gz must be beside this script
-unless their paths are supplied explicitly.
+The Pal wheel must be beside this script unless --wheel is supplied.
+A custom runtime-root overlay is optional and applied only with --overlay.
 
 Usage:
   ./install-pal.sh [options]
@@ -18,7 +18,7 @@ Options:
   --bin-dir PATH       Directory for the pal launcher
                        (default: $PAL_BIN_DIR or ~/.local/bin)
   --wheel PATH         Pal wheel to install
-  --overlay PATH       Runtime-root overlay archive to extract
+  --overlay PATH       Optional custom runtime-root overlay archive to extract
   --providers-dir PATH Directory containing provider wheels
                        (default: providers/ beside this script, when present)
   --no-providers       Do not install bundled provider wheels
@@ -147,11 +147,10 @@ done
 if [[ -z "$wheel_path" ]]; then
   wheel_path="$(find_packaged_artifact 'pal_v2-*.whl' 'Pal wheel')"
 fi
-if [[ -z "$overlay_path" ]]; then
-  overlay_path="$(find_packaged_artifact 'pal_v2-runtime-root-overlay.tar.gz' 'runtime-root overlay')"
-fi
 [[ -f "$wheel_path" ]] || fail "wheel does not exist: $wheel_path"
-[[ -f "$overlay_path" ]] || fail "runtime-root overlay does not exist: $overlay_path"
+if [[ -n "$overlay_path" ]]; then
+  [[ -f "$overlay_path" ]] || fail "runtime-root overlay does not exist: $overlay_path"
+fi
 if [[ -z "$providers_dir" && -d "$script_dir/providers" ]]; then
   providers_dir="$script_dir/providers"
 fi
@@ -263,9 +262,11 @@ echo "Installing $(basename "$wheel_path")..."
 
 "$pal_bin" --help >/dev/null
 
-echo "Installing runtime-root overlay into $runtime_root..."
 mkdir -p "$runtime_root"
-tar -xzf "$overlay_path" -C "$runtime_root"
+if [[ -n "$overlay_path" ]]; then
+  echo "Installing runtime-root overlay into $runtime_root..."
+  tar -xzf "$overlay_path" -C "$runtime_root"
+fi
 
 if [[ "${#provider_wheels[@]}" -gt 0 ]]; then
   echo "Installing ${#provider_wheels[@]} channel-provider wheel(s)..."

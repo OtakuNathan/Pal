@@ -33,9 +33,19 @@ def register(manager, name, content):
 @pytest.mark.parametrize('audio', [False, True])
 def test_long_text_is_readable_beyond_artifact_preview_with_file_tool(manager, audio):
     content = ''.join(f'line{index:05d}\n' for index in range(10000))
-    if audio:
-        manager.transcriber = SimpleNamespace(transcribe=lambda *args, **kwargs: content)
     ref = register(manager, 'voice.wav' if audio else 'source.txt', 'fake audio' if audio else content)
+    if audio:
+        # Transcripts persisted by earlier versions or external processors remain readable.
+        from pal.artifact.contracts import ArtifactRepresentation
+        transcript_path = manager.runtime_root / 'existing-transcript.txt'
+        transcript_path.write_text(content)
+        manager.repository.upsert_representation(ArtifactRepresentation(
+            representation_id=f'{ref.artifact_id}:transcript:default',
+            artifact_id=ref.artifact_id, representation_kind='transcript',
+            path=str(transcript_path), mime_type='text/plain', size_bytes=len(content),
+            text_preview=content[:200], summary='Existing transcript', status='ready',
+        ))
+        ref, = manager.list_hot('scope')
     path = ref.text_file['file_path']
     assert Path(path).read_text() == content
     preview = manager.read(ref.artifact_id, 'scope', max_chars=100000)

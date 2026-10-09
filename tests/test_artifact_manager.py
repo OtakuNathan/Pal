@@ -21,7 +21,7 @@ from pal.artifact import (
     ArtifactRepresentationModel,
     register_with_core as register_artifact_with_core,
 )
-from pal.artifact.tools import ArtifactContentSearchTool, ArtifactImportTool, ArtifactReadTool, ArtifactTranscribeTool
+from pal.artifact.tools import ArtifactContentSearchTool, ArtifactImportTool, ArtifactReadTool
 from pal.artifact.prompt import ArtifactPromptFragmentProvider
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.prompt_compiler import PromptCompiler
@@ -56,12 +56,6 @@ class _ToolRuntime:
     def __init__(self, scope_key: str) -> None:
         self.turn_io = _TurnIO(scope_key)
         self.provider_registry = {"core:turn_io": self.turn_io}
-
-
-class _FakeTranscriber:
-    def transcribe(self, path: Path, *, mime_type: str = "") -> str | None:
-        _ = (path, mime_type)
-        return "transcribed hello"
 
 
 class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -983,52 +977,54 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, RuntimeStatus.OK)
         self.assertFalse(result.structured["ttl_refreshed"])
 
-    async def test_audio_without_asr_returns_needs_transcription(self) -> None:
-        audio_path = self.root / "incoming" / "voice.mp3"
-        audio_path.parent.mkdir(parents=True, exist_ok=True)
-        audio_path.write_bytes(b"not really mp3")
+    def test_audio_is_exposed_as_a_file_for_discovered_transcription(self) -> None:
+        audio_path = self._write_source("voice.mp3", "fixture audio bytes")
         ref = self.manager.register_ingested(
             {"local_cached_path": str(audio_path), "file_name": "voice.mp3", "mime_type": "audio/mpeg"},
-            scope_key=self.scope_key,
-            turn_id=self.turn_id,
-            source_channel="telegram",
+            scope_key=self.scope_key, turn_id=self.turn_id, source_channel="telegram",
         )
-        tool = ArtifactTranscribeTool(service=self.manager)
+        info = self.manager.info(ref.artifact_id, self.scope_key)
+        exposure = self.manager.select_prompt_exposure(self.scope_key, self.turn_id, "", {})
+        self.assertEqual(ref.status, "ready")
+        self.assertEqual(ref.available_actions, ("inspect_artifact_info",))
+        self.assertFalse(ref.text_file)
+        self.assertEqual(exposure.inline_parts, ())
+        self.assertIn("This is an audio file, not a transcript", exposure.text)
+        self.assertIn('search_tools(query="audio transcribe")', exposure.text)
+        self.assertIn("audio/mpeg", exposure.text)
+        self.assertNotIn("transcribe_artifact", exposure.text)
+        path = info["artifact"]["metadata"]["local_file"]["preferred_path"]
+        self.assertIn(path, exposure.text)
+        self.assertEqual(Path(path).read_bytes(), audio_path.read_bytes())
+        result = self.manager.read(ref.artifact_id, self.scope_key)
+        self.assertIn("not transcribed", result.text)
+        self.assertIn("search_tools", " ".join(result.next_actions))
+        from pal.llm.ir import ArtifactRefPartIR, LLMMessageIR, MessageRole
+        core = PalCore()
+        register_artifact_with_core(core.context, self.manager)
+        try:
+            projected = core.turn_executor._project_messages_for_prompt(
+                [LLMMessageIR(role=MessageRole.USER, parts=(ArtifactRefPartIR(artifact_id=ref.artifact_id),))],
+                turn_id=self.turn_id, artifact_scope_key=self.scope_key, capabilities={},
+            )
+            self.assertIn(path, projected[0].text)
+            self.assertIn("This is an audio file, not a transcript", projected[0].text)
+            self.assertIn('search_tools(query="audio transcribe")', projected[0].text)
+        finally:
+            core.context.execution_runtime.shutdown()
 
-        result = await tool.ainvoke(
-            {"artifact_id": ref.artifact_id},
-            runtime=_ToolRuntime(self.scope_key),
-            turn_id=self.turn_id,
-        )
-
-        self.assertEqual(result.status, "unsupported")
-        self.assertEqual(result.structured["reason"], "needs_transcription")
-
-    async def test_audio_with_asr_returns_existing_transcript(self) -> None:
-        audio_path = self.root / "incoming" / "voice.wav"
-        audio_path.parent.mkdir(parents=True, exist_ok=True)
-        audio_path.write_bytes(b"not really wav")
-        manager = ArtifactManager(
-            runtime_root=self.root,
-            repository=self.repository,
-            transcriber=_FakeTranscriber(),
-        )
-        ref = manager.register_ingested(
-            {"local_cached_path": str(audio_path), "file_name": "voice.wav", "mime_type": "audio/wav"},
-            scope_key=self.scope_key,
-            turn_id=self.turn_id,
-            source_channel="telegram",
-        )
-        tool = ArtifactTranscribeTool(service=manager)
-
-        result = await tool.ainvoke(
-            {"artifact_id": ref.artifact_id},
-            runtime=_ToolRuntime(self.scope_key),
-            turn_id=self.turn_id,
-        )
-
-        self.assertEqual(result.status, "ok")
-        self.assertIn("transcribed hello", result.text)
+    def test_transcribe_tool_is_not_registered(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        register_artifact_with_core(core.context, self.manager)
+        try:
+            for module in ("execution", "artifact"):
+                core.publish_module_capabilities(module)
+            runtime = core.context.execution_runtime
+            self.assertIsNone(runtime.registry_generation.record_for_alias("transcribe_artifact"))
+            self.assertIsNotNone(runtime.registry_generation.record_for_alias("read_artifact"))
+        finally:
+            core.context.execution_runtime.shutdown()
 
     @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
     def test_image_artifact_can_be_serialized_to_openai_chat_data_url(self) -> None:
@@ -1157,9 +1153,10 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         from pal.artifact.service import _next_actions_for
         aliases = core.context.capability_registry.descriptors
-        for kind in ("pdf", "audio"):
-            for suggestion in _next_actions_for(SimpleNamespace(kind=kind)):
-                self.assertIn(suggestion.split()[1], aliases)
+        for suggestion in _next_actions_for(SimpleNamespace(kind="pdf")):
+            self.assertIn(suggestion.split()[1], aliases)
+        self.assertIn("search_tools", aliases)
+        self.assertIn("search_tools", " ".join(_next_actions_for(SimpleNamespace(kind="audio"))))
         core.context.execution_runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
         ref = self._register_text("refund-policy.txt", "refund terms are on page one")
 

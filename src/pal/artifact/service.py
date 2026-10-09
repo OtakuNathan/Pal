@@ -32,7 +32,6 @@ from pal.artifact.contracts import (
     ArtifactRef,
     ArtifactRepresentation,
     ArtifactSearchResult,
-    ArtifactTranscriberPort,
     REPRESENTATION_CHUNK_TEXT,
     REPRESENTATION_METADATA,
     REPRESENTATION_NORMALIZED_IMAGE,
@@ -49,12 +48,13 @@ from pal.foundation import StoredArtifact
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class NoopArtifactTranscriber:
-    def transcribe(self, path: Path, *, mime_type: str = "") -> str | None:
-        _ = path
-        _ = mime_type
-        return None
+AUDIO_TRANSCRIPTION_GUIDANCE = (
+    "This is an audio file, not a transcript. Pal has not transcribed it. "
+    'If its speech content is needed, use search_tools(query="audio transcribe") to find an available '
+    "transcription tool that accepts the supplied local_file.preferred_path. "
+    "Prefer a remote service over running a speech-recognition model on this host. "
+    "If no suitable tool is available, report that the audio has not been transcribed; do not infer its contents."
+)
 
 
 @dataclass
@@ -97,7 +97,6 @@ class ArtifactManager:
     policy: ArtifactPolicy = None  # type: ignore[assignment]
     processor_registry: ArtifactProcessorRegistry = None  # type: ignore[assignment]
     representation_registry: ArtifactRepresentationRegistry = None  # type: ignore[assignment]
-    transcriber: ArtifactTranscriberPort | None = None
     writable: bool = True
     _lifecycle_lock: Any = field(default_factory=RLock, init=False, repr=False)
 
@@ -110,8 +109,6 @@ class ArtifactManager:
             self.processor_registry = ArtifactProcessorRegistry.defaults()
         if self.representation_registry is None:
             self.representation_registry = ArtifactRepresentationRegistry()
-        if self.transcriber is None:
-            self.transcriber = NoopArtifactTranscriber()
 
     def reap_expired(
         self,
@@ -465,7 +462,6 @@ class ArtifactManager:
                 root=artifact_root,
                 repository=self.repository,
                 policy=self.policy,
-                transcriber=self.transcriber,
             )
             try:
                 record = processor.process(context)
@@ -900,6 +896,8 @@ class ArtifactManager:
             "  direct_content: unavailable" if record.kind != ARTIFACT_KIND_PDF else "  extracted_text: unavailable",
             "  handling: inspect current capabilities/tools for a suitable processor using the metadata below",
         ]
+        if record.kind == ARTIFACT_KIND_AUDIO:
+            lines[-1] = f"  handling: {AUDIO_TRANSCRIPTION_GUIDANCE}"
         if record.kind == ARTIFACT_KIND_PDF:
             page_access = {key: record.metadata[key] for key in
                            ("page_index_file_path", "page_file_pattern", "page_count", "extracted_pages", "extraction_truncated")
@@ -1053,8 +1051,6 @@ class ArtifactManager:
         actions = ["inspect_artifact_info"]
         if not text_file and any(self.representation_registry.is_textual(rep.representation_kind) for rep in reps):
             actions.extend(("read_artifact", "grep_artifact"))
-        if record.kind == ARTIFACT_KIND_AUDIO and not any(rep.representation_kind == REPRESENTATION_TRANSCRIPT for rep in reps):
-            actions.append("transcribe_artifact")
         return ArtifactRef(
             artifact_id=record.artifact_id,
             kind=record.kind,
@@ -1298,7 +1294,7 @@ def _prompt_actions_for(record: ArtifactRecord, *, image_inlined: bool) -> tuple
             return ("inspect_artifact_info",)
         return ("inspect_artifact_info", "read_artifact", "grep_artifact")
     if record.kind == ARTIFACT_KIND_AUDIO:
-        return ("inspect_artifact_info", "transcribe_artifact")
+        return ("inspect_artifact_info",)
     return ("inspect_artifact_info",)
 
 
@@ -1317,7 +1313,7 @@ def _next_actions_for(record: ArtifactRecord) -> tuple[str, ...]:
     if record.kind == ARTIFACT_KIND_PDF:
         return ("Use grep_artifact for specific terms.", "Use read_artifact with page or chunk for focused reading.")
     if record.kind == ARTIFACT_KIND_AUDIO:
-        return ("Use transcribe_artifact if a transcript is needed.",)
+        return (AUDIO_TRANSCRIPTION_GUIDANCE,)
     if record.kind == ARTIFACT_KIND_IMAGE:
         return ("Use a vision-capable model for image content.",)
     return ()

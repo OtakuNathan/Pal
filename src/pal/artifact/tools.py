@@ -252,28 +252,6 @@ class ArtifactContentSearchTool:
             return _result(RuntimeStatus.NOT_FOUND, "Artifact content search failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 
 
-@dataclass
-class ArtifactTranscribeTool:
-    service: ArtifactManager
-
-    def invoke(self, args: dict[str, Any]) -> CapabilityResult:
-        _ = args
-        return _result(RuntimeStatus.INVALID, "Artifact transcription unavailable", {"reason": "async_required"})
-
-    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
-        try:
-            scope_key = _scope_from_runtime(kwargs.get("runtime"), kwargs.get("turn_id"))
-            artifact_id = str(args.get("artifact_id") or "")
-            transcript = self.service.read(artifact_id, scope_key, representation="transcript")
-            if transcript.ok:
-                return _result(RuntimeStatus.OK, "Artifact transcript", transcript.to_dict(), text=transcript.text)
-            structured = {"reason": "needs_transcription", "artifact": transcript.metadata,
-                          "read_result": transcript.to_dict()}
-            return _result(RuntimeStatus.UNSUPPORTED, "Artifact transcription needed", structured)
-        except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact transcription failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
-
-
 def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None

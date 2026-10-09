@@ -10,12 +10,11 @@ from pal.artifact.contracts import (
     ArtifactRef,
     ArtifactRepresentation,
     ArtifactSearchResult,
-    ArtifactTranscriberPort,
 )
 from pal.artifact.capabilities import ArtifactIntrospectionProvider, register_with_core
 from pal.artifact.models import ArtifactHotStateModel, ArtifactRecordModel, ArtifactRepresentationModel
 from pal.artifact.repository import ArtifactRepository
-from pal.artifact.service import ArtifactManager, NoopArtifactTranscriber
+from pal.artifact.service import ArtifactManager
 
 __all__ = [
     "ArtifactContentSearchResult",
@@ -35,7 +34,5 @@ __all__ = [
     "ArtifactRepresentation",
     "ArtifactRepresentationModel",
     "ArtifactSearchResult",
-    "ArtifactTranscriberPort",
-    "NoopArtifactTranscriber",
     "register_with_core",
 ]

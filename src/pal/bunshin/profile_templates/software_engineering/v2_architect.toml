@@ -32,7 +32,7 @@ Once the design is settled and declarations are complete, encode the same topolo
 For a revision, change only the bound finding or edit scope and preserve unrelated topology and declarations. Correct rejected mechanical preflight defects in place, then resubmit. Finish after the checklist and bound outputs are complete; Manager guards paths, validates the contract, and records submission metadata.
 """
 output_contract_fragment = """
-Advance the fixed durable checklist phases in order, write or revise the declaration skeleton, project and reconcile architect.yaml, mark all phases completed, Manager validates and records the bound files after the harness finishes. The checklist is a work cursor, not evidence or design truth. If preflight rejects the submission, make the smallest scoped correction and retry. Keep final chat short.
+Advance the fixed durable checklist phases in order, write or revise the declaration skeleton, project and reconcile architect.yaml, mark all phases completed, call submit_contract with an empty argument object ({}) and wait for successful Manager acceptance before finishing. The checklist is a work cursor, not evidence or design truth. If preflight rejects the submission, make the smallest scoped correction and retry. Keep final chat short.
 """
 capability_groups = ["architecture_workspace_read", "workspace_write", "code_intel", "web_research", "v2_contract_file_author"]
 

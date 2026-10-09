@@ -492,10 +492,9 @@ def test_zero_exit_control_terminal_is_recovered_without_overriding_submission_r
     repository.role_retries.queue_role_attempt_retry.assert_not_called()
 
 
-@pytest.mark.parametrize("harness", ["pal", "codex"])
 @pytest.mark.parametrize("fails", [False, True])
-def test_real_harness_entrypoint_flushes_native_stdout_before_exit(harness, fails):
-    module = "pal.bunshin.worker_main" if harness == "pal" else "plugins.codex_architect_harness.codex_architect_worker"
+def test_real_harness_entrypoint_flushes_native_stdout_before_exit(fails):
+    module = "pal.bunshin.worker_main"
     script = f'''
 import importlib, sys
 module = importlib.import_module({module!r})

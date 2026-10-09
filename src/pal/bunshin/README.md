@@ -14,7 +14,10 @@ Package layout:
 - the default worker entrypoint is `python -m pal.bunshin.worker_main`; formal
   models live in `spec/bunshin/`
 
-Pal and Codex harnesses enqueue worker events into a bounded FIFO. One sender
+All built-in roles, including Architect, run through the Pal worker and use
+Pal's configured LLM endpoints and tool surface.
+
+Pal workers enqueue events into a bounded FIFO. One sender
 task owns nonblocking JSON-line writes to stdout; model and tool execution do
 not await progress delivery. A full queue applies asynchronous backpressure.
 Approvals, clarifications, terminal events, and worker errors await pipe-write

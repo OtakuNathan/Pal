@@ -21,8 +21,6 @@ from pal.execution.generated_tool_models import (
     ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput,
     ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput,
     ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput,
 )
 
 from dataclasses import dataclass
@@ -37,7 +35,6 @@ from pal.artifact.tools import (
     ArtifactReadTool,
     ArtifactSearchTool,
     ArtifactSelectTool,
-    ArtifactTranscribeTool,
 )
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
@@ -184,7 +181,7 @@ class ArtifactIntrospectionProvider:
             search_objects=('artifact', 'artifacts', 'text', 'representation', 'representations'),
             purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
             use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). With a known artifact_id, call directly: representation defaults to auto, so inspect_artifact_info is unnecessary. Supports page/chunk selection and max_chars. The result supplies text_file for complete rg/read_file access.",
-            do_not_use_when="A text_file.file_path is already supplied: use rg/read_file directly. Reading local source text (use read_file); importing local images/documents (use import_artifact). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without transcript (use transcribe_artifact first).",
+            do_not_use_when="A text_file.file_path is already supplied: use rg/read_file directly. Reading local source text (use read_file); importing local images/documents (use import_artifact). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without a transcript: use the supplied local file with a separately discovered transcription tool.",
             failure_next_steps="If representation_unavailable, use inspect_artifact_info to inspect the available representations. If not_text_readable, inspect an already-inline image directly with a vision-capable model; there is no separate vision tool. If artifact_handler_retired, ask the user to attach the source again.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
@@ -267,28 +264,6 @@ class ArtifactIntrospectionProvider:
             dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="artifact",
-        action_name="transcribe",
-        guidance=ToolGuidance(
-            search_objects=("artifact", "artifacts", "audio"),
-            purpose="Request transcription for an audio artifact.",
-            use_when="The user sent an audio/voice message and you need the text content.",
-            do_not_use_when="The artifact is not audio (use read_artifact for text/pdf). Transcribing local audio files.",
-            failure_next_steps="If needs_transcription is returned, the transcriber backend may not be configured — check runtime or inform the user. If artifact_handler_retired, ask the user to attach the source again.",
-        ),
-        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput,
-        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput,
-        metadata={"async_required": True},
-        aliases=("transcribe_artifact",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    async def transcribe(self, call: CapabilityCall) -> CapabilityResult:
-        return await ArtifactTranscribeTool(service=self.service).ainvoke(
-            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
-        )
 
 
 def register_with_core(context: "MainContext", service: ArtifactManager) -> ModuleHandle:

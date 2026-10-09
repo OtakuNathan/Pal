@@ -11,7 +11,6 @@ from typing import Any, Callable, Mapping
 
 HARNESS_PROTOCOL_VERSION = "bunshin_harness.v1"
 PAL_HARNESS_ID = "pal"
-CODEX_ARCHITECT_HARNESS_ID = "codex_architect"
 HARNESS_LAUNCH_PAL_SANDBOX = "pal_sandbox"
 HARNESS_LAUNCH_HOST = "host"
 

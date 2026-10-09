@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import tomllib
 
 import pytest
 
-from pal.bunshin.harness_request import compile_architect_harness_request
 from pal.bunshin.prompt_adapter import BunshinPromptFragmentProvider
 from pal.bunshin.runner_components.prompt_context import PromptContext
 from pal.core.prompt_compiler import PromptCompiler
@@ -63,28 +61,6 @@ def test_consumed_native_architect_requires_submit_receipt_without_mutating_pinn
     assert "A final response does not submit the files" in consumed
     assert value.to_dict() == original
 
-
-def test_external_architect_keeps_manager_recording_contract(tmp_path):
-    value = pack(tmp_path, harness="codex_architect")
-    original = copy.deepcopy(value.to_dict())
-    consumed = render(value, tmp_path)
-    assert "after the harness finishes" in consumed
-    assert "durable submission receipt" not in consumed
-    assert value.to_dict() == original
-
-
-def test_external_adapter_still_compiles_harness_neutral_submission_guidance(tmp_path):
-    value = pack(tmp_path, harness="codex_architect")
-    # The external compiler requires a harness-neutral behavior fragment.
-    # Its existing rejection of Pal-specific behavior is outside this fix.
-    value = replace(value, resolved_profile={**value.resolved_profile,
-        "behavior_fragment": "Author the bound architecture and declaration files."})
-    original = copy.deepcopy(value.to_dict())
-    render(value, tmp_path)
-    request = compile_architect_harness_request(value)
-    assert "after the harness finishes" in request.developer_instructions
-    assert "submit_contract" not in request.developer_instructions + request.user_input
-    assert value.to_dict() == original
 
 
 @pytest.mark.parametrize("role,receipt", [("verifier", True), ("architect", False)])

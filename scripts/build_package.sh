@@ -7,26 +7,17 @@ cd "$repo_root"
 python_bin="${PYTHON:-python3}"
 dist_dir="$repo_root/dist"
 provider_dist_dir="$dist_dir/providers"
-runtime_overlay_dir="$dist_dir/runtime_root"
-runtime_overlay_path="$dist_dir/pal_v2-runtime-root-overlay.tar.gz"
 installer_source="$repo_root/scripts/install_package.sh"
 installer_path="$dist_dir/install-pal.sh"
 install_bundle_dir="$dist_dir/install_bundle"
 install_bundle_path="$dist_dir/pal_v2-install-bundle.tar.gz"
-codex_harness_source="$repo_root/plugins/codex_architect_harness"
-codex_harness_relative="plugins/community/codex_architect_harness"
-codex_harness_files=(
-  "plugin.toml"
-  "codex_architect_harness_runtime.py"
-  "codex_architect_worker.py"
-)
 
 mkdir -p "$dist_dir"
 rm -rf "$repo_root/build" "$repo_root/src/pal_v2.egg-info"
 rm -f "$dist_dir"/pal_v2-*.whl
 rm -rf "$provider_dist_dir"
-rm -rf "$runtime_overlay_dir"
-rm -f "$runtime_overlay_path"
+rm -rf "$dist_dir/runtime_root"
+rm -f "$dist_dir/pal_v2-runtime-root-overlay.tar.gz"
 rm -f "$installer_path"
 rm -rf "$install_bundle_dir"
 rm -f "$install_bundle_path"
@@ -60,7 +51,6 @@ required_wheel_paths=(
   "pal/lsp/server_templates/pyright.toml"
   "pal/mcp/templates/stdio_server.toml"
   "pal/bunshin/families.py"
-  "pal/bunshin/harness_request.py"
   "pal/bunshin/harnesses.py"
   "pal/bunshin/profiles.py"
   "pal/bunshin/manager.py"
@@ -245,7 +235,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
 
     channel_capabilities = read_text("pal/channel/capabilities.py")
     for token in (
-        'aliases=("channel_send_message",)',
+        'aliases=("send_channel_message",)',
         "ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput",
         "ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput",
     ):
@@ -299,7 +289,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
     telegram_endpoint = read_provider_text("telegram", "endpoint.py")
     for token in (
         "TelegramInteractionStore",
-        "_segment_text(spec.text",
+        "_segment_text(interaction_text(spec)",
         "data_root=",
     ):
         if token not in telegram_endpoint:
@@ -448,27 +438,11 @@ print(
 )
 PY
 
-codex_harness_overlay_dir="$runtime_overlay_dir/$codex_harness_relative"
-mkdir -p "$codex_harness_overlay_dir"
-for harness_file in "${codex_harness_files[@]}"; do
-  install -m 0644 \
-    "$codex_harness_source/$harness_file" \
-    "$codex_harness_overlay_dir/$harness_file"
-  if ! cmp -s \
-    "$codex_harness_source/$harness_file" \
-    "$codex_harness_overlay_dir/$harness_file"; then
-    echo "Runtime overlay differs from Codex harness source file: $harness_file" >&2
-    exit 1
-  fi
-done
-tar -czf "$runtime_overlay_path" -C "$runtime_overlay_dir" .
-
 install -m 0755 "$installer_source" "$installer_path"
 bash -n "$installer_path"
 
 mkdir -p "$install_bundle_dir"
 install -m 0644 "$wheel_path" "$install_bundle_dir/$(basename "$wheel_path")"
-install -m 0644 "$runtime_overlay_path" "$install_bundle_dir/$(basename "$runtime_overlay_path")"
 install -m 0755 "$installer_path" "$install_bundle_dir/$(basename "$installer_path")"
 mkdir -p "$install_bundle_dir/providers"
 for provider_wheel in "$provider_dist_dir"/pal_channel_provider_*.whl; do
@@ -480,8 +454,7 @@ rm -rf "$install_bundle_dir"
 echo "Built $wheel_path"
 echo "Built $telegram_provider_wheel_path"
 echo "Built $websocket_provider_wheel_path"
-echo "Built $runtime_overlay_path"
 echo "Built $installer_path"
 echo "Built $install_bundle_path"
 echo "Verified ${#required_wheel_paths[@]} semantic wheel contract files plus all package source/data files"
-echo "Verified provider wheels under providers/ and runtime overlay at $codex_harness_relative/"
+echo "Verified provider wheels under providers/"

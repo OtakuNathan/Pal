@@ -25,7 +25,6 @@ def test_artifact_effects_track_hot_state_and_content_mutations() -> None:
         "search": EffectKind.LOCAL_READ,
         "select": EffectKind.LOCAL_WRITE,
         "content_search": EffectKind.LOCAL_WRITE,
-        "transcribe": EffectKind.LOCAL_WRITE,
     }
 
     assert {

@@ -130,20 +130,6 @@ ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput = _strict_model(
     },
 )
 
-ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput',
-    {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
-    },
-)
-
-ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput',
-    {
-    },
-)
-
-
 ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput',
     {
