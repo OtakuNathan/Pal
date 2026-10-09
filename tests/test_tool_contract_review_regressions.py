@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -157,6 +158,33 @@ def test_malformed_mcp_result_is_unknown_failure_through_public_invocation(runti
     assert result.effect.value == 'unknown'
     assert result.__class__.__name__ == 'FailedResult'
     assert 'mcp_protocol_error' in str(result)
+
+
+def test_mcp_normalizer_keeps_validator_and_error_type_in_one_generation():
+    # Isolate deliberate import eviction from the rest of this test process.
+    script = """
+import importlib
+import sys
+from pal.mcp.normalize import normalize_tool_result, normalize_prompt_result, normalize_tool_payload
+old_model = importlib.import_module('pal.mcp.model')
+for name in ('pal.mcp.protocol', 'pal.mcp.model'):
+    sys.modules.pop(name, None)
+new_protocol = importlib.import_module('pal.mcp.protocol')
+assert new_protocol.McpProtocolError is not old_model.McpProtocolError
+for normalize, name in ((normalize_tool_result, 'tool_name'),
+                        (normalize_prompt_result, 'prompt_name')):
+    result = normalize({}, server_id='audit', **{name: 'probe'})
+    assert result.status == 'error'
+    assert result.structured['error_code'] == 'mcp_protocol_error'
+try:
+    normalize_tool_payload({'name': 'bad', 'inputSchema': 'not-a-schema'})
+except old_model.McpProtocolError:
+    pass
+else:
+    raise AssertionError('invalid tool schema was accepted')
+"""
+    result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize('raw', [{'content': []}, {'content': [{'type': 'text', 'text': ''}]},

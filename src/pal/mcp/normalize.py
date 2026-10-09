@@ -7,6 +7,8 @@ from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt
 from pal.mcp.ipc import McpManagerRpcError
 from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpProtocolError, McpRemoteError, McpToolSpec
+# Keep validators and the exceptions caught below in the same module generation.
+from pal.mcp.protocol import validate_message, validate_tool_result
 from pal.shared import RuntimeStatus
 from pal.shared.diagnostics import diagnostic_text, exception_report
 from pal.shared.result_rendering import render_titled_structured_for_llm
@@ -23,7 +25,6 @@ def sanitize_name(value: str, *, fallback: str = "item") -> str:
 
 
 def normalize_tool_payload(payload: dict[str, Any]) -> McpToolSpec:
-    from pal.mcp.protocol import validate_message
     validate_message(payload, "Tool")
     return McpToolSpec(
         name=payload["name"],
@@ -36,7 +37,6 @@ def normalize_tool_payload(payload: dict[str, Any]) -> McpToolSpec:
 
 
 def normalize_prompt_payload(payload: dict[str, Any]) -> McpPromptSpec:
-    from pal.mcp.protocol import validate_message
     validate_message(payload, "Prompt")
     arguments = []
     for item in list(payload.get("arguments") or []):
@@ -80,7 +80,6 @@ def prompt_arguments_schema(prompt: McpPromptSpec) -> dict[str, Any]:
 
 
 def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: str) -> CapabilityResult:
-    from pal.mcp.protocol import validate_tool_result
     try:
         validate_tool_result(result)
     except McpProtocolError as exc:
@@ -142,7 +141,6 @@ def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind:
 
 
 def normalize_prompt_result(result: dict[str, Any], *, server_id: str, prompt_name: str) -> CapabilityResult:
-    from pal.mcp.protocol import validate_message
     try:
         validate_message(result, "GetPromptResult")
     except McpProtocolError as exc:

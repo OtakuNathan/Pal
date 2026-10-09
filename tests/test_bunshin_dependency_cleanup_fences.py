@@ -140,7 +140,15 @@ class DependencyCleanupTaskTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Event().wait()
             return {}
 
-        with patch('asyncio.create_subprocess_exec', side_effect=spawn), patch('os.killpg', side_effect=kill) as killpg:
+        # The fake PID may identify a real group on the runner. Group liveness
+        # belongs to this fake process too; never consult the host's ps/proc.
+        def group_live(pgid):
+            self.assertEqual(pgid, process.pid)
+            return not exited.is_set()
+
+        with (patch('asyncio.create_subprocess_exec', side_effect=spawn),
+              patch('os.killpg', side_effect=kill) as killpg,
+              patch('pal.bunshin.process_lifecycle._process_group_live', side_effect=group_live)):
             task = asyncio.create_task(run())
             background.track('old-effect', task)
             background.bind('old-effect', 'old-assignment')

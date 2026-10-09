@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_mcp.py::McpCompilerTests",
+    "tests/test_tool_contract_review_regressions.py::test_mcp_normalizer_keeps_validator_and_error_type_in_one_generation"
+  ],
+  "status": "passed",
+  "observed_peak_rss_mib": 185.9,
+  "elapsed_seconds": 11.6,
+  "jvm_heap": null,
+  "python_address_space_limit": "1GiB",
+  "returncode": 0
+}

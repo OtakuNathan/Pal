@@ -56,3 +56,20 @@ diagnostics.py、test_failure_delivery_redaction.py）保留工作树，不混�
 
 本轮代码审查与上述检查未发现尚未修复的阻塞问题；这不是全实现形式证明。
 未对常驻 Pal 做 reload 或部署。后续执行用户已授权的 commit + push。
+
+推送后完整 CI 复核与补充修复
+- 3f86c4a 已推送。Domain contracts（含 mypy）通过，完整 TLC nightly 10 个 job
+  全部通过；9 个模型分片共 117 个活跃配置全部获得本轮新证据，输入哈希已
+  与当前文件逐项核对。详见 wide/hosted-tlc-validation.json。
+- 常规 CI 完整批次发现 MCP 的一个模块代际问题：normalize.py 在函数内延迟
+  导入校验器，却在模块加载时捕获异常类型。保留旧 normalizer 引用、再重载
+  model/protocol 后，校验器抛出的新 McpProtocolError 无法被旧类型捕获。
+  受控子进程已复现；改为同一模块加载阶段导入校验器与异常类型。新增回归
+  同时覆盖工具结果、prompt 结果的错误归类，以及非法工具 schema 的异常类型。
+  此问题解释 Ubuntu/macOS core-a 的 5 个参数化失败及 core-b 的 1 个失败。
+- macOS bunshin-b 的进程测试将 spawn/kill 模拟为假 PID 901，却向真实 ps 查询
+  该进程组，可能撞上 runner 的真实进程组而误报未回收。现让 liveness 查询
+  与模拟进程共享退出状态。生产进程组回收屏障没有放宽。
+- 修复后针对性回归 91 passed，补验原始 MCP 编译器及最终子进程用例 6 passed。
+  日志为 wide/ci-followup.log、wide/ci-mcp-final.log。完整跨平台 CI 将由后续
+  修正提交重新触发；此前失败没有改记为通过。
