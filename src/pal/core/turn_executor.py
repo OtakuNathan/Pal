@@ -5,7 +5,7 @@ from pal.memory.contracts import MEMORY
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
-from pal.shared.diagnostics import diagnostic_text, exception_report
+from pal.shared.diagnostics import diagnostic_text, exception_summary, exception_report
 
 import asyncio
 import inspect
@@ -1300,8 +1300,12 @@ class TurnExecutor:
         if callable(active_reader):
             try:
                 active_turn = active_reader(continuation.turn_id)
-            except Exception:
+            except Exception as exc:
                 active_turn = None
+                metadata["memory_context_errors"] = {
+                    **metadata.get("memory_context_errors", {}),
+                    "active_turn": exception_summary(exc),
+                }
         if active_turn is not None:
             metadata["active_l1_owns_primary_input"] = True
         if assembly_context.turn_kind != "failure":
@@ -1328,8 +1332,14 @@ class TurnExecutor:
                             or None,
                         )
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Preserve the failure for this request instead of silently
+                    # retrying in PromptCompiler and losing the diagnosis.
+                    metadata["memory_pack"] = None
+                    metadata["memory_context_errors"] = {
+                        **metadata.get("memory_context_errors", {}),
+                        "memory_pack": exception_summary(exc),
+                    }
         metadata["typed_l1_projection"] = True
         if continuation.finalization_only:
             metadata["finalization_directive"] = (
@@ -1390,7 +1400,7 @@ class TurnExecutor:
         memory_pack = metadata.get("memory_pack")
         context_view = None
         view_builder = (memory_service.l1_context_view if memory_service is not None else None)
-        if callable(view_builder):
+        if callable(view_builder) and "active_turn" not in metadata.get("memory_context_errors", {}):
             selected_turns = tuple(getattr(memory_pack, "l1_turns", ()) or ())
             context_view = view_builder(continuation.turn_id, selected_turns)
             prepare = getattr(getattr(self.context, "execution_runtime", None), "prepare_model_context", None)

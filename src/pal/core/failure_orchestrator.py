@@ -28,6 +28,7 @@ from pal.failure import (
     VerificationResult,
 )
 from pal.foundation import utc_now
+from pal.shared.diagnostics import exception_report, exception_summary
 from pal.llm.conversions import request_ir_from_prompt
 from pal.llm.ir import LLMRequestIR
 from pal.memory.contracts import L2Entry
@@ -240,15 +241,16 @@ class FailureOrchestrator:
                 try:
                     outcome = await llm_runtime.agenerate(request)
                 except Exception as exc:
+                    diagnostic = exception_summary(exc)
                     return FailureFlowOutcome(
                         verification=VerificationResult(
                             status=FAILURE_VERIFICATION_FAILED,
-                            reason=f"Failure safe-mode LLM request failed: {type(exc).__name__}: {exc}",
+                            reason=f"Failure safe-mode LLM request failed: {diagnostic}",
                             evidence={"error_type": type(exc).__name__},
                         ),
                         enriched_fields={
                             "why_blocked": "Failure safe-mode LLM request failed.",
-                            "current_blocker": str(exc),
+                            "current_blocker": diagnostic,
                             "recommended_next_step": "Surface the original runtime failure and safe-mode LLM failure to the user.",
                         },
                     )
@@ -268,7 +270,7 @@ class FailureOrchestrator:
                 try:
                     tool_result = await self.context.execution_runtime.execute_tool_async(effect.tool_call, allow_tools=True)
                 except Exception as exc:
-                    text = f"safe-mode tool failed: {type(exc).__name__}: {exc}"
+                    text = "safe-mode tool failed:\n" + exception_report(exc)
                     tool_result = ToolExecutionResult(
                         name=effect.tool_call.name,
                         ok=False,

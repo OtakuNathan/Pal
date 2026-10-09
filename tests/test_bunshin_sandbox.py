@@ -257,7 +257,7 @@ class BunshinSandboxTests(unittest.TestCase):
 
         self.assertEqual(_resolve_bunshin_max_output_tokens(Runtime(), pack), 12_288)
 
-    def test_length_recovery_exposes_action_tools_instead_of_more_investigation(self) -> None:
+    def test_role_tool_surface_keeps_reads_and_actions(self) -> None:
         def record(effect_kind):
             return SimpleNamespace(execution=SimpleNamespace(effect_kind=effect_kind))
 
@@ -281,14 +281,14 @@ class BunshinSandboxTests(unittest.TestCase):
                     {"function": {"name": "submit_candidate"}},
                 ]
 
-        selected = _llm_tools_for_allowed(Runtime(), [], action_only=True)
+        selected = _llm_tools_for_allowed(Runtime(), [])
 
         self.assertEqual(
             [item["function"]["name"] for item in selected],
-            ["write_file", "run_shell", "submit_candidate"],
+            ["read_file", "write_file", "run_shell", "submit_candidate"],
         )
 
-    def test_length_recovery_uses_semantics_for_custom_aliases_and_fails_closed(self) -> None:
+    def test_role_tool_surface_supports_custom_and_read_only_tools(self) -> None:
         def record(effect_kind):
             return SimpleNamespace(execution=SimpleNamespace(effect_kind=effect_kind))
 
@@ -305,10 +305,10 @@ class BunshinSandboxTests(unittest.TestCase):
                 {"function": {"name": "publish_plan"}},
             ],
         )
-        selected = _llm_tools_for_allowed(runtime, [], action_only=True)
+        selected = _llm_tools_for_allowed(runtime, [])
         self.assertEqual(
             [item["function"]["name"] for item in selected],
-            ["publish_plan"],
+            ["inspect_plan", "publish_plan"],
         )
 
         runtime.registry_generation = SimpleNamespace(
@@ -318,10 +318,10 @@ class BunshinSandboxTests(unittest.TestCase):
         runtime.build_llm_tool_contracts = lambda: [
             {"function": {"name": "inspect_plan"}}
         ]
-        with self.assertRaisesRegex(RuntimeError, "no action capability"):
-            _llm_tools_for_allowed(runtime, [], action_only=True)
+        self.assertEqual(_llm_tools_for_allowed(runtime, []),
+                         [{"function": {"name": "inspect_plan"}}])
 
-    def test_length_recovery_keeps_dispatcher_for_indirect_actions(self) -> None:
+    def test_role_tool_surface_keeps_reads_and_indirect_dispatcher(self) -> None:
         def record(effect_kind):
             return SimpleNamespace(execution=SimpleNamespace(effect_kind=effect_kind))
 
@@ -341,11 +341,11 @@ class BunshinSandboxTests(unittest.TestCase):
             ],
         )
 
-        selected = _llm_tools_for_allowed(runtime, [], action_only=True)
+        selected = _llm_tools_for_allowed(runtime, [])
 
         self.assertEqual(
             [item["function"]["name"] for item in selected],
-            ["call_tool"],
+            ["read_file", "call_tool"],
         )
 
     def test_sandbox_metadata_defaults_to_bubblewrap(self) -> None:
@@ -1034,11 +1034,11 @@ class BunshinSandboxTests(unittest.TestCase):
             self.assertIn("Use the role playbook as the required checklist spine", prompt)
             self.assertIn("initialize the smallest task-specific checklist", prompt)
             self.assertIn(
-                "Never repeat an operation when the tool, arguments, relevant state, and observed error are unchanged",
+                "do not replay an unchanged rejection",
                 prompt,
             )
             self.assertIn(
-                "retry=safe permits a corrected retry, not an unchanged replay",
+                "retry=safe permits a bounded retry with the same arguments",
                 prompt,
             )
             self.assertIn("## Reference Access Efficiency", prompt)

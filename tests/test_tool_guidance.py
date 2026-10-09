@@ -91,7 +91,8 @@ class ToolGuidanceCompilationTests(unittest.TestCase):
             self.assertIn("`indirect_next` (indirect) — continue indirectly", record.compiled_description)
             from pal.shared.tool_routing import TOOL_ROUTING_DEVELOPER_GUIDANCE
             self.assertIn("call_tool(name=alias, args=...)", TOOL_ROUTING_DEVELOPER_GUIDANCE)
-            self.assertIn("starter-purpose-token", record.search_document)
+            self.assertNotIn("starter-purpose-token", record.search_document)
+            self.assertIn("starter-purpose-token", record.compiled_description)
             self.assertNotIn("direct_next", record.search_document)
             self.assertNotIn("negative-only-token", record.search_document)
             self.assertNotIn("failure-only-token", record.search_document)

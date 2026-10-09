@@ -144,6 +144,7 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_memory_candidate_write": {
         "alias": "propose_memories",
         "guidance": {
+            "search_objects": ('memory', 'memories', 'proposal', 'proposals'),
             "purpose": "Replace this invocation's memory proposals with at most five most useful durable candidates; zero is allowed.",
             "use_when": 'Submit the complete selected batch. Template: {"candidates":[{"kind":"fact","title":"...","summary":"...","source_excerpt":"...","topics":[],"why_durable":"..."}]}. Cases also require star with situation/task/action/result; preserve evidence and uncertainty.',
             "do_not_use_when": "This is a proposal, not a memory write. The host will ask the user to review each item and explicitly submit the batch.",
@@ -154,6 +155,7 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_artifact_write": {
         "alias": "write_workflow_artifact",
         "guidance": {
+            "search_objects": ('artifact', 'artifacts'),
             "purpose": "Write the profile-declared structured output artifact.",
             "use_when": "The current role must create or replace its declared structured output artifact.",
             "do_not_use_when": "Architect roles must edit the Manager-preseeded architect.yaml instead. Do not write undeclared outputs.",
@@ -164,6 +166,7 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_artifact_edit": {
         "alias": "edit_workflow_artifact",
         "guidance": {
+            "search_objects": ('artifact', 'artifacts'),
             "purpose": "Append to or replace one existing profile output artifact.",
             "use_when": "Supply relative_path, complete content, and operation=append|replace for a profile-owned output artifact.",
             "do_not_use_when": "Do not use old_string/new_string exact replacement arguments or edit product source through this artifact tool.",
@@ -293,8 +296,16 @@ def _workflow_capability(
                     recovery_hint=str(details.get("recovery_hint") or details.get("recovery") or ""),
                     snapshot_refs=result.snapshot_refs, context_messages=result.context_messages,
                 )
-            payload = dict(result.structured or {"text": result.text})
+            payload = dict(result.structured if result.structured is not None else {"text": result.text})
             llm_text = default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")
+            return CapabilityResult(
+                status=RuntimeStatus.OK, text=result.text, llm_text=llm_text,
+                structured={"payload": payload},
+                effect_receipt=EffectReceipt(outcome=(
+                    EffectOutcome.NONE if effect_kind is EffectKind.NONE else EffectOutcome.APPLIED)),
+                snapshot_refs=result.snapshot_refs, context_messages=result.context_messages,
+                context_delivery=result.context_delivery,
+            )
         else:
             payload = {"value": result}
             llm_text = str(result or "tool completed")

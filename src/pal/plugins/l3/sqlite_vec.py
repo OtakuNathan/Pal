@@ -186,6 +186,7 @@ class SQLiteVecL3Plugin:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show sqlite-vec memory provider state.",
             use_when='Diagnosing the sqlite memory backend — record count, index status, embedding model. If unmounted, use attach_memory_provider. Missing embeddings are an indexing observation; inspect provider inventory and embedding availability before rebuilding indexes.',
             do_not_use_when="Checking which provider is active (use inspect_active_memory_provider). Recalling memories (use recall_memory).",
@@ -203,6 +204,7 @@ class SQLiteVecL3Plugin:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory",
         guidance=ToolGuidance(
+            search_objects=('inventory', 'inventories'),
             purpose="Inspect sqlite-vec memory inventory and index status.",
             use_when='Checking memory record counts, embedding coverage, or index health. Missing embeddings do not mean records are absent. Inspect the embedding provider and use refresh_memory_provider_indexes after correcting availability.',
             do_not_use_when="Recalling specific memories (use recall_memory). Provider state (use inspect_memory_provider_state).",
@@ -224,6 +226,7 @@ class SQLiteVecL3Plugin:
         family="recall",
         action_name="recall",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Recall durable memory records by searching against the source-of-truth text.",
             use_when="Diagnosing the sqlite provider directly. For errors, regressions, failed repairs, repeated pitfalls, or unfamiliar debugging, prefer kind='case' with concrete error, symptom, and fix terms.",
             do_not_use_when="Normal Pal memory recall (use recall_memory, which routes to the active provider).",
@@ -272,6 +275,7 @@ class SQLiteVecL3Plugin:
         family="commit",
         action_name="write",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Commit a durable memory record.",
             use_when="Testing or operating the sqlite provider directly. summary is prompt-ready text; search_text is retrieval source text. For kind=case, provide STAR situation, task, action, and result fields.",
             do_not_use_when="Normal Pal memory writes (use remember_memory, which routes to the active provider).",
@@ -341,6 +345,7 @@ class SQLiteVecL3Plugin:
         family="correct",
         action_name="update",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Update a memory record in the sqlite backend.",
             use_when="Correcting or superseding a stored memory record at the provider level.",
             do_not_use_when="High-level memory updates (use update_memory — it routes to the active provider).",
@@ -393,6 +398,7 @@ class SQLiteVecL3Plugin:
         family="delete",
         action_name="delete",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Delete one durable memory record by exact mem_ref.",
             use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
             do_not_use_when="Normal Pal memory deletion (use forget_memory, which routes to the active provider).",
@@ -421,6 +427,7 @@ class SQLiteVecL3Plugin:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Attach the sqlite-vec memory provider.",
             use_when="Reconnecting a detached memory backend.",
             do_not_use_when="Detaching (use detach_memory_provider). Switching providers (use set_active_memory_provider).",
@@ -441,6 +448,7 @@ class SQLiteVecL3Plugin:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Detach the sqlite-vec memory provider.",
             use_when='Temporarily disconnecting the memory backend. Use attach_memory_provider to reconnect this provider before storage or recall.',
             do_not_use_when="Attaching (use attach_memory_provider).",
@@ -465,6 +473,7 @@ class SQLiteVecL3Plugin:
         family="maintenance",
         action_name="refresh_indexes",
         guidance=ToolGuidance(
+            search_objects=('index', 'indexes', 'indices'),
             purpose="Refresh sqlite-vec indexes and embedding state.",
             use_when="After bulk data changes or when search results seem stale.",
             do_not_use_when="Normal operation — indexes update incrementally. Provider state (use inspect_memory_provider_state).",

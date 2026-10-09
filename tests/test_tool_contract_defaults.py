@@ -44,6 +44,23 @@ def test_omit_only_and_nullable_fields_keep_distinct_invocation_semantics():
     assert _invocation_args(patch) == {'avoid_when': '', 'activation_terms': [], 'enabled': False}
 
 
+def test_nested_list_arguments_keep_defaults_and_explicit_nulls():
+    class Item(BaseModel):
+        value: str | None
+        enabled: bool = False
+        count: int = 0
+        note: str | None = None
+
+    class Input(BaseModel):
+        items: list[Item]
+
+    value = Input.model_validate({'items': [{'value': None}, {'value': 'x', 'note': None}]})
+    assert _invocation_args(value) == {'items': [
+        {'value': None, 'enabled': False, 'count': 0},
+        {'value': 'x', 'enabled': False, 'count': 0, 'note': None},
+    ]}
+
+
 @pytest.mark.parametrize('model,good,bad', [
     (tool_models.BrowserFindInput, {'text': 'login'}, {}),
     (tool_models.BrowserFindInput, {'regex': 'log.*'}, {'text': 'login', 'regex': 'log.*'}),
@@ -79,9 +96,9 @@ def test_error_paths_preserve_original_cause_and_diagnostic_action(tmp_path):
     assert 'bad schedule' in result.llm_text
     mcp = McpManagerPluginProvider(runtime_root=tmp_path, core_context=None)
     result = mcp.image_prepare(IntrospectionCall(name='prepare_mcp_image', args={'path': str(tmp_path / 'artifact-absent.png')}))
-    assert 'artifact-absent.png' in result.llm_text and 'run_shell' in result.llm_text
+    assert 'artifact-absent.png' in result.llm_text and 'run_shell' in result.recovery_hint
     missing = mcp.image_prepare(IntrospectionCall(name='prepare_mcp_image', args={}))
-    assert 'read_tool' in missing.llm_text
+    assert 'read_tool' in missing.recovery_hint
     assert 'ValueError' != result.llm_text
     error = normalize_protocol_error(ConnectionError('connection refused'), server_id='demo', name='inspect', kind='tool')
     assert 'connection refused' in error.llm_text and "read_mcp_server(name='demo')" in error.llm_text

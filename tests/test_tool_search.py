@@ -97,7 +97,7 @@ class ToolSearchTests(unittest.TestCase):
         payload = self.search(query="web_lookup", top_k=10)
         hit = payload["hits"][0]
         self.assertEqual(hit["alias"], "web_lookup")
-        self.assertGreaterEqual(hit["score"], 100)
+        self.assertGreater(hit["score"], 0)
         self.assertEqual(hit["invocation_mode"], "direct")
         self.assertIn("input_shape", hit)
         self.assertNotIn("description", hit)
@@ -131,9 +131,11 @@ class ToolSearchTests(unittest.TestCase):
         self.assertIn("web", families)
         self.assertIn("filters exclude", payload["usage_hint"])
 
-    def test_jieba_terms_find_chinese_search_text(self) -> None:
-        payload = self.search(query="记忆召回")
+    def test_search_uses_alias_words_without_indexing_guidance_prose(self) -> None:
+        self.assertEqual(self.search(query="记忆召回")["hits"], [])
+        payload = self.search(query="memory lookup")
         self.assertEqual(payload["hits"][0]["alias"], "memory_lookup")
+        self.assertIn("记忆召回", payload["hits"][0]["use_when"])
 
     def test_exec_show_counts_current_generation_tools(self) -> None:
         runtime = self.core.context.execution_runtime

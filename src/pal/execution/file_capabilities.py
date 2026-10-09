@@ -42,6 +42,7 @@ from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResu
 
 
 FILE_READ_GUIDANCE = ToolGuidance(
+    search_objects=('file', 'files'),
     purpose=(
         "Read selected lines from one UTF-8 text file. "
         "ranges=[{offset, limit}, ...] delivers multiple blocks in one call (sed -n style). "
@@ -78,6 +79,7 @@ FILE_READ_GUIDANCE = ToolGuidance(
 )
 
 FILE_EDIT_GUIDANCE = ToolGuidance(
+    search_objects=('file', 'files'),
     purpose="Apply valid exact replacements to one local UTF-8 file and report any failed items.",
     use_when=(
         "Making a focused change to an existing text file whose affected lines were delivered by read_file and remain in the current logical "
@@ -97,6 +99,7 @@ FILE_EDIT_GUIDANCE = ToolGuidance(
 )
 
 FILE_WRITE_GUIDANCE = ToolGuidance(
+    search_objects=('file', 'files'),
     purpose="Write complete UTF-8 text content to a local file on the Pal host, creating it or replacing all of its contents.",
     use_when=(
         "Creating a text file, or intentionally replacing an existing file's complete contents after its complete "
@@ -367,6 +370,7 @@ class FileCapabilityMixin:
         family="path",
         action_name="delete",
         guidance=ToolGuidance(
+            search_objects=('path', 'paths', 'file', 'files', 'directory', 'directories', 'link', 'links'),
             purpose="Delete the file, directory, or symbolic link at the given path; deleting a link preserves its target.",
             use_when="Removing unwanted filesystem entries. Symbolic links, including links to directories and dangling links, are unlinked without following their targets; recursive=true is required only for real directories.",
             do_not_use_when="Moving or renaming files (use run_shell mv).",
@@ -392,6 +396,7 @@ class FileCapabilityMixin:
         family="file",
         action_name="state",
         guidance=ToolGuidance(
+            search_objects=('cache', 'caches'),
             purpose="Inspect the read-before-edit file cache.",
             use_when="Checking whether a file has a current cached read snapshot before edit_file, or debugging stale-edit detection.",
             do_not_use_when="Reading file content (use read_file). Editing a file (use edit_file).",

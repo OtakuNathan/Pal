@@ -1,9 +1,9 @@
 from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
-from typing import Any, Mapping
-from pal.execution.tool_facade import EffectKind as ToolEffectKind
+from typing import Any
 from pal.foundation import EventEnvelope
 from pal.bunshin.scoped_execution import _effective_capability_name
+from pal.bunshin.prompt_adapter import bunshin_role
 from pal.shared import PromptAssemblyContext, ToolExecutionResult, BunshinInvocationPack, default_tool_result_text
 
 
@@ -31,54 +31,14 @@ def _bunshin_prompt_context(
 def _llm_tools_for_allowed(
     execution_runtime: Any,
     allowed_capabilities: list[str],
-    *,
-    action_only: bool = False,
 ) -> list[dict[str, Any]]:
     _ = allowed_capabilities
     build = getattr(execution_runtime, "build_llm_tool_contracts", None)
     if not callable(build):
         raise TypeError("Bunshin execution runtime must expose immutable generation tool contracts")
-    tools = list(build())
-    if not action_only:
-        return tools
-    generation = getattr(execution_runtime, "registry_generation", None)
-    direct_aliases = getattr(generation, "direct_aliases", None)
-    indirect_aliases = getattr(generation, "indirect_aliases", None)
-    if not isinstance(direct_aliases, Mapping) or not isinstance(indirect_aliases, Mapping):
-        raise RuntimeError(
-            "output-length recovery requires immutable tool execution semantics"
-        )
-    read_effects = {
-        ToolEffectKind.NONE,
-        ToolEffectKind.LOCAL_READ,
-        ToolEffectKind.EXTERNAL_READ,
-    }
-    action_aliases = {
-        str(alias)
-        for alias, record in direct_aliases.items()
-        if getattr(getattr(record, "execution", None), "effect_kind", None)
-        not in read_effects
-    }
-    if any(
-        getattr(getattr(record, "execution", None), "effect_kind", None)
-        not in read_effects
-        for record in indirect_aliases.values()
-    ):
-        # The indirect record remains hidden from the provider tool list. Its
-        # single direct dispatcher is nevertheless an action-capable recovery
-        # route for this immutable generation.
-        action_aliases.add("call_tool")
-    selected = [
-        item
-        for item in tools
-        if str(dict(item.get("function") or {}).get("name") or "").strip()
-        in action_aliases
-    ]
-    if not selected:
-        raise RuntimeError(
-            "output-length recovery has no action capability in the immutable tool generation"
-        )
-    return selected
+    # The scoped registry already enforces this role's authority. Output length
+    # is not evidence that investigation is complete or a mutation is appropriate.
+    return list(build())
 
 
 def _provider_call_with_effective_args(
@@ -120,15 +80,23 @@ def _tool_call_summary(tool_call: ToolCallIR) -> dict[str, str]:
 DEFAULT_BUNSHIN_OUTPUT_LENGTH_RECOVERY_ROUNDS = 3
 
 
-BUNSHIN_OUTPUT_LENGTH_RECOVERY_NOTE = (
-    "The previous assistant response reached the output limit and was discarded; "
-    "do not repeat, recap, investigate further, or continue that response as prose. "
-    "Resume from the existing workspace and checklist and act now: update the "
-    "checklist if necessary, write the smallest compiling/valid scaffold, then fill "
-    "it as the next bounded action. Emit complete tool calls, including at least one "
-    "action tool call in this round. "
-    "Keep the final reply short."
-)
+def bunshin_output_length_recovery_note(pack: BunshinInvocationPack) -> str:
+    role = bunshin_role(pack)
+    role_guidance = {
+        "architect": "Continue the bound architecture declarations and contract; do not implement product behavior.",
+        "implementation": "Continue the owned implementation or its focused validation; preserve the accepted contract.",
+        "reviewer": "Continue the architecture review: inspect missing evidence or record findings; do not implement or repair the candidate.",
+        "verifier": "Continue independent verification: gather missing evidence or record findings; do not repair the candidate.",
+    }.get(role, "Continue only the bound role's permitted work.")
+    return (
+        "The previous assistant response reached the output limit and was discarded. "
+        "Do not repeat that response as prose. Resume from the existing workspace and checklist "
+        "with one bounded action. Keep reasoning concise and emit complete tool calls when needed. "
+        "Read missing decisive evidence when necessary; reuse evidence already established. "
+        + role_guidance + " "
+        "Do not mutate files or submit merely to recover from truncation. Submit only after the "
+        "role's evidence, checklist, and acceptance prerequisites are satisfied. Keep the final reply short."
+    )
 
 
 _BUNSHIN_TOOL_RESULT_RETENTION_CALLS = 5

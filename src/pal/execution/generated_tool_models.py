@@ -414,12 +414,12 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput = _stric
 ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput',
     {
-        'query': (str, Field(None, description="Search short English alias keywords: [domain] [action] [object], e.g. 'remember memory', 'lsp prepare workspace', 'browser screenshot'. Include a known domain; spaces/underscores and reordered words work. Purpose also supports task synonyms.")),
+        'query': (str, Field(None, description="Search short English keywords: [domain] [action] [object], e.g. 'remember memory', 'lsp prepare workspace', 'browser screenshot'. All query words must match whole indexed words; spaces/underscores and reordered words work. No fuzzy matching.")),
         'namespace': (Literal['inspect', 'action', 'introspection', 'operation'], Field(None, description='Optional registry namespace from hits/facets. inspect aliases introspection; action aliases operation. Omit when unknown; read-only tools can also be registered under operation.')),
         'family': (str, Field(None, description='Exact explicitly declared family copied from hits/facets. Empty family in a hit means undeclared, not its namespace or module. Omit on initial search; use module_name for channel/skill/etc.')),
         'module_name': (str, Field(None, description='Optional semantic module name filter such as llm, memory, channel, artifact, bunshin, or web_search.')),
         'tags': (list[str], Field(None, description='Optional tags that every result must include.')),
-        'top_k': (int, Field(None, description='Maximum callable hits; default up to 3 strongest matches, or one exact match. Set explicitly for broader results.', ge=1)),
+        'top_k': (int, Field(None, description='Maximum callable hits; default up to 3 strongest matches, or one exact match. Set explicitly to include lower-ranked relevant matches.', ge=1)),
         'limit': (int, Field(None, description='Alias for top_k; top_k takes precedence when both are supplied.', ge=1)),
         'facets': (bool, Field(None, description='Default false. Set true to include namespace/module/family counts for broad-search narrowing.')),
     },
@@ -442,7 +442,6 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem = _stri
         'module_id': (str, Field(...)),
         'tags': (list[str], Field(...)),
         'score': (int, Field(...)),
-        'weak_match': (bool, Field(None, description='Present when only generic action/status words matched; this is not evidence of task suitability.')),
     },
 )
 

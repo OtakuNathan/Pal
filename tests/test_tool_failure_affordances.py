@@ -211,7 +211,9 @@ def test_unexpected_exception_is_complete_redacted_and_read_label_is_not_a_recei
     assert "missing configuration" in result.llm_text
     assert "hidden" not in result.llm_text
     assert "diagnostic-tail" in result.llm_text
-    assert "Traceback" in result.llm_text
+    assert "Traceback" not in result.llm_text
+    from pathlib import Path
+    assert "Traceback" in Path(result.snapshot_refs[0].path).read_text()
     assert metadata(result)["error_code"] == "handler_exception"
     assert metadata(result)["effect"] == "unknown"
 
@@ -371,7 +373,7 @@ def test_delete_path_validation_does_not_claim_partial_deletion(runtime, monkeyp
     assert "Deletion may be partial" not in result.llm_text
 
 
-def test_long_recovery_preserves_final_constraints_in_snapshot(runtime):
+def test_long_recovery_preserves_final_constraints_outside_output_budget(runtime):
     from pathlib import Path
     hint = "Check each pending item. " * 90 + "Do not delete the recovery copy."
     def fail(_):
@@ -382,8 +384,7 @@ def test_long_recovery_preserves_final_constraints_in_snapshot(runtime):
         turn_id="review", budget=ToolCallBudget(max_output_chars=1500, preview_chars=300))
     assert result.snapshot_refs
     assert hint in Path(result.snapshot_refs[-1].path).read_text()
-    assert "full recovery" in metadata(result)["recovery"]
-    assert len(metadata(result)["recovery"]) <= 500
+    assert metadata(result)["recovery"] == hint
 
 
 def test_snapshot_save_failure_keeps_full_storage_diagnostic(runtime, monkeypatch):
@@ -398,8 +399,8 @@ def test_snapshot_save_failure_keeps_full_storage_diagnostic(runtime, monkeypatc
     assert result.ok
     assert not result.snapshot_refs
     assert "storage-diagnostic-tail" in result.llm_text
-    assert "Preview incomplete" in result.llm_text
-    assert "exceeds this output budget and is shown in full" in result.llm_text
+    assert "body" * 2000 in result.llm_text
+    assert "full result is shown above beyond the output budget" in result.llm_text
 
 
 @pytest.mark.parametrize("failed", [False, True])

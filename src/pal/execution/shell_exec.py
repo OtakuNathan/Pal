@@ -34,6 +34,7 @@ from pal.shared import (
 SHELL_EXEC_DESCRIPTION = "Run one shell command and return stdout, stderr, and exit status."
 
 SHELL_EXEC_GUIDANCE = ToolGuidance(
+    search_objects=('command', 'commands'),
     purpose=SHELL_EXEC_DESCRIPTION,
     use_when=(
         "Use for tests, builds, scripts, package commands, process probes, and bounded directory listings. "

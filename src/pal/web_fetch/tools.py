@@ -15,9 +15,11 @@ from pal.web_fetch.browser_service import BrowserServiceError
 from pal.web_fetch.service import WebFetchService
 
 
-def browser_tool_error(action: str, exc: BrowserServiceError, *, allow_curl: bool = False) -> ToolExecutionError:
+def browser_tool_error(
+    action: str, exc: BrowserServiceError, *, allow_curl: bool = False, worker_scope: bool = False,
+) -> ToolExecutionError:
     error = exc.to_dict()
-    if error["curl_applicable"] and allow_curl:
+    if error["curl_applicable"] and allow_curl and not worker_scope:
         error["fallback_hint"] = "Use run_shell with curl only when raw HTTP content is sufficient."
     pre_effect = not exc.state_unknown and exc.code in {
         "dependency_installing", "dependency_install_failed", "unsupported_action", "cli_unavailable",
@@ -40,6 +42,31 @@ def browser_tool_error(action: str, exc: BrowserServiceError, *, allow_curl: boo
         if retry is RetryDirective.CORRECT_INPUT else
         "Inspect browser status and the error before deciding how to continue."
     )
+    if worker_scope:
+        # Workers receive browser reads through the broker, not host lifecycle
+        # or provisioning tools. Keep the original error/effect/retry metadata.
+        if exc.code == "dependency_installing":
+            recovery = (
+                "Browser dependencies are being installed. Wait for provisioning before one safe retry. "
+                "If still unavailable, report the installation error to the Manager as an environment blocker."
+            )
+        elif exc.code == "dependency_install_failed":
+            recovery = (
+                "Browser dependency installation failed. Report the installation error to the Manager as an "
+                "environment blocker; do not install dependencies or repair the host runtime from this worker."
+            )
+        elif exc.state_unknown:
+            recovery = (
+                "The browser action may have taken effect. Reconcile with a visible read tool when it can "
+                "establish the outcome; otherwise report the uncertain outcome to the Manager. "
+                "Do not repeat an uncertain mutation."
+            )
+        elif exc.code != "page_restore_failed" and retry is not RetryDirective.CORRECT_INPUT:
+            recovery = (
+                "Use the error and visible tools to determine whether recovery is possible. "
+                "If recovery requires unavailable host or browser-management tools, report an environment "
+                "blocker to the Manager; do not probe or repair the host runtime."
+            )
     return ToolExecutionError(
         f"Browser {action} failed: {exc}", error_code=exc.code,
         effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED if pre_effect else EffectOutcome.UNKNOWN),

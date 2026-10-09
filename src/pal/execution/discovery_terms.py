@@ -12,18 +12,8 @@ def tool_search_terms(text: str) -> tuple[str, ...]:
     # The shared tokenizer deliberately retains identifiers. Tool discovery also
     # needs their individual words: install must never match uninstall.
     return tuple(dict.fromkeys(
-        _singularize(word)
+        word
         for term in jieba_search_terms(text.lower())
         for word in re.split(r"[_.-]+", term)
         if word
     ))
-
-
-def _singularize(word: str) -> str:
-    if not word.isascii() or not word.isalpha():
-        return word
-    if len(word) > 4 and word.endswith("ies"):
-        return word[:-3] + "y"
-    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
-        return word[:-1]
-    return word

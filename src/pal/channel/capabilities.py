@@ -208,6 +208,7 @@ class ChannelIntrospectionProvider:
         scope="module",
         action_name="list",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="List configured channel endpoints and their usable names.",
             use_when='Need to discover available endpoint names, their channel kind, enabled/attached/paired status. An empty list means no endpoints are configured or discovered; inspect the channel provider configuration.',
             do_not_use_when="You already know the endpoint name. If endpoints exist, use inspect_channel_endpoint for an in-depth diagnosis; endpoint-specific tools are available only while endpoints exist.",
@@ -254,6 +255,7 @@ class ChannelIntrospectionProvider:
         family="channel",
         action_name="send_attachment",
         guidance=ToolGuidance(
+            search_objects=('attachment', 'attachments', 'file', 'files'),
             purpose="Send a local file attachment back to the channel that started the current turn.",
             use_when="The user asked for a generated file (image, document, code) to be sent back through the channel.",
             do_not_use_when="For an ordinary text reply to the current turn, respond normally without a sending tool. Use send_channel_message only for a separate initiated text delivery. Writing a local file (use write_file).",
@@ -285,6 +287,7 @@ class ChannelIntrospectionProvider:
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput,
         OutputModel=ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput,
         guidance=ToolGuidance(
+            search_objects=('message', 'messages'),
             purpose="Send an ordinary text message through a configured channel endpoint.",
             use_when=(
                 "Use when you need to initiate a message on an attached, enabled endpoint; "
@@ -423,6 +426,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="enable",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="Enable a channel endpoint so it accepts incoming messages.",
             use_when="An endpoint was disabled and needs to resume receiving messages.",
             do_not_use_when="The endpoint runtime is disconnected (use attach_channel_endpoint). The endpoint is already enabled.",
@@ -441,6 +445,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="disable",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="Disable a channel endpoint so it stops accepting incoming messages.",
             use_when="Temporarily stopping an endpoint without removing its configuration.",
             do_not_use_when="Fully disconnecting the runtime (use detach_channel_endpoint). Recovery socket endpoints are protected and cannot be disabled.",
@@ -459,6 +464,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="attach",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="Attach a channel endpoint — connect its runtime instance so it can send and receive.",
             use_when="Reconnecting a detached endpoint's runtime. After rescan_channel_providers discovered a new endpoint. An already attached endpoint is an idempotent no-op; attachment alone does not reload provider code.",
             do_not_use_when="Just toggling message acceptance (use enable_channel_endpoint). The endpoint is already attached.",
@@ -477,6 +483,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="detach",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="Detach a channel endpoint — disconnect its runtime instance without removing configuration.",
             use_when="Temporarily disconnecting an endpoint's runtime (e.g. maintenance, restart). Use attach_channel_endpoint when the disconnected endpoint should resume delivery.",
             do_not_use_when="Just stopping message acceptance (use disable_channel_endpoint — keeps runtime alive).",
@@ -495,6 +502,7 @@ class ChannelIntrospectionProvider:
         family="provider",
         action_name="rescan",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Discover physical provider additions and removals in the runtime root.",
             use_when="A provider was installed, removed, enabled, or disabled.",
             do_not_use_when="Provider source changed in place (use reload_channel_provider) or one transport is stuck (use restart_channel_endpoint).",
@@ -527,6 +535,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="reload_provider",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Explicitly detach, unload, load, and reattach one runtime-root provider.",
             use_when="A known provider's source, manifest, or provider-wide resources changed in place.",
             do_not_use_when="Only one endpoint connection is stuck (use restart_channel_endpoint). Discovering provider additions/removals or enabled/disabled state (use rescan_channel_providers).",
@@ -554,6 +563,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="restart_endpoint",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="Restart one channel endpoint runtime instance without reloading provider code.",
             use_when="One endpoint connection is stuck, misbehaving, or needs a fresh transport session.",
             do_not_use_when="Provider source or provider-wide resources changed (use reload_channel_provider or rescan_channel_providers).",
@@ -571,6 +581,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="inspect",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="Inspect full state of one channel endpoint.",
             use_when="Need detailed status of a specific endpoint (enabled, attached, paired, provider info).",
             do_not_use_when="Just need a list of all endpoints (use list_channel_endpoints). Checking auth (use inspect_channel_endpoint_auth).",
@@ -593,6 +604,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="auth_state",
         guidance=ToolGuidance(
+            search_objects=('auth', 'authorization', 'credential', 'credentials'),
             purpose="Inspect whether an endpoint is authenticated and authorized.",
             use_when="Diagnosing auth failures or checking if credentials are still valid.",
             do_not_use_when="Applying credentials (use set_channel_endpoint_auth_material). General endpoint state (use inspect_channel_endpoint).",
@@ -616,6 +628,7 @@ class ChannelIntrospectionProvider:
         family="endpoint",
         action_name="set_auth_material",
         guidance=ToolGuidance(
+            search_objects=('material', 'materials', 'credential', 'credentials', 'token', 'tokens'),
             purpose="Apply endpoint authorization material (tokens, credentials) without exposing secrets in output.",
             use_when="An endpoint needs credentials to authenticate (e.g. Telegram bot token, API key).",
             do_not_use_when="Reading current auth state (use inspect_channel_endpoint_auth).",
@@ -647,6 +660,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="backlog",
         guidance=ToolGuidance(
+            search_objects=('backlog', 'backlogs', 'message', 'messages'),
             purpose="Inspect undelivered message backlog for one endpoint.",
             use_when='Checking if messages are queued but not yet delivered (endpoint was detached or slow). A large backlog is an observation, not proof of its cause; inspect endpoint health and attachment before reconnecting.',
             do_not_use_when="General endpoint health (use inspect_channel_endpoint_health). Listing endpoints (use list_channel_endpoints).",
@@ -669,6 +683,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="health",
         guidance=ToolGuidance(
+            search_objects=('health',),
             purpose="Inspect network connectivity and delivery health for one endpoint.",
             use_when='Diagnosing message delivery failures or connection issues. A successful inspection can report an unhealthy endpoint. Inspect authentication and connection state; restart_channel_endpoint rebuilds its connection when appropriate.',
             do_not_use_when="Checking auth (use inspect_channel_endpoint_auth). Checking message queue (use inspect_channel_endpoint_backlog).",

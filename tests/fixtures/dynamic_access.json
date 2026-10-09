@@ -900,8 +900,8 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/compaction.py:CompactionEngine.run:getattr(outcome, 'text', '')": {
-    "count": 2,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+    "count": 3,
+    "reason": "LLM failure projection: collect available text and response metadata from generation adapters; missing optional response evidence must not mask the original failure."
   },
   "src/pal/core/compaction.py:CompactionSnapshot.capture_left:getattr(memory_service, 'left_transcripts', None)": {
     "count": 1,
@@ -3710,5 +3710,69 @@
   "src/pal/wizard/runtime.py:WizardService.seed_from_wizard:getattr(ep, 'provider', '')": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/channel/channel_endpoint_queue_base.py:ChannelEndpointQueueBase.flush_attachment_outbox:getattr(exc, 'reason', 'delivery_failed')": {
+    "count": 1,
+    "reason": "Channel transport exception boundary: preserve an optional provider reason code, defaulting to delivery_failed for ordinary exceptions."
+  },
+  "src/pal/channel/channel_endpoint_queue_base.py:ChannelEndpointQueueBase.flush_outbox:getattr(exc, 'reason', 'delivery_failed')": {
+    "count": 1,
+    "reason": "Channel transport exception boundary: preserve an optional provider reason code, defaulting to delivery_failed for ordinary exceptions."
+  },
+  "src/pal/channel/channel_endpoint_queue_base.py:ChannelEndpointQueueBase.flush_stream_update_outbox:getattr(exc, 'reason', 'delivery_failed')": {
+    "count": 1,
+    "reason": "Channel transport exception boundary: preserve an optional provider reason code, defaulting to delivery_failed for ordinary exceptions."
+  },
+  "src/pal/core/compaction.py:CompactionEngine._commit:getattr(outcome, 'detail', '')": {
+    "count": 1,
+    "reason": "Memory commit adapter boundary: preserve optional follow-up failure detail without turning an applied checkpoint into an uncommitted operation."
+  },
+  "src/pal/core/compaction.py:CompactionEngine.run:getattr(getattr(response, 'message', None), 'metadata', {})": {
+    "count": 1,
+    "reason": "LLM failure projection: collect available text and response metadata from generation adapters; missing optional response evidence must not mask the original failure."
+  },
+  "src/pal/core/compaction.py:CompactionEngine.run:getattr(outcome, 'response', None)": {
+    "count": 1,
+    "reason": "LLM failure projection: collect available text and response metadata from generation adapters; missing optional response evidence must not mask the original failure."
+  },
+  "src/pal/core/compaction.py:CompactionEngine.run:getattr(response, 'message', None)": {
+    "count": 1,
+    "reason": "LLM failure projection: collect available text and response metadata from generation adapters; missing optional response evidence must not mask the original failure."
+  },
+  "src/pal/core/compaction.py:CompactionRunResult.diagnostic_details:getattr(self.memory_result, 'metadata', None)": {
+    "count": 1,
+    "reason": "Compaction diagnostic projection accepts absent memory results and retains optional post-commit diagnostics from the memory result metadata."
+  },
+  "src/pal/core/prompt_compiler.py:PromptCompiler._ensure_memory_pack:getattr(self.context, 'require_port', None)": {
+    "count": 1,
+    "reason": "Optional host interface boundary: hosts without a memory port resolver have no memory load to perform; resolver failures are reported separately."
+  },
+  "src/pal/core/turn_executor.py:TurnExecutor._handle_memory_compact:getattr(run_result, 'failure_details', ())": {
+    "count": 1,
+    "reason": "Compaction result adapter boundary: preserve available failure codes and detailed causes from both older and current result providers."
+  },
+  "src/pal/core/turn_executor.py:TurnExecutor._handle_memory_compact:getattr(run_result, 'failures', ())": {
+    "count": 1,
+    "reason": "Compaction result adapter boundary: preserve available failure codes and detailed causes from both older and current result providers."
+  },
+  "src/pal/lsp/plugin.py:LspManagerPluginProvider._rpc_error:getattr(exc, 'payload', None)": {
+    "count": 1,
+    "reason": "RPC exception boundary: copy optional remote payload evidence from transport exceptions without requiring every local startup error to implement that field."
+  },
+  "src/pal/mcp/normalize.py:normalize_protocol_error:getattr(exc, 'payload', None)": {
+    "count": 1,
+    "reason": "MCP protocol exception boundary: preserve optional remote payload evidence alongside the original exception chain."
+  },
+  "src/pal/mcp/plugin.py:_error_payload:getattr(exc, 'payload', None)": {
+    "count": 1,
+    "reason": "MCP manager exception boundary: preserve optional RPC payload evidence while accepting ordinary local startup errors."
+  },
+  "src/pal/web_fetch/browser_service.py:_PlaywrightCliWorker._close_workspace_sessions:getattr(exc, 'stderr', None)": {
+    "count": 1,
+    "reason": "Subprocess exception boundary: TimeoutExpired can carry captured stdout/stderr; ordinary launch exceptions do not. Preserve streams when supplied."
+  },
+  "src/pal/web_fetch/browser_service.py:_PlaywrightCliWorker._close_workspace_sessions:getattr(exc, 'stdout', None)": {
+    "count": 1,
+    "reason": "Subprocess exception boundary: TimeoutExpired can carry captured stdout/stderr; ordinary launch exceptions do not. Preserve streams when supplied."
   }
 }

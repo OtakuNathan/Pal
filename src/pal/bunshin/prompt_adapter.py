@@ -205,6 +205,12 @@ def bunshin_primary_input(envelope: ChannelEnvelope) -> str:
     return extract_text_from_payload(envelope.event.payload).strip() or "No worker instruction was provided. Report blocked."
 
 
+def bunshin_role(pack: BunshinInvocationPack) -> str:
+    binding = {**dict((pack.metadata or {}).get("bunshin_v2") or {}),
+               **dict((pack.workspace or {}).get("bunshin_v2") or {})}
+    return str(binding.get("role") or dict((pack.resolved_profile or {}).get("role") or {}).get("kind") or "")
+
+
 def render_bunshin_task_prompt(pack: BunshinInvocationPack) -> str:
     lines = ["# Contract Invocation"]
     goal = str(pack.instruction or pack.goal or "").strip()
@@ -325,7 +331,10 @@ def render_bunshin_task_prompt(pack: BunshinInvocationPack) -> str:
             "",
             "## Boundary",
             "- This is one durable role invocation, not an autonomous workflow.",
-            "- Do not create architecture, acceptance authority, hidden follow-up work, milestones, or checkpoints.",
+            ("- Author or revise only the bound architecture contract and required declarations; do not create alternate architecture artifacts. "
+                 if bunshin_role(pack) == "architect" else
+                 "- Do not create or revise architecture outside the bound role. ")
+                + "Do not invent acceptance authority, hidden follow-up work, milestones, or repository checkpoints.",
             "- Use only visible capabilities and the bound workspace/reference roots.",
             "- Immutable inputs are lookup sources, not a mandatory reading checklist. Read one only when the current prompt, source, contract, diff, or evidence is insufficient to decide a role obligation or named question; stop once the evidence is decisive.",
         ]
@@ -337,10 +346,10 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
     lines = [
         "- Preserve contract correctness and role boundaries. Efficiency means eliminating duplicate work, never skipping decisive evidence.",
         "- Use the role playbook as the required checklist spine. After one bounded orientation pass, initialize the smallest task-specific checklist, append only concrete work, and drive execution from its current item. Once the next action is clear, act; do not reopen settled questions unless new evidence contradicts them.",
-        "- Never repeat an operation when the tool, arguments, relevant state, and observed error are unchanged. First use the returned error, retry directive, and affordances to change the input or state; if no meaningful change is available, record the blocker or finding and stop. A rejection may be retried only after the relevant input or state actually changes; if the same rejection fingerprint recurs, stop and report the blocker instead of probing around it. retry=safe permits a corrected retry, not an unchanged replay; effect=unknown requires reconciliation before retry.",
+        "- Follow the returned retry directive. retry=correct_input requires correcting the input or satisfying the failed precondition; do not replay an unchanged rejection. retry=safe permits a bounded retry with the same arguments for a transient failure after any stated wait or readiness condition; if the same failure persists after that retry, report the blocker. effect=unknown or retry=reconcile_first requires reconciliation before retrying a mutation. retry=do_not_retry forbids repeating the call. Never replay completed work or bypass a rejection through another tool or spelling.",
         "- Prefer the smallest contract-complete action. Do not add optional abstraction, evidence, or polish after this role's completion conditions are satisfied.",
     ]
-    role = str(dict(dict(pack.metadata or {}).get("bunshin_v2") or {}).get("role") or "")
+    role = bunshin_role(pack)
     if role == "implementation":
         lines.append(
             "- Implementation: once the owned contract, edit path, and one sufficient validation path are clear, implement directly. When the checklist is complete and focused checks pass, call submit_candidate immediately."

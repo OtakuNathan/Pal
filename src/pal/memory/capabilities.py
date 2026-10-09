@@ -132,7 +132,7 @@ class MemoryIntrospectionProvider:
         InputModel=DreamingInput, execution=INDIRECT_LOCAL_WRITE, aliases=("manage_memory_dreaming",),
         async_handler_name="dreaming_async",
         examples=({"operation": "status"}, {"operation": "start", "dry_run": True}),
-        guidance=ToolGuidance(purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
+        guidance=ToolGuidance(search_objects=('consolidation', 'duplicate', 'duplicates'), purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
             use_when="The user requests dreaming, a dry run, its status/report, or changes to automatic scheduling and configuration.",
             do_not_use_when="For immediate memory corrections, use update_memory.",
             failure_next_steps="Read the run report; failed runs preserve the published generation."))
@@ -169,7 +169,7 @@ class MemoryIntrospectionProvider:
         InputModel=MemoryHistoryInput, aliases=("read_memory_history",),
         execution=INDIRECT_LOCAL_READ,
         examples=({"query": "prior API preference"},),
-        guidance=ToolGuidance(purpose="Explicitly read archived original memories and successor references.",
+        guidance=ToolGuidance(search_objects=('history', 'histories', 'memory', 'memories'), purpose="Explicitly read archived original memories and successor references.",
             use_when="Current recall lacks historical details or a memory reference has been replaced.",
             do_not_use_when="Do not treat historical results as current facts or install them into L2 HOT.",
             failure_next_steps="Try the current successor reference or a more specific archive query."))
@@ -189,7 +189,7 @@ class MemoryIntrospectionProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="commit_candidates",
         InputModel=CommitMemoryCandidatesInput, aliases=("commit_memory_candidates",),
         execution=INDIRECT_EXTERNAL_WRITE,
-        guidance=ToolGuidance(purpose="Commit a memory batch already authorized by the user's final review action.",
+        guidance=ToolGuidance(search_objects=('candidate', 'candidates'), purpose="Commit a memory batch already authorized by the user's final review action.",
             use_when="Retrying a previously authorized memory candidate batch.",
             do_not_use_when="Candidates have not received the user's final batch approval. Use the review UI.",
             failure_next_steps="Open /memory_review with the batch ID. An unavailable provider leaves the draft intact."))
@@ -248,6 +248,7 @@ class MemoryIntrospectionProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show memory runtime state.",
             use_when='Diagnosing memory system health — provider count, active provider, record counts. If there is no active backend, inspect list_memory_providers for installed and mounted providers.',
             do_not_use_when="Recalling specific memories (use recall_memory).",
@@ -268,6 +269,7 @@ class MemoryIntrospectionProvider:
         scope="module",
         action_name="list_providers",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="List registered L3 memory providers.",
             use_when='Checking which memory backends are installed and mounted. An empty list means no L3 providers are registered; inspect list_plugins for their installation and attachment state.',
             do_not_use_when="Checking the active provider (use inspect_active_memory_provider). Recalling memories (use recall_memory).",
@@ -300,6 +302,7 @@ class MemoryIntrospectionProvider:
         scope="module",
         action_name="active_provider",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Show the current active memory provider.",
             use_when='Checking which backend handles recall/remember/update/forget operations. L3 storage and recall require an active mounted provider. If none is available, inspect list_memory_providers before selecting one.',
             do_not_use_when="Listing all providers (use list_memory_providers). Switching providers (use set_active_memory_provider).",
@@ -335,6 +338,7 @@ class MemoryIntrospectionProvider:
         family="recall",
         action_name="recall",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Read durable memory by semantic search or exact mem_ref from the active provider; recalled entries are marked as recently used.",
             use_when=(
                 "The task depends on durable facts or past experience missing from the current context. "
@@ -398,6 +402,7 @@ class MemoryIntrospectionProvider:
         family="commit",
         action_name="write",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Remember a new durable memory record.",
             use_when=(
                 "Only when the user explicitly asks to remember/save, or states a clear durable fact/preference. "
@@ -489,6 +494,7 @@ class MemoryIntrospectionProvider:
         family="correct",
         action_name="update",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Update an existing durable memory record.",
             use_when=(
                 "Instead of remember_memory when a corresponding recalled record needs additional, corrected or superseding information. "
@@ -552,6 +558,7 @@ class MemoryIntrospectionProvider:
         family="delete",
         action_name="delete",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Forget an existing durable memory record.",
             use_when=(
                 "Only when the user explicitly asks to forget/delete a specific memory, or approves deleting a clearly invalid record. "
@@ -585,6 +592,7 @@ class MemoryIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Switch the active L3 memory provider.",
             use_when="Changing which memory backend handles recall/remember/update/forget.",
             do_not_use_when="Checking the active provider (use inspect_active_memory_provider). Listing providers (use list_memory_providers).",

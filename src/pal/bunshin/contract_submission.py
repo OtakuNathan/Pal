@@ -27,6 +27,7 @@ CONTRACT_SUBMIT_CAPABILITY = "op_bunshin_contract_submit"
 CONTRACT_SUBMIT_TOOL_SPEC: dict[str, Any] = {
     "alias": "submit_contract",
     "guidance": {
+        "search_objects": ('contract', 'contracts'),
         "purpose": "Submit the Manager-preseeded architect.yaml for independent semantic review.",
         "use_when": (
             "Use with no arguments after the fixed role playbook and checklist are complete "

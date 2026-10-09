@@ -1,12 +1,13 @@
 """P2-A/P2-B budget tests: operation output is bounded, and the
 long-line shell hint fires only for real source reads (task package v2 §9-§10).
 
-The truncation budget covers body, status, and recovery metadata. Validated
-optional affordances are delivered outside that budget.
+The truncation budget covers normal output only. Error presentation, status,
+recovery guidance and validated affordances are independent of that budget.
 """
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from pal.core import PalCore
 from pal.execution import register_with_core
@@ -74,8 +75,8 @@ def _mount_boom(runtime, *, handler, alias="boom", mode=InvocationMode.DIRECT) -
     )
 
 
-class TestEveryExitIsBounded:
-    def test_sync_handler_exception_is_bounded(self, tmp_path):
+class TestOutputAndDiagnosticPresentation:
+    def test_sync_handler_exception_retains_full_diagnostic(self, tmp_path):
         core = _core()
         runtime = core.context.execution_runtime
 
@@ -91,11 +92,13 @@ class TestEveryExitIsBounded:
             )
             assert not result.ok
             assert "RuntimeError" in result.llm_text
-            assert len(result.llm_text) <= LIMIT
+            assert result.snapshot_refs
+            assert Path(result.snapshot_refs[0].path).read_text()
+            assert "Full diagnostic:" in result.llm_text
         finally:
             core.close()
 
-    def test_async_handler_exception_is_bounded(self, tmp_path):
+    def test_async_handler_exception_retains_full_diagnostic(self, tmp_path):
         core = _core()
         runtime = core.context.execution_runtime
 
@@ -112,11 +115,13 @@ class TestEveryExitIsBounded:
                 )
             )
             assert not result.ok
-            assert len(result.llm_text) <= LIMIT
+            assert result.snapshot_refs
+            assert Path(result.snapshot_refs[0].path).read_text()
+            assert "Full diagnostic:" in result.llm_text
         finally:
             core.close()
 
-    def test_huge_error_payloads_are_bounded(self, tmp_path):
+    def test_huge_error_payloads_have_readable_details(self, tmp_path):
         core = _core()
         runtime = core.context.execution_runtime
 
@@ -141,11 +146,13 @@ class TestEveryExitIsBounded:
                 turn_id="d3",
             )
             assert not result.ok
-            assert len(result.llm_text) <= LIMIT
+            assert result.snapshot_refs
+            assert Path(result.snapshot_refs[0].path).read_text()
+            assert "Full diagnostic:" in result.llm_text
         finally:
             core.close()
 
-    def test_pre_invocation_rejection_with_long_input_is_bounded(self, tmp_path):
+    def test_pre_invocation_rejection_names_invalid_field_without_echoing_long_input(self, tmp_path):
         core = _core()
         runtime = core.context.execution_runtime
         calls: list[int] = []
@@ -165,7 +172,9 @@ class TestEveryExitIsBounded:
             )
             assert not result.ok
             assert calls == []
-            assert len(result.llm_text) <= LIMIT
+            assert not result.snapshot_refs
+            assert "value: Input should be a valid string" in result.llm_text
+            assert "v" * BIG not in result.llm_text
         finally:
             core.close()
 

@@ -328,6 +328,7 @@ def compile_registry_generation(
         record = direct_aliases.get(alias) or indirect_aliases[alias]
         search_records[alias] = {
             "alias": alias,
+            "search_objects": record.guidance.search_objects,
             "search_text": record.search_document,
             "invocation_mode": record.execution.invocation_mode.value,
             "input_shape": record.compact_input_shape(),
@@ -552,12 +553,10 @@ def _compile_next_tool_lines(
 
 
 def _compile_search_document(record: CompiledToolRecord) -> str:
-    guidance = record.guidance
     return " ".join(
         part
         for part in (
             record.alias,
-            guidance.purpose,
             record.family,
             record.module_id,
             *record.tags,

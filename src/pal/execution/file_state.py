@@ -18,6 +18,7 @@ import threading
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, RetryDirective, ToolExecutionError
 from pal.execution.session_state import (
     LogicalExecutionContext,
     LogicalExecutionStateBackend,
@@ -142,15 +143,27 @@ def _atomic_compare_and_swap_locked(
             os.chmod(temporary, resolved.stat().st_mode & 0o7777)
 
         os.replace(temporary, resolved)
+        directory_synced = False
         try:
             directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-        except OSError:
-            directory_fd = -1
-        if directory_fd >= 0:
             try:
                 os.fsync(directory_fd)
+                directory_synced = True
             finally:
                 os.close(directory_fd)
+        except OSError as exc:
+            raise ToolExecutionError(
+                (f"File replacement and directory synchronization completed for {resolved}, "
+                 "but closing the directory failed." if directory_synced else
+                 f"File replacement applied to {resolved}, but directory synchronization failed; "
+                 "crash durability is unconfirmed."),
+                error_code="DIRECTORY_CLOSE_FAILED" if directory_synced else "DURABILITY_FAILED",
+                retry=RetryDirective.DO_NOT_RETRY,
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.APPLIED),
+                details={"file_path": str(resolved), "directory_synced": directory_synced},
+                recovery_hint="Do not repeat the applied write. Inspect the directory I/O error and "
+                              "read the current file before any further edits.",
+            ) from exc
     finally:
         try:
             temporary.unlink()

@@ -5,9 +5,10 @@ from pal.bunshin.verification_policy_validation import (
 
 from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
 
+from pal.bunshin.authoring_errors import AuthoringProgress, authoring_error_result
+from pal.bunshin.submission_errors import submission_error_result
 from pal.shared.tool_protocol import ToolCallIR
 from pal.shared.result_rendering import render_titled_structured_for_llm
-from pal.execution.tool_facade import rejection
 
 from pal.execution.generated_tool_models import (
     BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput,
@@ -46,7 +47,7 @@ from pal.bunshin.semantic_evidence import (
     recorded_cases,
     run_lsp_evidence,
     run_shell_evidence,
-    scratch_fingerprint,
+    scratch_fingerprint, bound_scratch_root,
 )
 from pal.bunshin.submission_drafts import (
     SubmissionDraftContext,
@@ -227,6 +228,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_scratch_write": {
         "alias": "write_verification_scratch",
         "guidance": {
+            "search_objects": ('file', 'files', 'probe', 'probes'),
             "purpose": "Create or replace one complete verifier-owned probe file in bound scratch storage.",
             "use_when": (
                 "Use for a temporary executable test or probe needed by a verification case; "
@@ -237,8 +239,8 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "probe through ordinary file tools."
             ),
             "failure_next_steps": (
-                "Correct the relative path or complete content and call this tool again; use the "
-                "returned scratch_path exactly."
+                "Follow the returned effect and retry directive. Correct rejected path/content inputs; "
+                "preserve an already-written probe and report storage or binding failures to Manager."
             ),
         },
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationScratchWriteInput,
@@ -247,6 +249,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         name: {
             "alias": "run_verification_" + name.removeprefix("op_bunshin_verification_run_"),
             "guidance": {
+                "search_objects": ('case', 'cases'),
                 "purpose": f"Run and durably register one {tag.replace('_', ' ')} verification case; rerun the same name to replace it before submission.",
                 "use_when": " ".join(
                     [
@@ -273,6 +276,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_run_lsp_check": {
         "alias": "run_verification_lsp_check",
         "guidance": {
+            "search_objects": ('check', 'checks', 'diagnostic', 'diagnostics'),
             "purpose": "Run and durably register LSP diagnostics for one source file.",
             "use_when": (
                 "Use the Manager-prepared context when diagnostics are an applicable supporting "
@@ -292,6 +296,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_check_unavailable": {
         "alias": "record_unavailable_verification",
         "guidance": {
+            "search_objects": ('obligation', 'obligations'),
             "purpose": "Record one required verification obligation as unavailable in the bound environment.",
             "use_when": "Use only for an applicable required obligation that genuinely cannot be exercised.",
             "do_not_use_when": (
@@ -305,6 +310,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_set_summary": {
         "alias": "set_verification_summary",
         "guidance": {
+            "search_objects": ('summary', 'summaries'),
             "purpose": "Replace the concise verifier summary for the current verification draft.",
             "use_when": "Use after the material verification cases and findings are known.",
             "do_not_use_when": "Do not use the summary as evidence or a substitute for structured findings.",
@@ -315,30 +321,33 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_draft_status": {
         "alias": "read_verification_draft_status",
         "guidance": {
+            "search_objects": ('status', 'draft', 'drafts'),
             "purpose": "Read compact current verification cases, findings, obligations, and next actions.",
             "use_when": "Use to resume an assignment or select the next unfinished risk-directed action.",
             "do_not_use_when": "Do not poll it repeatedly when no case, finding, or assignment state has changed.",
-            "failure_next_steps": "Continue from the bound checklist and recorded cases if status cannot be read.",
+            "failure_next_steps": "Follow the returned retry directive or report the storage failure to Manager. Unavailable status is not evidence of submission readiness.",
         },
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationDraftStatusInput,
     },
     "op_bunshin_verification_remove_case": {
         "alias": "remove_verification_case",
         "guidance": {
+            "search_objects": ('case', 'cases'),
             "purpose": "Remove one current recorded verification case by semantic name; findings are edited separately.",
             "use_when": "Use only when a recorded case itself is invalid, duplicate, or no longer applicable.",
             "do_not_use_when": "Do not hide a legitimate failure; rerun that case after a real fix instead.",
-            "failure_next_steps": "Correct the exact semantic case name and audit reason before retrying.",
+            "failure_next_steps": "Correct the case name or audit reason only for a validation rejection; reconcile uncertain changes before retrying.",
         },
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationRemoveCaseInput,
     },
     "op_bunshin_verification_submit": {
         "alias": "submit_verification",
         "guidance": {
+            "search_objects": ('evidence', 'finding', 'findings'),
             "purpose": "Submit and freeze the current verification evidence and findings for Manager-derived routing.",
             "use_when": "Use with no arguments after every required obligation and checklist item is closed.",
             "do_not_use_when": "Do not use with missing evidence, incomplete findings, or unfinished checklist work.",
-            "failure_next_steps": "Resolve every returned draft consistency error before retrying.",
+            "failure_next_steps": "Correct rejected draft content; reconcile unknown acceptance with Manager, and never repeat a submission already accepted.",
         },
         "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationSubmitInput,
     },
@@ -610,9 +619,10 @@ async def verification_builder_tool_result(
 ) -> ToolExecutionResult:
     name = str(call.name or "")
     draft_kind = _draft_kind(workspace)
+    progress = AuthoringProgress(read_only=name == "op_bunshin_verification_draft_status")
     try:
         _assert_tool_contract_allows(workspace, name=name, args=dict(call.args or {}))
-    except ValueError as exc:
+    except Exception as exc:
         return _rejected(call, exc)
     if name in _RUN_TO_KIND_TAG:
         case_kind, obligation = _RUN_TO_KIND_TAG[name]
@@ -622,7 +632,7 @@ async def verification_builder_tool_result(
                 draft_kind=draft_kind,
                 requested_case_kind=case_kind,
             )
-        except ValueError as exc:
+        except Exception as exc:
             return _rejected(call, exc)
         return await run_shell_evidence(
             call,
@@ -645,33 +655,49 @@ async def verification_builder_tool_result(
         return record_unavailable_evidence(call, workspace=workspace, draft_kind=draft_kind)
     try:
         if name == "op_bunshin_verification_scratch_write":
-            return _scratch_write(call, workspace, draft_kind=draft_kind)
+            return _scratch_write(call, workspace, draft_kind=draft_kind, progress=progress)
         if name == "op_bunshin_verification_set_summary":
-            return _set_summary(call, workspace, draft_kind=draft_kind)
+            return _set_summary(call, workspace, draft_kind=draft_kind, progress=progress)
         if name == "op_bunshin_verification_draft_status":
             return _draft_status(call, workspace, draft_kind=draft_kind)
         if name == "op_bunshin_verification_remove_case":
-            return _remove_case(call, workspace, draft_kind=draft_kind)
+            return _remove_case(call, workspace, draft_kind=draft_kind, progress=progress)
         if name == "op_bunshin_verification_submit":
-            return _submit(call, workspace, produced_artifacts)
+            return _submit(call, workspace, produced_artifacts, progress=progress)
         raise ValueError(f"unknown verification authoring capability: {name}")
     except Exception as exc:
-        return _error(call, exc)
+        record_verifier_failure(exc)
+        if name == "op_bunshin_verification_submit" and progress.started:
+            return submission_error_result(
+                call, exc, submission_started=True,
+                submission_accepted=bool(progress.details.get("submission_accepted")),
+                invalid_code="invalid_verification_submission",
+                correction="Correct the reported submission defect before retrying.",
+            )
+        return authoring_error_result(
+            call, exc, progress, correction="Correct the listed input or prerequisites before retrying.",
+            invalid_code="verification_preflight",
+        )
 
 
-def _scratch_write(call: ToolCallIR, workspace: Mapping[str, Any], *, draft_kind: str) -> ToolExecutionResult:
+def _scratch_write(call: ToolCallIR, workspace: Mapping[str, Any], *, draft_kind: str, progress: AuthoringProgress | None = None) -> ToolExecutionResult:
+    progress = progress or AuthoringProgress()
     args = dict(call.args or {})
     relative = PurePosixPath(str(args.get("path") or ""))
     if not str(relative) or relative.is_absolute() or ".." in relative.parts:
         raise ValueError("scratch path must be a safe relative path")
+    root = bound_scratch_root(workspace)
     context, store = _store_context(workspace, draft_kind=draft_kind)
     store.read(context, seed=_empty_payload())
-    root = Path(str(workspace.get("review_scratch_dir") or ""))
-    if not root:
-        raise ValueError("review scratch directory is not bound")
     target = root / relative
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise ValueError("scratch path escapes the bound scratch directory")
+    progress.started = True
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(str(args.get("content") or ""), encoding="utf-8")
+    progress.applied = True
+    progress.details["scratch_path"] = str(target.resolve())
+    progress.details["scratch_file_written"] = True
 
     def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
         definitions = dict(payload.get("definitions") or {})
@@ -682,7 +708,7 @@ def _scratch_write(call: ToolCallIR, workspace: Mapping[str, Any], *, draft_kind
         payload["definitions"] = definitions
         return payload, {"written": str(relative), "scratch_fingerprint": scratch_fingerprint(workspace)}
 
-    result = store.mutate(
+    result = progress.mutate(store,
         context,
         operation_key=str(call.call_id or f"scratch:{relative}"),
         request=args,
@@ -819,7 +845,9 @@ def _remove_case(
     workspace: Mapping[str, Any],
     *,
     draft_kind: str,
+    progress: AuthoringProgress | None = None,
 ) -> ToolExecutionResult:
+    progress = progress or AuthoringProgress()
     args = dict(call.args or {})
     name = str(args.get("name") or "").strip()
     reason = str(args.get("reason") or "").strip()
@@ -835,7 +863,7 @@ def _remove_case(
         payload["evidence"] = evidence
         return payload, {"removed": removed, "case": name, "reason": reason}
 
-    result = store.mutate(
+    result = progress.mutate(store,
         context,
         operation_key=str(call.call_id or f"remove-case:{name}"),
         request=args,
@@ -845,7 +873,8 @@ def _remove_case(
     return _ok(call, f"verification case removed: {name}", result)
 
 
-def _set_summary(call: ToolCallIR, workspace: Mapping[str, Any], *, draft_kind: str) -> ToolExecutionResult:
+def _set_summary(call: ToolCallIR, workspace: Mapping[str, Any], *, draft_kind: str, progress: AuthoringProgress | None = None) -> ToolExecutionResult:
+    progress = progress or AuthoringProgress()
     args = dict(call.args or {})
     summary_text = str(args.get("summary") or "").strip()
     if not summary_text:
@@ -858,7 +887,7 @@ def _set_summary(call: ToolCallIR, workspace: Mapping[str, Any], *, draft_kind: 
         payload["summary"] = summary
         return payload, {"recorded": True}
 
-    result = store.mutate(context, operation_key=str(call.call_id or "summary"), request=args, reducer=reducer, seed=_empty_payload())
+    result = progress.mutate(store, context, operation_key=str(call.call_id or "summary"), request=args, reducer=reducer, seed=_empty_payload())
     return _ok(call, "verification summary recorded", result)
 
 
@@ -866,7 +895,9 @@ def _submit(
     call: ToolCallIR,
     workspace: Mapping[str, Any],
     produced_artifacts: list[dict[str, Any]],
+    *, progress: AuthoringProgress | None = None,
 ) -> ToolExecutionResult:
+    progress = progress or AuthoringProgress()
     if dict(call.args or {}):
         raise ValueError(f"{call.name} takes no arguments")
     draft_kind = "verification"
@@ -912,6 +943,7 @@ def _submit(
     if reference_warnings:
         output["reference_warnings"] = list(reference_warnings)
     submission_ref: dict[str, Any] = {}
+    progress.started = True
     if store.uses_role_gateway:
         receipt = store.mark_submitted(
             context,
@@ -952,6 +984,8 @@ def _submit(
         submission_ref = local_submission_ref.to_dict()
     if not submission_ref:
         raise RuntimeError("Manager accepted verification submission without a durable receipt")
+    progress.applied = True
+    progress.details["submission_accepted"] = True
     artifact = _write_bunshin_artifact(
         dict(workspace),
         {
@@ -1170,16 +1204,9 @@ def _ok(call: ToolCallIR, text: str, structured: Mapping[str, Any]) -> ToolExecu
     return ToolExecutionResult(name=call.name, ok=True, text=text, llm_text=text, structured=dict(structured), call_id=call.call_id, status=RuntimeStatus.OK)
 
 
-def _error(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
+def _rejected(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
     record_verifier_failure(exc)
-    text = f"{exc.__class__.__name__}: {exc}"
-    return ToolExecutionResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this local issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)
-
-
-def _rejected(call: ToolCallIR, exc: ValueError) -> ToolExecutionResult:
-    record_verifier_failure(exc)
-    text = str(exc) + " Correct the listed prerequisites and retry. No command ran."
-    details = {"error": str(exc), "error_type": type(exc).__name__}
-    return ToolExecutionResult(name=call.name, ok=False, text=text, llm_text=text,
-                               structured=details, call_id=call.call_id, status=RuntimeStatus.INVALID,
-                               invocation_result=rejection("verification_preflight", text, details=details))
+    return authoring_error_result(
+        call, exc, AuthoringProgress(), invalid_code="verification_preflight",
+        correction="Correct the listed prerequisites and retry. No command ran.",
+    )

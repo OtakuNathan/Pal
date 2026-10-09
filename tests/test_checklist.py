@@ -583,7 +583,8 @@ def test_unknown_step_large_plan_is_recoverable_from_snapshot():
         assert not result.ok
         assert result.snapshot_refs
         saved = Path(result.snapshot_refs[0].path).read_text()
-        payload = json.loads(saved.split("\n", 1)[1])
+        # The complete diagnostic also carries status/recovery metadata.
+        payload, _ = json.JSONDecoder().raw_decode(saved.split("\n", 1)[1])
         assert [item["step"] for item in payload["plan"]] == [item["step"] for item in plan]
         assert service.show().done == 0
     finally:

@@ -362,7 +362,8 @@ def test_save_failure_keeps_host_control_and_context_messages(tmp_path, monkeypa
         assert canonical.structured['channel_event'] == output['channel_event']
         assert canonical.context_messages == context
         assert 'disk full' in result.llm_text
-        assert len(result.llm_text) <= 1000
+        assert 'X' * 5000 in result.llm_text
+        assert 'beyond the output budget' in result.llm_text
     finally:
         runtime.shutdown()
 
@@ -410,13 +411,18 @@ def test_only_delivered_source_lines_grant_edits(tmp_path, monkeypatch, disk_ful
         context = runtime.logical_context_for_turn('t')
         grant = runtime.logical_state.file_grant(execution_lifetime_id=context.execution_lifetime_id,
             file_key=str(path.resolve()), digest=result.context_delivery['digest'])
-        assert grant is not None and not grant.complete
-        assert not any(start <= 500 <= end for start, end in grant.covered_ranges)
+        assert grant is not None
+        assert grant.complete is disk_full
+        assert any(start <= 500 <= end for start, end in grant.covered_ranges) is disk_full
         assert all(f'line-{n:04d}' in result.llm_text for start, end in grant.covered_ranges for n in range(start, end + 1))
         hidden_edit = runtime.invoke_direct_tool(new_tool_call(name='edit_file', args={'file_path': str(path),
             'edits': [{'old_string': 'line-0500', 'new_string': 'hidden-change'}]}), turn_id='t')
-        assert 'PARTIAL_READ' in hidden_edit.llm_text
-        assert 'line-0500' in path.read_text()
+        if disk_full:
+            assert hidden_edit.kind == 'complete'
+            assert 'hidden-change' in path.read_text()
+        else:
+            assert 'PARTIAL_READ' in hidden_edit.llm_text
+            assert 'line-0500' in path.read_text()
     finally:
         core.close()
 

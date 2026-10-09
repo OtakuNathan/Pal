@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.runner_components.prompt_values import bunshin_output_length_recovery_note
 from pal.bunshin.runner_components.models import BunshinRuntimeBundle
 from pal.bunshin.runner_components.models import BunshinAgentLoopState
 from pal.bunshin.runner_components.llm_settings import _resolve_bunshin_max_output_tokens
@@ -211,10 +212,9 @@ class AgentSession:
 
         def build_context(frame: AgentLoopFrame):
             retry_note = str(
-                frame.retry_note
-                or state.pending_output_length_recovery_note
-                or forced_retry_note
-                or ""
+                bunshin_output_length_recovery_note(self.pack)
+                if state.pending_output_length_recovery_note
+                else frame.retry_note or forced_retry_note or ""
             )
             metadata = {"retry_note": retry_note}
             return _bunshin_prompt_context(

@@ -116,6 +116,7 @@ class McpManagerPluginProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show MCP manager status.",
             use_when="Diagnosing MCP system health — manager process, projection, server count.",
             do_not_use_when="Listing servers (use list_mcp_servers). Checking one server (use read_mcp_server).",
@@ -133,6 +134,7 @@ class McpManagerPluginProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="mcp_server", action_name="list",
         guidance=ToolGuidance(
+            search_objects=('server', 'servers'),
             purpose="List configured MCP servers.",
             use_when='Discovering which MCP servers are configured and their attach status. An empty list means no servers are currently discovered. After adding or correcting server configuration, use rescan_mcp_servers.',
             do_not_use_when="Checking manager health (use inspect_mcp_state). Reading one server's details (use read_mcp_server).",
@@ -148,6 +150,7 @@ class McpManagerPluginProvider:
         scope="mcp_server",
         action_name="read",
         guidance=ToolGuidance(
+            search_objects=('server', 'servers'),
             purpose="Read one MCP server's metadata and tool discovery snapshot.",
             use_when="Inspecting what tools a specific MCP server exposes.",
             do_not_use_when="Listing all servers (use list_mcp_servers). Manager health (use inspect_mcp_state).",
@@ -185,6 +188,7 @@ class McpManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan",
         guidance=ToolGuidance(
+            search_objects=('server', 'servers'),
             purpose="Rescan MCP server configs and refresh the tool projection.",
             use_when="After adding or modifying MCP server configuration files.",
             do_not_use_when="Restarting the manager (use reload_plugin with name='mcp'). Attaching one server (use attach_mcp_server).",
@@ -207,6 +211,7 @@ class McpManagerPluginProvider:
         family="server",
         action_name="attach",
         guidance=ToolGuidance(
+            search_objects=('server', 'servers'),
             purpose="Attach one configured MCP server inside the manager.",
             use_when="Enabling a specific MCP server's tools without affecting others.",
             do_not_use_when="Attaching the whole MCP plugin (use attach_plugin). Detaching a server (use detach_mcp_server).",
@@ -232,6 +237,7 @@ class McpManagerPluginProvider:
         family="server",
         action_name="detach",
         guidance=ToolGuidance(
+            search_objects=('server', 'servers'),
             purpose="Detach one MCP server inside the manager.",
             use_when="Temporarily disabling one MCP server's tools.",
             do_not_use_when="Detaching the whole MCP plugin (use detach_plugin). Attaching a server (use attach_mcp_server).",
@@ -256,6 +262,7 @@ class McpManagerPluginProvider:
         family="mcp",
         action_name="image_prepare",
         guidance=ToolGuidance(
+            search_objects=('image', 'images'),
             purpose="Convert an image artifact or local file into the path, base64, or data-URL representation required by an external MCP tool.",
             use_when="An MCP tool requires an image representation that differs from the artifact, local path, or URL already available.",
             do_not_use_when="Reading artifact text content (use read_artifact). The MCP tool already accepts the available URL or path directly. The active model can inspect an inline image itself.",

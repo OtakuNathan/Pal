@@ -226,7 +226,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         search = core.context.execution_runtime.execute_tool(
             new_tool_call(
                 name="search_tools",
-                args={"query": "send message to channel endpoint", "top_k": 5},
+                args={"query": "send channel message", "top_k": 5},
             )
         )
         self.assertTrue(search.ok)

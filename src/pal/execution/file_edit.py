@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import EffectOutcome, ToolExecutionError
 from pal.execution.file_state import (
     FileContentChangedError,
     FileSnapshotReadError,
@@ -155,6 +156,12 @@ class FileEditTool:
                 expected_content=cached_content,
                 new_content=new_content,
             )
+        except ToolExecutionError as exc:
+            self.cache.invalidate(file_path)
+            if exc.effect_receipt is not None and exc.effect_receipt.outcome == EffectOutcome.APPLIED:
+                exc.details.update(applied_edit_indices=sorted({item[3] for item in replacements}),
+                                   failed_edits=_failure_details(failures))
+            raise
         except FileContentChangedError as exc:
             self.cache.invalidate(file_path)
             return _err(

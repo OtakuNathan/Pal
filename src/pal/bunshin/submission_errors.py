@@ -29,16 +29,23 @@ def role_gateway_error_kind(exc: Exception) -> str:
 
 def submission_error_result(
     call: ToolCallIR, exc: Exception, *, submission_started: bool,
-    invalid_code: str, correction: str,
+    invalid_code: str, correction: str, submission_accepted: bool = False,
 ) -> ToolExecutionResult:
     remote_validation = isinstance(exc, BunshinManagerRpcError) and exc.kind == "submission_validation"
     # YAML parsing can wrap filesystem errors. Preserve their infrastructure meaning.
     filesystem_cause = isinstance(exc.__cause__, OSError)
-    invalid = remote_validation or (
+    invalid = not submission_accepted and (remote_validation or (
         isinstance(exc, SubmissionValidationError) and not filesystem_cause
-    )
+    ))
     text = exception_report(exc)
-    if invalid:
+    if submission_accepted:
+        category = "submission_post_acceptance_error"
+        advice = (
+            "Manager already accepted the submission, but subsequent report delivery failed. "
+            "Do not resubmit or change accepted content. Report this infrastructure failure "
+            "to Manager so the report can be recovered from the accepted submission."
+        )
+    elif invalid:
         category = "validation"
         advice = correction
     elif submission_started:
@@ -65,8 +72,10 @@ def submission_error_result(
     else:
         result = FailedResult(
             error_code=category, error=llm_text, llm_text=llm_text, details=details,
-            effect=EffectOutcome.UNKNOWN if submission_started else EffectOutcome.NOT_STARTED,
-            retry=(RetryDirective.RECONCILE_FIRST if submission_started else
+            effect=(EffectOutcome.APPLIED if submission_accepted else
+                    EffectOutcome.UNKNOWN if submission_started else EffectOutcome.NOT_STARTED),
+            retry=(RetryDirective.DO_NOT_RETRY if submission_accepted else
+                   RetryDirective.RECONCILE_FIRST if submission_started else
                    RetryDirective.SAFE if isinstance(exc, (OSError, BunshinManagerRpcError)) or filesystem_cause
                    else RetryDirective.DO_NOT_RETRY),
         )

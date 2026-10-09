@@ -6,7 +6,7 @@ from pal.bunshin.runner_components.llm_settings import _bunshin_generation_resul
 from pal.bunshin.runner_components.prompt_values import _is_truncation_finish_reason
 from pal.bunshin.runner_components.prompt_values import _tool_call_summary
 from pal.bunshin.runner_components.prompt_values import DEFAULT_BUNSHIN_OUTPUT_LENGTH_RECOVERY_ROUNDS
-from pal.bunshin.runner_components.prompt_values import BUNSHIN_OUTPUT_LENGTH_RECOVERY_NOTE
+from pal.bunshin.runner_components.prompt_values import bunshin_output_length_recovery_note
 from pal.bunshin.runner_components.progress_text import _preview_text
 from dataclasses import dataclass
 from typing import Any
@@ -48,7 +48,7 @@ class LlmRounds:
         state: BunshinAgentLoopState | None = None,
     ) -> str:
         if state is not None and state.pending_output_length_recovery_note:
-            return state.pending_output_length_recovery_note
+            return bunshin_output_length_recovery_note(self.pack)
         if self.status.blocked_summary:
             return ""
         if self.tool_session.execution_sessions is not None and self.tool_session.execution_sessions.has_work:
@@ -179,7 +179,8 @@ class LlmRounds:
                 if not failure.retryable:
                     # Quota and authorization require user action, not another
                     # worker retry of this same logical session.
-                    self.status.block(failure.user_message + "\n" + provider_error)
+                    self.status.diagnostics.append(provider_error)
+                    self.status.block(failure.user_message)
                     return result
             # Provider exhaustion produced no assistant/tool turn.  Keep the
             # durable checkpoint at the same logical round so a later process
@@ -204,18 +205,14 @@ class LlmRounds:
                 # turn.  The manager must retry this same logical session
                 # from its last safe checkpoint; settling L1 here would make
                 # the next worker's first update a late write to a closed turn.
-                raise BunshinLLMRetryableError(
-                    provider_error
-                )
+                raise BunshinLLMRetryableError(provider_error)
         elif truncated and not committed_tool_calls:
             if continuation is not None:
                 response = getattr(outcome, "response", None)
                 message = getattr(response, "message", None)
                 message_id = str(getattr(message, "message_id", "") or "").strip()
                 if not message_id:
-                    raise RuntimeError(
-                        "truncated LLM response has no message id for atomic L1 discard"
-                    )
+                    raise RuntimeError("truncated LLM response has no message id for atomic L1 discard")
                 state.memory_service.discard_l1_assistant(
                     continuation.turn_id,
                     message_id,
@@ -234,7 +231,7 @@ class LlmRounds:
             if state.output_length_recovery_count < recovery_limit:
                 state.output_length_recovery_count += 1
                 state.pending_output_length_recovery_note = (
-                    BUNSHIN_OUTPUT_LENGTH_RECOVERY_NOTE
+                    bunshin_output_length_recovery_note(self.pack)
                 )
                 await self.reporter.emit_progress(
                     "llm_output_length_recovery_scheduled",

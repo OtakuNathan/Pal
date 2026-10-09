@@ -40,6 +40,10 @@ def test_restored_native_loop_consumes_new_contract_without_rewriting_profile(tm
         repository = BunshinRepository(tmp_path)
         lease = repository.leases.claim_lease("architect-guidance", "native-attempt", ttl_seconds=60)
         value = pack(tmp_path)
+        # Preserve coverage for a checkpoint pinned before adapter removal.
+        value.resolved_profile["output_contract_fragment"] = (
+            "Manager validates and records the bound files after the harness finishes."
+        )
         value.metadata["bunshin_v2"].update({
             "workflow_id": "architect-workflow", "invocation_id": "native-attempt",
             "lease_resource_key": lease.resource_key, "fencing_token": lease.fencing_token,

@@ -29,8 +29,9 @@ def test_word_search_distinguishes_install_and_uninstall_and_splits_alias(runtim
         mount_test_capability(runtime, alias=alias, canonical_path=f"op_test_{alias}",
                               InputModel=EmptyToolInput, OutputModel=EmptyToolOutput,
                               handler=lambda _: {}, guidance=ToolGuidance(
-                                  purpose=purpose, use_when=purpose, do_not_use_when="unrelated task"))
-    for query in ("install", "install dependencies", "install_pack", "install_package"):
+                                  purpose=purpose, use_when=purpose, do_not_use_when="unrelated task",
+                                  search_objects=("dependency", "dependencies")))
+    for query in ("install", "install dependencies", "install_package"):
         result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
         assert result.ok
         aliases = [hit["alias"] for hit in result.structured["hits"]]
@@ -41,16 +42,14 @@ def test_word_search_distinguishes_install_and_uninstall_and_splits_alias(runtim
     assert len(result.structured["hits"]) == 3
 
 
-def test_generic_word_hits_report_weak_matching_without_changing_ranking(runtime):
+def test_generic_word_hits_do_not_substitute_for_missing_domain(runtime):
     for alias in ("inspect_browser_status", "inspect_proactive_status"):
         mount_test_capability(runtime, alias=alias, canonical_path=f"op_test_{alias}",
             InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
             guidance=ToolGuidance(purpose="Inspect service status", use_when="Read service status", do_not_use_when="Other tasks"))
     result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "git status"}))
     assert result.ok
-    assert result.structured["hits"]
-    assert all(hit["weak_match"] for hit in result.structured["hits"])
-    assert "Weak matches" in result.llm_text
+    assert result.structured["hits"] == []
     precise = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "inspect_browser_status"}))
     assert not precise.structured["hits"][0].get("weak_match")
 
@@ -62,6 +61,49 @@ def test_call_tool_search_does_not_advertise_wrapper_retry_or_effect(runtime):
     assert "effect_kind" not in execution
     assert "retry_policy" not in execution
     assert "idempotency" not in execution
+
+
+def test_all_query_words_match_without_alias_prefix_fallback(runtime):
+    for alias, purpose in (
+        ("browser_repair", "Repair a browser session"),
+        ("inspect_browser_engine", "Inspect the browser RE engine"),
+    ):
+        mount_test_capability(runtime, alias=alias, canonical_path=f"op_test_{alias}",
+            InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
+            guidance=ToolGuidance(purpose=purpose, use_when=purpose, do_not_use_when="Other tasks",
+                search_objects=("re",) if alias == "inspect_browser_engine" else ()))
+
+    for query in ("browser_re", "browser re", "re browser", "browser re re"):
+        result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
+        assert result.ok
+        assert [hit["alias"] for hit in result.structured["hits"]] == ["inspect_browser_engine"]
+
+    broad = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "browser_re", "top_k": 100}))
+    scores = {hit["alias"]: hit["score"] for hit in broad.structured["hits"]}
+    assert "browser_repair" not in scores
+    exact = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "browser_repair"}))
+    assert [hit["alias"] for hit in exact.structured["hits"]] == ["browser_repair"]
+
+
+@pytest.mark.parametrize("action", ["search", "find"])
+def test_missing_web_domain_excludes_unrelated_search_matches(runtime, action):
+    mount_test_capability(runtime, alias=f"{action}_lsp_symbols", canonical_path=f"op_test_{action}_lsp_symbols",
+        InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
+        guidance=ToolGuidance(purpose=f"{action.title()} workspace symbols", use_when="Locate symbols", do_not_use_when="Other tasks"))
+    missing = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": f"web {action}"}))
+    assert missing.ok
+    assert missing.structured["hits"] == []
+
+    mount_test_capability(runtime, alias=f"{action}_web", canonical_path=f"op_test_{action}_web",
+        InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
+        guidance=ToolGuidance(purpose=f"{action.title()} the public web", use_when="Research online", do_not_use_when="Local code"))
+    for query in (f"web {action}", f"{action} web"):
+        found = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query, "top_k": 100}))
+        assert found.ok
+        assert found.structured["hits"][0]["alias"] == f"{action}_web"
+        assert not found.structured["hits"][0].get("weak_match")
+        scores = {hit["alias"]: hit["score"] for hit in found.structured["hits"]}
+        assert f"{action}_lsp_symbols" not in scores
 
 
 def test_discovery_exposes_plugin_reattach_and_provider_install():
@@ -152,39 +194,38 @@ def test_compaction_preserves_data_named_title_and_mcp_validation_rules():
     assert compact_input_contract(data) == data
 
 
-def test_task_words_handle_plural_without_promoting_next_tool_hints(runtime):
+def test_task_words_preserve_forms_without_promoting_next_tool_hints(runtime):
     from pal.execution.discovery_terms import tool_search_terms
 
-    assert tool_search_terms("find controls") == ("find", "control")
-    assert tool_search_terms("prepare dependencies") == ("prepare", "dependency")
+    assert tool_search_terms("find controls") == ("find", "controls")
+    assert tool_search_terms("prepare dependencies") == ("prepare", "dependencies")
     assert "install" not in tool_search_terms("uninstall")
     mount_test_capability(runtime, alias="find_control", canonical_path="op_test_find_control",
                           InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
                           guidance=ToolGuidance(purpose="Find a control", use_when="Locating controls",
                                                 do_not_use_when="No controls needed"))
-    assert runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "find controls"})).structured["hits"][0]["alias"] == "find_control"
+    assert runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "find controls"})).structured["hits"] == []
 
 
 def test_specific_task_words_rank_above_partial_matches(runtime):
     result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "read file", "top_k": 100}))
     aliases = [hit["alias"] for hit in result.structured["hits"]]
     assert aliases[0] == "read_file"
-    assert aliases.index("read_tool") > aliases.index("read_file")
+    assert "read_tool" not in aliases
 
 
 def test_exact_search_does_not_report_weaker_matches_as_truncation(runtime):
     precise = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "read file", "facets": True}))
     assert precise.ok
     assert [hit['alias'] for hit in precise.structured['hits']] == ['read_file']
-    assert precise.structured['omitted_weaker_count'] > 0
     assert precise.structured['truncated'] is False
     assert 'usage_hint' not in precise.structured
     broad = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "read file", "top_k": 1}))
-    assert broad.structured['truncated'] is True
+    assert broad.structured['truncated'] is False
     assert broad.structured['omitted_weaker_count'] == 0
 
 
-def test_find_symbols_keeps_symbol_tools_despite_other_full_matches(tmp_path):
+def test_lsp_symbol_search_requires_action_and_object(tmp_path):
     from pal.lsp import build_lsp_plugin
 
     core = PalCore()
@@ -196,7 +237,9 @@ def test_find_symbols_keeps_symbol_tools_despite_other_full_matches(tmp_path):
     try:
         result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "find symbols", "top_k": 10}))
         aliases = {hit["alias"] for hit in result.structured["hits"]}
-        assert {"list_lsp_document_symbols", "search_lsp_workspace_symbols"} <= aliases
+        assert "list_lsp_document_symbols" not in aliases
+        result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "search symbols"}))
+        assert "search_lsp_workspace_symbols" in {hit["alias"] for hit in result.structured["hits"]}
     finally:
         runtime.shutdown()
 
@@ -242,11 +285,11 @@ def test_alias_words_converge_without_description_contamination(runtime):
         assert [hit['alias'] for hit in result.structured['hits']] == ['remember_memory']
     broad = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': 'remember memory', 'top_k': 20}))
     aliases = [hit['alias'] for hit in broad.structured['hits']]
-    assert 'inspect_active_memory_provider' in aliases
+    assert 'inspect_active_memory_provider' not in aliases
     assert 'unrelated_helper' not in aliases
 
 
-def test_domain_partial_alias_and_purpose_synonym(tmp_path):
+def test_domain_partial_alias_and_declared_object_form(tmp_path):
     from pal.lsp import build_lsp_plugin
     core = PalCore()
     register_with_core(core.context)
@@ -320,3 +363,47 @@ def test_builtin_tool_navigation_references_declared_public_aliases():
     for skill in builtin_declared_skills():
         references.update(skill.capability_refs)
     assert not references - aliases, sorted(references - aliases)
+
+
+@pytest.mark.parametrize("top_k", [None, 100])
+def test_partial_task_does_not_hide_missing_domain(runtime, top_k):
+    args = {"query": "read file from web"}
+    if top_k is not None:
+        args["top_k"] = top_k
+    result = runtime.execute_tool(new_tool_call(name="search_tools", args=args))
+    assert result.structured["hits"] == []
+    assert "No matching tools" in result.llm_text
+
+
+@pytest.mark.parametrize("singular,plural", [
+    ("cookie", "cookies"), ("dependency", "dependencies"),
+    ("cache", "caches"), ("class", "classes"), ("movie", "movies"),
+])
+def test_search_does_not_infer_plural_forms(runtime, singular, plural):
+    alias = f"get_{singular}"
+    mount_test_capability(runtime, alias=alias, canonical_path=f"op_test_{alias}",
+        InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
+        guidance=ToolGuidance(purpose=f"Get a {singular}", use_when="Requested", do_not_use_when="Other tasks"))
+    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": f"get {plural}"}))
+    assert result.structured["hits"] == []
+    exact = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": f"get {singular}"}))
+    assert [hit["alias"] for hit in exact.structured["hits"]] == [alias]
+
+
+@pytest.mark.parametrize("query,alias,purpose", [
+    ("read", "ready_service", "Start a service"),
+    ("read browser cookie", "delete_browser_cookie", "Delete a browser cookie"),
+    ("git status", "git_commit", "Create a git commit"),
+    ("news", "create_new_item", "Create a new item"),
+    ("install_pack", "install_package", "Install dependencies"),
+])
+@pytest.mark.parametrize("top_k", [None, 100])
+def test_search_rejects_prefixes_and_missing_query_words(query, alias, purpose, top_k):
+    from types import SimpleNamespace
+    from pal.execution.runtime import ExecutionRuntime
+
+    generation = SimpleNamespace(search_records={alias: {"alias": alias, "purpose": purpose}})
+    args = {"query": query}
+    if top_k is not None:
+        args["top_k"] = top_k
+    assert ExecutionRuntime._search_generation(generation, args)["hits"] == []

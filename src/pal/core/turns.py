@@ -18,6 +18,7 @@ from pal.llm.contracts import LLMGenerationResult
 from pal.shared import EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, ToolExecutionResult, TurnDeliveryBinding
 from pal.foundation import EventEnvelope
 from pal.shared.payloads import extract_text_from_payload
+from pal.shared.diagnostics import diagnostic_text
 from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.shared.agent_io import ChannelMessage, ChannelStreamUpdate
 
@@ -522,7 +523,7 @@ def _render_failure_primary_input(
             {
                 "tool_name": item.tool_name,
                 "ok": item.ok,
-                "summary": _compact_prompt_text(item.summary, limit=500),
+                "summary": diagnostic_text(item.summary, limit=None),
                 "structured_summary": _project_tool_structured_summary(item.structured),
             }
             for item in observations
@@ -546,7 +547,7 @@ def _project_maintenance_outcome(item: dict[str, Any]) -> dict[str, Any]:
         "action_name": str(item.get("action_name") or "").strip(),
         "status": str(item.get("status") or "").strip(),
         "ok": bool(item.get("ok")),
-        "text": _compact_prompt_text(str(item.get("text") or ""), limit=500),
+        "text": diagnostic_text(str(item.get("text") or ""), limit=None),
         "structured_summary": _project_tool_structured_summary(structured),
     }
 
@@ -554,80 +555,34 @@ def _project_maintenance_outcome(item: dict[str, Any]) -> dict[str, Any]:
 def _project_failure_evidence(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    projected: dict[str, Any] = {}
-    for key, raw in value.items():
-        normalized_key = str(key or "").strip()
-        if not normalized_key:
-            continue
-        if isinstance(raw, dict):
-            projected[normalized_key] = _project_mapping_shape(raw)
-        elif isinstance(raw, list):
-            projected[normalized_key] = _project_list_shape(raw)
-        else:
-            projected[normalized_key] = _compact_prompt_text(str(raw or ""), limit=500)
-    return projected
+    return _project_diagnostic_value(value)
 
 
 def _project_tool_structured_summary(value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or not value:
         return {}
-    if set(value) == {"payload"} and isinstance(value.get("payload"), dict):
-        return _project_tool_structured_summary(value["payload"])
-    if isinstance(value.get("capability"), dict):
-        capability = dict(value.get("capability") or {})
+    return _project_diagnostic_value(value)
+
+
+def _project_diagnostic_value(value: Any) -> Any:
+    """Preserve diagnostic values and structure; redact credentials only.
+
+    A shape-only preview cannot establish recovery: nested causes, per-item
+    failures and false/zero status values are all evidence for the verdict.
+    """
+    if isinstance(value, dict):
         return {
-            "kind": "capability_contract",
-            "name": str(capability.get("name") or "").strip(),
-            "required_params": _project_list_shape(capability.get("required_params")),
+            key: "[redacted]" if re.fullmatch(
+                r"password|passwd|(?:access|refresh|auth)[_-]?token|token|api[_-]?key|secret",
+                str(key), re.IGNORECASE,
+            ) else _project_diagnostic_value(item)
+            for key, item in value.items()
         }
-    if isinstance(value.get("tools"), list):
-        tools = [item for item in value.get("tools") or [] if isinstance(item, dict)]
-        return {
-            "kind": "tool_inventory",
-            "tool_count": len(tools),
-            "tool_names_preview": [str(item.get("name") or "").strip() for item in tools[:12] if str(item.get("name") or "").strip()],
-        }
-    return _project_mapping_shape(value)
-
-
-def _project_mapping_shape(value: dict[str, Any]) -> dict[str, Any]:
-    projected: dict[str, Any] = {}
-    for key, raw in list(value.items())[:16]:
-        normalized_key = str(key or "").strip()
-        if not normalized_key:
-            continue
-        if isinstance(raw, dict):
-            projected[normalized_key] = {"keys": [str(item) for item in list(raw.keys())[:12]], "key_count": len(raw)}
-        elif isinstance(raw, list):
-            projected[normalized_key] = _project_list_shape(raw)
-        else:
-            projected[normalized_key] = _compact_prompt_text(str(raw or ""), limit=240)
-    if len(value) > 16:
-        projected["truncated_key_count"] = len(value) - 16
-    return projected
-
-
-def _project_list_shape(value: object) -> list[Any] | dict[str, Any]:
-    if not isinstance(value, list):
-        return []
-    preview: list[Any] = []
-    for item in value[:12]:
-        if isinstance(item, dict):
-            preview.append({"keys": [str(key) for key in list(item.keys())[:8]]})
-        else:
-            preview.append(_compact_prompt_text(str(item or ""), limit=160))
-    if len(value) <= 12:
-        return preview
-    return {"count": len(value), "preview": preview}
-
-
-def _compact_prompt_text(text: str, *, limit: int) -> str:
-    normalized = str(text or "").strip()
-    if len(normalized) <= limit:
-        return normalized
-    if limit <= 20:
-        return normalized[:limit].rstrip()
-    return f"{normalized[: limit - 18].rstrip()} ... [truncated]"
+    if isinstance(value, (list, tuple)):
+        return [_project_diagnostic_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return diagnostic_text(value, limit=None)
 
 
 def _parse_failure_verification(text: str) -> tuple[VerificationResult, dict[str, Any]]:

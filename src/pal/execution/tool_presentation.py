@@ -62,6 +62,6 @@ def render_tool_search(generation: Any, payload: dict[str, Any]) -> str:
     """Deliver callable contracts without repeating the index or field list."""
     _ = generation
     hits = [{key: value for key, value in hit.items()
-             if key not in {"search_text", "input_shape"}}
+             if key not in {"search_text", "input_shape", "search_objects"}}
             for hit in payload.get("hits", ())]
     return render_structured_for_llm({**payload, "hits": hits})

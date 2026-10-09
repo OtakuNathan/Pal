@@ -1170,7 +1170,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("list_artifacts", contracts)
         search = await core.context.execution_runtime.execute_tool_async(
-            new_tool_call(name="search_tools", args={"query": "artifact refund", "module_name": "artifact", "top_k": 10}),
+            new_tool_call(name="search_tools", args={"query": "artifact", "module_name": "artifact", "top_k": 100}),
             turn_id=self.turn_id,
         )
         self.assertTrue(search.ok, search.text)

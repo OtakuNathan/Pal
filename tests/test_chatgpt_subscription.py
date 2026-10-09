@@ -650,13 +650,16 @@ def test_bunshin_quota_blocks_instead_of_worker_retry():
     # Quota must short-circuit before any completion heuristics or reporter.
     rounds = LlmRounds(
         completion=None, control=None, heartbeat=None, prompt_context=None, reporter=None,
-        status=SimpleNamespace(block=blocked.append), text_deliverables=None, tool_session=None, pack=None,
+        status=SimpleNamespace(block=blocked.append, diagnostics=[]), text_deliverables=None, tool_session=None, pack=None,
     )
     failure = ChatGPTError(QUOTA_CODE)
     state = SimpleNamespace(llm_round_count=1)
     result = EffectResult(status=RuntimeStatus.OK, payload=_failure_result(failure.user_message, exc=failure))
     assert asyncio.run(rounds.postprocess_bunshin_llm_round(state, result)) is result
     assert blocked == [failure.user_message]
+    assert len(rounds.status.diagnostics) == 1
+    assert QUOTA_CODE in rounds.status.diagnostics[0]
+    assert "Provider metadata" in rounds.status.diagnostics[0]
     assert state.llm_round_count == 0
 
 

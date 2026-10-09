@@ -24,6 +24,8 @@ def test_output_contract_error_preserves_large_result_in_snapshot():
         assert not result.ok
         assert len(calls) == 1
         assert "output contract error" in result.llm_text
+        assert "not the task arguments" in result.llm_text
+        assert "Do not repeat side effects" in result.llm_text
         saved = Path(result.snapshot_refs[0].path).read_text()
         assert body in saved
         assert "OUTPUT_EVIDENCE" in saved

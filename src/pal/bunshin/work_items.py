@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pal.bunshin.draft_values import (BunshinReviewFindingLocation, BunshinAddFindingInput, BunshinUpdateFindingInput, BunshinRemoveFindingInput, normalize_finding, _finding_hash, submission_work_items)
 
+from pal.bunshin.authoring_errors import AuthoringProgress, authoring_error_result
 from pal.shared.tool_protocol import ToolCallIR
 
 import hashlib
@@ -9,7 +10,7 @@ from typing import Any, Literal, Mapping
 
 from pydantic import Field
 
-from pal.execution.tool_facade import StrictToolModel, rejection
+from pal.execution.tool_facade import StrictToolModel
 from pal.bunshin.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftStore,
@@ -97,6 +98,7 @@ ADD_FINDING_EXAMPLES = (
 UPDATE_CHECKLIST_TOOL_SPEC: dict[str, Any] = {
     "alias": "update_checklist",
     "guidance": {
+        "search_objects": ('checklist', 'checklists'),
         "purpose": "Replace the current role's complete compact semantic work cursor.",
         "use_when": (
             "Initialize it after understanding the bounded assignment, then update statuses "
@@ -107,8 +109,8 @@ UPDATE_CHECKLIST_TOOL_SPEC: dict[str, Any] = {
             "playbook steps, or include a terminal submission call as a checklist item."
         ),
         "failure_next_steps": (
-            "Correct the complete plan, preserve fixed and Manager-routed items in order, and "
-            "ensure at most one item is in_progress before retrying."
+            "For validation rejection, correct the plan while preserving fixed and Manager-routed items "
+            "in order and at most one in_progress item. Otherwise follow the returned effect and retry directive."
         ),
     },
     "InputModel": BunshinUpdateChecklistInput,
@@ -120,6 +122,7 @@ UPDATE_CHECKLIST_TOOL_SPEC: dict[str, Any] = {
 ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
     "alias": "add_finding",
     "guidance": {
+        "search_objects": ('finding', 'findings', 'defect', 'defects'),
         "purpose": "Record one actionable defect in the Manager-owned WorkItem ledger.",
         "use_when": (
             "Use after reproducing or otherwise establishing one concrete correctness, "
@@ -144,6 +147,7 @@ ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
 UPDATE_FINDING_TOOL_SPEC = {
     "alias": "update_finding",
     "guidance": {
+        "search_objects": ('finding', 'findings'),
         "purpose": "Create or replace one current verifier draft finding before submission with one upsert tool.",
         "use_when": "To create, choose a never-used finding_id and expected_revision=0. To replace, use its current finding_id and revision from read_verification_draft_status. Supply the complete finding fields; all finding kinds are editable.",
         "do_not_use_when": "Do not edit external or submitted history. A completed finding is still editable until submission; retain accurate defects.",
@@ -155,6 +159,7 @@ UPDATE_FINDING_TOOL_SPEC = {
 REMOVE_FINDING_TOOL_SPEC = {
     "alias": "remove_finding",
     "guidance": {
+        "search_objects": ('finding', 'findings'),
         "purpose": "Delete one current verifier draft finding before submission while preserving its audit history.",
         "use_when": "Use the finding_id and revision from update_finding or read_verification_draft_status when you no longer endorse a current finding, regardless of its kind or completed status.",
         "do_not_use_when": "Do not erase external or submitted history or hide a real remaining defect. Removing a finding does not make failed or stale test evidence pass.",
@@ -244,10 +249,11 @@ def update_checklist_tool_result(
     call: ToolCallIR,
     workspace: Mapping[str, Any],
 ) -> ToolExecutionResult:
+    progress = AuthoringProgress()
     try:
         checklist, context, seed, reducer = _prepare_checklist(workspace, call.args)
 
-        result = SubmissionDraftStore(_runtime_root(workspace)).mutate(
+        result = progress.mutate(SubmissionDraftStore(_runtime_root(workspace)),
             context,
             operation_key=str(call.call_id or _request_key("checklist", call.args)),
             request=dict(call.args or {}),
@@ -269,7 +275,7 @@ def update_checklist_tool_result(
             )
         return _ok(call, text, result)
     except Exception as exc:
-        return _invalid(call, exc, "Correct the semantic plan and retry.")
+        return authoring_error_result(call, exc, progress, correction="Correct the semantic plan and retry.")
 
 
 def _prepare_checklist(workspace: Mapping[str, Any], args: Mapping[str, Any]):
@@ -361,11 +367,12 @@ def add_finding_tool_result(
     call: ToolCallIR,
     workspace: Mapping[str, Any],
 ) -> ToolExecutionResult:
+    progress = AuthoringProgress()
     try:
         operation_key = str(call.call_id or _request_key("add-finding", call.args))
         context, seed, semantic_hash, reducer = _prepare_add_finding(workspace, call.args, operation_key)
 
-        result = SubmissionDraftStore(_runtime_root(workspace)).mutate(
+        result = progress.mutate(SubmissionDraftStore(_runtime_root(workspace)),
             context,
             operation_key=operation_key,
             request=dict(call.args or {}),
@@ -379,7 +386,7 @@ def add_finding_tool_result(
         )
         return _ok(call, text, result)
     except Exception as exc:
-        return _invalid(call, exc, "Correct the finding and retry.")
+        return authoring_error_result(call, exc, progress, correction="Correct the finding and retry.")
 
 
 def _prepare_add_finding(workspace: Mapping[str, Any], args: Mapping[str, Any], operation_key: str):
@@ -665,45 +672,20 @@ def _ok(
     )
 
 
-def _invalid(
-    call: ToolCallIR,
-    exc: Exception,
-    recovery: str,
-) -> ToolExecutionResult:
-    text = f"{exc.__class__.__name__}: {exc}"
-    llm_text = f"{text} {recovery}"
-    return ToolExecutionResult(
-        name=call.name,
-        ok=False,
-        text=text,
-        llm_text=llm_text,
-        structured={"error": str(exc), "error_type": exc.__class__.__name__},
-        call_id=call.call_id,
-        status=RuntimeStatus.INVALID,
-        invocation_result=rejection(
-            "invalid_work_item",
-            llm_text,
-            details={
-                "error": str(exc),
-                "error_type": exc.__class__.__name__,
-            },
-        ),
-    )
-
-
 def edit_finding_tool_result(call: ToolCallIR, workspace: Mapping[str, Any]) -> ToolExecutionResult:
     from pal.bunshin.finding_edits import prepare_finding_edit
+    progress = AuthoringProgress()
     try:
         args = dict(call.args or {})
         model = BunshinUpdateFindingInput if call.name == UPDATE_FINDING_CAPABILITY else BunshinRemoveFindingInput
         model.model_validate(args, strict=True)
         operation = str(call.call_id or _request_key(call.name, args))
         reducer = prepare_finding_edit(workspace, args)
-        result = SubmissionDraftStore(_runtime_root(workspace)).mutate(
+        result = progress.mutate(SubmissionDraftStore(_runtime_root(workspace)),
             work_item_context(workspace), operation_key=operation, request=args,
             reducer=reducer, seed=work_item_seed(workspace),
         )
         action = "created" if result.get("created") else "updated" if call.name == UPDATE_FINDING_CAPABILITY else "removed"
         return _ok(call, f"Finding {result['finding_id']} {action}; audit history retained.", result)
     except Exception as exc:
-        return _invalid(call, exc, "Call read_verification_draft_status and correct the finding identity or revision.")
+        return authoring_error_result(call, exc, progress, correction="Call read_verification_draft_status and correct the finding identity or revision.")

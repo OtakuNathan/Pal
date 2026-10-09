@@ -101,6 +101,7 @@ class WebSearchIntrospectionProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show web search module state.",
             use_when='Diagnosing web search health — provider count, active provider, mounted status. If no provider is active, inspect list_web_search_providers before selecting an enabled backend.',
             do_not_use_when="Searching the web (use search_web). Listing providers (use list_web_search_providers).",
@@ -121,6 +122,7 @@ class WebSearchIntrospectionProvider:
         scope="module",
         action_name="list_providers",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="List configured web search providers.",
             use_when='Discovering available search backends and their enabled status. An empty list means no providers are configured.',
             do_not_use_when="Checking the active provider (use inspect_active_web_search_provider). Searching (use search_web).",
@@ -144,6 +146,7 @@ class WebSearchIntrospectionProvider:
         scope="module",
         action_name="active_provider",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Show the active web search provider.",
             use_when='Checking which search backend handles queries. If no effective provider is reported, inspect list_web_search_providers and select an enabled provider with set_active_web_search_provider.',
             do_not_use_when="Listing all providers (use list_web_search_providers). Switching (use set_active_web_search_provider).",
@@ -169,6 +172,7 @@ class WebSearchIntrospectionProvider:
         scope="provider",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Show one web search provider's metadata.",
             use_when="Inspecting a specific provider's kind, settings, auth keys.",
             do_not_use_when="Module health (use inspect_web_search_state). Auth state (use inspect_web_search_provider_auth).",
@@ -193,6 +197,7 @@ class WebSearchIntrospectionProvider:
         scope="provider",
         action_name="auth_state",
         guidance=ToolGuidance(
+            search_objects=('auth', 'authorization', 'credential', 'credentials'),
             purpose="Show one web search provider's authorization state.",
             use_when='Diagnosing auth failures or checking if API keys are configured. A successful inspection can report unauthorized or unknown authorization; inspect the returned state and apply credentials only when needed.',
             do_not_use_when="Applying credentials (use set_web_search_provider_auth_material). Provider metadata (use inspect_web_search_provider).",
@@ -218,6 +223,7 @@ class WebSearchIntrospectionProvider:
         scope="provider",
         action_name="health",
         guidance=ToolGuidance(
+            search_objects=('health',),
             purpose="Show one web search provider's health.",
             use_when='Diagnosing search failures or connectivity issues. A successful inspection can report an unhealthy backend. Inspect authorization and the reported cause; choose a healthy enabled provider with set_active_web_search_provider if needed.',
             do_not_use_when="Auth state (use inspect_web_search_provider_auth). Module health (use inspect_web_search_state).",
@@ -244,6 +250,7 @@ class WebSearchIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Set the active web search provider.",
             use_when="Switching to a different enabled search backend.",
             do_not_use_when="Checking the active provider (use inspect_active_web_search_provider). The target provider is disabled (enable it first).",
@@ -284,6 +291,7 @@ class WebSearchIntrospectionProvider:
         scope="module",
         action_name="query",
         guidance=ToolGuidance(
+            search_objects=('page', 'pages', 'result', 'results'),
             purpose="Search the web with the configured provider and internal fallback.",
             use_when="Looking up current external facts, documentation, or comparing sources.",
             do_not_use_when="Reading a new webpage at a known URL (use navigate_browser, which also returns content). Rereading the current page (use read_browser_page). Reading local files (use read_file).",
@@ -339,6 +347,7 @@ class WebSearchIntrospectionProvider:
         family="management",
         action_name="enable",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Enable a web search provider.",
             use_when="Re-enabling a disabled search provider.",
             do_not_use_when="Disabling (use disable_web_search_provider). Setting active (use set_active_web_search_provider).",
@@ -356,6 +365,7 @@ class WebSearchIntrospectionProvider:
         family="management",
         action_name="disable",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Disable a web search provider.",
             use_when="Temporarily removing a provider from the active pool.",
             do_not_use_when="Enabling (use enable_web_search_provider).",
@@ -373,6 +383,7 @@ class WebSearchIntrospectionProvider:
         family="management",
         action_name="set_auth_material",
         guidance=ToolGuidance(
+            search_objects=('material', 'materials', 'credential', 'credentials', 'token', 'tokens'),
             purpose="Apply auth material to a web search provider without exposing secrets.",
             use_when="A provider needs API keys or credentials to function.",
             do_not_use_when="Reading auth state (use inspect_web_search_provider_auth).",
@@ -408,6 +419,7 @@ class WebSearchIntrospectionProvider:
         family="management",
         action_name="set_config",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Merge config into a web search provider's settings blob.",
             use_when="Tuning provider-specific settings (e.g. result count, safe search defaults).",
             do_not_use_when="Setting auth material (use set_web_search_provider_auth_material).",

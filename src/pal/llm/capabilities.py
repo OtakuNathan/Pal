@@ -112,6 +112,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="list",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="List enabled LLM endpoints ordered by priority.",
             use_when='Discovering available model endpoints, their provider, wire shape, priority, vision/tools support, and context window. An empty list means no enabled endpoints are available; it does not prove the endpoint configuration is absent.',
             do_not_use_when="Checking the current active model (use inspect_active_llm). Inspecting one endpoint in depth (use inspect_llm_endpoint).",
@@ -150,6 +151,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="active",
         guidance=ToolGuidance(
+            search_objects=('model', 'models'),
             purpose="Show the current active LLM model metadata.",
             use_when='Checking which model endpoint is currently selected for requests. If no endpoint is active, use list_llm_endpoints to inspect enabled choices; endpoint selection is user-controlled through /model.',
             do_not_use_when="Listing all endpoints (use list_llm_endpoints). Switching endpoints (the user must use /model).",
@@ -172,6 +174,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('endpoint', 'endpoints'),
             purpose="Show public metadata for one enabled LLM endpoint by name.",
             use_when="Inspecting one endpoint's context window, max output, thinking levels, capabilities.",
             do_not_use_when="Checking the active model (use inspect_active_llm). Listing all endpoints (use list_llm_endpoints).",
@@ -209,6 +212,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="think_level",
         guidance=ToolGuidance(
+            search_objects=('level', 'levels'),
             purpose="Show the active endpoint's thinking level choices and current selection.",
             use_when="Checking or deciding which reasoning level (e.g. low/medium/high) the active model uses. Choices are provider declarations; an empty list can mean thinking levels are unsupported.",
             do_not_use_when="Checking token usage (use inspect_llm_usage). Switching endpoints (the user must use /model).",
@@ -246,6 +250,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="usage",
         guidance=ToolGuidance(
+            search_objects=('usage', 'statistic', 'statistics', 'token', 'tokens'),
             purpose="Show resident-process LLM usage statistics — requests, tokens, cache hit rate, cost.",
             use_when="Monitoring token consumption, cache performance, or cost across the current process lifetime. Missing or incomplete usage/cost is unknown, not zero; inspect cost_complete and reporting counts.",
             do_not_use_when="Checking model metadata (use inspect_active_llm or inspect_llm_endpoint).",

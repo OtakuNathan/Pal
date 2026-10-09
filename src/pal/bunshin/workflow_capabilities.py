@@ -35,6 +35,8 @@ from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.tool_facade import StrictToolModel, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_CONTROL
 from pal.bunshin.service import BunshinWorkflowService
+from pal.foundation.diagnostics import exception_report
+from pal.foundation.sidecar import SidecarRpcError
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -56,6 +58,7 @@ BUNSHIN_START_WORKFLOW_PURPOSE = (
 )
 
 BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
+    search_objects=('workflow', 'workflows'),
     purpose=BUNSHIN_START_WORKFLOW_PURPOSE,
     use_when=(
         "Use when the requested work is identity-light executor work: a medium-to-large or long-running project, work "
@@ -287,6 +290,7 @@ class BunshinPublicProvider:
         scope="bunshin_catalog",
         action_name="read",
         guidance=ToolGuidance(
+            search_objects=('catalog', 'catalogs'),
             purpose="Read the effective Bunshin profile/family catalog from the sidecar.",
             use_when="Checking available Bunshin profiles and families before starting a workflow.",
             do_not_use_when="Starting a workflow (use start_bunshin_workflow). Checking task status (use read_bunshin_task_status).",
@@ -305,7 +309,7 @@ class BunshinPublicProvider:
                 llm_text=render_titled_structured_for_llm("Bunshin catalog", payload),
             )
         except Exception as exc:
-            payload = {"error": str(exc), "error_type": exc.__class__.__name__}
+            payload = _exception_payload(exc)
             return IntrospectionResult(
                 status=RuntimeStatus.ERROR,
                 text="bunshin catalog read failed",
@@ -318,6 +322,7 @@ class BunshinPublicProvider:
         scope="bunshin_catalog",
         action_name="set_profile_override",
         guidance=ToolGuidance(
+            search_objects=('profile', 'profiles', 'override', 'overrides'),
             purpose="Patch one Bunshin profile override in the sidecar.",
             use_when="Customizing a profile (e.g. changing model, constraints, or instructions) for future Tasks.",
             do_not_use_when="Removing an override (use reset_bunshin_profile_override). Existing Tasks are unaffected.",
@@ -348,6 +353,7 @@ class BunshinPublicProvider:
         scope="bunshin_catalog",
         action_name="reset_profile_override",
         guidance=ToolGuidance(
+            search_objects=('profile', 'profiles', 'override', 'overrides'),
             purpose="Remove one profile override and restore the package builtin.",
             use_when='Reverting a profile customization back to defaults. If no override exists, resetting is an idempotent no-op.',
             do_not_use_when="Patching a profile (use set_bunshin_profile_override).",
@@ -373,6 +379,7 @@ class BunshinPublicProvider:
         scope="bunshin_catalog",
         action_name="set_family_override",
         guidance=ToolGuidance(
+            search_objects=('family', 'families', 'override', 'overrides'),
             purpose="Patch one Bunshin family override in the sidecar.",
             use_when="Customizing role bindings or profile availability for a family.",
             do_not_use_when="Removing a family override (use reset_bunshin_family_override).",
@@ -398,6 +405,7 @@ class BunshinPublicProvider:
         scope="bunshin_catalog",
         action_name="reset_family_override",
         guidance=ToolGuidance(
+            search_objects=('family', 'families', 'override', 'overrides'),
             purpose="Remove one family override and restore the package builtin.",
             use_when='Reverting a family customization back to defaults. If no override exists, resetting is an idempotent no-op.',
             do_not_use_when="Patching a family (use set_bunshin_family_override).",
@@ -423,6 +431,7 @@ class BunshinPublicProvider:
         scope="bunshin_catalog",
         action_name="refresh",
         guidance=ToolGuidance(
+            search_objects=('catalog', 'catalogs'),
             purpose="Reload Bunshin package builtins and validate overrides.",
             use_when="After upgrading the Bunshin package or when catalog changes are not reflected.",
             do_not_use_when="Reading the catalog (use read_bunshin_catalog). Patching profiles (use set_bunshin_profile_override).",
@@ -484,6 +493,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="submit_artifact",
         guidance=ToolGuidance(
+            search_objects=('artifact', 'artifacts'),
             purpose="Publish a durable artifact under a natural-language name for the current actor.",
             use_when="When the user has a named architecture or design to reference in later workflow calls.",
             do_not_use_when="This does not execute the artifact. Not for unnamed or ad-hoc content.",
@@ -515,6 +525,7 @@ class BunshinPublicProvider:
         scope="bunshin_task",
         action_name="search",
         guidance=ToolGuidance(
+            search_objects=('task', 'tasks'),
             purpose="Search the durable Bunshin V2 Task Ledger for the current actor.",
             use_when='Before claiming a workflow cannot be found. Empty query lists most recently updated Tasks. An empty result means no matching actor-owned Task was found; broaden the query before declaring the workflow missing.',
             do_not_use_when="Not for live workflow state (use read_bunshin_task_status).",
@@ -547,20 +558,20 @@ class BunshinPublicProvider:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="bunshin V2 task search invalid",
-                structured={"error": str(exc), "error_type": exc.__class__.__name__},
+                structured=_exception_payload(exc),
                 llm_text=render_titled_structured_for_llm(
                     "Bunshin V2 task search invalid",
-                    {"error": str(exc), "error_type": exc.__class__.__name__},
+                    _exception_payload(exc),
                 ),
             )
         except Exception as exc:
             return IntrospectionResult(
                 status=RuntimeStatus.ERROR,
                 text="bunshin V2 task search failed",
-                structured={"error": str(exc), "error_type": exc.__class__.__name__},
+                structured=_exception_payload(exc),
                 llm_text=render_titled_structured_for_llm(
                     "Bunshin V2 task search failed",
-                    {"error": str(exc), "error_type": exc.__class__.__name__},
+                    _exception_payload(exc),
                 ),
             )
 
@@ -569,6 +580,7 @@ class BunshinPublicProvider:
         scope="bunshin_task",
         action_name="status",
         guidance=ToolGuidance(
+            search_objects=('task', 'tasks'),
             purpose="Read a Task by natural-language title, then mechanically attach its single current workflow when one exists.",
             use_when=(
                 "Checking workflow phase, module Coder/Verifier state, blockers, next legal actions, timings, or liveness. "
@@ -614,6 +626,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="resume_workflow",
         guidance=ToolGuidance(
+            search_objects=('workflow', 'workflows'),
             purpose="Resume a deliberately paused V2 workflow, or normalize orphaned worker-owned work into TRIAGE_REQUIRED items.",
             use_when="When a workflow was deliberately paused, or after an interrupted worker disappears.",
             do_not_use_when="Not for triage resolution (use resolve_bunshin_triage after addressing blockers).",
@@ -650,6 +663,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="restart_execution",
         guidance=ToolGuidance(
+            search_objects=('execution', 'executions', 'attempt', 'attempts'),
             purpose="Discard the current execution attempt and restart from its accepted architecture.",
             use_when="When execution policy or Coder behavior changed but the accepted architecture remains the intended baseline.",
             do_not_use_when="Not for architecture changes (start a new workflow). Not for transient failures (use resolve_bunshin_triage).",
@@ -687,6 +701,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="resolve_triage",
         guidance=ToolGuidance(
+            search_objects=('triage', 'item', 'items'),
             purpose="Mark one TRIAGE_REQUIRED workflow item as manually handled and resume it.",
             use_when="After the blocker has actually been addressed. Copy the exact semantic subject from workflow status (e.g. module:ohos_font).",
             do_not_use_when="Does not accept a candidate, waive verification, or skip a gate.",
@@ -725,6 +740,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="submit_human_decision",
         guidance=ToolGuidance(
+            search_objects=('decision', 'decisions'),
             purpose="Submit Accept/Edit/Reject for an architecture review.",
             use_when="When an inline review card is unavailable and the user needs to decide manually.",
             do_not_use_when="Not for live workflow state queries (use read_bunshin_task_status).",
@@ -770,6 +786,7 @@ class BunshinPublicProvider:
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput,
         aliases=("rebind_bunshin_task_delivery",),
         guidance=ToolGuidance(
+            search_objects=('delivery', 'deliveries', 'target', 'targets'),
             purpose="Rebind one Task's Manager-owned reply target without changing its workflow.",
             use_when="Use only after the user explicitly names a Task and destination channel endpoint.",
             do_not_use_when="Do not use merely because the user contacted Pal from another channel; ordinary conversation never moves Task delivery.",
@@ -809,6 +826,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="answer_question",
         guidance=ToolGuidance(
+            search_objects=('question', 'questions'),
             purpose="Answer the single pending Architect question for the named Task.",
             use_when="When the user's response is not one of the inline options.",
             do_not_use_when="Not for multiple-choice answers (use inline options when available).",
@@ -848,6 +866,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="control_workflow",
         guidance=ToolGuidance(
+            search_objects=('workflow', 'workflows'),
             purpose="Request asynchronous pause or cancel for a V2 workflow.",
             use_when="The user wants to stop a running workflow.",
             do_not_use_when="Starting a workflow (use start_bunshin_workflow). Checking status (use read_bunshin_task_status).",
@@ -886,6 +905,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="archive_workflow",
         guidance=ToolGuidance(
+            search_objects=('workflow', 'workflows'),
             purpose="Archive a terminal V2 workflow.",
             use_when="Hide a completed, rejected, or cancelled Workflow from default search results. Its reusable Task remains active; include_archived=true includes archived Workflow history. read_bunshin_task_status reports the archive flag.",
             do_not_use_when="Active workflows must be cancelled first (use control_bunshin_workflow).",
@@ -1049,8 +1069,16 @@ def _public_payload(value: Any) -> Any:
     return result
 
 
+def _exception_payload(exc: Exception) -> dict[str, Any]:
+    payload: dict[str, Any] = {"error": exception_report(exc), "error_type": type(exc).__name__}
+    if isinstance(exc, SidecarRpcError):
+        payload["rpc_kind"] = exc.kind
+        payload["rpc_details"] = exc.payload
+    return payload
+
+
 def _invalid(title: str, exc: Exception) -> CapabilityResult:
-    payload = {"error": str(exc), "error_type": exc.__class__.__name__}
+    payload = _exception_payload(exc)
     return CapabilityResult(
         status=RuntimeStatus.INVALID,
         text=title,
@@ -1060,7 +1088,7 @@ def _invalid(title: str, exc: Exception) -> CapabilityResult:
 
 
 def _error(title: str, exc: Exception) -> CapabilityResult:
-    payload = {"error": str(exc), "error_type": exc.__class__.__name__}
+    payload = _exception_payload(exc)
     return CapabilityResult(
         status=RuntimeStatus.ERROR,
         text=title,

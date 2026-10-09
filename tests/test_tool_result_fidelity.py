@@ -192,15 +192,24 @@ def test_output_storage_exception_preserves_operation_result(runtime, monkeypatc
     def fail(*args, **kwargs):
         raise exception_type("storage adapter failed")
     monkeypatch.setattr(runtime.result_snapshots, "capture", fail)
-    mount(runtime, "storage_failure", lambda _: CapabilityResult(
-        status=RuntimeStatus.OK, llm_text="completed output " * 500, structured={},
-        effect_receipt=EffectReceipt(outcome=EffectOutcome.APPLIED)))
+    body = "begin " * 500 + "UNIQUE_MIDDLE_EVIDENCE" + " end" * 500
+    calls = []
+    def handler(_):
+        calls.append("executed")
+        return CapabilityResult(
+            status=RuntimeStatus.OK, llm_text=body, structured={},
+            effect_receipt=EffectReceipt(outcome=EffectOutcome.APPLIED))
+    mount(runtime, "storage_failure", handler)
     result = runtime.execute_tool(new_tool_call(name="storage_failure", args={}), turn_id="review",
         budget=ToolCallBudget(max_output_chars=1200, preview_chars=300))
     assert result.ok
     assert metadata(result)["effect"] == "applied"
     assert "storage adapter failed" in result.llm_text
-    assert "Preview incomplete" in result.llm_text
+    assert body in result.llm_text
+    assert "full result is shown" in result.llm_text
+    assert not result.snapshot_refs
+    assert result.invocation_result.output_error
+    assert calls == ["executed"]
 
 
 def test_failed_snapshot_read_saves_diagnostic_separately_from_source(runtime, monkeypatch):

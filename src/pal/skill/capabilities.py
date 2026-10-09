@@ -90,6 +90,7 @@ class SkillIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show skill management state and pending assimilation candidates.",
             use_when='Diagnosing skill system health, or recovering a candidate_id after an uncertain prepare_skill_candidate result. If no applicable skill is present, use search_skills to discover active references.',
             do_not_use_when="Searching for a specific skill (use search_skills). Checking memory state (use inspect_memory_state).",
@@ -134,6 +135,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="assimilate",
         guidance=ToolGuidance(
+            search_objects=('candidate', 'candidates'),
             purpose="Create a sanitized skill candidate from plain text or SKILL.md content without committing.",
             use_when="The user provides a reusable procedure, playbook, or domain manual that should become a normalized skill.",
             do_not_use_when="Recording a durable fact or preference (use remember_memory). The content is a one-off procedure not worth normalizing.",
@@ -159,6 +161,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="commit",
         guidance=ToolGuidance(
+            search_objects=('candidate', 'candidates'),
             purpose="Commit a sanitized skill candidate to the searchable manual library.",
             use_when="After prepare_skill_candidate produced a candidate you've reviewed and want to persist as a normalized skill.",
             do_not_use_when="Committing unreviewed candidates. Writing a durable fact (use remember_memory).",
@@ -178,6 +181,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="update",
         guidance=ToolGuidance(
+            search_objects=('skill', 'skills'),
             purpose="Update a normalized skill's metadata or manual text.",
             use_when="Editing an existing skill's content, activation terms, or metadata.",
             do_not_use_when="Updating a durable fact (use update_memory). Creating a new skill (use prepare_skill_candidate + commit_skill_candidate).",
@@ -197,6 +201,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="disable",
         guidance=ToolGuidance(
+            search_objects=('skill', 'skills'),
             purpose="Disable a normalized skill so it stops matching scenarios, without deleting its history.",
             use_when='A skill is no longer relevant or is producing false-positive activations. Reactivation requires update_skill with both status=active and enabled=true; setting only one does not reactivate a disabled entry.',
             do_not_use_when="Forgetting a durable fact (use forget_memory). Permanently deleting skill data (this only disables).",
@@ -216,6 +221,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="search",
         guidance=ToolGuidance(
+            search_objects=('skill', 'skills'),
             purpose="Search normalized skills by scenario or name. Returns metadata only — does not inject manuals into context.",
             use_when='Looking for a reusable procedure or domain manual that may help the current task. Checking if a skill exists before creating one. An empty result means no matching skill was found; broaden the query before concluding none exists.',
             do_not_use_when="Recalling durable facts (use recall_memory). You already know the skill name and want its manual (use read_skill or inject_skill).",
@@ -237,6 +243,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="read",
         guidance=ToolGuidance(
+            search_objects=('skill', 'skills'),
             purpose="Read one skill's metadata and optionally its full manual text.",
             use_when="Inspecting a skill's metadata, resolving uncertainty about its applicability, or examining its manual for review or maintenance.",
             do_not_use_when="The skill is already known to apply and its manual is needed for execution (use inject_skill directly). The needed content is already in context. Searching for skills by scenario (use search_skills). Reading a durable fact (use recall_memory).",
@@ -256,6 +263,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="inject",
         guidance=ToolGuidance(
+            search_objects=('skill', 'skills'),
             purpose="Inject a skill's manual text into the current context as a reference observation.",
             use_when="A known skill matches the current task and its procedure or manual is missing from context. Inject it directly; a prior read_skill is unnecessary when applicability is already established.",
             do_not_use_when="Just browsing skill metadata (use read_skill). Searching for skills (use search_skills). The same manual is already available in the current conversation context.",

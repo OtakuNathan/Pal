@@ -107,6 +107,7 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="upsert",
         guidance=ToolGuidance(
+            search_objects=('checklist', 'checklists'),
             purpose="Create or replace Pal's active execution-cursor checklist, including multiple status updates in one call. A fully completed plan closes automatically.",
             use_when=(
                 "Unless the user specifies otherwise, use before the first mutation in work with multiple delivery phases, long execution, or resumption needs"
@@ -162,6 +163,7 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="check",
         guidance=ToolGuidance(
+            search_objects=('step', 'steps'),
             purpose="Mark one exact step as completed; checking the last unfinished step automatically closes the checklist.",
             use_when="The step is already confirmed complete. Prefer calling alongside the next useful tools in the same response, rather than in a separate bookkeeping round.",
             do_not_use_when="Completion depends on results from tools in the same batch; wait for those results first. No checklist is active.",
@@ -232,6 +234,7 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('checklist', 'checklists'),
             purpose="Read Pal's active checklist and exact step text.",
             use_when='Exact step text or current progress is needed. No active checklist is a valid inactive state; it does not prove the user task is complete.',
             do_not_use_when="The runtime reminder already provides enough checklist state.",
@@ -277,6 +280,7 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="clear",
         guidance=ToolGuidance(
+            search_objects=('checklist', 'checklists'),
             purpose="Close Pal's checklist and return its recorded progress.",
             use_when=(
                 'The task is complete, cancelled, replaced, or made stale. Closing adds no verification requirement; describe actual execution evidence and the verification scope already performed. Closing an inactive checklist is an idempotent no-op.'
@@ -315,6 +319,7 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Inspect the checklist module's current state.",
             use_when='Diagnosing checklist state or verifying the module is mounted. Inactive checklist state is not an execution failure or proof that all user work is complete.',
             do_not_use_when="Managing checklist work as Pal (use read_checklist, upsert_checklist, complete_checklist_step, or close_checklist).",

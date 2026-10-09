@@ -117,6 +117,7 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show stub memory provider runtime state.",
             use_when="Diagnosing the stub memory backend.",
             do_not_use_when="Checking a real provider (use search_tools to discover its bound provider-state alias). Recalling memories (use recall_memory).",
@@ -139,6 +140,7 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         action_name="inventory",
         guidance=ToolGuidance(
+            search_objects=('inventory', 'inventories'),
             purpose="Inspect stub memory inventory.",
             use_when="Checking stub memory record counts.",
             do_not_use_when="Real provider inventory (use search_tools to discover the selected provider's bound inventory alias).",
@@ -163,6 +165,7 @@ class _L3ProviderCapabilityMixin:
         family="recall",
         action_name="recall",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Recall durable memory records.",
             use_when="Testing provider-level recall behavior with the stub backend, including case queries with concrete error, symptom, and fix terms.",
             do_not_use_when="Normal Pal memory recall (use recall_memory).",
@@ -210,6 +213,7 @@ class _L3ProviderCapabilityMixin:
         family="commit",
         action_name="write",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Commit a memory record to the stub backend.",
             use_when="Testing memory write paths with the stub provider.",
             do_not_use_when="Real memory writes (use remember_memory — it routes to the active provider).",
@@ -275,6 +279,7 @@ class _L3ProviderCapabilityMixin:
         family="correct",
         action_name="update",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Update a memory record in the stub backend.",
             use_when="Testing memory update paths with the stub provider.",
             do_not_use_when="Real memory updates (use update_memory).",
@@ -326,6 +331,7 @@ class _L3ProviderCapabilityMixin:
         family="delete",
         action_name="delete",
         guidance=ToolGuidance(
+            search_objects=('memory', 'memories', 'record', 'records'),
             purpose="Delete one durable memory record by exact mem_ref.",
             use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
             do_not_use_when="Normal Pal memory deletion (use forget_memory).",
@@ -353,6 +359,7 @@ class _L3ProviderCapabilityMixin:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Attach the stub memory provider.",
             use_when="Testing with the stub memory backend.",
             do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound attach alias).",
@@ -370,6 +377,7 @@ class _L3ProviderCapabilityMixin:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Detach the stub memory provider.",
             use_when="Disconnecting the stub memory backend.",
             do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound detach alias).",
@@ -391,6 +399,7 @@ class _L3ProviderCapabilityMixin:
         family="maintenance",
         action_name="refresh_indexes",
         guidance=ToolGuidance(
+            search_objects=('index', 'indexes', 'indices'),
             purpose="Refresh stub provider indexes.",
             use_when="Testing refresh paths with the stub provider.",
             do_not_use_when="Real provider index refresh (use search_tools to discover the selected provider's bound refresh alias).",

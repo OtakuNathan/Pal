@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR
+from pal.shared.tool_protocol import ToolCallIR, EffectOutcome, FailedResult, RetryDirective
+from pal.execution.tool_facade import rejection
+from pal.shared.diagnostics import exception_report
 
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -16,6 +18,7 @@ ASK_QUESTION_CAPABILITY = "op_bunshin_ask_question"
 ASK_QUESTION_TOOL_SPEC: dict[str, Any] = {
     "alias": "ask_question",
     "guidance": {
+        "search_objects": ('question', 'questions'),
         "purpose": "Suspend the current role invocation and ask the user one decisive question.",
         "use_when": (
             "Use when a contradiction, material ambiguity, infeasible requirement, "
@@ -42,18 +45,15 @@ async def ask_question_tool_result(
     ),
 ) -> ToolExecutionResult:
     if request_user is None:
-        return ToolExecutionResult(
-            name=call.name,
-            ok=False,
-            text="Architect user interaction is unavailable in this runtime",
-            llm_text=(
-                "Architect user interaction is unavailable. Do not guess a "
-                "material requirement or preference."
-            ),
-            structured={"reason": "user_interaction_unavailable"},
-            call_id=call.call_id,
-            status=RuntimeStatus.ERROR,
+        return _question_failure(
+            call, "user_interaction_unavailable",
+            "Architect user interaction is unavailable. Report the environment blocker to Manager; "
+            "do not guess a material requirement or preference.",
+            effect=EffectOutcome.NOT_STARTED, retry=RetryDirective.DO_NOT_RETRY,
         )
+    request_started = False
+    answer = ""
+    revision: dict[str, Any] = {}
     try:
         args = dict(call.args or {})
         title = str(args.get("title") or "").strip()
@@ -70,6 +70,7 @@ async def ask_question_tool_result(
             options.append(
                 {"label": option, "description": option}
             )
+        request_started = True
         response = await request_user(
             {
                 "title": title,
@@ -91,17 +92,12 @@ async def ask_question_tool_result(
             str(answers[0].get("answer") or "") if answers else ""
         )
         if not answer.strip():
-            return ToolExecutionResult(
-                name=call.name,
-                ok=False,
-                text="Architect user question was cancelled",
-                llm_text=(
-                    "The user did not answer. Keep the ambiguity explicit; "
-                    "do not submit a contract that guesses the answer."
-                ),
-                structured={"status": "cancelled"},
-                call_id=call.call_id,
-                status=RuntimeStatus.ERROR,
+            return _question_failure(
+                call, "user_question_cancelled",
+                "The user did not answer. Keep the ambiguity explicit; do not submit a contract "
+                "that guesses the answer or automatically repeat the question. Report the blocker to Manager.",
+                effect=EffectOutcome.APPLIED, retry=RetryDirective.DO_NOT_RETRY,
+                details={"status": "cancelled"},
             )
         revision = dict(response.get("task_revision") or {})
         if not bool(revision.get("appended")):
@@ -127,16 +123,45 @@ async def ask_question_tool_result(
             status=RuntimeStatus.OK,
         )
     except Exception as exc:
-        text = f"{exc.__class__.__name__}: {exc}"
-        return ToolExecutionResult(
-            name=call.name,
-            ok=False,
-            text=text,
-            llm_text=text,
-            structured={
-                "error": str(exc),
-                "error_type": exc.__class__.__name__,
-            },
-            call_id=call.call_id,
-            status=RuntimeStatus.INVALID,
+        cause = exception_report(exc)
+        details = {"error": cause, "error_type": type(exc).__name__}
+        if answer.strip():
+            details.update(answer=answer, task_revision=revision, status="answered_revision_unconfirmed")
+            return _question_failure(
+                call, "question_revision_unconfirmed",
+                f"User answered: {answer}\n{cause}\n"
+                "The answer was received, but recording it in task.yaml is unconfirmed. "
+                "Do not ask the user again or edit the task ledger. Report the answer and "
+                "recording failure to Manager for reconciliation before submitting the contract.",
+                effect=EffectOutcome.APPLIED, retry=RetryDirective.DO_NOT_RETRY, details=details,
+            )
+        if request_started:
+            return _question_failure(
+                call, "user_question_outcome_unknown",
+                cause + " The question may already have been delivered or answered. "
+                "Ask Manager to reconcile the interaction and task revision before retrying; "
+                "do not automatically repeat the question.",
+                effect=EffectOutcome.UNKNOWN, retry=RetryDirective.RECONCILE_FIRST, details=details,
+            )
+        return _question_failure(
+            call, "invalid_question", cause + " Correct the question arguments before retrying.",
+            effect=EffectOutcome.NOT_STARTED, retry=RetryDirective.CORRECT_INPUT, details=details,
         )
+
+
+def _question_failure(
+    call: ToolCallIR, code: str, text: str, *, effect: EffectOutcome,
+    retry: RetryDirective, details: dict[str, Any] | None = None,
+) -> ToolExecutionResult:
+    details = dict(details or {})
+    result = (
+        rejection(code, text, retry=retry, details=details)
+        if effect is EffectOutcome.NOT_STARTED else
+        FailedResult(error_code=code, error=text, llm_text=text,
+                     effect=effect, retry=retry, details=details)
+    )
+    return ToolExecutionResult(
+        name=call.name, call_id=call.call_id, ok=False, text=text, llm_text=text,
+        structured=details, invocation_result=result,
+        status=RuntimeStatus.INVALID if code == "invalid_question" else RuntimeStatus.ERROR,
+    )

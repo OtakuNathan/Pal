@@ -60,6 +60,7 @@ class ControlIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show control module status. Resident implementation changes require a full host restart.",
             use_when="Diagnosing whether the control plane is mounted or in degraded mode.",
             do_not_use_when="Checking core runtime state (use observe_core). Checking execution tool count (use inspect_execution_state).",

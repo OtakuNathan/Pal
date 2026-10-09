@@ -68,18 +68,25 @@ class PromptContext:
         if (binding.get("role") != "architect" or not binding.get("submission_receipt_required")
                 or str(binding.get("harness_id") or "pal") != "pal"):
             return contract
-        # The immutable profile is shared with external adapters, which record
-        # files after their harness exits. Native Pal must submit before exit.
-        contract = contract.replace(
-            "Manager validates and records the bound files after the harness finishes.",
-            "call submit_contract with no arguments and wait for successful Manager acceptance before finishing.",
-        )
-        return contract + "\n\n" + (
-            "After authoring and reconciling the bound architect.yaml and any required declaration files, complete the checklist "
-            "and call submit_contract with an empty argument object ({}). Finish only after successful Manager "
+        acceptance = (
+            "Finish only after successful Manager "
             "acceptance records the durable submission receipt. A final response does not submit the files. "
             "If submission is rejected, preserve the files and correct the reported validation error before retrying."
         )
+        submission = "call submit_contract with an empty argument object ({}). " + acceptance
+        # Replace known current/legacy wording in place so new and pinned
+        # profiles each receive one complete rule, without mutating the pack.
+        for previous in (
+            "Manager validates and records the bound files after the harness finishes.",
+            "call submit_contract with no arguments and wait for successful Manager acceptance before finishing.",
+            "call submit_contract with an empty argument object ({}) and wait for successful Manager acceptance before finishing.",
+        ):
+            if previous in contract:
+                return contract.replace(previous, submission)
+        # Preserve custom profile instructions; add only the missing call or gate.
+        if "submit_contract" in contract:
+            return contract + "\n\n" + acceptance
+        return contract + "\n\nAfter completing the bound outputs and checklist, " + submission
 
     def workspace_policy(self) -> dict[str, Any]:
         workspace_policy = self.pack.workspace.get("workspace_policy")

@@ -171,7 +171,7 @@ def test_search_word_order_and_new_object_coverage(runtime):
     assert [(h['alias'], h['score']) for h in forward] == [(h['alias'], h['score']) for h in reverse]
     focused = search("read browser page")
     assert focused[0]["alias"] == "read_browser_page"
-    assert focused[0]["score"] > next(h["score"] for h in focused if h["alias"] == "read_browser")
+    assert "read_browser" not in {h["alias"] for h in focused}
 
 
 def test_diagnostics_are_bounded_and_redact_authentication_material():
@@ -264,10 +264,10 @@ def test_search_word_reordering_preserves_score_but_added_action_object_words_im
     assert scores['browser_read'] == scores['read_browser']
     added = invoke(runtime, 'search_tools', {'query': 'read browser page', 'top_k': 10})
     scores = {hit['alias']: hit['score'] for hit in added.structured['hits']}
-    assert scores['read_browser_page'] > scores['browser_read']
+    assert 'browser_read' not in scores
     assert added.structured['hits'][0]['alias'] == 'read_browser_page'
-    # Exact/prefix routing can change independently of unordered word coverage.
+    # Exact aliases remain preferred; partial words do not match.
     exact = invoke(runtime, 'search_tools', {'query': 'read_browser_page'})
     assert exact.structured['hits'][0]['alias'] == 'read_browser_page'
     prefix = invoke(runtime, 'search_tools', {'query': 'browser_re'})
-    assert prefix.structured['hits'][0]['alias'] == 'browser_read'
+    assert prefix.structured['hits'] == []

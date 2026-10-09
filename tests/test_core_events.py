@@ -130,15 +130,20 @@ def test_tool_failure_is_observed_before_escalation():
         bus = core.context.core_event_bus
         for topic in (TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_FAILED, TURN_TOOL_CALL_AFTER):
             bus.subscribe(topic, lambda topic, event: seen.append((topic, event)))
+        escalation_events = []
         async def escalate(*args, **kwargs):
-            assert [topic for topic, _ in seen] == [TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_FAILED]
-            assert seen[-1][1]["call_id"] == "call-one"
+            escalation_events.extend(seen)
             raise RuntimeError("stop after observing escalation boundary")
         executor._handle_failure_async = escalate
         continuation = make_continuation(turn_id="t", pending_tool_call_batch=[], finalization_only=False)
         effect = ToolCallEffect(tool_call=new_tool_call(name="probe", args={}, call_id="call-one"))
-        with pytest.raises(RuntimeError, match="escalation boundary"):
-            await executor._handle_tool_call(effect, continuation)
+        result = await executor._handle_tool_call(effect, continuation)
+        assert [topic for topic, _ in escalation_events] == [TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_FAILED]
+        assert escalation_events[-1][1]["call_id"] == "call-one"
+        assert [topic for topic, _ in seen] == [TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_FAILED, TURN_TOOL_CALL_AFTER]
+        assert result.payload.ok is False
+        assert result.payload.text.startswith("failed")
+        assert "escalation boundary" in result.payload.structured["failure_recovery_error"]
     asyncio.run(run())
 
 

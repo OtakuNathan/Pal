@@ -74,6 +74,7 @@ class ExecutionIntrospectionProvider(
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show execution runtime state — capability count and tool count.",
             use_when='Diagnosing whether all expected capabilities are mounted. Checking if a capability generation swap occurred. If counts differ from expectations, inspect observe_core for module lifecycle state and search_tools for the current registry; counts alone do not identify a missing capability.',
             do_not_use_when="Listing specific tools (use list_tools). Searching for a capability (use search_tools).",

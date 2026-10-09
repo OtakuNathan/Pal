@@ -226,6 +226,7 @@ class SkillReadTool:
                 text="skill not found",
                 structured=structured,
                 llm_text=_render_skill_tool_payload(self.service, "Skill read failed", structured),
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE),
             )
         structured = {"skill": skill_read_dict(skill, include_manual=include_manual)}
         return CapabilityResult(
@@ -256,6 +257,7 @@ class SkillInjectTool:
                 text="skill_id is required",
                 structured=structured,
                 llm_text=_render_skill_tool_payload(self.service, "Skill injection failed", structured),
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE),
             )
         skill = self.service.inject_skill(skill_id)
         if skill is None:
@@ -265,6 +267,7 @@ class SkillInjectTool:
                 text="skill not found or inactive",
                 structured=structured,
                 llm_text=_render_skill_tool_payload(self.service, "Skill injection failed", structured),
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE),
             )
         structured = {
             "skill_id": skill.skill_id,
@@ -289,10 +292,7 @@ class SkillInjectTool:
                 ToolContextMessageIR(
                     content=render_xml_block(
                         "skill",
-                        _project_skill_text(
-                            self.service,
-                            _render_injected_skill_for_llm(structured),
-                        ),
+                        _render_injected_skill_for_llm(_project_skill_payload(self.service, structured)),
                     ),
                     semantic_kind="runtime_context_skill",
                     metadata={
@@ -332,14 +332,23 @@ def _render_injected_skill_for_llm(payload: dict[str, Any]) -> str:
 
 
 def _render_skill_tool_payload(service: SkillService, title: str, structured: Any) -> str:
-    runtime = service.execution_runtime
-    llm_value = runtime.project_llm_value(structured) if runtime is not None else structured
-    return render_titled_structured_for_llm(title, llm_value)
+    return render_titled_structured_for_llm(title, _project_skill_payload(service, structured))
 
 
-def _project_skill_text(service: SkillService, value: object) -> str:
+def _project_skill_payload(service: SkillService, value: Any) -> Any:
+    # Only declared capability references are tool identities. Manuals, IDs,
+    # paths and arbitrary metadata must retain their original literal values.
+    if not isinstance(value, dict):
+        return value
+    result = dict(value)
     runtime = service.execution_runtime
-    return runtime.project_llm_text(value) if runtime is not None else str(value or "")
+    if runtime is not None and "capability_refs" in result:
+        result["capability_refs"] = [runtime.project_llm_text(ref) for ref in result["capability_refs"]]
+    if isinstance(result.get("skill"), dict):
+        result["skill"] = _project_skill_payload(service, result["skill"])
+    if isinstance(result.get("hits"), list):
+        result["hits"] = [_project_skill_payload(service, hit) for hit in result["hits"]]
+    return result
 
 
 _SEARCH_STOP_WORDS = frozenset("a an the and or to of for in on at by with from as is are be using use".split())

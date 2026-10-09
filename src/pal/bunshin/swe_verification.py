@@ -258,6 +258,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_pass": {
         "alias": "submit_verification_pass",
         "guidance": {
+            "search_objects": ('pass', 'outcome', 'outcomes'),
             "purpose": "Submit a successful semantic verification outcome.",
             "use_when": (
                 "Use with no arguments only after every required regression, diff-risk, "
@@ -277,6 +278,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_request_module_repair": {
         "alias": "request_verification_module_repair",
         "guidance": {
+            "search_objects": ('repair', 'repairs', 'defect', 'defects'),
             "purpose": "Submit reproduced implementation defects for module repair.",
             "use_when": (
                 "Use with no arguments after every current implementation defect is reproduced "
@@ -295,6 +297,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_request_contract_revision": {
         "alias": "request_verification_contract_revision",
         "guidance": {
+            "search_objects": ('revision', 'revisions', 'defect', 'defects'),
             "purpose": "Submit a frozen public-contract defect for contract revision.",
             "use_when": (
                 "Use after recording a contradictory, incomplete, or impossible public contract "
@@ -308,6 +311,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_request_architecture_revision": {
         "alias": "request_verification_architecture_revision",
         "guidance": {
+            "search_objects": ('revision', 'revisions', 'defect', 'defects'),
             "purpose": "Submit a topology or ownership defect for architecture revision.",
             "use_when": (
                 "Use after recording a module-boundary, ownership, hidden-coupling, dependency, "
@@ -321,6 +325,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_request_requirements_revision": {
         "alias": "request_verification_requirements_revision",
         "guidance": {
+            "search_objects": ('requirement', 'requirements', 'revision', 'revisions'),
             "purpose": "Submit a contradictory or materially incomplete requirement for user revision.",
             "use_when": "Use after recording the exact requirements conflict or omission with update_finding.",
             "do_not_use_when": (
@@ -334,6 +339,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_verification_unknown": {
         "alias": "submit_verification_unknown",
         "guidance": {
+            "search_objects": ('outcome', 'outcomes', 'evidence'),
             "purpose": "Submit an UNKNOWN outcome for required evidence unavailable in the bound environment.",
             "use_when": (
                 "Use only when a required platform or environment genuinely cannot be exercised "

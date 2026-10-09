@@ -493,7 +493,7 @@ class FailureFlowTests(unittest.TestCase):
                             "properties": {
                                 "cmd": {
                                     "type": "string",
-                                    "description": "full schema must not enter verify prompt",
+                                    "description": "complete input constraint",
                                 }
                             },
                         },
@@ -556,18 +556,19 @@ class FailureFlowTests(unittest.TestCase):
             self.assertNotIn("<identity>", request.messages[0].text)
             self.assertNotIn("<runtime_overlay>", request.messages[0].text)
             rendered = json.dumps([message.text for message in request.messages], ensure_ascii=False)
-            self.assertNotIn("input_schema", rendered)
-            self.assertNotIn("full schema must not enter verify prompt", rendered)
+            if request is not llm.requests[0]:
+                self.assertIn("input_schema", rendered)
+                self.assertIn("complete input constraint", rendered)
 
         verify_request = llm.requests[1]
         self.assertEqual(verify_request.tools, ())
 
         verify_payload = verify_request.messages[1].text
-        self.assertIn('"kind": "capability_contract"', verify_payload)
+        self.assertIn('"capability":', verify_payload)
         self.assertIn('"name": "run_shell"', verify_payload)
         maintain_payload = llm.requests[2].messages[1].text
         self.assertIn('"stage": "maintain"', maintain_payload)
-        self.assertIn('"kind": "capability_contract"', maintain_payload)
+        self.assertIn('"capability":', maintain_payload)
         self.assertIn('"name": "run_shell"', maintain_payload)
         self.assertEqual(draft.attempted_actions, ["safe_probe"])
 
@@ -593,7 +594,7 @@ class FailureFlowTests(unittest.TestCase):
                                 "properties": {
                                     "cmd": {
                                         "type": "string",
-                                        "description": "do not leak this full schema into safe-mode prompt",
+                                        "description": "complete input constraint",
                                     }
                                 },
                             },
@@ -621,13 +622,13 @@ class FailureFlowTests(unittest.TestCase):
         )
 
         rendered = json.dumps(payload, ensure_ascii=False)
-        self.assertIn('"kind": "capability_contract"', rendered)
+        self.assertIn('"capability":', rendered)
         self.assertIn('"name": "run_shell"', rendered)
-        self.assertIn('"kind": "tool_inventory"', rendered)
-        self.assertIn('"tool_count": 30', rendered)
-        self.assertNotIn("input_schema", rendered)
-        self.assertNotIn("do not leak this full schema", rendered)
-        self.assertNotIn("very long shell tool description", rendered)
+        self.assertIn('"tools":', rendered)
+        self.assertEqual(len(payload["failure"]["maintenance_outcomes"][1]["structured_summary"]["tools"]), 30)
+        self.assertIn("input_schema", rendered)
+        self.assertIn("complete input constraint", rendered)
+        self.assertIn("very long shell tool description", rendered)
 
 
 if __name__ == "__main__":

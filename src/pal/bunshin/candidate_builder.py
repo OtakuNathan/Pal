@@ -9,6 +9,7 @@ from pal.execution.generated_tool_models import (
 )
 
 import json
+from dataclasses import dataclass
 import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -25,6 +26,7 @@ from pal.bunshin.submission_drafts import (
     SubmissionDraftStore,
     assert_authoring_schema_budget,
 )
+from pal.bunshin.submission_errors import submission_error_result, submission_validation
 from pal.bunshin.submission_preflight import bound_reference_payload
 from pal.bunshin.work_items import (
     assert_work_items_complete,
@@ -46,6 +48,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_candidate_submit": {
         "alias": "submit_candidate",
         "guidance": {
+            "search_objects": ('candidate', 'candidates'),
             "purpose": "Submit the current module Candidate for independent verification.",
             "use_when": (
                 "Use after every checklist item is completed, focused checks pass, and the "
@@ -70,6 +73,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_candidate_report_architecture_defect": {
         "alias": "report_candidate_architecture_defect",
         "guidance": {
+            "search_objects": ('defect', 'defects'),
             "purpose": "Terminally report that the frozen architecture contract cannot satisfy the task.",
             "use_when": (
                 "Use only when correct implementation requires changing a public boundary, "
@@ -93,6 +97,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_bunshin_candidate_request_module_split": {
         "alias": "request_candidate_module_split",
         "guidance": {
+            "search_objects": ('split', 'splits'),
             "purpose": "Terminally request an architecture-owned module split.",
             "use_when": (
                 "Use only when the accepted module's responsibility and scale genuinely cannot "
@@ -124,24 +129,36 @@ def is_candidate_builder_capability(name: str) -> bool:
     return str(name or "") in CANDIDATE_BUILDER_TOOL_SPECS
 
 
+@dataclass
+class _SubmissionProgress:
+    started: bool = False
+    accepted: bool = False
+
+
 async def candidate_builder_tool_result(
     call: ToolCallIR,
     workspace: dict[str, Any],
     produced_artifacts: list[dict[str, Any]],
 ) -> ToolExecutionResult:
     name = str(call.name or "")
+    progress = _SubmissionProgress()
     try:
         if name == "op_bunshin_candidate_submit":
-            return _submit_candidate(call, workspace, produced_artifacts, status="candidate_ready")
+            return _submit_candidate(call, workspace, produced_artifacts, progress=progress, status="candidate_ready")
         if name == "op_bunshin_candidate_report_architecture_defect":
-            return _submit_candidate(call, workspace, produced_artifacts, status="architecture_defect")
+            return _submit_candidate(call, workspace, produced_artifacts, progress=progress, status="architecture_defect")
         if name == "op_bunshin_candidate_request_module_split":
-            return _submit_candidate(call, workspace, produced_artifacts, status="module_split_request")
+            return _submit_candidate(call, workspace, produced_artifacts, progress=progress, status="module_split_request")
         raise ValueError(f"unknown candidate authoring capability: {name}")
     except ToolRejectedError as exc:
         return _rejected(call, exc)
     except Exception as exc:
-        return _error(call, exc)
+        return submission_error_result(
+            call, exc, submission_started=progress.started,
+            submission_accepted=progress.accepted,
+            invalid_code="invalid_candidate_submission",
+            correction="Correct the reported candidate/checklist defect before retrying.",
+        )
 
 
 def _submit_candidate(
@@ -150,6 +167,7 @@ def _submit_candidate(
     produced_artifacts: list[dict[str, Any]],
     *,
     status: str,
+    progress: _SubmissionProgress,
 ) -> ToolExecutionResult:
     args = dict(call.args or {})
     context = SubmissionDraftContext.from_workspace(workspace, draft_kind="candidate")
@@ -192,7 +210,8 @@ def _submit_candidate(
             )
     else:
         work_items = {"items": []}
-        _validate_defect_args(args, work_view=work_view)
+        with submission_validation():
+            _validate_defect_args(args, work_view=work_view)
     files_changed = _live_worktree_delta(workspace, work_view=work_view)
     reserved_paths = {
         str(item).replace("\\", "/").strip().lstrip("./")
@@ -228,7 +247,8 @@ def _submit_candidate(
                 "source_file": str(args.get("source_file") or "").strip(),
             }
         )
-    reference_warnings = validate_candidate_submission(report, work_view=work_view)
+    with submission_validation():
+        reference_warnings = validate_candidate_submission(report, work_view=work_view)
     if reference_warnings:
         report["reference_warnings"] = list(reference_warnings)
     artifact_filename = (
@@ -239,11 +259,15 @@ def _submit_candidate(
     # Let the Manager accept and durably record the submission before exposing
     # a primary artifact to the runner completion gate.
     if store.uses_role_gateway:
+        progress.started = True
         store.mark_submitted(
             context,
             expected_version=snapshot.version,
             submission_payload=report,
         )
+        progress.accepted = True
+    # Local report writes may have effects even if their result is lost.
+    progress.started = True
     artifact = _write_bunshin_artifact(
         manager_workspace,
         {
@@ -423,11 +447,6 @@ def _bound_candidate_work_view(workspace: Mapping[str, Any]) -> dict[str, Any]:
 
 def _ok(call: ToolCallIR, text: str, structured: Mapping[str, Any]) -> ToolExecutionResult:
     return ToolExecutionResult(name=call.name, ok=True, text=text, llm_text=text, structured=dict(structured), call_id=call.call_id, status=RuntimeStatus.OK)
-
-
-def _error(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
-    text = f"{exc.__class__.__name__}: {exc}"
-    return ToolExecutionResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)
 
 
 def _rejected(

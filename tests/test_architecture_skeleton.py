@@ -944,12 +944,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("op_path_delete", published)
         self.assertIn("op_file_state", published)
 
-        result = core.context.execution_runtime.execute_tool(
-            new_tool_call(name="search_tools", args={"query": "read edit write delete path file", "top_k": 10})
-        )
-
-        self.assertTrue(result.ok)
-        hit_names = [item["alias"] for item in result.structured["hits"]]
+        hit_names = []
+        # Search words are conjunctive: each operation has its own query.
+        for query in ("read file", "edit file", "write file", "delete path"):
+            result = core.context.execution_runtime.execute_tool(
+                new_tool_call(name="search_tools", args={"query": query, "top_k": 10})
+            )
+            self.assertTrue(result.ok)
+            hit_names.extend(item["alias"] for item in result.structured["hits"])
         self.assertIn("read_file", hit_names)
         self.assertIn("edit_file", hit_names)
         self.assertIn("write_file", hit_names)

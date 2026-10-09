@@ -67,7 +67,9 @@ def test_real_wrapper_and_heartbeat_preserve_original_failure_without_public_cha
                 SimpleNamespace(execution_runtime=SimpleNamespace(), llm_round_count=87, tool_call_count=0),
                 SimpleNamespace(pending_tool_results=[], turn_id="turn"), tool_call())
             assert public_result(result) == public_result(baseline)
-            assert result.status == ("error" if stale else "handler_exception")
+            # The semantic handler now reports both pre-execution failures;
+            # the observation wrapper must preserve that reported status.
+            assert result.status == "error"
             item = next(event["payload"] for event in events
                         if event["event_kind"] == "verifier_tool_diagnostic" and event["payload"]["stage"] == "completed")
             provenance = item["provenance"]

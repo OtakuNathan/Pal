@@ -401,9 +401,19 @@ def _upsert_recorded_case(
     return recorded
 
 
+def bound_scratch_root(workspace: Mapping[str, Any]) -> Path:
+    value = str(workspace.get("review_scratch_dir") or "").strip()
+    if not value:
+        raise RuntimeError("review scratch directory is not bound; Manager must supply the scratch workspace")
+    return Path(value)
+
+
 def scratch_fingerprint(workspace: Mapping[str, Any]) -> str:
-    root = Path(str(workspace.get("review_scratch_dir") or ""))
     digest = hashlib.sha256()
+    if not str(workspace.get("review_scratch_dir") or "").strip():
+        digest.update(b"<unbound>")
+        return digest.hexdigest()
+    root = bound_scratch_root(workspace)
     if not root.is_dir():
         digest.update(b"<missing>")
         return digest.hexdigest()
@@ -433,8 +443,10 @@ def scratch_probe_fingerprint(workspace: Mapping[str, Any], probe_path: str) -> 
     relative = PurePosixPath(raw_path)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("probe_path must be a safe path relative to the verifier scratch directory")
-    root = Path(str(workspace.get("review_scratch_dir") or ""))
+    root = bound_scratch_root(workspace)
     path = root / relative
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise ValueError("probe_path escapes the bound scratch directory")
     if not path.is_file() or path.is_symlink():
         raise ValueError(f"probe_path does not name a verifier scratch file: {relative}")
     digest.update(relative.as_posix().encode("utf-8"))

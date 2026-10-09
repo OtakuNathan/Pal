@@ -30,6 +30,7 @@ class FailureIntrospectionProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show failure runtime summary.",
             use_when='Diagnosing reply delivery failures or checking failure tracking health. Use list_failure_reports when individual recent failures are needed; the summary is not the complete failure history.',
             do_not_use_when="Checking LLM token or cost metrics (use inspect_llm_usage; it does not diagnose transport errors). Checking proactive task failures (use list_proactive_runs). LLM transport errors require the relevant service logs when no structured failure report exists.",
@@ -50,6 +51,7 @@ class FailureIntrospectionProvider:
         scope="module",
         action_name="recent_reports",
         guidance=ToolGuidance(
+            search_objects=('report', 'reports'),
             purpose="List the last 16 structured failure reports; this is a bounded recent window, not a complete history.",
             use_when="Investigating why replies or deliveries failed recently.",
             do_not_use_when="Module-level health (use inspect_failure_state).",

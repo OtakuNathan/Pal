@@ -11,7 +11,7 @@ import pytest
 from pal.artifact import (ArtifactManager, ArtifactRepository, ArtifactRecordModel,
                           ArtifactRepresentationModel, ArtifactHotStateModel)
 from pal.artifact.processors import normalize_image_file, prepare_inline_image_file
-from pal.artifact.tools import ArtifactImportTool, ArtifactTranscribeTool
+from pal.artifact.tools import ArtifactImportTool
 from pal.artifact.tools import (ArtifactListTool, ArtifactInfoTool, ArtifactReadTool,
                                 ArtifactSearchTool, ArtifactSelectTool, ArtifactContentSearchTool)
 from pal.execution.contracts import CapabilityResult
@@ -191,13 +191,13 @@ def test_artifact_processor_failure_reaches_import_ref_and_info(services, tmp_pa
     assert "backend detail: storage unavailable" in exposure.text
 
 
-def test_transcription_failure_preserves_original_read_result(services, tmp_path, monkeypatch, runtime):
+def test_existing_transcript_read_failure_preserves_original_result(services, tmp_path, monkeypatch, runtime):
     from pal.artifact.contracts import ArtifactReadResult
     _, manager = services
     original = ArtifactReadResult(ok=False, artifact_id="one", kind="audio", representation="transcript", reason="decoder_unavailable",
                                   metadata={"error": "codec library failed"})
     monkeypatch.setattr(manager, "read", lambda *a, **kw: original)
-    final = deliver(runtime, lambda: artifact_call(ArtifactTranscribeTool(manager), {"artifact_id": "one"}))
+    final = deliver(runtime, lambda: artifact_call(ArtifactReadTool(manager), {"artifact_id": "one", "representation": "transcript"}))
     assert "decoder_unavailable" in final.llm_text
     assert "codec library failed" in final.llm_text
 
@@ -228,7 +228,7 @@ def test_image_preservation_does_not_accept_invalid_image(services, tmp_path):
 @pytest.mark.parametrize("tool,method", [
     (ArtifactListTool, "list_hot"), (ArtifactInfoTool, "info"), (ArtifactReadTool, "read"),
     (ArtifactSearchTool, "artifact_search"), (ArtifactSelectTool, "select"),
-    (ArtifactContentSearchTool, "content_search"), (ArtifactTranscribeTool, "read"),
+    (ArtifactContentSearchTool, "content_search"),
 ])
 def test_artifact_lookup_wrapper_keeps_backend_cause(services, monkeypatch, runtime, tool, method):
     _, manager = services

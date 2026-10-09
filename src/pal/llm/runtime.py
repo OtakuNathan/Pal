@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.foundation.diagnostics import diagnostic_text, exception_report
+from pal.foundation.diagnostics import diagnostic_text, exception_report, exception_summary
 
 import asyncio
 import hashlib
@@ -2022,7 +2022,7 @@ def _failure_result(
     exc: Exception | None = None,
     failure_attempts: list[dict[str, Any]] | None = None,
 ) -> LLMGenerationResult:
-    detail = exception_report(exc) if exc is not None else ""
+    detail = exception_summary(exc) if exc is not None else ""
     text = diagnostic_text(text, limit=None)
     if detail and detail not in text:
         text += "\n" + detail

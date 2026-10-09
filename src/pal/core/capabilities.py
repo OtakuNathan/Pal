@@ -48,6 +48,7 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="observe",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Observe core runtime state — queued events, active turns, mode, detached modules.",
             use_when='Diagnosing core health: event backlog, stuck turns, or checking which modules are detached. Queue backlog and active turns are current workload observations. The mode label alone does not prove maintenance or draining; defer activation while Pal is busy.',
             do_not_use_when="Checking control plane status (use inspect_control_state). Checking execution tool count (use inspect_execution_state).",
@@ -70,6 +71,7 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="configure",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Set the core state mode label.",
             use_when="Changing the mode label exposed by observe_core; this does not pause, drain, restart, or enter maintenance.",
             do_not_use_when="Reading core state (use observe_core). Configuring a specific module (use that module's capabilities).",
@@ -95,6 +97,7 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="cache_warm_deadline",
         guidance=ToolGuidance(
+            search_objects=('deadline', 'deadlines', 'reminder', 'reminders'),
             purpose="Inspect the hot prompt-cache compact reminder configuration and current in-memory deadline.",
             use_when="Checking whether Pal will suggest compacting before the confirmed A cache expires.",
             do_not_use_when="Checking general token usage (use inspect_llm_usage). Triggering compaction now (use the compact control action).",
@@ -121,6 +124,7 @@ class CoreIntrospectionProvider:
         family="management",
         action_name="configure_cache_warm_deadline",
         guidance=ToolGuidance(
+            search_objects=('deadline', 'deadlines', 'reminder', 'reminders'),
             purpose="Enable, disable, or tune Pal's compact reminder before the confirmed A prompt cache expires.",
             use_when="The user asks to change hot-cache compact reminders, their lead time, or their minimum prompt size.",
             do_not_use_when="Triggering compaction immediately. Inspect first when the requested setting is ambiguous.",

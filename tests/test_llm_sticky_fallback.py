@@ -160,7 +160,9 @@ class PalLLMNoFallbackTests(unittest.TestCase):
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
         self.assertIn("kind=unknown", outcome.text)
         self.assertIn("type=RuntimeError", outcome.text)
-        self.assertNotIn("broken endpoint", outcome.text)
+        self.assertIn("broken endpoint", outcome.text)
+        self.assertNotIn("Traceback", outcome.text)
+        self.assertIn("Traceback", outcome.response.message.metadata["error_diagnostic"])
         self.assertEqual(invoker.calls, ["broken"])
         self.assertEqual(runtime.active_endpoint_id, "active")
 
@@ -314,7 +316,9 @@ class PalLLMNoFallbackTests(unittest.TestCase):
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
         self.assertIn("kind=unknown", outcome.text)
         self.assertIn("type=RuntimeError", outcome.text)
-        self.assertNotIn("broken endpoint", outcome.text)
+        self.assertIn("broken endpoint", outcome.text)
+        self.assertNotIn("Traceback", outcome.text)
+        self.assertIn("Traceback", outcome.response.message.metadata["error_diagnostic"])
         self.assertEqual(invoker.calls, ["broken"])
 
     def test_timeout_error_exhausts_retries_on_selected_endpoint(self) -> None:

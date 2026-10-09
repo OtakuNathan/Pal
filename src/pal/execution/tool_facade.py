@@ -7,7 +7,7 @@ from functools import lru_cache
 from typing import Any
 
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
-from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter, ValidationError, field_validator, model_validator
 
 from pal.shared.tool_protocol import (
     CompleteResult,
@@ -131,11 +131,20 @@ class ToolGuidance(StrictToolModel):
     purpose: str
     use_when: str
     do_not_use_when: str
+    # Internal discovery vocabulary for objects only, never action/domain
+    # synonyms. Explicit forms avoid fuzzy stemming and are not rendered.
+    search_objects: tuple[str, ...] = ()
     # Host-side failure fallback declaration. It intentionally does not enter
     # the default model description; execution offers it only when a real
     # failure result carries no more specific handler guidance.
     failure_next_steps: str = ""
     next_tool_hints: tuple[NextToolHint, ...] = ()
+
+    @field_validator("search_objects", mode="before")
+    @classmethod
+    def restore_search_objects(cls, value: Any) -> Any:
+        # Internal capability specs cross JSON boundaries into worker registries.
+        return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
     def validate_guidance(self) -> "ToolGuidance":
@@ -143,6 +152,10 @@ class ToolGuidance(StrictToolModel):
             if not str(getattr(self, field_name)).strip():
                 raise ValueError(f"tool guidance {field_name} must be non-empty")
         names = [hint.name for hint in self.next_tool_hints]
+        if any(not re.fullmatch(r"[a-z][a-z0-9]*", word) for word in self.search_objects):
+            raise ValueError("search_objects must contain lowercase whole object words")
+        if len(set(self.search_objects)) != len(self.search_objects):
+            raise ValueError("search_objects must be unique")
         if len(names) != len(set(names)):
             raise ValueError("next tool names must be unique within one guidance contract")
         return self
@@ -235,6 +248,36 @@ def validate_output(model: type[BaseModel], value: Any) -> BaseModel:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="python")
     return model.model_validate(value, strict=True)
+
+
+def dump_output(model: BaseModel) -> Any:
+    """Keep explicit nulls while omitting unused optional null defaults."""
+    return model.model_dump(mode="json", exclude=_unset_null_exclusions(model))
+
+
+def dump_input(model: BaseModel) -> Any:
+    """Retain nested defaults and explicit nulls without adding omit-only fields."""
+    return model.model_dump(mode="python", exclude=_unset_null_exclusions(model))
+
+
+def _unset_null_exclusions(value: Any) -> dict[Any, Any]:
+    if isinstance(value, RootModel):
+        return _unset_null_exclusions(value.root)
+    if isinstance(value, BaseModel):
+        exclusions = {}
+        for name, item in value:
+            if item is None and name not in value.model_fields_set:
+                exclusions[name] = True
+            elif nested := _unset_null_exclusions(item):
+                exclusions[name] = nested
+        return exclusions
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, (list, tuple)):
+        items = enumerate(value)
+    else:
+        return {}
+    return {key: nested for key, item in items if (nested := _unset_null_exclusions(item))}
 
 
 def derive_retry_directive(

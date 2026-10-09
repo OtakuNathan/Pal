@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -18,6 +19,35 @@ from tests.test_tool_result_fidelity import mount
 
 
 CANARY = "SYNTHETIC_FAILURE_DELIVERY_CANARY_917"
+
+
+def test_nested_diagnostic_redaction_preserves_evidence_after_newline(runtime):
+    details = {"nested": [{"message": f'token={CANARY}\nRetain this cause',
+                           "quoted": f'api_key="{CANARY} SECRET_TAIL"; retain this action'}]}
+    raw = FailedResult(error_code="provider_failed", error="provider failed", llm_text="provider failed",
+        details=details, effect=EffectOutcome.NONE, retry=RetryDirective.SAFE)
+    mount(runtime, "nested_diagnostic", lambda _: raw)
+    result = invoke(runtime, "nested_diagnostic", {})
+    assert "Retain this cause" in result.llm_text
+    assert "retain this action" in result.llm_text
+    assert "SECRET_TAIL" not in result.llm_text
+    assert CANARY not in result.llm_text
+    assert raw.details == details
+
+
+@pytest.mark.parametrize("payload", [
+    {"message": f'token={CANARY}\nRetain this cause'},
+    {"message": f'api_key="{CANARY} SECRET_TAIL"; retain this action'},
+    {"api_key": f'{CANARY} "SECRET_TAIL"', "cause": "Retain this cause"},
+])
+def test_encoded_diagnostics_redact_whole_credentials_without_eating_evidence(payload):
+    encoded = json.dumps(payload)
+    for text in (encoded, "Failure details: " + encoded):
+        redacted = diagnostic_text(text, limit=None)
+        assert CANARY not in redacted
+        assert "SECRET_TAIL" not in redacted
+        assert ("Retain this cause" if "retain this action" not in text else "retain this action") in redacted
+        assert diagnostic_text(redacted, limit=None) == redacted
 
 
 @pytest.mark.parametrize("direct", [False, True])

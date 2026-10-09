@@ -55,6 +55,8 @@ def test_consumed_native_architect_requires_submit_receipt_without_mutating_pinn
     if restored:
         value = BunshinInvocationPack.from_dict(copy.deepcopy(original))
     consumed = render(value, tmp_path)
+    context = PromptContext(SimpleNamespace(visible_capability_aliases=["submit_contract"]), value, tmp_path)
+    assert context.output_contract().count("submit_contract") == 1
     assert "after the harness finishes" not in consumed
     assert "submit_contract" in consumed and "empty argument object ({})" in consumed
     assert "durable submission receipt" in consumed

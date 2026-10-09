@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from pal.skill.models import SkillModel
+from pal.skill.tools import SkillUpdateTool
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.execution.tool_facade import CompleteResult, EffectKind, Idempotency, RetryPolicy
@@ -61,7 +62,6 @@ class SkillSubsystemTests(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_disable_reenable_and_read_expose_actual_availability(self):
-        from pal.skill.tools import SkillUpdateTool
         self.skill_repository.upsert_skill(SkillDescriptor(
             skill_id="test.restore", module_id="skill", title="Restore", summary="Test", manual_text="Do work"))
         self.service.disable_skill("test.restore")
@@ -76,7 +76,6 @@ class SkillSubsystemTests(unittest.TestCase):
         self.assertEqual(SkillInjectTool(self.service).invoke({"skill_id": "test.restore"}).status, "ok")
 
     def test_patch_validates_fields_clears_values_and_preserves_noop_version(self):
-        from pal.skill.tools import SkillUpdateTool
         from unittest.mock import patch
         skill = SkillDescriptor(skill_id="test.patch", module_id="skill", title="Patch", summary="Test", manual_text="Do the work", activation_terms=("old",), avoid_when="old")
         self.skill_repository.upsert_skill(skill)

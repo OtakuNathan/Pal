@@ -324,10 +324,19 @@ class RoleAssignmentGateway:
             workspace = self._authoring_workspace(authenticated, context)
             request = dict(params.get("request") or {})
             operation = str(params.get("operation_key") or "")
+            with submission_validation():
+                reducer = prepare_work_item_mutation(workspace, request, operation)
+
+            def validated_reducer(payload: dict[str, Any]):
+                # Preserve semantic rejections across RPC without classifying
+                # storage, fencing, or CAS failures as authored-content errors.
+                with submission_validation():
+                    return reducer(payload)
+
             result = SubmissionDraftStore(self.service.runtime_root).mutate(
                 context, operation_key=operation, request=request,
                 expected_version=int(params.get("expected_version") or 0),
-                reducer=prepare_work_item_mutation(workspace, request, operation),
+                reducer=validated_reducer,
                 seed=work_item_seed(workspace),
             )
             return {"result": dict(result)}

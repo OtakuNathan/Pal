@@ -49,7 +49,7 @@ def _bunshin_llm_request_metadata(pack: BunshinInvocationPack, run_id: str) -> d
         "response_mode_hint": "operational",
         "bunshin_run_id": str(run_id or ""),
         "max_output_tokens_source": "bunshin",
-        # Bunshin owns bounded, action-forcing recovery.  Generic endpoint
+        # Bunshin owns bounded tool-call recovery.  Generic endpoint
         # continuation would replay the same oversized reasoning before the
         # role harness can narrow the next step.
         "max_output_recovery_enabled": False,

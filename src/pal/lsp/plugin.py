@@ -189,6 +189,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
+            search_objects=('provider', 'providers'),
             purpose="Show LSP provider status.",
             use_when="Diagnosing LSP system health — manager process, server count, last error.",
             do_not_use_when="Checking workspace readiness (use inspect_lsp_status). Running server health check (use diagnose_lsp_server).",
@@ -205,6 +206,7 @@ class LspManagerPluginProvider:
         family="lsp",
         action_name="status",
         guidance=ToolGuidance(
+            search_objects=('status',),
             purpose="Report recorded workspace preparation and LSP server health. An absent preparation record alone does not block individual queries.",
             use_when="Inspecting workspace-wide preparation and server health, or diagnosing a readiness problem reported by an LSP operation.",
             do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. A recent result already establishes readiness for the unchanged workspace. Module-level status (use inspect_lsp_provider). One server health (use diagnose_lsp_server).",
@@ -236,6 +238,7 @@ class LspManagerPluginProvider:
         family="lsp",
         action_name="prepare_workspace",
         guidance=ToolGuidance(
+            search_objects=('workspace', 'workspaces'),
             purpose="Configure a workspace's LSP project environment and optionally prewarm its language servers.",
             use_when='Project environment setup is needed, such as C/C++ compile commands or include paths; those settings changed; a query reported missing project context; or workspace prewarming is explicitly requested. name pins the server and workspace_root pins the root. Usable project compilation databases, compile_flags.txt and .clangd take precedence over generated fallback flags.',
             do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. Selecting a project alone does not require preparation. Not for non-LSP projects.",
@@ -255,6 +258,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor",
         guidance=ToolGuidance(
+            search_objects=('server', 'servers'),
             purpose="Check one LSP server's binary, workspace, and initialization readiness.",
             use_when="Diagnosing why a specific language server is not working.",
             do_not_use_when="Workspace-wide readiness (use inspect_lsp_status). Module status (use inspect_lsp_provider).",
@@ -265,6 +269,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="diagnostics",
         guidance=ToolGuidance(
+            search_objects=('diagnostic', 'diagnostics', 'error', 'errors', 'warning', 'warnings'),
             purpose="Read diagnostics (errors/warnings) for a file.",
             use_when='Checking compile errors or type issues after editing a file. A successful empty result means no diagnostics were reported. Diagnose readiness only when the operation reports an error.',
             do_not_use_when="Reading file content (use read_file). Searching code (use run_shell rg). No LSP server available.",
@@ -275,6 +280,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="hover",
         guidance=ToolGuidance(
+            search_objects=('hover', 'information', 'type', 'types'),
             purpose="Read hover information (type, docs) at a file position.",
             use_when="Checking a symbol's type signature or documentation at a specific location. A successful empty result means no hover information was returned at this position. Diagnose readiness only on a reported error.",
             do_not_use_when="Finding definitions (use find_lsp_definitions). Reading file content (use read_file).",
@@ -285,6 +291,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="definition",
         guidance=ToolGuidance(
+            search_objects=('definition', 'definitions'),
             purpose="Find definitions at a file position.",
             use_when='Jumping to where a symbol is defined. A successful empty result means no definition was returned. Check the requested position or use text search if needed; diagnose readiness only on a reported error.',
             do_not_use_when="Finding references (use find_lsp_references). Finding implementations (use find_lsp_implementations).",
@@ -295,6 +302,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="implementation",
         guidance=ToolGuidance(
+            search_objects=('implementation', 'implementations'),
             purpose="Find implementations at a file position.",
             use_when='Finding concrete implementations of an interface or abstract method. A successful empty result means no implementations were returned. Diagnose readiness only on a reported error.',
             do_not_use_when="Finding definitions (use find_lsp_definitions). Finding references (use find_lsp_references).",
@@ -305,6 +313,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="references",
         guidance=ToolGuidance(
+            search_objects=('reference', 'references'),
             purpose="Find references at a file position.",
             use_when='Finding all places that reference a symbol. A successful empty result means no references were returned. Diagnose readiness only on a reported error.',
             do_not_use_when="Finding definitions (use find_lsp_definitions). Call hierarchy (use find_lsp_incoming_calls).",
@@ -315,6 +324,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy",
         guidance=ToolGuidance(
+            search_objects=('hierarchy', 'hierarchies', 'item', 'items'),
             purpose="Prepare call hierarchy items at a file position.",
             use_when='Inspecting the candidate call hierarchy symbols at a file position when those items themselves are needed. If empty, the position may not be a callable symbol.',
             do_not_use_when="Finding callers or callees at a known file position: call find_lsp_incoming_calls or find_lsp_outgoing_calls directly; each prepares its items internally.",
@@ -332,6 +342,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls",
         guidance=ToolGuidance(
+            search_objects=('call', 'calls', 'caller', 'callers'),
             purpose="Find callers (incoming calls) for a symbol.",
             use_when='Tracing who calls a specific function or method at a known file position. Preparation is internal; no prior prepare_lsp_call_hierarchy call is needed. A successful empty result means no callers were returned. Diagnose readiness only on a reported error.',
             do_not_use_when="Finding callees (use find_lsp_outgoing_calls). Finding references (use find_lsp_references).",
@@ -342,6 +353,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls",
         guidance=ToolGuidance(
+            search_objects=('call', 'calls', 'callee', 'callees'),
             purpose="Find callees (outgoing calls) for a symbol.",
             use_when='Tracing what a specific function or method calls at a known file position. Preparation is internal; no prior prepare_lsp_call_hierarchy call is needed. A successful empty result means no callees were returned. Diagnose readiness only on a reported error.',
             do_not_use_when="Finding callers (use find_lsp_incoming_calls). Finding references (use find_lsp_references).",
@@ -352,6 +364,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="document_symbols",
         guidance=ToolGuidance(
+            search_objects=('symbol', 'symbols', 'function', 'functions', 'class', 'classes', 'variable', 'variables'),
             purpose="List document symbols (functions, classes, variables) for a file.",
             use_when='Mapping the structure of a file before reading it in detail. A successful empty result means no document symbols were returned. Read the file if its contents are needed; diagnose readiness only on a reported error.',
             do_not_use_when="Workspace-wide symbol search (use search_lsp_workspace_symbols). Reading file content (use read_file).",
@@ -362,6 +375,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="workspace_symbols",
         guidance=ToolGuidance(
+            search_objects=('symbol', 'symbols'),
             purpose="Search workspace symbols by name.",
             use_when='Finding where a symbol is defined across the entire workspace. A successful empty result means no matching symbols were returned. Refine the query or use text search if needed; diagnose readiness only on a reported error.',
             do_not_use_when="One file's symbols (use list_lsp_document_symbols). Text search (use run_shell rg).",
@@ -386,6 +400,7 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="rescan",
         guidance=ToolGuidance(
+            search_objects=('server', 'servers'),
             purpose="Rescan LSP server configs and refresh health.",
             use_when="After adding or modifying LSP server configuration.",
             do_not_use_when="Restarting the manager (use reload_plugin with name='lsp').",

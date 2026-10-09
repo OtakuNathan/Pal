@@ -27,6 +27,7 @@ REVIEW_SUBMIT_CAPABILITY = "op_bunshin_review_submit"
 REVIEW_SUBMIT_TOOL_SPEC: dict[str, Any] = {
     "alias": "submit_review",
     "guidance": {
+        "search_objects": ('review', 'reviews'),
         "purpose": "Submit the completed semantic review and let the Manager derive its verdict.",
         "use_when": (
             "Use with no arguments after the complete audit is finished, every finding is "

@@ -86,6 +86,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="import",
         guidance=ToolGuidance(
+            search_objects=('artifact', 'artifacts', 'image', 'images'),
             purpose="Import a local file or screenshot into the current conversation and attach its artifact reference for model input.",
             use_when='A local image or screenshot path must become visible to Pal, or a local PDF/audio/document needs artifact processing. Extracted OCR or transcript text is not proof of visual inspection; pixels are inspected only when actually attached to a vision-capable model.',
             do_not_use_when="The same image is already inline. A PDF artifact_id does not mean its page images are inline; import an image_file_path from its page index when pixels are needed. Reading ordinary source text (use read_file).",
@@ -106,6 +107,7 @@ class ArtifactIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_objects=('state', 'states'),
             purpose="Show artifact manager state.",
             use_when="Diagnosing artifact lifecycle issues — checking hot TTL, hard cap, or max size limits.",
             do_not_use_when="Looking for specific artifacts (use list_artifacts or search_artifacts). Reading artifact content (use read_artifact).",
@@ -133,6 +135,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="list",
         guidance=ToolGuidance(
+            search_objects=('artifact', 'artifacts'),
             purpose="List recent tagged conversation artifacts visible to the current turn.",
             use_when='A file was received or imported into this conversation and you need to discover what is available. An empty list can mean no artifact has been received in this scope or available references have expired. Inspect scope and filters; ask for resend only when the needed artifact is unavailable.',
             do_not_use_when="Looking for local filesystem files (use run_shell rg or read_file). No files were received or imported in this conversation.",
@@ -155,6 +158,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="info",
         guidance=ToolGuidance(
+            search_objects=('artifact', 'artifacts', 'metadata', 'representation', 'representations'),
             purpose="Inspect metadata and available representations for one artifact id.",
             use_when="Inspecting artifact metadata, choosing a specific representation, or diagnosing a representation_unavailable result.",
             do_not_use_when="Ordinary text reading with a known artifact_id: call read_artifact directly; its auto mode selects a representation. Importing local images/documents (use import_artifact).",
@@ -177,6 +181,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="read",
         guidance=ToolGuidance(
+            search_objects=('artifact', 'artifacts', 'text', 'representation', 'representations'),
             purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
             use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). With a known artifact_id, call directly: representation defaults to auto, so inspect_artifact_info is unnecessary. Supports page/chunk selection and max_chars. The result supplies text_file for complete rg/read_file access.",
             do_not_use_when="A text_file.file_path is already supplied: use rg/read_file directly. Reading local source text (use read_file); importing local images/documents (use import_artifact). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without transcript (use transcribe_artifact first).",
@@ -199,6 +204,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="search",
         guidance=ToolGuidance(
+            search_objects=('artifact', 'artifacts'),
             purpose="Search currently available conversation artifacts by filename, kind, caption, or summary. Results use relevance and recency ranking, not a date filter.",
             use_when='You know roughly what file the user means by name, type, or content but lack the exact artifact_id. An empty result is not proof of expiry. Broaden the query or use list_artifacts to inspect current references before asking for a resend.',
             do_not_use_when="Searching local filesystem or codebase (use run_shell rg or read_file). You already have the artifact_id.",
@@ -221,6 +227,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="select",
         guidance=ToolGuidance(
+            search_objects=('artifact', 'artifacts'),
             purpose="Select an artifact search result and refresh its short-lived hot state when the runtime has write authority.",
             use_when="You want to keep a specific artifact's hot state alive across multiple tool calls. Use after search_artifacts when you've identified the right artifact.",
             do_not_use_when="You just need to read an artifact once (read_artifact already refreshes hot state).",
@@ -243,6 +250,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="grep",
         guidance=ToolGuidance(
+            search_objects=('artifact', 'artifacts'),
             purpose="Search inside existing text representations of a known artifact.",
             use_when="For text files, PDF page text/chunks, or existing transcripts.",
             do_not_use_when="Does not inspect image pixels or create transcripts from audio.",
@@ -265,6 +273,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="transcribe",
         guidance=ToolGuidance(
+            search_objects=("artifact", "artifacts", "audio"),
             purpose="Request transcription for an audio artifact.",
             use_when="The user sent an audio/voice message and you need the text content.",
             do_not_use_when="The artifact is not audio (use read_artifact for text/pdf). Transcribing local audio files.",

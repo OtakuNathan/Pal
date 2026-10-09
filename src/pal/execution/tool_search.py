@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import new_tool_call
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.tool_facade import NextToolHint, ToolGuidance
+from pal.execution.tool_facade import EffectReceipt, NextToolHint, ToolGuidance, ToolInvocationResult
 from pal.execution.generated_tool_models import (
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadInput,
@@ -35,6 +35,7 @@ class ExecutionToolSearchMixin:
         scope="module",
         action_name="tools",
         guidance=ToolGuidance(
+            search_objects=('tool', 'tools', 'capability', 'capabilities'),
             purpose="List a compact directory of registered tool aliases, purposes, modules, and invocation modes.",
             use_when="Browsing all available tools when you don't know what to search for. Checking tool inventory completeness.",
             do_not_use_when="Searching for a specific capability (use search_tools). Reading one tool's contract (use read_tool).",
@@ -60,6 +61,7 @@ class ExecutionDiscoveryCapabilityMixin:
         family="exec",
         action_name="capability_call",
         guidance=ToolGuidance(
+            search_objects=('tool', 'tools', 'capability', 'capabilities', 'alias', 'aliases'),
             purpose="Invoke one indirect capability by its exact alias.",
             use_when="Invoke a known indirect alias with the arguments you judge appropriate.",
             do_not_use_when="For direct capabilities — they must be invoked directly and are rejected here.",
@@ -89,10 +91,11 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="search",
         guidance=ToolGuidance(
-            purpose="Search callable capabilities by task or alias.",
-            use_when="When you need to find a capability by what it does but don't know its exact alias.",
+            search_objects=('tool', 'tools', 'capability', 'capabilities', 'alias', 'aliases'),
+            purpose="Find callable tools using short English domain, action, and object keywords or an alias.",
+            use_when="When the callable alias is unknown. Search whole words in [domain] [action] [object] form; word order is flexible. All query words must match; use short keywords rather than a task sentence.",
             do_not_use_when="When you already know a callable alias and its arguments, invoke it directly or via call_tool according to its invocation mode.",
-            failure_next_steps="For empty results, use filter_suggestions or remove guessed filters. Use facets=true to discover classifications before narrowing; family is not a business-domain taxonomy.",
+            failure_next_steps="For empty results, remove unnecessary query words or try another exact action/object word. If filters were supplied, use filter_suggestions or remove guessed filters. Use facets=true only when classification discovery is needed; family is not a business-domain taxonomy.",
             next_tool_hints=(
                 NextToolHint(
                     name="read_tool",
@@ -125,6 +128,7 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="read",
         guidance=ToolGuidance(
+            search_objects=('tool', 'tools', 'contract', 'contracts', 'capability', 'capabilities'),
             purpose="Read the full capability contract for an execution capability by exact alias.",
             use_when="When the capability contract is absent, changed, or insufficient for correct arguments and execution semantics. Reuse a valid contract already in context; do not read it before every call.",
             do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use list_tools).",
@@ -168,7 +172,7 @@ class ExecutionDiscoveryCapabilityMixin:
 
 
 
-def _invocation_capability_result(runtime: object, name: str, result: object) -> CapabilityResult:
+def _invocation_capability_result(runtime: object, name: str, result: ToolInvocationResult) -> CapabilityResult:
     convert = getattr(runtime, "_canonical_result_from_invocation")
     canonical = convert(name, None, result)
     return CapabilityResult(
@@ -176,5 +180,10 @@ def _invocation_capability_result(runtime: object, name: str, result: object) ->
         text=canonical.text,
         structured=canonical.structured,
         llm_text=canonical.llm_text,
+        effect_receipt=EffectReceipt(outcome=result.effect),
+        affordances=tuple(result.affordances),
+        recovery_hint=result.recovery_hint,
+        context_delivery=canonical.context_delivery,
         snapshot_refs=canonical.snapshot_refs,
+        context_messages=canonical.context_messages,
     )

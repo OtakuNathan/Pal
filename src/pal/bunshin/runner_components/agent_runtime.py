@@ -57,7 +57,7 @@ class AgentRuntime:
                     temperature=_bunshin_temperature(self.pack, fallback=prompt.policy.temperature),
                     tool_choice=(
                         "required"
-                        if state.pending_output_length_recovery_note
+                        if state.pending_output_length_recovery_note and prompt.tools
                         else prompt.policy.tool_choice
                     ),
                 ),
@@ -73,7 +73,6 @@ class AgentRuntime:
             build_llm_tool_contracts=lambda: _llm_tools_for_allowed(
                 state.execution_runtime,
                 self.pack.allowed_capabilities,
-                action_only=bool(state.pending_output_length_recovery_note),
             ),
             handle_failure_async=_bunshin_noop_failure_handler,
             render_failure_feedback_text=lambda feedback: str(feedback or ""),

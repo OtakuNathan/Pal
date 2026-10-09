@@ -66,7 +66,7 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
     assert descriptors["read_browser_page"].InputModel.__module__ == "pal.web_fetch.tool_models"
     assert not any(name.startswith("web_fetch_provider_") for name in descriptors)
     assert not {"read_web", "inspect_web_layout", "screenshot_web"} & set(descriptors)
-    for query, expected in (("read webpage", "navigate_browser"), ("find controls", "find_browser_text")):
+    for query, expected in (("navigate browser", "navigate_browser"), ("find browser text", "find_browser_text")):
         found = core.context.execution_runtime.execute_tool(
             new_tool_call(name="search_tools", args={"query": query})
         )

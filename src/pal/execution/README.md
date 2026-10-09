@@ -3,6 +3,13 @@
 Owns:
 - capability forest
 - immutable, generation-scoped tool registry
+- `ToolGuidance.search_objects`: internal whole-word object vocabulary, including
+  explicitly supported singular/plural forms. Declare objects only, never action
+  or domain synonyms. Empty declarations keep external tools compatible without
+  guessing vocabulary. Search requires every query word to match the alias
+  or these objects; purpose is display-only and never affects matching or ranking; exact aliases rank first. Object vocabulary is carried
+  across internal worker specs but omitted from model descriptions, tool schemas,
+  inventories, and search results.
 - O(1) bound action dispatch index
 - plugin registration surface
 - the only side-effect execution boundary
@@ -36,6 +43,9 @@ Notes:
   machine execution semantics, examples, and the handler in one immutable
   registry record. Provider descriptions and search documents are compiled
   from guidance; capability authors do not maintain parallel prose fields
+- input serialization preserves declared defaults inside nested lists and
+  objects, explicit nulls, and false/zero values; only unset null sentinels
+  are omitted
 - guidance may name likely next tools. Compilation renders the exact direct or
   `read_tool`/`call_tool` route for the current surface. Unknown first-party
   aliases fail compilation, while detachable and scoped projections render an
@@ -46,9 +56,22 @@ Notes:
   details to the model. Recovery or transport errors add evidence; they must
   not replace the original result or erase its effect/retry semantics. The
   shared tool policy explains these fields in normal and failure prompts
+- capability and workflow result adapters retain effect receipts, recovery
+  guidance, context attachments and snapshot references across wrapper boundaries
+- diagnostic fields are redacted before JSON serialization. Already encoded
+  diagnostics respect escaped quotes and newlines, preserving the cause after
+  a credential while keeping the original host evidence separate
 - complete output is validated before budgeting. Large output is saved as an
   immutable UTF-8 file with a bounded head/tail preview and its local path. Use
   `rg` or `read_file` to inspect the copy; business-query pagination is unchanged
+- errors, status, retry decisions and recovery guidance do not consume the
+  normal-output budget. Error messages show concise causes; full stack traces
+  and large diagnostic details remain available in explicit snapshots. Short
+  errors are not shortened merely because a caller requested a tiny output budget
+- a completed operation may carry `delivery_error` metadata for a secondary
+  output or guidance fault. This diagnostic is shown outside the normal-output
+  budget, with a separate snapshot when needed; it does not change the operation's
+  status or effect and does not authorize repeating completed side effects
 - MCP `tools/call` and `prompts/get` use separate result envelopes. Prompt
   retrieval preserves messages and supplies a read receipt instead of applying
   a tool's `structuredContent` output contract
@@ -62,7 +85,7 @@ Notes:
 - `read_file` preserves CRLF and CR between numbered lines and tells the model
   their JSON escapes. `edit_file` continues to match exact authorized bytes;
   callers remove display labels and preserve the delivered line endings
-- if a failure's full text cannot be saved, deliver it inline with the storage
+- if a result's full text cannot be saved, deliver it inline with the storage
   error and an explicit budget exception. A preview without a complete snapshot
   must not become the only remaining account of why the tool failed
 - tool-result delivery metadata is stored on the L1 `ToolResultIR`. A delivered
