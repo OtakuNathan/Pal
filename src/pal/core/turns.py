@@ -18,7 +18,7 @@ from pal.llm.contracts import LLMGenerationResult
 from pal.shared import EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, ToolExecutionResult, TurnDeliveryBinding
 from pal.foundation import EventEnvelope
 from pal.shared.payloads import extract_text_from_payload
-from pal.shared.diagnostics import diagnostic_text
+from pal.shared.diagnostics import diagnostic_text, diagnostic_value
 from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.shared.agent_io import ChannelMessage, ChannelStreamUpdate
 
@@ -570,19 +570,7 @@ def _project_diagnostic_value(value: Any) -> Any:
     A shape-only preview cannot establish recovery: nested causes, per-item
     failures and false/zero status values are all evidence for the verdict.
     """
-    if isinstance(value, dict):
-        return {
-            key: "[redacted]" if re.fullmatch(
-                r"password|passwd|(?:access|refresh|auth)[_-]?token|token|api[_-]?key|secret",
-                str(key), re.IGNORECASE,
-            ) else _project_diagnostic_value(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_project_diagnostic_value(item) for item in value]
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    return diagnostic_text(value, limit=None)
+    return diagnostic_value(value)
 
 
 def _parse_failure_verification(text: str) -> tuple[VerificationResult, dict[str, Any]]:

@@ -55,7 +55,7 @@ def diagnostic_value(value: Any, *, summarize: bool = False) -> Any:
     if isinstance(value, Mapping):
         return {
             key: "[redacted]" if re.fullmatch(
-                r"password|passwd|(?:access|refresh|auth)[_-]?token|token|api[_-]?key|secret",
+                r"password|passwd|(?:access|refresh|auth)[_-]?token|token|api[_-]?key|secret|(?:proxy[-_]?)?authorization",
                 str(key), re.IGNORECASE,
             ) else diagnostic_value(item, summarize=summarize)
             for key, item in value.items()

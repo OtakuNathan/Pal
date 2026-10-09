@@ -167,3 +167,74 @@ def test_success_business_output_is_not_rewritten(runtime):
 def test_repeated_diagnostic_redaction_is_idempotent(text):
     once = diagnostic_text(text, limit=None)
     assert diagnostic_text(once, limit=None) == once
+
+
+@pytest.mark.parametrize("header", [
+    "Authorization", "aUtHoRiZaTiOn", "Proxy-Authorization",
+    "proxy_authorization", "ProxyAuthorization",
+])
+@pytest.mark.parametrize("scheme", ["Basic", "Bearer", "CustomScheme"])
+def test_nested_authorization_is_redacted_in_every_failure_prompt_source(header, scheme):
+    from copy import deepcopy
+    from pal.core.turns import ToolObservation, _render_failure_primary_input
+    from pal.failure import FailureDraft
+
+    evidence = {"request": {"headers": [{header: f"{scheme} {CANARY}",
+        "Content-Type": "application/json", "X-Request-ID": "request-17"}]},
+        "status": 401, "retry": False, "attempts": 0,
+        "authorization_required": True, "authorization_url": "https://example.invalid/auth"}
+    original = deepcopy(evidence)
+    draft = FailureDraft(subsystem="execution", component="request", failure_kind="capability_failure",
+        severity="medium", primary_blocker="request failed", evidence=evidence,
+        maintenance_outcomes=[{"action_name": "probe", "status": "error", "ok": False,
+                              "text": "probe failed", "structured": evidence}])
+    observation = ToolObservation(tool_name="probe", ok=False, summary="request failed", structured=evidence)
+    rendered = _render_failure_primary_input(draft, stage="diagnose", allowed_tools=[],
+                                            observations=[observation])
+    assert CANARY not in rendered
+    payload = json.loads(rendered)
+    expected = deepcopy(evidence)
+    expected["request"]["headers"][0][header] = "[redacted]"
+    assert payload["failure"]["evidence"] == expected
+    assert payload["failure"]["maintenance_outcomes"][0]["structured_summary"] == expected
+    assert payload["recent_observations"][0]["structured_summary"] == expected
+    assert evidence == original
+
+
+@pytest.mark.parametrize("scheme", ["Basic", "Bearer", "CustomScheme"])
+def test_nested_authorization_is_redacted_in_tool_delivery_and_snapshot(runtime, scheme):
+    details = {"responses": [{"request": {"headers": {
+        "Authorization": f"{scheme} {CANARY}",
+        "Proxy-Authorization": f"{scheme} {CANARY}", "Accept": "application/json"}},
+        "status": 401, "retry": False, "attempts": 0}], "evidence": "retain evidence " * 1000}
+    raw = FailedResult(error_code="provider_failed", error="request failed", llm_text="request failed",
+        details=details, effect=EffectOutcome.NONE, retry=RetryDirective.SAFE)
+    mount(runtime, "header_redaction", lambda _: raw)
+    result = invoke(runtime, "header_redaction", {})
+    assert CANARY not in result.llm_text
+    assert result.snapshot_refs
+    snapshots = "\n".join(Path(ref.path).read_text() for ref in result.snapshot_refs)
+    assert CANARY not in snapshots
+    assert "application/json" in snapshots and "retain evidence" in snapshots
+    assert raw.details == details
+    assert raw.details["responses"][0]["request"]["headers"]["Authorization"] == f"{scheme} {CANARY}"
+    assert (metadata(result)["error_code"], metadata(result)["effect"], metadata(result)["retry"]) == (
+        "provider_failed", "none", "safe")
+
+
+@pytest.mark.parametrize("summarize", [False, True])
+def test_shared_header_redaction_supports_mappings_and_tuple_diagnostics(summarize):
+    from types import MappingProxyType
+    from pal.shared.diagnostics import diagnostic_value
+
+    headers = MappingProxyType({"AUTHORIZATION": f"Basic {CANARY}",
+                                "PROXY_AUTHORIZATION": {"credentials": CANARY},
+                                "WWW-Authenticate": "Basic realm=example", "Content-Length": 0})
+    value = MappingProxyType({"attempts": ({"headers": headers, "ok": False},),
+                              "authorization_status": "denied", "body": None})
+    expected = {"attempts": [{"headers": {"AUTHORIZATION": "[redacted]",
+        "PROXY_AUTHORIZATION": "[redacted]", "WWW-Authenticate": "Basic realm=example",
+        "Content-Length": 0}, "ok": False}], "authorization_status": "denied", "body": None}
+    assert diagnostic_value(value, summarize=summarize) == expected
+    assert diagnostic_value(expected, summarize=summarize) == expected
+    assert headers["AUTHORIZATION"] == f"Basic {CANARY}"
