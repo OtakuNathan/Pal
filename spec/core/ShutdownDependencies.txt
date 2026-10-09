@@ -1,0 +1,18 @@
+ShutdownDependencies maps the fallible shutdown ordering to a bounded dependency
+chain: dependent plugin -> plugin -> resident services -> database, and provider
+-> resident services. The positive model stops at the failed child and retries
+that stage. The unsafe variant continues, matching the old ignored-error paths.
+
+Implementation:
+- PluginHost._shutdown_owned withdraws management admission, closes its jobs,
+  and detaches generations in reverse topological order. Any failed generation
+  stops the traversal, preserves dependencies, and populates shutdown_errors.
+- StubRuntimeHandle.stop_async checks plugin and provider errors before moving
+  to resident services. Resident hook failures propagate. Successful hooks are
+  cleared so retry does not invoke them twice. Database close is last.
+- Plugin/provider handles retain failed work as described in the publication
+  and ProviderCleanupOwnership models and their boundary tests.
+
+This model assumes serialized shutdown and quiescent public admission. It is a
+safety abstraction with two representative dependent plugins, not a generated
+proof of every Python call or a liveness claim about arbitrary shutdown hooks.

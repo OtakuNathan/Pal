@@ -385,3 +385,25 @@ that loses current records and its later PASS-without-CRUD consequence. The
 reference/new physical assignment and preserved current findings plus cases.
 `tests/test_bunshin_verifier_retry_identity_model.py` runs these with actual TLC
 when the pinned jar is supplied; its wiring assertion alone is not a proof.
+
+## Task workflow selection
+
+`TaskWorkflowSelection.tla` models current-first selection independently of
+history volume. `SearchStore.task_workflow_candidates` ranks ordinary live
+states before `RESTARTING`, then terminal history, within the actor/task scope;
+its SQL `LIMIT 2` is applied after ranking. Two live candidates are sufficient
+for `BunshinWorkflowService.resolve_task_workflow_selector` to reject a duplicate
+active-workflow invariant violation. A live replacement beats a restarting
+source even when the source is newer. Status can fall back to a restarting
+source or the latest terminal/archived workflow. Control selection retains its
+exclusion of `RESTARTING`, terminal, and archived rows.
+
+The model abstracts live count to 0/1/2, one restarting source, and 0..21 newer
+archived terminal rows. It checks active visibility, duplicate detection,
+recovery priority, and terminal/control fallback. The unsafe config restores
+window-before-ranking and must produce a counterexample. This is a selection
+abstraction, not proof of SQL execution, task creation, or the archive state
+machine. `tests/test_bunshin_workflow_selection.py` bridges SQL fixtures to the
+service, including 25 newer archived rows, multiple restarting rows, scope,
+archive filters, deterministic latest-first fallback, and duplicate detection.
+Existing archive contract tests cover task reuse and public status projection.

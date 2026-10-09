@@ -4,7 +4,7 @@ from pal.foundation.diagnostics import exception_report
 
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import re
@@ -65,6 +65,24 @@ class ChannelEndpointQueueBase(ABC):
         init=False,
         repr=False,
     )
+
+    async def start_async(self) -> None:
+        """Start owned transport work; in-memory endpoints have none."""
+
+    async def stop_async(self) -> None:
+        """Finish owned transport work before its instance may be released."""
+
+    def quiesce_delivery_async(self) -> Awaitable[None] | None:
+        """Fence delivery before stop when the transport needs a drain step."""
+        return None
+
+    def prepare_replacement(self, previous: ChannelEndpointQueueBase) -> Awaitable[None] | None:
+        """Prepare an unpublished candidate without taking the old ownership."""
+        return None
+
+    def validate_replacement_startup(self) -> Awaitable[None] | None:
+        """Confirm startup before publishing a replacement transport."""
+        return None
 
     def export_pending_state(self) -> EndpointPendingState:
         return EndpointPendingState(

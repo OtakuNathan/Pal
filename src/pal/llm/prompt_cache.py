@@ -68,6 +68,11 @@ class PromptCacheTrackPlan:
         return 0
 
 
+@dataclass
+class _CacheAdmission:
+    observed: bool = False
+
+
 @dataclass(frozen=True)
 class PromptCachePlan:
     scope_key: str
@@ -84,8 +89,10 @@ class PromptCachePlan:
     profile_generation: str = ""
     allow_stable_anchor_marker: bool = False
     prepared_encoded: EncodedRequest | None = field(default=None, repr=False, compare=False)
+    tail_incarnation: object | None = field(default=None, repr=False, compare=False)
     tail_generation: int = 0
     tail_current: wire.Boundary | None = None
+    admission: _CacheAdmission = field(default_factory=_CacheAdmission, repr=False, compare=False)
     mode: str = "implicit"
     anchor: PromptCacheTrackPlan = field(
         default_factory=lambda: PromptCacheTrackPlan("anchor", "5m")
@@ -553,12 +560,14 @@ class PromptCacheCoordinator:
                              ("tail_previous", previous), ("tail_current", frontier)):
                 if b is not None and b.path not in {p.path for p in points}:
                     points.append(PromptCacheBreakpoint(label, b.message_id, "30m", b.coordinate, b.path))
+            state.planned_sequence += 1
             plan = PromptCachePlan(scope_key=scope, cache_key=_cache_key(request, context),
                 dialect=dialect, breakpoints=tuple(points), mode=mode,
                 decision="eager_tail" if mode == "explicit" else "hybrid_fixed_anchors",
-                plan_sequence=state.sequence + 1,
+                plan_sequence=state.planned_sequence,
                 estimated_prefix_tokens=estimated_prefix,
-                prepared_encoded=clean, tail_generation=state.generation, tail_current=frontier,
+                prepared_encoded=clean, tail_incarnation=state.incarnation,
+                tail_generation=state.generation, tail_current=frontier,
                 **dict(profile_fields, strategy=POLICY if mode == "explicit" else "fixed_anchors"))
             self._prune_scopes_locked(now=now, keep=scope)
             self._remember(plan, request=request, context=context)
@@ -616,7 +625,7 @@ class PromptCacheCoordinator:
     def prepare_attempt(self, request: LLMRequestIR, context: ShapeContext,
                         raw_encoded: EncodedRequest, request_id: str, *,
                         finalize_request: Callable[[EncodedRequest], EncodedRequest] | None = None):
-        # Serialize planning and submission of the bounded tail history.
+        # Freeze and audit before transport admission; do not consume tail history.
         with self._lock:
             plan = self.plan(request, context, raw_encoded)
             encoded = self.inject(raw_encoded, plan)
@@ -642,10 +651,10 @@ class PromptCacheCoordinator:
                 audited &= encoded.extra_body.get("prompt_cache_key") == plan.cache_key
                 if plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT:
                     audited &= encoded.extra_body.get("session_id") == plan.cache_key
-                audited &= state is not None and state.generation == plan.tail_generation and not state.closed
+                audited &= (state is not None and state.incarnation is plan.tail_incarnation
+                            and state.generation == plan.tail_generation and not state.closed)
                 if not audited:
                     raise CacheProfileError("cache marker payload or content generation changed before submission")
-                state.submit(plan.tail_current, plan.tail_generation, plan.plan_sequence)
                 tail_snapshot = state.snapshot()
         description = describe_request(request, raw_encoded, encoded)
         now = time.monotonic()
@@ -660,7 +669,7 @@ class PromptCacheCoordinator:
             stats.last_request_at = now
             stats.last_access_at = now
             if plan.prepared_encoded is not None:
-                stats.next_plan_sequence = plan.plan_sequence
+                stats.next_plan_sequence = max(stats.next_plan_sequence, plan.plan_sequence)
             for track, track_plan in (() if plan.prepared_encoded is not None else ((stats.anchor, plan.anchor), (stats.frontier, plan.frontier))):
                 _record_track_success(track, track_plan, plan_sequence=plan.plan_sequence,
                     applied_breakpoint_ids=frozenset(encoded.applied_cache_breakpoint_message_ids), observed_at=now)
@@ -677,8 +686,27 @@ class PromptCacheCoordinator:
             }
         if plan.prepared_encoded is not None:
             diagnostics.update(cache_tail=tail_snapshot, wire_audit_fingerprint=wire_hash)
-        self.record_attempt(plan, status="submitted", request_id=request_id, **diagnostics)
+        self.record_attempt(plan, status="prepared", request_id=request_id, **diagnostics)
         return diagnostics
+
+    def submit_attempt(self, plan: PromptCachePlan, *, request_id: str,
+                       diagnostics: dict[str, Any]) -> None:
+        """Observe actual transport admission of an already frozen/audited request.
+
+        Each plan owns one admission token, separate from its planning sequence.
+        A late callback cannot revive a closed, changed or evicted scope;
+        provider usage is irrelevant.
+        """
+        with self._lock:
+            if plan.admission.observed:
+                return
+            plan.admission.observed = True
+            if plan.prepared_encoded is not None:
+                state = self._tails.get(plan.scope_key)
+                if state is not None and state.incarnation is plan.tail_incarnation:
+                    state.submit(plan.tail_current, plan.tail_generation)
+                    diagnostics["cache_tail"] = state.snapshot()
+        self.record_attempt(plan, status="submitted", request_id=request_id, **diagnostics)
 
     def record_attempt(
         self,
@@ -804,7 +832,7 @@ class PromptCacheCoordinator:
         with self._lock:
             previous = next((item for item in self._attempt_records if request_id and item["attempt_id"] == request_id), None)
             if previous is not None:
-                if previous["status"] != "submitted":
+                if previous["status"] not in {"prepared", "submitted"}:
                     return
                 if not record["wire_audit_fingerprint"]:
                     record["wire_audit_fingerprint"] = previous.get("wire_audit_fingerprint", "")

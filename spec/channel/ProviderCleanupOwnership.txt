@@ -1,0 +1,48 @@
+Provider cleanup ownership — implementation boundary (2026-10-09)
+
+EndpointHubLifecycle checks the generated hub reducer; it does not model Python
+resource owners. ProviderCleanupOwnership adds a separate finite safety model.
+
+Mapping:
+- stage 0: ChannelRuntime retained removal/replacement tasks and failed candidate
+  cleanup; provider_manager._unload_runtime_provider refuses disposal while any
+  provider endpoint transport remains owned.
+- stage 1: RuntimeChannelProviderHandle.detach_step; detach completion precedes
+  cleanup callbacks. A pending attach must settle before this step begins.
+- stage 2: cleanup_callbacks + cleanup_step, popped only after success.
+- stage 3: module_names removal; runtime_provider_handles popped only afterward.
+- phase pending: OwnedLifecycleStep.pending. Timeout/cancellation leaves the same
+  Future/Task owned. Retry joins it; it never invokes a second pending callback.
+- phase completed: completed task receipt, including completion racing waiter
+  cancellation. Its result must be consumed before releasing the task reference.
+- owner: exact runtime handle / endpoint instance, including failed builds and
+  partially initialized replacement candidates.
+
+Positive configuration checks ownership, one pending invocation, transport-before-
+resource-close ordering, and no second successful execution of a completed step.
+Four negative configurations independently drop ownership, skip transport cleanup,
+forget pending work, or forget a completed receipt. Each must violate its named
+invariant, not merely return a nonzero TLC exit code.
+
+Boundary regression tests:
+  tests/test_channel_provider_cleanup.py (including already-scheduled Task
+  returns from synchronous hooks and retry after cross-loop callback failure)
+  tests/test_channel_replacement_cleanup.py
+  tests/test_package_cleanup_ownership.py
+  tests/test_plugin_entry_withdrawal.py
+
+Limits: this is a hand-written abstraction, not generated refinement proof of the
+Python implementation. It assumes serialized lifecycle mutations, cooperative
+async hooks, and a retryable contract for hooks that explicitly fail. Two attempts
+per stage bound the graph. It verifies safety, not eventual cleanup: a permanently
+blocked hook may legitimately keep an owner indefinitely. Raw FD close retries
+are separately governed by FdLease, whose uncertain close enters quarantine.
+It does not model process death, power loss, filesystem journal recovery, or
+arbitrary external side effects inside third-party cleanup hooks.
+
+The public execution boundary now serializes channel lifecycle aliases and
+canonical tool paths through ExecutionRuntime._invocation_gate (writer side),
+shared with plugin and package activation. Direct internal manager callers must
+honor the same serialization contract. PluginScope also stops its LIFO cleanup
+stack at the first unfinished dependency; its tracked-task regression exercises
+this ordering separately from the provider-specific state machine.

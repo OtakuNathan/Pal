@@ -73,6 +73,13 @@ class HydratedCapabilityNode:
     search_record_ids: list[str] = field(default_factory=list)
 
 
+@dataclass
+class BindingAdmission:
+    """Live mount authority shared by immutable registry snapshots."""
+
+    live: bool = True
+
+
 @dataclass(frozen=True)
 class BoundCapabilityAction:
     canonical_path: str
@@ -80,6 +87,7 @@ class BoundCapabilityAction:
     descriptor: CapabilityDescriptor
     callable: Callable[[CapabilityCall], CapabilityResult]
     async_callable: Callable[[CapabilityCall], Any] | None = None
+    admission: BindingAdmission = field(default_factory=BindingAdmission, compare=False, repr=False)
 
 
 @dataclass
@@ -95,6 +103,7 @@ class MountedSubtreeHandle:
     bound_action_keys: list[tuple[str, str]] = field(default_factory=list)
     search_record_ids: list[str] = field(default_factory=list)
     mounted: bool = False
+    admission: BindingAdmission = field(default_factory=BindingAdmission, compare=False, repr=False)
 
 
 def capability_node(

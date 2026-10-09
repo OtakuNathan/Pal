@@ -1,0 +1,390 @@
+..................................................................................................... [ 44%]
+.................................................................... [ 74%]
+..........................................................               [100%]2026-10-09 16:17:55,316 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:55,573 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:55,829 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:56,084 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:56,341 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:56,596 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:56,853 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:57,110 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:57,366 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:57,623 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:57,881 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:58,138 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:58,394 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:58,651 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+2026-10-09 16:17:58,908 ERROR pal.bunshin.manager bunshin V2 outbox tick failed
+Traceback (most recent call last):
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/manager.py", line 863, in _run_outbox
+    await self.semantic_orchestrator.recover_background_assignments()
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/orchestrator.py", line 103, in recover_background_assignments
+    return await self.components.assignment_recovery.recover_background_assignments(self.components.effect_dispatch.handlers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/semantic_orchestration/assignment_recovery.py", line 26, in recover_background_assignments
+    self.repository.role_assignments.list_role_assignments(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+    states=(
+    ^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+    ),
+    ^
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/role_assignments.py", line 344, in list_role_assignments
+    with self.database.read_connection() as connection:
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/contextlib.py", line 141, in __enter__
+    return next(self.gen)
+  File "/home/nathan/Documents/coding/Pal/src/pal/bunshin/storage/database.py", line 94, in read_connection
+    connection = sqlite3.connect(str(self.db_path), timeout=30)
+sqlite3.OperationalError: unable to open database file
+
+=============================== warnings summary ===============================
+../../../.local/lib/python3.13/site-packages/jieba/_compat.py:18
+  /home/nathan/.local/lib/python3.13/site-packages/jieba/_compat.py:18: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../../../../../usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147
+  /usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('logilab')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+227 passed, 2 warnings, 191 subtests passed in 919.90s (0:15:19)

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import tomllib
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pal.plugins.host import PluginHost
+
+from pal.packages.process import check_cancelled
 
 from pal.packages.process import PackageError
 from pal.shared import RuntimeStatus
@@ -9,11 +16,35 @@ from pal.shared import RuntimeStatus
 class RuntimeActivation:
     """Keep installation outside the lifecycle fence; switch through existing owners."""
 
-    def __init__(self, host):
+    def __init__(self, host: PluginHost):
         self.host = host
 
     def gate(self):
         return self.host.context.execution_runtime.lifecycle_gate.write()
+
+    @contextmanager
+    def switch_gate(self, kind: str, name: str):
+        # Validation belongs before this boundary. Withdraw public entries before
+        # waiting for admitted calls; resources remain owned until write admission.
+        check_cancelled()
+        captured = self.host.withdraw_tool_entries(name) if kind == "plugin" else ()
+        entered = False
+        try:
+            with self.gate():
+                entered = True
+                try:
+                    yield
+                finally:
+                    # Untouched owners get fresh authority. Cleanup failures
+                    # deliberately remain withdrawn and owned for retry.
+                    if captured:
+                        self.host.restore_tool_entries(captured)
+        finally:
+            if not entered and captured:
+                # Even failure to acquire the writer must not strand a live
+                # provider without entries. Restoration checks owner and cleanup
+                # state atomically under the registry lock; it does no cleanup.
+                self.host.restore_tool_entries(captured)
 
     def _channel(self):
         return self.host.context.require_port("channel:provider_manager")
@@ -23,14 +54,15 @@ class RuntimeActivation:
             record = self.host._record(name)
             state = {"existed": record is not None, "attached": bool(record and record.attached),
                      "enabled": bool(record and record.enabled)}
-            if state["attached"] and self.host.detach(name)["status"] != RuntimeStatus.OK:
+            owned = name in self.host.generations or name in self.host._pending_rollbacks
+            if (state["attached"] or owned) and self.host.detach(name)["status"] != RuntimeStatus.OK:
                 raise PackageError("Previous plugin could not be detached; installation was not switched")
             return state
         manager = self._channel()
         state = {"existed": name in manager.discovered_runtime_providers,
                  "endpoints": [endpoint_id for endpoint_id in manager._provider_hub_ids(name)
                                if manager.runtime.get_endpoint(endpoint_id) is not None]}
-        if state["existed"]:
+        if state["existed"] or name in manager.runtime_provider_handles:
             _, errors = manager._stop_provider_transports(name, reason="package_install")
             if errors:
                 raise PackageError(f"Previous provider could not be stopped: {errors}")

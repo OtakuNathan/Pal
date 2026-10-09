@@ -770,12 +770,10 @@ class BunshinWorkflowService:
             detail = f" matching {query!r}" if query else ""
             raise ValueError(f"No active Bunshin Task{detail}.")
 
-        workflows = self.repository.search.search_workflows(
+        workflows = self.repository.search.task_workflow_candidates(
             actor_id=actor,
             task_id=task_id,
-            include_terminal=True,
-            include_archived=include_terminal,
-            limit=20,
+            include_terminal=include_terminal,
         )
         active = tuple(
             item

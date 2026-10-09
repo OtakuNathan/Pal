@@ -40,7 +40,7 @@ from pal.execution.tool_facade import (
     ToolInvocationResult,
     rejection,
 )
-from pal.execution.tool_registry import _example_from_schema
+from pal.execution.tool_registry import _example_from_schema, compile_registry_generation
 from pal.shared import ToolExecutionResult
 from pal.bunshin.profiles import filter_bunshin_allowed_capabilities, is_bunshin_capability_denied
 from pal.bunshin.tool_guidance import (
@@ -484,12 +484,21 @@ def _verifier_execution_delegate(runtime: "BunshinScopedExecutionRuntime", name:
 
 
 def _capture_legacy_finding_generation(runtime: ExecutionRuntime, subtree: MountedSubtreeHandle) -> Any:
-    """Keep strict persisted-call dispatch outside the live discovery surface."""
-    handle = SimpleNamespace(mounted_subtree=subtree)
-    runtime.mount_subtree(handle)
-    generation = runtime.registry_generation
-    runtime.unmount_subtree(handle)
-    return generation
+    """Compile permission-gated replay without publishing or retiring its owner.
+
+    Hiding discovery is not an unload: a mount/capture/unmount sequence would
+    revoke the authority captured for persisted replay. Only the private entry
+    receives fresh authority; borrowed live bindings retain their original
+    tokens, so real withdrawal still fences every view of those owners.
+    """
+    with runtime._registry_lock:
+        current = runtime.registry_generation
+        mounted = dict(current.mounted_subtrees)
+        mounted[subtree.module_id] = runtime._prepared_subtree(subtree)
+        return compile_registry_generation(
+            generation_id=current.generation_id + 1,
+            mounted_subtrees=mounted,
+        )
 
 
 def _scoped_tool_destination(name: str, workspace: dict[str, Any], primary: Any, legacy: Any) -> Any:

@@ -1,0 +1,115 @@
+最新深入复核：另修复恢复失败、异步取消、撤销失败和空状态 CI 误通过问题；此前
+超时的 verifier 已完成，当前 110 个有效配置均已有通过证据。见 deep_review.txt
+及 deep-validation.json。以下保留此前阶段的结论与限制，不覆盖最新结果。
+
+上一轮进展：新增缓存交错缺陷已修复，英国时间 02:00 夜间 TLC CI 已写入工作树。
+本地 107 个有效配置中 106 个按预期通过、1 个大型正例超时；详见 nightly_review.txt
+及 nightly-validation.json。下文是较早阶段的记录，其中 G5“无独立 CI”已被本轮
+配置补齐，但托管 CI 尚未运行，跨子系统组合证明仍未完成。
+
+后续修复结果（2026-10-09，当前工作树）
+
+R1 / R2 已修复。
+- PluginHost 保留 generation 建立前失败的 scope 及原始导入元数据，包含 start
+  尚未返回 handle 的情况。attach / enable / 依赖启动不能覆盖待清理资源；
+  detach / reload / disable / shutdown 共用清理重试路径，只有成功后才释放 owner。
+- ExecutionSlot 独立保存安装失败 candidate 的清理 owner；close 失败后仍可 uninstall
+  重试，期间禁止新安装。恢复后的原实现保持可用，不重新发布失败 candidate。
+- 宿主在调用 extension.install 前登记 uninstall 清理回调，保证两个生命周期相连。
+- PluginPublicationLifecycle 增加 preparing 阶段和独立 owner，覆盖早期失败。
+
+本轮验证：96 项生命周期集成 + 77 项架构/工具契约回归通过；补充依赖与 disable/reload
+检查后的最终 rollback 文件 28 项通过（与前组有重叠）。Contract mypy 15 文件通过。
+原复现入口现导入正式回归，15 项通过；旧的 3 failed 日志仅保留作修复前证据。
+更新后的 TLC 正向模型 11 distinct states，无错误；既有 Unsafe 和新增
+EarlyCleanupUnsafe 分别触发 PublicationAgrees / CleanupRetainsOwnership（exit 12）。
+git diff --check 通过。日志见同目录 cleanup-fix-*.log。
+
+改动仅在源码工作树；未提交、推送或激活运行实例。
+未执行完整四批 CI 或 macOS / Python 3.12。G5 的独立 TLC CI 和跨子系统组合证明
+仍为后续事项；本轮修复范围是两个已复现的资源清理缺陷。
+
+以下保留首次修复包复核的历史结论；其中“尚未修复”和“3 failed”描述修复前状态。
+==========================================================================
+
+Pal 状态机修复包复核（2026-10-09）
+
+结论
+已把 followup 包的 CUMULATIVE-state-fixes-618f70f-to-510bc8e.patch 应用到
+当前 f914d3cf3283524e0a023004b46c95b2596ac067 工作树。未提交、推送或激活运行中的 Pal。
+当前已有的 MCP / tool contract 修改保留，原有未跟踪文件保留。
+
+补丁路线核验
+两个修复包各自清单内 4 个补丁/mbox 文件的 SHA256 均匹配；审计包 21 项均匹配。
+在独立 Git index 中从 618f70f 分别应用：
+(1) 第一包 cumulative + 第二包 incremental；(2) 第二包 cumulative。
+两者生成同一 tree：a6a96dbfa7feccb9350bdf7223d85de8c7103ed8。
+第二包已包含第一包，不应重复叠加。
+
+audit 对照
+F1：已修复普通 task 重复取消期间的 gate acquisition 所有权泄漏。
+    drain 循环等 acquire 真正完成后释放一次；取消等待仍依赖持有者最终释放。
+F2：已修复排队旧 binding 在卸载后开始调用。
+    mount admission token 随冻结 registry 共享，撤销后不复活，重挂使用新 token；
+    已 admission 的调用由 lifecycle read lease 保护至完成。
+F3：已修复 generation 发布后的 late attach 失败残留，成功回滚允许重新 attach。
+    真正 late cleanup 失败保留 generation。更早的失败阶段仍有下述 R1。
+F4：已修复 prepare 提前消费 cache tail，提交挪到实际 transport admission，
+    包含重复通知与旧 incarnation 回调保护。
+G1：通过明确 core ownership listener 的 no-throw 契约及加固实际
+    ResultSnapshotStore listener 处理。普通失败保留旧 ownership 并终身禁用回收；
+    cleanup/logging 失败不打断 root 发布。不是对任意抛错 listener 的通用隔离。
+G2：是契约范围澄清，不是新增文件系统原子事务。
+    支持的 verifier 前台写入/提交已有 invocation/fence 共享锁；外部及后台写入
+    不在此保证内，最终 settlement 仍需重新核验。不能宣称任意写入下 receipt 原子。
+G3：endpoint 不再自动 fallback 的模型已同步；L1 draft 与 item commit 精度差异
+    已说明；未建立组合 refinement 证明。
+G4：workflow 按状态排序后 LIMIT，避免历史挤掉 active 和遮蔽重复 active。
+G5：未完成。无跨子系统组合证明，也没有固定 TLC 版本的独立 CI job。
+    scripts/check_execution_tla.sh 仍只运行 FileResultAuthorization，未自动覆盖新增
+    LifecycleAdmission / EntryWithdrawal；本次额外手动执行它们。
+第二包另修第一包引入的 legacy add_finding replay admission 回归，并补 Authorization 脱敏。
+
+剩余可复现问题（尚未修改其实现）
+
+R1 [P2] generation 建立前回滚失败，仍会丢失待清理资源所有权
+位置：src/pal/plugins/host.py:851（同时参见 capability 发布后才建立 generation 的顺序）。
+触发：_publish_module_capabilities 等早期 attach 阶段抛错，scope.close 中某个
+清理回调也失败。保留 owner 的分支要求 generation 非空，而这个阶段尚未建立。
+结果：scope 中仍有待重试 callback，但 host.generations 为空，状态为 load_failed；
+随后 detach 返回 OK，却不再调用该清理。允许后续 attach 可能叠加未清理资源。
+内置插件和第三方插件均已复现。此缺口在补丁前已存在，包仅修了 late publication。
+建议：从可获得 scope/handle 时建立独立 pending cleanup owner，成功清理才释放；
+即便尚未正式发布也要阻止重复 attach，并提供 detach 重试路径。
+
+R2 [P2] execution extension 激活失败且 close 失败，没有保留 candidate 的重试入口
+位置：src/pal/execution/extensions.py:73；uninstall 的空状态返回在 85–87 行。
+触发：extension.activate 抛错；回滚恢复 previous 后 extension.close(candidate) 再抛错。
+结果：仅给原异常 add_note；_installed 仍为空，后续 uninstall 不再调用 close。
+候选实现持有的资源可能遗留。此缺口也在补丁前存在，包新增的卸载失败重试仅覆盖
+成功安装过的 extension，未覆盖安装失败。
+建议：保存独立的 failed-candidate cleanup owner，关闭入口并允许重复清理；
+不要将失败 candidate 重新公开，也不要丢失恢复后的原实现。
+
+复现
+PYTHONPATH=.:src python -m pytest -q docs/reviews/state_machine_20261009/repro_cleanup_ownership.py
+这是缺陷见证，当前预期 3 failed（R1 两种来源 + R2），不是已通过的回归。
+测试使用临时目录与模拟回调，不调用在线 provider。日志见同目录 cleanup_ownership.log。
+
+验证结果
+首轮相关回归：211 passed，含 MCP strict 与 tool contract regression 交叉检查。
+Contract mypy：15 个文件通过。
+当前六个 LLM TLC 配置全部通过；PromptCacheTail 为 194415 distinct states。
+另行正向检查：PluginPublicationLifecycle 8 states、LifecycleAdmission 390 states、
+EntryWithdrawal 29 states、TaskWorkflowSelection 264 states，全部通过。
+五个负向配置按预期触发对应不变量反例：EndpointSelectionStable、AdmittedHistory、
+PublicationAgrees、NoRetarget、DuplicateCannotBeHidden（TLC exit 12）。
+新增缺陷见证：3 failed，见上文，未混入通过数。
+较广回归组：430 passed（493.75 秒），覆盖 package/plugin/execution/cache/history 及架构边界。
+与首轮 211 项有重叠，不应相加当成独立测试总数。git diff --check 通过。
+环境：Linux aarch64、Python 3.13.5、OpenJDK 21.0.10；使用仓库现有 tla2tools.jar。
+TLC 为 2.19（2024-08-08），SHA256：
+936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88。
+这与交付包宣称的 2026 版 jar 不同，本次结果来自实际本机运行。
+未执行完整四批 CI、macOS / Python 3.12、在线模型调用或运行时激活。
+实际执行日志暂存 /tmp/pal-state-audit-vigmkxbq；有限模型不是整程序正确性证明。

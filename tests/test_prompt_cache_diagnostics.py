@@ -143,6 +143,7 @@ def _record_round(
     encoded = coordinator.inject(codec.encode(request, context), plan)
     diagnostics = coordinator.start_attempt(plan, request=request, context=context,
         raw_encoded=codec.encode(request, context), encoded=encoded, request_id=request_id)
+    coordinator.submit_attempt(plan, request_id=request_id, diagnostics=diagnostics)
     if previous_gap is not None:
         diagnostics["previous_request_gap"] = previous_gap
     coordinator.record_success(

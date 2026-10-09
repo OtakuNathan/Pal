@@ -1,0 +1,60 @@
+本记录已由同目录 deep_review.txt 接续：此前超时模型已完成，新增异常路径已修复，
+当前清单 110 个有效配置均有通过证据。以下保留本轮初始夜间 CI 复核的历史结果。
+
+状态机模型/实现后续复核与夜间 CI（2026-10-09，当前工作树）
+
+结论
+新增发现并修复一个缓存 admission 缺口；夜间 TLC 已配置为英国时间每天 02:00。
+107 个有效配置本地实际运行，106 个按预期通过，1 个正例超时，不能宣称全绿。
+改动未提交、推送或部署；GitHub 定时任务须合入默认分支后生效，尚无托管 CI 运行证据。
+
+R3：多个 prepare 共用提交序号，后续真实 admission 可能被忽略（已修复）
+同一 coordinator scope 同时持有两个尚未提交的 plan 时，原实现都使用
+submitted_sequence + 1；第一份提交后，第二份被 sequence 去重误判成重复通知。
+旧 PromptCacheTail 只保留一个 pending payload，无法覆盖这一交错。
+这是 coordinator 边界的已复现缺陷，尚未证明主对话路径实际并发触发过。
+
+现在每份 plan 持有独立的一次性 admission token，prepare 序号与实际提交计数分离；
+短的迟到 tail 不回退已提交的较长位置。重复通知、过期 generation、关闭及淘汰后
+重建 scope 的保护保留。生产测试覆盖两个 admission 顺序及重复通知，旧实现 2 failed，
+修复后通过。新增 PromptCacheAdmission 两个配置：正例通过，旧共享序号 mutant
+触发 SubmittedCountExact。它与 PromptCacheTail 仍是独立模型，并非组合证明。
+
+模型与 CI
+- spec/tlc-suite.json 分类全部 TLA/config：62 正例、42 反例、3 reachability witness、
+  3 明确退役的历史缓存配置；107 个有效配置分布在 9 个夜间分片。
+- 普通 CI 检查清单完整性及 Bunshin/channel/FD 三份生成模型与生产 renderer 一致。
+  该快速检查不冒充实际 TLC。夜间另跑生产边界回归及动态 imported-plan mutants。
+- TLC 固定官方 v1.7.4（2.19）和 SHA-256：
+  936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88。
+- 正例须成功完成；反例须 exit 12 且精确命中声明的不变量；解析错误、其他错误、
+  崩溃和超时都报失败。试跑发现两处清单 invariant 名称误填，已修正并加声明校验；
+  runner 同时支持 TLC 的初始状态反例格式，相关配置已重新执行通过。
+- 每例独立工作/metadata 目录，记录输入、哈希、命令、退出码、耗时和完整 TLC 输出；
+  CI 成功失败均保存 artifacts 14 天。手动 workflow_dispatch 可用。
+- 夜间使用 Python 3.12、Java 21、2 GiB heap、单 worker、每例 900 秒上限。
+  调度 Europe/London 跟随夏令时；GitHub 可能延迟执行，非精确时刻 SLA。
+
+实际验证
+本机 Linux aarch64、Python 3.13.5、OpenJDK 21.0.10。
+- TLC 61 正例完成 + 42 预期反例 + 3 witness，共 106 个通过。
+- FileResultAuthorization 首轮 300 秒超时，使用 1 GiB / 2 workers 重跑，约 335 秒
+  完成 1,027,911 distinct states。未降低模型边界。
+- VerifierDraftLifecycle 首轮 300 秒及 1 GiB / 2 workers 的 900 秒重跑均超时。
+  最后报告已发现 1,035,998 distinct states，但队列尚未清空；不是通过，也尚无反例。
+  夜间托管机器能否在 900 秒内完成仍需真实运行确认，超时会报红。
+- 两个投影正例分别完成 3,818 / 26,244 states；mutant 按预期违反 DraftAligned。
+- 相关 conformance 238 passed（67 subtests）；生成模型边界组 289 passed（71 subtests）；
+  缓存组 77 passed；最终 runner 9 passed；contract mypy 15 文件通过。
+  这些测试组有重叠，不能累加为独立测试总数。未跑完整四批 CI 或 macOS/Python 3.12。
+- workflow YAML 解析通过，matrix 恰好覆盖 107 个有效配置一次；git diff --check 通过。
+
+证据
+nightly-validation.json 汇总每个配置最新已完成运行及输入/日志哈希；完整本地日志
+位于 /tmp/pal-nightly-review，关键回归及新模型/大型模型日志另存本目录 nightly-*.log。
+初次全量运行的失败保留原样；汇总引用对应的修正后重跑，不将旧失败涂成通过。
+
+仍未证明
+手写 TLA 与全部 Python 路径尚无机械 refinement 证明；独立模型未证明跨子系统组合。
+外部文件写入与 verifier durable receipt 的原子性、任意第三方 callback 的终止性
+仍不在既有契约保证内。夜间 CI 能发现已建模及已测试的回归，不能消除这些证明边界。

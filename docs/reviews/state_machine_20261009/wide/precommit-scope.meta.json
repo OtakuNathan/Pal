@@ -1,0 +1,20 @@
+{
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_plugin_publication_rollback.py",
+    "tests/test_plugin_raii.py",
+    "tests/test_plugin_entry_withdrawal.py",
+    "tests/test_channel_provider_cleanup.py",
+    "tests/test_lifecycle_gate_cancellation.py",
+    "tests/test_execution_extensions.py"
+  ],
+  "status": "passed",
+  "observed_peak_rss_mib": 129.4,
+  "elapsed_seconds": 44.7,
+  "jvm_heap": null,
+  "python_address_space_limit": "1GiB",
+  "returncode": 0
+}

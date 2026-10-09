@@ -1,0 +1,101 @@
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+____________ test_early_publication_cleanup_ownership[first_party] _____________
+
+staged_plugin = (PluginHost(context=MainContext(execution_runtime=<pal.execution.extensions.ExecutionSlot object at 0x7f8c572660>, mod...ve_notice=None, _last_error='')), PosixPath('/tmp/pytest-of-nathan/pytest-46/test_early_publication_cleanup0/builtin'))
+
+    def test_early_publication_cleanup_ownership(staged_plugin):
+        host, core, root = staged_plugin
+        captured = []
+        original = PluginScope.close
+        blocked = True
+        def cleanup():
+            if blocked:
+                raise RuntimeError("early cleanup pending")
+        def close(scope):
+            captured.append(scope)
+            scope.defer(cleanup)
+            return original(scope)
+        with patch.object(host, "_publish_module_capabilities", side_effect=RuntimeError("early publication failure")), patch.object(PluginScope, "close", close):
+            result = host.attach("publication_test")
+        assert result["status"] == "error"
+        assert captured[0].cleanups
+        try:
+            result = host.detach("publication_test")
+            assert result["status"] == "ok"
+>           assert "publication_test" in host.generations, "detach returned OK while pending early cleanup has no host owner"
+E           AssertionError: detach returned OK while pending early cleanup has no host owner
+E           assert 'publication_test' in {}
+E            +  where {} = PluginHost(context=MainContext(execution_runtime=<pal.execution.extensions.ExecutionSlot object at 0x7f8c572660>, modu...errors=[], last_scan_status=<RuntimeStatus.OK: 'ok'>, _generation_counter=0, _management_handle=None, _attaching=set()).generations
+
+/tmp/pal-state-audit-vigmkxbq/test_additional_review.py:27: AssertionError
+____________ test_early_publication_cleanup_ownership[third_party] _____________
+
+staged_plugin = (PluginHost(context=MainContext(execution_runtime=<pal.execution.extensions.ExecutionSlot object at 0x7f8c5bec10>, mod...None, _last_error='')), PosixPath('/tmp/pytest-of-nathan/pytest-46/test_early_publication_cleanup1/plugins/community'))
+
+    def test_early_publication_cleanup_ownership(staged_plugin):
+        host, core, root = staged_plugin
+        captured = []
+        original = PluginScope.close
+        blocked = True
+        def cleanup():
+            if blocked:
+                raise RuntimeError("early cleanup pending")
+        def close(scope):
+            captured.append(scope)
+            scope.defer(cleanup)
+            return original(scope)
+        with patch.object(host, "_publish_module_capabilities", side_effect=RuntimeError("early publication failure")), patch.object(PluginScope, "close", close):
+            result = host.attach("publication_test")
+        assert result["status"] == "error"
+        assert captured[0].cleanups
+        try:
+            result = host.detach("publication_test")
+            assert result["status"] == "ok"
+>           assert "publication_test" in host.generations, "detach returned OK while pending early cleanup has no host owner"
+E           AssertionError: detach returned OK while pending early cleanup has no host owner
+E           assert 'publication_test' in {}
+E            +  where {} = PluginHost(context=MainContext(execution_runtime=<pal.execution.extensions.ExecutionSlot object at 0x7f8c5bec10>, modu...errors=[], last_scan_status=<RuntimeStatus.OK: 'ok'>, _generation_counter=0, _management_handle=None, _attaching=set()).generations
+
+/tmp/pal-state-audit-vigmkxbq/test_additional_review.py:27: AssertionError
+____________ test_failed_extension_activation_retains_cleanup_owner ____________
+
+execution = namespace(context=MainContext(execution_runtime=<pal.execution.extensions.ExecutionSlot object at 0x7f8c47c2d0>, modul...one, cleanup_callbacks=[], shutdown_sync=None, shutdown_async=None, execution_extension=None, runtime_state_port=None))
+
+    def test_failed_extension_activation_retains_cleanup_owner(execution):
+        state = execution
+        extension = ProbeExtension()
+        def activate():
+            raise RuntimeError("activation failed")
+        def cleanup():
+            raise RuntimeError("candidate cleanup pending")
+        extension.activate_callback = activate
+        extension.close_callback = cleanup
+        with pytest.raises(RuntimeError, match="activation failed"):
+            state.slot.install(extension, state.context, state.owner)
+        assert state.slot.implementation is state.original
+        attempts = len(extension.closed)
+        state.slot.uninstall(state.context, state.owner)
+>       assert len(extension.closed) > attempts, "uninstall silently skips the failed candidate cleanup"
+E       AssertionError: uninstall silently skips the failed candidate cleanup
+E       assert 1 > 1
+E        +  where 1 = len([ExecutionRuntime(activity_decorator=None, provider_registry={'null_l3': NullL3Plugin(provider_id='null_l3', mounted=T...10>, _interrupt_handles={}, _interrupt_tasks={}, _interrupt_state_lock=<unlocked _thread.lock object at 0x7f8c63a190>)])
+E        +    where [ExecutionRuntime(activity_decorator=None, provider_registry={'null_l3': NullL3Plugin(provider_id='null_l3', mounted=T...10>, _interrupt_handles={}, _interrupt_tasks={}, _interrupt_state_lock=<unlocked _thread.lock object at 0x7f8c63a190>)] = <tests.test_execution_extension_admission.ProbeExtension object at 0x7f8c5d3380>.closed
+
+/tmp/pal-state-audit-vigmkxbq/test_additional_review.py:47: AssertionError
+=============================== warnings summary ===============================
+../../../.local/lib/python3.13/site-packages/jieba/_compat.py:18
+  /home/nathan/.local/lib/python3.13/site-packages/jieba/_compat.py:18: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../../../../../usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147
+  /usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('logilab')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../../../tmp/pal-state-audit-vigmkxbq/test_additional_review.py::test_early_publication_cleanup_ownership[first_party]
+FAILED ../../../../../tmp/pal-state-audit-vigmkxbq/test_additional_review.py::test_early_publication_cleanup_ownership[third_party]
+FAILED ../../../../../tmp/pal-state-audit-vigmkxbq/test_additional_review.py::test_failed_extension_activation_retains_cleanup_owner
+3 failed, 2 warnings in 8.69s

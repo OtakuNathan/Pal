@@ -44,6 +44,7 @@ models=(
     LogicalCoroutineSnapshotLifecycle
     ResidentMailboxLifecycle
     TaskDeliveryLifecycle
+    TaskWorkflowSelection
     ActiveLineageTriage
     OperatorTriageRecovery
 )

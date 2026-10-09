@@ -1,7 +1,7 @@
 """L1-owned output files. Publishing and retiring references are separate from I/O."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import hashlib
 import logging
 import os
@@ -26,6 +26,10 @@ class ResultSnapshotStore:
         self._histories: dict[int, object] = {}
         self._listeners: dict[int, object] = {}
         self._lock = threading.RLock()
+        # A missed ownership notification makes future collection unsafe.
+        # Keep this store conservative for its lifetime; an incremental
+        # notification cannot reconstruct an earlier missed ownership change.
+        self._reclamation_disabled = False
 
     def capture(self, text: str, *, call_id: str, lifetime: str, coverage: str = "unknown") -> ResultSnapshotRef:
         return self.capture_chunks((text.encode("utf-8"),), call_id=call_id, lifetime=lifetime, coverage=coverage)
@@ -138,17 +142,39 @@ class ResultSnapshotStore:
             def changed(old, new):
                 # Acquire all successor owners before dropping predecessors.
                 with self._lock:
-                    additions = [(turn.turn_id, turn_snapshot_refs(turn)) for turn in new]
-                    for _, refs in additions:
-                        for ref in refs:
-                            self._validate_path(ref)
-                    for identity, refs in additions:
-                        self.own((key, identity), refs)
-                    new_ids = {t.turn_id for t in new}
-                    for turn in old:
-                        if turn.turn_id not in new_ids:
-                            self._owners.pop((key, turn.turn_id), None)
-                    self.reap()
+                    try:
+                        # Stage the entire update: a later validation failure
+                        # must not replace even a same-turn predecessor owner.
+                        owners = self._owners.copy()
+                        references = self._refs.copy()
+                        for turn in new:
+                            refs = turn_snapshot_refs(turn)
+                            for ref in refs:
+                                self._validate_path(ref)
+                                references[ref.snapshot_id] = ref
+                            if refs:
+                                owners[(key, turn.turn_id)] = {ref.snapshot_id for ref in refs}
+                            else:
+                                owners.pop((key, turn.turn_id), None)
+                        new_ids = {turn.turn_id for turn in new}
+                        for turn in old:
+                            if turn.turn_id not in new_ids:
+                                owners.pop((key, turn.turn_id), None)
+                    except Exception:
+                        self._reclamation_disabled = True
+                        # Configured logging handlers are outside the core
+                        # ownership boundary and may themselves fail.
+                        with suppress(Exception):
+                            LOG.exception("History snapshot retention failed; reclamation disabled for this store lifetime")
+                        return
+                    self._refs, self._owners = references, owners
+                    try:
+                        self.reap()
+                    except Exception:
+                        # Ownership is installed. Cleanup is best effort and
+                        # must not abort the history/root publication either.
+                        with suppress(Exception):
+                            LOG.exception("History snapshot cleanup failed after ownership transfer")
             def validate(turns):
                 for turn in turns:
                     for ref in turn_snapshot_refs(turn):
@@ -195,6 +221,8 @@ class ResultSnapshotStore:
 
     def reap(self) -> None:
         with self._lock:
+            if self._reclamation_disabled:
+                return
             live = set().union(*self._owners.values(), *self._pending.values())
             for identity, ref in tuple(self._refs.items()):
                 if identity in live:
@@ -218,6 +246,8 @@ class ResultSnapshotStore:
 
     def finish_restore(self):
         self.release("restoring")
+        if self._reclamation_disabled:
+            return
         if not self.root.exists():
             return
         for path in self.root.iterdir():

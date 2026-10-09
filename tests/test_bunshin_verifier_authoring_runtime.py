@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
+# Keep the patch target in the same imported generation as the class below;
+# earlier lifecycle tests may evict this module and import a new generation.
+from pal.bunshin import scoped_execution
 from pal.bunshin.runner_components.agent_session import _build_scoped_execution_runtime
 from pal.bunshin.runner_components.tool_session import ToolSession
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime, BunshinScopedExecutionShellInput
@@ -247,7 +250,6 @@ def test_hydration_keeps_invocation_evidence_contract_filter(verifier, allowed, 
 
 
 def test_submit_serializes_corpus_writer_across_runtime_views_and_rechecks_freeze(verifier, monkeypatch):
-    from pal.bunshin import scoped_execution
     from pal.bunshin.swe_verification import verification_outcome_readiness
 
     _, workspace, probe, _, current, _ = verifier
@@ -305,7 +307,6 @@ def test_submit_serializes_corpus_writer_across_runtime_views_and_rechecks_freez
     ('op_lsp_diagnostics', 'read_lsp_diagnostics', {'status': 'ok', 'diagnostics_state': 'fresh', 'diagnostics': []}),
 ])
 def test_direct_execution_records_receipt_before_waiting_submit_enters(verifier, monkeypatch, canonical, alias, output):
-    from pal.bunshin import scoped_execution
     from pal.bunshin import verification_readiness
 
     _, workspace, _, _, current, _ = verifier
@@ -575,3 +576,29 @@ def test_pending_native_execution_prevents_submission(verifier):
     assert not result.ok and result.structured['reason'] == 'verification_execution_pending'
     runtime.role_execution_sessions.has_work = False
     assert payload(call('submit_verification_pass'))['submitted']
+
+
+def test_legacy_generation_is_private_and_borrows_visible_mount_authority():
+    from pal.bunshin.scoped_execution import _capture_legacy_finding_generation
+    from tests.capability_fixture import build_test_capability_handle
+
+    runtime = ExecutionRuntime()
+    public = mount_test_capability(runtime, canonical_path='op_test_visible', alias='visible',
+        InputModel=EmptyToolInput, OutputModel=StructuredToolOutput, handler=lambda _: {})
+    hidden = build_test_capability_handle(canonical_path=ADD_FINDING_CAPABILITY, alias='add_finding',
+        InputModel=EmptyToolInput, OutputModel=StructuredToolOutput, handler=lambda _: {})
+    current = runtime.registry_generation
+    try:
+        private = _capture_legacy_finding_generation(runtime, hidden.mounted_subtree)
+        assert runtime.registry_generation is current
+        assert 'add_finding' not in current.search_records
+        legacy = private.record_for_alias('add_finding').binding
+        visible = private.record_for_alias('visible').binding
+        assert legacy.admission.live
+        assert visible.admission is current.record_for_alias('visible').binding.admission
+        runtime.unmount_subtree(public)
+        assert not visible.admission.live  # private views do not revive borrowed owners
+        assert legacy.admission.live  # unrelated retirement cannot revoke private replay
+        assert 'add_finding' not in runtime.registry_generation.search_records
+    finally:
+        runtime.shutdown()

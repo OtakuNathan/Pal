@@ -58,6 +58,45 @@ class SearchStore:
             ).fetchall()
         return tuple({**dict(row), "archived": bool(row["archived"])} for row in rows)
 
+    def task_workflow_candidates(
+        self,
+        *,
+        actor_id: str,
+        task_id: str,
+        include_terminal: bool,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return at most two current-first candidates, never a history page.
+
+        Rank before LIMIT: ordinary nonterminal workflows, RESTARTING recovery,
+        then terminal history. Two rows suffice to detect multiple active
+        workflows; history volume cannot hide either active row. Controls keep
+        excluding RESTARTING, terminal, and archived rows. Status may fall back
+        to recovery/history, including archived workflows, as before.
+        """
+        self.database.ensure_schema()
+        clauses = [
+            "aggregate_type = ?",
+            "json_extract(payload_json, '$.owner') = ?",
+            "json_extract(payload_json, '$.task_id') = ?",
+        ]
+        if not include_terminal:
+            clauses.extend((
+                "state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED', 'RESTARTING')",
+                "coalesce(json_extract(payload_json, '$.archived'), 0) = 0",
+            ))
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                "SELECT aggregate_id AS workflow_id, state AS workflow_state "
+                "FROM bunshin_v2_aggregate_snapshots WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY CASE "
+                "WHEN state IN ('COMPLETED', 'REJECTED', 'CANCELLED') THEN 2 "
+                "WHEN state = 'RESTARTING' THEN 1 ELSE 0 END, "
+                "updated_at DESC, aggregate_id LIMIT 2",
+                (AggregateType.WORKFLOW.value, str(actor_id or "").strip(), str(task_id).strip()),
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
     def search_tasks(
         self,
         *,

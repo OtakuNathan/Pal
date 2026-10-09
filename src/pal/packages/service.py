@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from pal.packages.integration import RuntimeActivation
 from pal.packages.archive import PackageArtifact, digest, unpack, valid_id
 from pal.packages.environment import PackageEnvironment, RECEIPT
 from pal.packages.process import PackageError, atomic_json, check_cancelled, error_text, install_lock, run_command, runtime_lease
@@ -21,6 +23,13 @@ class PackageService:
         self.runtime_root = Path(runtime_root).expanduser().resolve()
         self.root = self.runtime_root / "packages"
         self.activation = activation
+
+    def _activation_gate(self, kind: str, name: str):
+        if self.activation is None:
+            return runtime_lease(self.runtime_root)
+        if isinstance(self.activation, RuntimeActivation):
+            return self.activation.switch_gate(kind, name)
+        return self.activation.gate()
 
     def _record_path(self, kind: str, name: str) -> Path:
         if kind not in {"plugin", "provider", "builtin"}:
@@ -160,7 +169,7 @@ class PackageService:
             self._publish(artifact.root / "host", target, record)
             self._save(record, "complete", status="ready")
             return record
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             self._save(record, record.get("stage", "check"), status="failed", error=str(exc))
             raise
 
@@ -223,7 +232,7 @@ class PackageService:
         archives = self.root / "previous" / record["kind"] / record["id"]
         archives.mkdir(parents=True, exist_ok=True)
         old = archives / uuid.uuid4().hex
-        gate = self.activation.gate() if self.activation else runtime_lease(self.runtime_root)
+        gate = self._activation_gate(record["kind"], record["id"])
         moved = False
         replaced = False
         retired = None
@@ -246,14 +255,14 @@ class PackageService:
                     os.replace(staging, target)
                     replaced = True
                     record["activation"] = self.activation.after(record["kind"], record["id"], state) if self.activation else "pending_rescan"
-                except Exception as exc:
+                except (Exception, asyncio.CancelledError) as exc:
                     if replaced:
                         if self.activation:
                             # Activation can fail after starting some resources.
                             # Stop those through their owner before restoring files.
                             try:
                                 self.activation.before(record["kind"], record["id"])
-                            except Exception as cleanup:
+                            except (Exception, asyncio.CancelledError) as cleanup:
                                 raise PackageError(f"Activation failed: {exc}; new generation cleanup failed: {cleanup}; installed files retained") from exc
                         shutil.rmtree(target)
                     if moved:
@@ -263,7 +272,7 @@ class PackageService:
                     if self.activation:
                         try:
                             self.activation.restore(record["kind"], record["id"], state)
-                        except Exception as recovery:
+                        except (Exception, asyncio.CancelledError) as recovery:
                             raise PackageError(f"Activation failed: {exc}; restoring previous version also failed: {recovery}") from exc
                     raise
         finally:
@@ -307,7 +316,7 @@ class PackageService:
                 record[f"{stage}_result"] = self._hook(None, stage, {"runtime_root": str(self.runtime_root)}, module=module)
             self._save(record, "complete", status="ready")
             return record
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             self._save(record, record["stage"], status="failed", error=str(exc))
             raise
 
@@ -332,6 +341,6 @@ class PackageService:
                 self._publish(source, self.runtime_root / "channel/providers" / wheel.provider_id, record)
             self._save(record, "complete", status="ready")
             return record
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             self._save(record, record["stage"], status="failed", error=str(exc))
             raise

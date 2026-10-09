@@ -1,4 +1,5 @@
 """Resumable removal of community plugins through their existing lifecycle owner."""
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import time
 import uuid
 
 from pal.packages.archive import valid_id
+from pal.packages.integration import RuntimeActivation
 from pal.packages.process import PackageError, atomic_json, check_cancelled, install_lock, runtime_lease, error_text
 from pal.plugins.settings import PluginSettings
 
@@ -84,47 +86,52 @@ def uninstall(service, name, *, purge_data=False):
             or (service.activation and name in service.activation.host.first_party_records)):
         raise PackageError("Built-in plugins cannot be uninstalled; use disable_plugin")
     with install_lock(root):
-        gate = service.activation.gate() if service.activation else runtime_lease(root)
-        with gate:
-            target = _safe_install_target(root, name)
-            if not target.exists() and (root / "channel/providers" / name).exists():
-                raise PackageError("Provider uninstall is not supported; only community plugins can be uninstalled")
-            path = service._record_path("plugin", name)
-            previous = json.loads(path.read_text()) if path.exists() else {}
-            pending = previous.get("status") in _REMOVAL_STATES
-            if pending and previous.get("purge_data") and not previous.get("data_purged"):
-                purge_data = True
-            manifest = target / "plugin.toml"
-            payload = tomllib.loads(manifest.read_text()) if manifest.exists() else {}
-            if payload and payload.get("plugin_id") != name:
-                raise PackageError("Plugin installation identity does not match directory")
-            data_paths = previous.get("data_paths") if pending else payload.get("uninstall", {}).get("data_paths")
-            if purge_data:
-                data_paths = validate_data_paths(root, data_paths, other_paths=_other_data_paths(root, name))
-            settings = PluginSettings(root)
-            host = service.activation.host if service.activation else None
-            installed = settings.installation(name)
-            if installed and Path(installed["filesystem_path"]).resolve() != target:
-                raise PackageError("Registered plugin path is outside its community installation directory")
-            if not target.exists() and not installed and not pending:
-                return {"id": name, "status": "uninstalled", "already_uninstalled": True}
-            if pending and previous.get("status") == "uninstalled" and (not purge_data or previous.get("data_purged")):
-                return previous
-            operation_id = previous.get("operation_id") if pending else uuid.uuid4().hex
-            if not isinstance(operation_id, str) or len(operation_id) != 32 or any(c not in "0123456789abcdef" for c in operation_id):
-                raise PackageError("Invalid uninstall operation identity")
-            retired = root / "packages/previous/plugin" / name / ("uninstall-" + operation_id)
-            for directory in (retired, *retired.parents):
-                if directory == root:
-                    break
-                if directory.is_symlink():
-                    raise PackageError("Uninstall retirement directory traverses a symlink")
-            record = {**previous, "id": name, "kind": "plugin", "operation": "uninstall",
-                      "operation_id": operation_id, "purge_data": purge_data, "data_paths": data_paths,
-                      "retired_path": str(retired), "status": "uninstalling"}
-            def save(stage, **updates):
-                record.update(stage=stage, updated_at=time.time(), **updates)
-                atomic_json(path, record)
+        target = _safe_install_target(root, name)
+        if not target.exists() and (root / "channel/providers" / name).exists():
+            raise PackageError("Provider uninstall is not supported; only community plugins can be uninstalled")
+        path = service._record_path("plugin", name)
+        previous = json.loads(path.read_text()) if path.exists() else {}
+        pending = previous.get("status") in _REMOVAL_STATES
+        if pending and previous.get("purge_data") and not previous.get("data_purged"):
+            purge_data = True
+        manifest = target / "plugin.toml"
+        payload = tomllib.loads(manifest.read_text()) if manifest.exists() else {}
+        if payload and payload.get("plugin_id") != name:
+            raise PackageError("Plugin installation identity does not match directory")
+        data_paths = previous.get("data_paths") if pending else payload.get("uninstall", {}).get("data_paths")
+        if purge_data:
+            data_paths = validate_data_paths(root, data_paths, other_paths=_other_data_paths(root, name))
+        settings = PluginSettings(root)
+        host = service.activation.host if service.activation else None
+        installed = settings.installation(name)
+        if installed and Path(installed["filesystem_path"]).resolve() != target:
+            raise PackageError("Registered plugin path is outside its community installation directory")
+        if not target.exists() and not installed and not pending:
+            return {"id": name, "status": "uninstalled", "already_uninstalled": True}
+        if pending and previous.get("status") == "uninstalled" and (not purge_data or previous.get("data_purged")):
+            return previous
+        operation_id = previous.get("operation_id") if pending else uuid.uuid4().hex
+        if not isinstance(operation_id, str) or len(operation_id) != 32 or any(c not in "0123456789abcdef" for c in operation_id):
+            raise PackageError("Invalid uninstall operation identity")
+        retired = root / "packages/previous/plugin" / name / ("uninstall-" + operation_id)
+        for directory in (retired, *retired.parents):
+            if directory == root:
+                break
+            if directory.is_symlink():
+                raise PackageError("Uninstall retirement directory traverses a symlink")
+        record = {**previous, "id": name, "kind": "plugin", "operation": "uninstall",
+                  "operation_id": operation_id, "purge_data": purge_data, "data_paths": data_paths,
+                  "retired_path": str(retired), "status": "uninstalling"}
+        def save(stage, **updates):
+            record.update(stage=stage, updated_at=time.time(), **updates)
+            atomic_json(path, record)
+        with service._activation_gate("plugin", name):
+            cleanup_before = tuple((generation, generation.cleanup_started)
+                                   for generation in service.activation.host.generations.values()
+                                   ) if isinstance(service.activation, RuntimeActivation) else ()
+            retained_before = settings.get("plugin.retained:" + name)
+            current_detach_result = None
+            destructive_started = False
             try:
                 check_cancelled()
                 if installed and (not pending or settings.get("plugin.retained:" + name) is None):
@@ -134,10 +141,15 @@ def uninstall(service, name, *, purge_data=False):
                 save("detaching", error="")
                 if host and (name in host.generations or host._record(name) is not None):
                     result = host.detach(name)
+                    current_detach_result = result
                     record["detach_result"] = result
+                    for key in ("logical_unload_committed", "cleanup_pending", "cleanup_plugin_id", "recovery_hint"):
+                        if key in result:
+                            record[key] = result[key]
                     if result["status"] != "ok" or name in host.generations:
                         raise PackageError(f"Plugin cleanup is incomplete: {result}")
                 check_cancelled()
+                destructive_started = True
                 save("retiring")
                 if target.exists():
                     retired.parent.mkdir(parents=True, exist_ok=True)
@@ -183,8 +195,29 @@ def uninstall(service, name, *, purge_data=False):
                     settings.delete("plugin.retained:" + name)
                     record["data_purged"] = True
                 record.pop("pending_cleanup", None)
+                record.pop("recovery_hint", None)
+                record.pop("cleanup_plugin_id", None)
+                record["cleanup_pending"] = False
                 save("complete", status="uninstalled", data_retained=not purge_data)
                 return record
-            except Exception as exc:
-                save(record.get("stage", "detaching"), status="cleanup_failed", error=error_text(exc))
+            except (Exception, asyncio.CancelledError) as exc:
+                detach_result = current_detach_result or {}
+                committed = (bool(detach_result.get("logical_unload_committed"))
+                             or detach_result.get("status") == "ok"
+                             or any(not started and generation.cleanup_started
+                                    for generation, started in cleanup_before)
+                             or destructive_started)
+                if committed:
+                    save(record.get("stage", "detaching"), status="cleanup_failed", error=error_text(exc))
+                else:
+                    # Entry rollback must also remove this uncommitted removal
+                    # intent, otherwise restart/attach would still be blocked.
+                    if previous:
+                        atomic_json(path, previous)
+                    else:
+                        path.unlink(missing_ok=True)
+                    if retained_before is None:
+                        settings.delete("plugin.retained:" + name)
+                    else:
+                        settings.set("plugin.retained:" + name, retained_before)
                 raise

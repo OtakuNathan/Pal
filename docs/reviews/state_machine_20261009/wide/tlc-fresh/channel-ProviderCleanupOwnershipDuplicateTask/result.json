@@ -1,0 +1,32 @@
+{
+  "config": "spec/channel/ProviderCleanupOwnershipDuplicateTask.cfg",
+  "module": "spec/channel/ProviderCleanupOwnership.tla",
+  "kind": "negative",
+  "invariant": "SinglePending",
+  "status": "passed",
+  "input_sha256": {
+    "spec/channel/ProviderCleanupOwnershipDuplicateTask.cfg": "bc647b5de20bb4737ba86083fd0b220343bb4996be441b715e5fd327212b2dd5",
+    "spec/channel/EndpointHubImplementationReducer.tla": "3037baf57488cf361b1756e9e0e2a10a4949007def273906d302ede484ac2884",
+    "spec/channel/EndpointHubLifecycle.tla": "9193d3da210406e8a5565bdccd831ef9fa0870588096929d9b33bdfae9e19832",
+    "spec/channel/ProviderCleanupOwnership.tla": "0dcdf3f3250abd3df32209bca6422006605a58ad5089d1e08a3581162cbbb9b6"
+  },
+  "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-ProviderCleanupOwnershipDuplicateTask/tlc.log",
+  "command": [
+    "java",
+    "-Xmx256m",
+    "-XX:+UseParallelGC",
+    "-jar",
+    "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+    "-workers",
+    "1",
+    "-seed",
+    "1",
+    "-metadir",
+    "/tmp/pal-tlc-kc070ug4",
+    "-config",
+    "ProviderCleanupOwnershipDuplicateTask.cfg",
+    "ProviderCleanupOwnership.tla"
+  ],
+  "returncode": 12,
+  "elapsed_seconds": 3.463
+}

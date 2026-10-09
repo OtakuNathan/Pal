@@ -1,0 +1,6 @@
+passed: positive spec/core/PluginPublicationLifecycle.cfg (3.881s)
+passed: negative spec/core/PluginPublicationLifecycleEarlyCleanupUnsafe.cfg (3.093s)
+passed: negative spec/core/PluginPublicationLifecycleUnsafe.cfg (3.111s)
+passed: negative spec/core/PluginPublicationLifecycleWithdrawalUnsafe.cfg (3.093s)
+passed: positive spec/execution/ExtensionRollback.cfg (3.108s)
+passed: negative spec/execution/ExtensionRollbackUnsafe.cfg (3.118s)

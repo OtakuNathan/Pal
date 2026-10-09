@@ -1,0 +1,20 @@
+{
+  "command": [
+    "env",
+    "TLA2TOOLS_JAR=/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_bunshin_imported_plan_model.py",
+    "-k",
+    "tlc",
+    "--junitxml=docs/reviews/state_machine_20261009/wide/imported-plan-tlc.xml"
+  ],
+  "status": "passed",
+  "observed_peak_rss_mib": 207.2,
+  "elapsed_seconds": 27.3,
+  "jvm_heap": "256m",
+  "python_address_space_limit": null,
+  "returncode": 0
+}

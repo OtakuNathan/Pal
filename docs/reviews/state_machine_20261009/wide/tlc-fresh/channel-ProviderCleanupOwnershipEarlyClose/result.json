@@ -1,0 +1,32 @@
+{
+  "config": "spec/channel/ProviderCleanupOwnershipEarlyClose.cfg",
+  "module": "spec/channel/ProviderCleanupOwnership.tla",
+  "kind": "negative",
+  "invariant": "TransportBeforeClose",
+  "status": "passed",
+  "input_sha256": {
+    "spec/channel/ProviderCleanupOwnershipEarlyClose.cfg": "550965043200755a549c12ecd81fcec3aa8d2a34c82c52244dfd4d5d78c152af",
+    "spec/channel/EndpointHubImplementationReducer.tla": "3037baf57488cf361b1756e9e0e2a10a4949007def273906d302ede484ac2884",
+    "spec/channel/EndpointHubLifecycle.tla": "9193d3da210406e8a5565bdccd831ef9fa0870588096929d9b33bdfae9e19832",
+    "spec/channel/ProviderCleanupOwnership.tla": "0dcdf3f3250abd3df32209bca6422006605a58ad5089d1e08a3581162cbbb9b6"
+  },
+  "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-ProviderCleanupOwnershipEarlyClose/tlc.log",
+  "command": [
+    "java",
+    "-Xmx256m",
+    "-XX:+UseParallelGC",
+    "-jar",
+    "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+    "-workers",
+    "1",
+    "-seed",
+    "1",
+    "-metadir",
+    "/tmp/pal-tlc-guyza7c8",
+    "-config",
+    "ProviderCleanupOwnershipEarlyClose.cfg",
+    "ProviderCleanupOwnership.tla"
+  ],
+  "returncode": 12,
+  "elapsed_seconds": 3.588
+}

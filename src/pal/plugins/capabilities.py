@@ -6,7 +6,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_READ,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import NextToolHint, ToolGuidance
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, NextToolHint, ToolGuidance
 from pal.packages.jobs import PackageJobs
 from pal.packages.notifications import PackageCompletionSource
 from pal.packages.tool_models import PackageInstallInput, PackagePrepareInput, PackageStatusInput, PluginUninstallInput
@@ -37,6 +37,13 @@ from pal.shared.diagnostics import exception_report
 
 if TYPE_CHECKING:
     from pal.plugins.host import PluginHost
+
+
+@dataclass(frozen=True)
+class _LifecycleResult(IntrospectionResult):
+    # Preserve the public introspection shape while carrying the committed
+    # logical-unload receipt through the capability adapter on cleanup failure.
+    effect_receipt: EffectReceipt | None = None
 
 
 @capability_node(
@@ -196,10 +203,12 @@ class PluginsIntrospectionProvider:
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.attach(str(call.args.get("name") or ""))
-        return IntrospectionResult(
+        return _LifecycleResult(
             status=result["status"],
             text="plugin attach result",
             structured=result,
+            effect_receipt=(EffectReceipt(outcome=EffectOutcome.APPLIED) if result.get("logical_unload_committed") else None),
+            recovery_hint=str(result.get("recovery_hint") or ""),
             llm_text=render_titled_structured_for_llm("Plugin attach result", result),
         )
 
@@ -221,10 +230,12 @@ class PluginsIntrospectionProvider:
     )
     def reattach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.reattach(str(call.args.get("name") or ""))
-        return IntrospectionResult(
+        return _LifecycleResult(
             status=result["status"],
             text="plugin reattach result",
             structured=result,
+            effect_receipt=(EffectReceipt(outcome=EffectOutcome.APPLIED) if result.get("logical_unload_committed") else None),
+            recovery_hint=str(result.get("recovery_hint") or ""),
             llm_text=render_titled_structured_for_llm("Plugin reattach result", result),
         )
 
@@ -246,10 +257,12 @@ class PluginsIntrospectionProvider:
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.detach(str(call.args.get("name") or ""))
-        return IntrospectionResult(
+        return _LifecycleResult(
             status=result["status"],
             text="plugin detach result",
             structured=result,
+            effect_receipt=(EffectReceipt(outcome=EffectOutcome.APPLIED) if result.get("logical_unload_committed") else None),
+            recovery_hint=str(result.get("recovery_hint") or ""),
             llm_text=render_titled_structured_for_llm("Plugin detach result", result),
         )
 
@@ -271,10 +284,12 @@ class PluginsIntrospectionProvider:
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.enable(str(call.args.get("name") or ""))
-        return IntrospectionResult(
+        return _LifecycleResult(
             status=result["status"],
             text="plugin enable result",
             structured=result,
+            effect_receipt=(EffectReceipt(outcome=EffectOutcome.APPLIED) if result.get("logical_unload_committed") else None),
+            recovery_hint=str(result.get("recovery_hint") or ""),
             llm_text=render_titled_structured_for_llm("Plugin enable result", result),
         )
 
@@ -296,10 +311,12 @@ class PluginsIntrospectionProvider:
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.disable(str(call.args.get("name") or ""))
-        return IntrospectionResult(
+        return _LifecycleResult(
             status=result["status"],
             text="plugin disable result",
             structured=result,
+            effect_receipt=(EffectReceipt(outcome=EffectOutcome.APPLIED) if result.get("logical_unload_committed") else None),
+            recovery_hint=str(result.get("recovery_hint") or ""),
             llm_text=render_titled_structured_for_llm("Plugin disable result", result),
         )
 
@@ -314,7 +331,7 @@ class PluginsIntrospectionProvider:
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self.host.rescan()
-        return IntrospectionResult(
+        return _LifecycleResult(
             status=(
                 RuntimeStatus.ERROR
                 if result.get("scan_errors")
@@ -322,6 +339,8 @@ class PluginsIntrospectionProvider:
             ),
             text="plugin rescan result",
             structured=result,
+            effect_receipt=(EffectReceipt(outcome=EffectOutcome.APPLIED) if result.get("logical_unload_committed") else None),
+            recovery_hint=str(result.get("recovery_hint") or ""),
             llm_text=render_titled_structured_for_llm("Plugin rescan result", result),
         )
 
@@ -348,10 +367,12 @@ class PluginsIntrospectionProvider:
             if result.get("scan_errors") or result.get("attach_errors")
             else RuntimeStatus.OK
         )
-        return IntrospectionResult(
+        return _LifecycleResult(
             status=status,
             text="plugin rescan and attach result",
             structured=result,
+            effect_receipt=(EffectReceipt(outcome=EffectOutcome.APPLIED) if result.get("logical_unload_committed") else None),
+            recovery_hint=str(result.get("recovery_hint") or ""),
             llm_text=render_titled_structured_for_llm("Plugin rescan and attach result", result),
         )
 

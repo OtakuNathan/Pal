@@ -1,0 +1,562 @@
+...................................................FFFFFFFFFFF [ 89%]
+FFF....                                                                  [100%]
+=================================== FAILURES ===================================
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[attach_channel_endpoint] _
+
+name = 'attach_channel_endpoint'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89935860>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f8907e3f0: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[detach_channel_endpoint] _
+
+name = 'detach_channel_endpoint'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f8c89cde0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88fc3790: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[enable_channel_endpoint] _
+
+name = 'enable_channel_endpoint'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89937af0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88f47c20: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[disable_channel_endpoint] _
+
+name = 'disable_channel_endpoint'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89937bd0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88ee8e10: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[restart_channel_endpoint] _
+
+name = 'restart_channel_endpoint'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89937af0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88ea03d0: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[reload_channel_provider] _
+
+name = 'reload_channel_provider'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89937d90>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88eb05f0: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[rescan_channel_providers] _
+
+name = 'rescan_channel_providers'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89937a10>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88eb0b30: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_attach] _
+
+name = 'op_channel_mgmt_attach'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89937af0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88eb1010: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_detach] _
+
+name = 'op_channel_mgmt_detach'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89937d90>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88eb0590: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_enable] _
+
+name = 'op_channel_mgmt_enable'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f8c788050>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88eb1c70: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_disable] _
+
+name = 'op_channel_mgmt_disable'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f8c89f1c0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88eb16d0: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_restart_endpoint] _
+
+name = 'op_channel_mgmt_restart_endpoint'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89937af0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88eb1190: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_reload_provider] _
+
+name = 'op_channel_mgmt_reload_provider'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f8c809da0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88ed7a10: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+_ test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_provider_rescan] _
+
+name = 'op_channel_provider_rescan'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f8c89cde0>
+
+    @pytest.mark.parametrize("name", [
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
+        "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+        "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
+    ])
+    def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        from types import SimpleNamespace
+        from pal.execution.runtime import ExecutionRuntime
+        runtime = ExecutionRuntime()
+        attempted, entered = threading.Event(), threading.Event()
+        def body(self, call):
+            entered.set()
+            return "done"
+        monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+        for mode in ("read", "write"):
+            original = getattr(runtime.lifecycle_gate, "_acquire_" + mode)
+            def acquire(original=original):
+                attempted.set()
+                original()
+            monkeypatch.setattr(runtime.lifecycle_gate, "_acquire_" + mode, acquire)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.read():
+                attempted.clear()
+                future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+>               assert attempted.wait(2)
+E               assert False
+E                +  where False = wait(2)
+E                +    where wait = <threading.Event at 0x7f88eb0650: unset>.wait
+
+tests/test_lifecycle_gate_cancellation.py:88: AssertionError
+=============================== warnings summary ===============================
+../../../.local/lib/python3.13/site-packages/jieba/_compat.py:18
+  /home/nathan/.local/lib/python3.13/site-packages/jieba/_compat.py:18: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../../../../../usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147
+  /usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('logilab')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[attach_channel_endpoint]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[detach_channel_endpoint]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[enable_channel_endpoint]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[disable_channel_endpoint]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[restart_channel_endpoint]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[reload_channel_provider]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[rescan_channel_providers]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_attach]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_detach]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_enable]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_disable]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_restart_endpoint]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_mgmt_reload_provider]
+FAILED tests/test_lifecycle_gate_cancellation.py::test_channel_mutation_waits_for_admitted_execution_before_entering[op_channel_provider_rescan]
+14 failed, 55 passed, 2 warnings, 82 subtests passed in 46.57s

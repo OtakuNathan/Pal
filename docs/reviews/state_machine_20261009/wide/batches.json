@@ -1,0 +1,764 @@
+{
+  "mode": "serial groups of 8 test files, isolated pytest processes",
+  "memory_max": "1GiB virtual address space per child; aggregate RSS watchdog at 850MiB; memory cgroup disabled by kernel",
+  "cpu_quota": "100%",
+  "results": [
+    {
+      "batch": "core-a",
+      "group": "core-a-00",
+      "files": [
+        "tests/test_adapter_error_fidelity.py",
+        "tests/test_architecture_skeleton.py",
+        "tests/test_artifact_text_access.py",
+        "tests/test_browser_cli_plugin.py",
+        "tests/test_browser_network_evaluate.py",
+        "tests/test_browser_text_snapshot.py",
+        "tests/test_cache_tail.py",
+        "tests/test_cache_warm_deadline.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 89.3
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-01",
+      "files": [
+        "tests/test_capability_alias_routing.py",
+        "tests/test_channel_ingress_ir.py",
+        "tests/test_channel_proactive_error_fidelity.py",
+        "tests/test_channel_replacement_cleanup.py",
+        "tests/test_chatgpt_subscription.py",
+        "tests/test_checklist_recovery.py",
+        "tests/test_compaction_artifact_lease.py",
+        "tests/test_compaction_fixtures.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 33.59
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-02",
+      "files": [
+        "tests/test_compaction_hosts_recovery.py",
+        "tests/test_continuity_compaction.py",
+        "tests/test_core_events.py",
+        "tests/test_dreaming_settings.py",
+        "tests/test_effect_kind_audit.py",
+        "tests/test_error_delivery_contract.py",
+        "tests/test_execution_approval.py",
+        "tests/test_execution_extension_admission.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 13.06
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-03",
+      "files": [
+        "tests/test_execution_runtime_async.py",
+        "tests/test_failure_flow.py",
+        "tests/test_fd_lease.py",
+        "tests/test_file_batch_edit.py",
+        "tests/test_file_path_and_newline_contracts.py",
+        "tests/test_file_read_tool.py",
+        "tests/test_file_write_tool.py",
+        "tests/test_foundation_sidecar.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 12.54
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-04",
+      "files": [
+        "tests/test_git_tool.py",
+        "tests/test_history_listener_noexcept.py",
+        "tests/test_hot_cache_compaction.py",
+        "tests/test_import_boundaries.py",
+        "tests/test_interrupt_backpressure.py",
+        "tests/test_l1_context_index.py",
+        "tests/test_lifecycle_gate_cancellation.py",
+        "tests/test_llm_decode_diagnostics.py"
+      ],
+      "status": "failed",
+      "returncode": 1,
+      "elapsed_seconds": 49.64
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-05",
+      "files": [
+        "tests/test_llm_fallback_switch.py",
+        "tests/test_llm_maintenance_error_fidelity.py",
+        "tests/test_llm_output_recovery.py",
+        "tests/test_llm_response_hooks.py",
+        "tests/test_llm_schema_migration.py",
+        "tests/test_llm_usage.py",
+        "tests/test_lossless_round_history.py",
+        "tests/test_lsp_diagnostic_evidence.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 153.43
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-06",
+      "files": [
+        "tests/test_lsp_tool_entrypoint.py",
+        "tests/test_mcp_prompt_delivery.py",
+        "tests/test_mcp_strict_contract.py",
+        "tests/test_memory_artifact_skill_fidelity.py",
+        "tests/test_memory_dreaming.py",
+        "tests/test_memory_generations.py",
+        "tests/test_memory_recall_paging.py",
+        "tests/test_memory_two_segment_service.py"
+      ],
+      "status": "failed",
+      "returncode": 1,
+      "elapsed_seconds": 43.11
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-07",
+      "files": [
+        "tests/test_observation_coverage.py",
+        "tests/test_p6_matrix_gaps.py",
+        "tests/test_package_cleanup_ownership.py",
+        "tests/test_package_data.py",
+        "tests/test_package_jobs.py",
+        "tests/test_persistence_read_only.py",
+        "tests/test_plugin_publication_rollback.py",
+        "tests/test_plugin_skill_example.py"
+      ],
+      "status": "failed",
+      "returncode": 1,
+      "elapsed_seconds": 45.62
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-08",
+      "files": [
+        "tests/test_port_contracts.py",
+        "tests/test_proactive_destinations.py",
+        "tests/test_projection_c_review.py",
+        "tests/test_projection_followup_review.py",
+        "tests/test_projection_isolation.py",
+        "tests/test_projection_retirement_ownership.py",
+        "tests/test_projection_session.py",
+        "tests/test_projection_two_segment.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 12.54
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-09",
+      "files": [
+        "tests/test_projection_visibility_cache.py",
+        "tests/test_prompt_cache_evidence.py",
+        "tests/test_prompt_cache_v2_runtime.py",
+        "tests/test_prompt_infrastructure.py",
+        "tests/test_provider_install.py",
+        "tests/test_reasoning_continuation_settings.py",
+        "tests/test_replay_persistence.py",
+        "tests/test_result_guidance.py"
+      ],
+      "status": "failed",
+      "returncode": 1,
+      "elapsed_seconds": 184.94
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-10",
+      "files": [
+        "tests/test_result_guidance_h.py",
+        "tests/test_runtime_compaction.py",
+        "tests/test_runtime_stability.py",
+        "tests/test_runtime_status.py",
+        "tests/test_service_logging.py",
+        "tests/test_shape_native_preservation.py",
+        "tests/test_skill.py",
+        "tests/test_socket_backpressure_recovery.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 65.78
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-11",
+      "files": [
+        "tests/test_socket_interactions.py",
+        "tests/test_tlc_runner.py",
+        "tests/test_tool_contract_defaults.py",
+        "tests/test_tool_contract_review_regressions.py",
+        "tests/test_tool_discovery_contracts.py",
+        "tests/test_tool_efficiency_benchmark.py",
+        "tests/test_tool_guidance.py",
+        "tests/test_tool_output_recovery.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 33.61
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-12",
+      "files": [
+        "tests/test_tool_result_fidelity.py",
+        "tests/test_tool_search.py",
+        "tests/test_tools_eval.py",
+        "tests/test_turn_event_bus.py",
+        "tests/test_two_segment_executor_flow.py",
+        "tests/test_v3_4b14ce4_review_fixes.py",
+        "tests/test_v3_af51d74_review_fixes.py",
+        "tests/test_v3_b_family_runtime.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 14.54
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-13",
+      "files": [
+        "tests/test_v3_h02_graceful_recovery.py",
+        "tests/test_v3_n11_followup.py",
+        "tests/test_v3_n2_continuity_lview.py",
+        "tests/test_v3_n3_invoker_projection.py",
+        "tests/test_v3_real_provider_e2e.py",
+        "tests/test_v3_warm_handoff_split.py",
+        "tests/test_web_fetch_screenshot.py",
+        "tests/test_web_service_error_fidelity.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 14.54
+    },
+    {
+      "batch": "core-a",
+      "group": "core-a-14",
+      "files": [
+        "tests/test_worker_memory_read_lease.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 6.53
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-00",
+      "files": [
+        "tests/test_alias_search_benchmark.py",
+        "tests/test_artifact_manager.py",
+        "tests/test_bootstrap_and_repositories.py",
+        "tests/test_browser_extensions.py",
+        "tests/test_browser_provisioning.py",
+        "tests/test_cache_diagnostics.py",
+        "tests/test_cache_tail_admission.py",
+        "tests/test_cache_wire.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 927.22
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-01",
+      "files": [
+        "tests/test_capability_result_bridge_fidelity.py",
+        "tests/test_channel_lifecycle.py",
+        "tests/test_channel_provider_cleanup.py",
+        "tests/test_channel_send_message.py",
+        "tests/test_checklist.py",
+        "tests/test_cli.py",
+        "tests/test_compaction_cancel_control.py",
+        "tests/test_compaction_gate.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 16.09
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-02",
+      "files": [
+        "tests/test_continuation_capture.py",
+        "tests/test_control_plane.py",
+        "tests/test_debug_dump.py",
+        "tests/test_dynamic_access.py",
+        "tests/test_embedding.py",
+        "tests/test_execution_admission_model.py",
+        "tests/test_execution_cancellation.py",
+        "tests/test_execution_extensions.py"
+      ],
+      "status": "failed",
+      "returncode": 1,
+      "elapsed_seconds": 23.59
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-03",
+      "files": [
+        "tests/test_failure_delivery_redaction.py",
+        "tests/test_failure_prompt_scalar_fidelity.py",
+        "tests/test_fd_manager_lifecycle.py",
+        "tests/test_file_edit_tool.py",
+        "tests/test_file_read_ranges.py",
+        "tests/test_file_state_cache.py",
+        "tests/test_foundation_heat.py",
+        "tests/test_foundation_ttl.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 10.04
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-04",
+      "files": [
+        "tests/test_h01_combination_matrix.py",
+        "tests/test_history_root_authority.py",
+        "tests/test_immutable_tool_facade.py",
+        "tests/test_interjection_injection.py",
+        "tests/test_invoker_native_capture.py",
+        "tests/test_l1_turn_ir.py",
+        "tests/test_llm_cli.py",
+        "tests/test_llm_endpoint_runtime_contract.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 17.58
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-05",
+      "files": [
+        "tests/test_llm_ir_shapes.py",
+        "tests/test_llm_model_hooks.py",
+        "tests/test_llm_real_integration.py",
+        "tests/test_llm_runtime_ir.py",
+        "tests/test_llm_sticky_fallback.py",
+        "tests/test_logical_execution_state.py",
+        "tests/test_lsp.py",
+        "tests/test_lsp_result_projection.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 86.37
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-06",
+      "files": [
+        "tests/test_mcp.py",
+        "tests/test_mcp_schema_data_fidelity.py",
+        "tests/test_mcp_tool_schema_validation.py",
+        "tests/test_memory_context_failures.py",
+        "tests/test_memory_dreaming_runtime.py",
+        "tests/test_memory_l1_ir_service.py",
+        "tests/test_memory_review.py",
+        "tests/test_model_switch.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 28.12
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-07",
+      "files": [
+        "tests/test_optional_shell_backend.py",
+        "tests/test_p6_transport_lanes.py",
+        "tests/test_package_completion_delivery.py",
+        "tests/test_package_installation.py",
+        "tests/test_path_delete_tool.py",
+        "tests/test_plugin_entry_withdrawal.py",
+        "tests/test_plugin_raii.py",
+        "tests/test_plugin_uninstall.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 84.86
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-08",
+      "files": [
+        "tests/test_proactive_context_isolation.py",
+        "tests/test_projection_branch_review.py",
+        "tests/test_projection_contracts.py",
+        "tests/test_projection_fourth_review.py",
+        "tests/test_projection_live_integration.py",
+        "tests/test_projection_review_adversarial.py",
+        "tests/test_projection_third_review.py",
+        "tests/test_projection_vertical_path.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 10.04
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-09",
+      "files": [
+        "tests/test_prompt_cache_diagnostics.py",
+        "tests/test_prompt_cache_policy.py",
+        "tests/test_prompt_context_lifecycle.py",
+        "tests/test_prompt_prefix_stability_e2e.py",
+        "tests/test_public_proof.py",
+        "tests/test_release_packaging.py",
+        "tests/test_resident_checkpoint.py",
+        "tests/test_result_guidance_budget.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 14.56
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-10",
+      "files": [
+        "tests/test_result_snapshots.py",
+        "tests/test_runtime_config.py",
+        "tests/test_runtime_state.py",
+        "tests/test_send_attachment.py",
+        "tests/test_setup_wizard.py",
+        "tests/test_shell_exec.py",
+        "tests/test_skill_and_failure_delivery_contracts.py",
+        "tests/test_socket_client.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 28.61
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-11",
+      "files": [
+        "tests/test_text_search.py",
+        "tests/test_tool_activity.py",
+        "tests/test_tool_contract_review.py",
+        "tests/test_tool_diagnostic_presentation.py",
+        "tests/test_tool_efficiency.py",
+        "tests/test_tool_failure_affordances.py",
+        "tests/test_tool_output_null_fidelity.py",
+        "tests/test_tool_recovery_rendering.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 20.08
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-12",
+      "files": [
+        "tests/test_tool_schema_properties.py",
+        "tests/test_tool_search_objects.py",
+        "tests/test_tty.py",
+        "tests/test_two_segment_budget_facts.py",
+        "tests/test_typing_ownership.py",
+        "tests/test_v3_7d182fd_review_fixes.py",
+        "tests/test_v3_anchor_read_confirmation.py",
+        "tests/test_v3_c9cb2d2_review_fixes.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 32.63
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-13",
+      "files": [
+        "tests/test_v3_m10_final_wire.py",
+        "tests/test_v3_n1_root_lifecycle.py",
+        "tests/test_v3_n2_projection_fixes.py",
+        "tests/test_v3_n3_vertical_trace.py",
+        "tests/test_v3_review_95373ef_fixes.py",
+        "tests/test_warm_handoff.py",
+        "tests/test_web_layout_inspection.py",
+        "tests/test_web_tool_guidance.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 11.05
+    },
+    {
+      "batch": "core-b",
+      "group": "core-b-14",
+      "files": [
+        "tests/test_worker_tool_routing.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 7.54
+    },
+    {
+      "batch": "bunshin-a",
+      "group": "bunshin-a-00",
+      "files": [
+        "tests/test_bunshin_adapters.py",
+        "tests/test_bunshin_authoring_failure_effects.py",
+        "tests/test_bunshin_catalog.py",
+        "tests/test_bunshin_checkpoint_lifecycle.py",
+        "tests/test_bunshin_completion_resume.py",
+        "tests/test_bunshin_control_error_fidelity.py",
+        "tests/test_bunshin_delivery.py",
+        "tests/test_bunshin_dependency_repair_apply.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 27.61
+    },
+    {
+      "batch": "bunshin-a",
+      "group": "bunshin-a-01",
+      "files": [
+        "tests/test_bunshin_dependency_repair_model.py",
+        "tests/test_bunshin_dependency_repair_recovery.py",
+        "tests/test_bunshin_editable_verifier_drafts.py",
+        "tests/test_bunshin_failure_diagnostics.py",
+        "tests/test_bunshin_families.py",
+        "tests/test_bunshin_git_mounts.py",
+        "tests/test_bunshin_graph.py",
+        "tests/test_bunshin_historical_contract.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 75.78
+    },
+    {
+      "batch": "bunshin-a",
+      "group": "bunshin-a-02",
+      "files": [
+        "tests/test_bunshin_imported_plan_binding.py",
+        "tests/test_bunshin_interaction_failure_recovery.py",
+        "tests/test_bunshin_llm_transport.py",
+        "tests/test_bunshin_lsp_client_lifecycle.py",
+        "tests/test_bunshin_native_architect_guidance.py",
+        "tests/test_bunshin_output_length_exhaustion.py",
+        "tests/test_bunshin_package_migration.py",
+        "tests/test_bunshin_process_lifecycle.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 33.14
+    },
+    {
+      "batch": "bunshin-a",
+      "group": "bunshin-a-03",
+      "files": [
+        "tests/test_bunshin_producer_tool_diagnostics.py",
+        "tests/test_bunshin_public.py",
+        "tests/test_bunshin_readonly_skills.py",
+        "tests/test_bunshin_replan.py",
+        "tests/test_bunshin_restart_import_lifecycle.py",
+        "tests/test_bunshin_role_gateway.py",
+        "tests/test_bunshin_sandbox.py",
+        "tests/test_bunshin_startup_recovery_model.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 113.98
+    },
+    {
+      "batch": "bunshin-a",
+      "group": "bunshin-a-04",
+      "files": [
+        "tests/test_bunshin_submission_errors.py",
+        "tests/test_bunshin_unchanged_dependency_baseline.py",
+        "tests/test_bunshin_unknown_triage_model.py",
+        "tests/test_bunshin_verifier_authoring_runtime.py",
+        "tests/test_bunshin_verifier_draft_model.py",
+        "tests/test_bunshin_verifier_failure_provenance.py",
+        "tests/test_bunshin_verifier_legacy_receipts.py",
+        "tests/test_bunshin_verifier_prompt_contract.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 189.68
+    },
+    {
+      "batch": "bunshin-a",
+      "group": "bunshin-a-05",
+      "files": [
+        "tests/test_bunshin_verifier_retry_identity_model.py",
+        "tests/test_bunshin_verifier_submission_freshness.py",
+        "tests/test_bunshin_verifier_tool_feedback.py",
+        "tests/test_bunshin_worker_events.py",
+        "tests/test_bunshin_workflow_triage_active_roles.py",
+        "tests/test_bunshin_workspace_observation.py",
+        "tests/efficiency_cli/verifier/test_efficiency_cli_e2e.py",
+        "tests/efficiency_metrics/verifier/test_efficiency_metrics_verifier.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 126.51
+    },
+    {
+      "batch": "bunshin-a",
+      "group": "bunshin-a-06",
+      "files": [
+        "tests/efficiency_report/verifier/test_efficiency_report_edges.py",
+        "tests/efficiency_store/verifier/test_efficiency_store_verifier.py",
+        "tests/execution_adapters/verifier/test_artifact_candidate_input_exclusion_adversarial.py",
+        "tests/input_binding/verifier/test_input_binding_verifier.py",
+        "tests/orchestrator/verifier/test_bound_input_delivery_end_to_end.py",
+        "tests/prompt_adapter/developer/test_bound_input_advertisement.py",
+        "tests/websocket_bridge_provider/developer/test_websocket_bridge_provider.py",
+        "tests/websocket_sidecar/developer/test_sidecar.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 19.08
+    },
+    {
+      "batch": "bunshin-a",
+      "group": "bunshin-a-07",
+      "files": [
+        "tests/websocket_sidecar/verification/test_two_pal_bridge.py",
+        "tests/workflow_service/verifier/test_input_binding_preflight_verifier.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 20.1
+    },
+    {
+      "batch": "bunshin-b",
+      "group": "bunshin-b-00",
+      "files": [
+        "tests/test_bunshin_archive_contract.py",
+        "tests/test_bunshin_background_assignments.py",
+        "tests/test_bunshin_checkpoint.py",
+        "tests/test_bunshin_completion_progress.py",
+        "tests/test_bunshin_contract_protocol.py",
+        "tests/test_bunshin_cutover.py",
+        "tests/test_bunshin_dependency_cleanup_fences.py",
+        "tests/test_bunshin_dependency_repair_capture.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 52.71
+    },
+    {
+      "batch": "bunshin-b",
+      "group": "bunshin-b-01",
+      "files": [
+        "tests/test_bunshin_dependency_repair_protocol.py",
+        "tests/test_bunshin_dependency_repair_runtime.py",
+        "tests/test_bunshin_execution.py",
+        "tests/test_bunshin_failure_recovery.py",
+        "tests/test_bunshin_git_gateway_diagnostics.py",
+        "tests/test_bunshin_git_read_results.py",
+        "tests/test_bunshin_harnesses.py",
+        "tests/test_bunshin_imported_architecture_workspace.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 92.84
+    },
+    {
+      "batch": "bunshin-b",
+      "group": "bunshin-b-02",
+      "files": [
+        "tests/test_bunshin_imported_plan_model.py",
+        "tests/test_bunshin_kernel.py",
+        "tests/test_bunshin_lsp_applicability.py",
+        "tests/test_bunshin_memory.py",
+        "tests/test_bunshin_native_architect_guidance_resume.py",
+        "tests/test_bunshin_ownership.py",
+        "tests/test_bunshin_pending_settlement_recovery.py",
+        "tests/test_bunshin_produced_dependency_gates.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 56.72
+    },
+    {
+      "batch": "bunshin-b",
+      "group": "bunshin-b-03",
+      "files": [
+        "tests/test_bunshin_prompt_recovery_contracts.py",
+        "tests/test_bunshin_python_mounts.py",
+        "tests/test_bunshin_remote_authoring_validation.py",
+        "tests/test_bunshin_replan_snapshot.py",
+        "tests/test_bunshin_result_bridge_fidelity.py",
+        "tests/test_bunshin_role_protocol.py",
+        "tests/test_bunshin_skeleton.py",
+        "tests/test_bunshin_submission_drafts.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 16.08
+    },
+    {
+      "batch": "bunshin-b",
+      "group": "bunshin-b-04",
+      "files": [
+        "tests/test_bunshin_task_ledger.py",
+        "tests/test_bunshin_unknown_recovery.py",
+        "tests/test_bunshin_verification.py",
+        "tests/test_bunshin_verifier_draft_manager_freshness.py",
+        "tests/test_bunshin_verifier_draft_transactions.py",
+        "tests/test_bunshin_verifier_finding_upsert_model.py",
+        "tests/test_bunshin_verifier_progress_evidence.py",
+        "tests/test_bunshin_verifier_retry_identity.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 98.9
+    },
+    {
+      "batch": "bunshin-b",
+      "group": "bunshin-b-05",
+      "files": [
+        "tests/test_bunshin_verifier_scope_recovery.py",
+        "tests/test_bunshin_verifier_tool_diagnostics.py",
+        "tests/test_bunshin_web_broker.py",
+        "tests/test_bunshin_workflow_selection.py",
+        "tests/test_bunshin_workflow_triage_projection.py",
+        "tests/efficiency_cli/developer/test_efficiency_cli.py",
+        "tests/efficiency_metrics/developer/test_efficiency_metrics.py",
+        "tests/efficiency_report/developer/test_efficiency_report_render.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 54.18
+    },
+    {
+      "batch": "bunshin-b",
+      "group": "bunshin-b-06",
+      "files": [
+        "tests/efficiency_store/developer/test_efficiency_store.py",
+        "tests/execution_adapters/developer/test_artifact_candidate_input_exclusion.py",
+        "tests/input_binding/developer/test_input_binding.py",
+        "tests/orchestrator/developer/test_orchestrator_input_binding.py",
+        "tests/orchestrator/verifier/test_orchestrator_binding_diff_risk.py",
+        "tests/prompt_adapter/verifier/test_bound_input_advertisement_verifier.py",
+        "tests/websocket_bridge_provider/verification/test_websocket_bridge_provider_verification.py",
+        "tests/websocket_sidecar/verification/test_sidecar_verification.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 13.56
+    },
+    {
+      "batch": "bunshin-b",
+      "group": "bunshin-b-07",
+      "files": [
+        "tests/workflow_service/developer/test_input_binding_preflight.py"
+      ],
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 11.05
+    }
+  ],
+  "complete": true,
+  "passed": false
+}

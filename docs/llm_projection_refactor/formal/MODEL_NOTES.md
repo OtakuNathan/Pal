@@ -26,9 +26,16 @@ Repair(0)
 
 这证明本包的抽象断言能拒绝该缺陷，不证明现有/未来Pal产品实现正确，也不证明TLA与Python语义完全一致。
 
-## 还没有执行
+## TLC 验证更新（2026-10-09）
 
-SANY/TLC未运行。本环境的GitHub下载不可用，不能取得`tla2tools.jar`。执行者必须把真正的SANY/TLC运行作为P1 gate。不要将这些Python通过数引用成TLC状态数。
+本次已使用官方 v1.7.4（TLC 2.19）、Java 21 执行真正的 TLC：
+`single.cfg`、`isolation.cfg` 正例完成，`stale_replay_mutant.cfg` 以 exit 12
+触发预期的 `DraftAligned` 反例。上述 Python 状态数仍仅属于 Python 实现，
+不是 TLC 状态数。三个配置已纳入 `spec/tlc-suite.json` 和夜间 CI。
+工具 SHA-256 与运行方式见 `spec/README.md`，本次证据见
+`docs/reviews/state_machine_20261009/nightly-validation.json`。
+
+原交付环境无法下载 jar，因此当时尚未执行 SANY/TLC；该限制已由本次实际检查补齐。
 
 在有Java和可信`tla2tools.jar`的机器上：
 

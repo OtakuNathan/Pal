@@ -23,7 +23,7 @@ from pal.execution.tool_facade import (
     compile_tool_description,
     model_validation_schema,
 )
-from pal.shared.capability_forest import BoundCapabilityAction, MountedSubtreeHandle, SINGLETON_TARGET
+from pal.shared.capability_forest import BindingAdmission, BoundCapabilityAction, MountedSubtreeHandle, SINGLETON_TARGET
 
 
 class FrozenDict(dict):
@@ -121,6 +121,7 @@ class FrozenMountedSubtree:
     node_ids: tuple[str, ...]
     bound_action_keys: tuple[tuple[str, str], ...]
     search_record_ids: tuple[str, ...]
+    admission: BindingAdmission
     mounted: bool = True
 
 
@@ -801,6 +802,7 @@ def _freeze_subtree(
 ) -> FrozenMountedSubtree:
     return FrozenMountedSubtree(
         module_id=str(subtree.module_id),
+        admission=subtree.admission,
         nodes=tuple(nodes[str(node.node_id)] for node in subtree.nodes),
         descriptors=tuple(descriptors[str(descriptor.name)] for descriptor in subtree.descriptors),
         bound_actions=tuple(

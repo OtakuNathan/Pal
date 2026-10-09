@@ -1,0 +1,278 @@
+{
+  "tool": {
+    "release": "v1.7.4",
+    "url": "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar",
+    "sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
+  },
+  "group": null,
+  "shard": 0,
+  "shards": 1,
+  "selected": 8,
+  "retired": [],
+  "results": [
+    {
+      "config": "spec/channel/EndpointHubLifecycle.cfg",
+      "module": "spec/channel/EndpointHubLifecycle.tla",
+      "kind": "positive",
+      "status": "passed",
+      "input_sha256": {
+        "spec/channel/EndpointHubLifecycle.cfg": "e46b00dd76e53d642a71224a6bf8de85c3d5c7c589d3d0ed6578c969c7b57fbb",
+        "spec/channel/EndpointHubImplementationReducer.tla": "3037baf57488cf361b1756e9e0e2a10a4949007def273906d302ede484ac2884",
+        "spec/channel/EndpointHubLifecycle.tla": "9193d3da210406e8a5565bdccd831ef9fa0870588096929d9b33bdfae9e19832",
+        "spec/channel/ProviderCleanupOwnership.tla": "0dcdf3f3250abd3df32209bca6422006605a58ad5089d1e08a3581162cbbb9b6"
+      },
+      "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-EndpointHubLifecycle/tlc.log",
+      "command": [
+        "java",
+        "-Xmx256m",
+        "-XX:+UseParallelGC",
+        "-jar",
+        "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "-workers",
+        "1",
+        "-seed",
+        "1",
+        "-metadir",
+        "/tmp/pal-tlc-c9s1ms80",
+        "-config",
+        "EndpointHubLifecycle.cfg",
+        "EndpointHubLifecycle.tla"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 24.732
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnership.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "positive",
+      "status": "passed",
+      "input_sha256": {
+        "spec/channel/ProviderCleanupOwnership.cfg": "66585ddc7676a3d3b359c9e3bd23f8eaef11ad3fc43af65de8aaa616dc3749b8",
+        "spec/channel/EndpointHubImplementationReducer.tla": "3037baf57488cf361b1756e9e0e2a10a4949007def273906d302ede484ac2884",
+        "spec/channel/EndpointHubLifecycle.tla": "9193d3da210406e8a5565bdccd831ef9fa0870588096929d9b33bdfae9e19832",
+        "spec/channel/ProviderCleanupOwnership.tla": "0dcdf3f3250abd3df32209bca6422006605a58ad5089d1e08a3581162cbbb9b6"
+      },
+      "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-ProviderCleanupOwnership/tlc.log",
+      "command": [
+        "java",
+        "-Xmx256m",
+        "-XX:+UseParallelGC",
+        "-jar",
+        "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "-workers",
+        "1",
+        "-seed",
+        "1",
+        "-metadir",
+        "/tmp/pal-tlc-90roqitc",
+        "-config",
+        "ProviderCleanupOwnership.cfg",
+        "ProviderCleanupOwnership.tla"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 3.622
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnershipDuplicateTask.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "negative",
+      "invariant": "SinglePending",
+      "status": "passed",
+      "input_sha256": {
+        "spec/channel/ProviderCleanupOwnershipDuplicateTask.cfg": "bc647b5de20bb4737ba86083fd0b220343bb4996be441b715e5fd327212b2dd5",
+        "spec/channel/EndpointHubImplementationReducer.tla": "3037baf57488cf361b1756e9e0e2a10a4949007def273906d302ede484ac2884",
+        "spec/channel/EndpointHubLifecycle.tla": "9193d3da210406e8a5565bdccd831ef9fa0870588096929d9b33bdfae9e19832",
+        "spec/channel/ProviderCleanupOwnership.tla": "0dcdf3f3250abd3df32209bca6422006605a58ad5089d1e08a3581162cbbb9b6"
+      },
+      "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-ProviderCleanupOwnershipDuplicateTask/tlc.log",
+      "command": [
+        "java",
+        "-Xmx256m",
+        "-XX:+UseParallelGC",
+        "-jar",
+        "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "-workers",
+        "1",
+        "-seed",
+        "1",
+        "-metadir",
+        "/tmp/pal-tlc-kc070ug4",
+        "-config",
+        "ProviderCleanupOwnershipDuplicateTask.cfg",
+        "ProviderCleanupOwnership.tla"
+      ],
+      "returncode": 12,
+      "elapsed_seconds": 3.463
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnershipEarlyClose.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "negative",
+      "invariant": "TransportBeforeClose",
+      "status": "passed",
+      "input_sha256": {
+        "spec/channel/ProviderCleanupOwnershipEarlyClose.cfg": "550965043200755a549c12ecd81fcec3aa8d2a34c82c52244dfd4d5d78c152af",
+        "spec/channel/EndpointHubImplementationReducer.tla": "3037baf57488cf361b1756e9e0e2a10a4949007def273906d302ede484ac2884",
+        "spec/channel/EndpointHubLifecycle.tla": "9193d3da210406e8a5565bdccd831ef9fa0870588096929d9b33bdfae9e19832",
+        "spec/channel/ProviderCleanupOwnership.tla": "0dcdf3f3250abd3df32209bca6422006605a58ad5089d1e08a3581162cbbb9b6"
+      },
+      "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-ProviderCleanupOwnershipEarlyClose/tlc.log",
+      "command": [
+        "java",
+        "-Xmx256m",
+        "-XX:+UseParallelGC",
+        "-jar",
+        "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "-workers",
+        "1",
+        "-seed",
+        "1",
+        "-metadir",
+        "/tmp/pal-tlc-guyza7c8",
+        "-config",
+        "ProviderCleanupOwnershipEarlyClose.cfg",
+        "ProviderCleanupOwnership.tla"
+      ],
+      "returncode": 12,
+      "elapsed_seconds": 3.588
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnershipLostOwner.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "negative",
+      "invariant": "CleanupOwned",
+      "status": "passed",
+      "input_sha256": {
+        "spec/channel/ProviderCleanupOwnershipLostOwner.cfg": "01b261b345a53abee6f24e4e3cd51a3bf976044c6a4a4d44a430363eff1f5bc1",
+        "spec/channel/EndpointHubImplementationReducer.tla": "3037baf57488cf361b1756e9e0e2a10a4949007def273906d302ede484ac2884",
+        "spec/channel/EndpointHubLifecycle.tla": "9193d3da210406e8a5565bdccd831ef9fa0870588096929d9b33bdfae9e19832",
+        "spec/channel/ProviderCleanupOwnership.tla": "0dcdf3f3250abd3df32209bca6422006605a58ad5089d1e08a3581162cbbb9b6"
+      },
+      "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-ProviderCleanupOwnershipLostOwner/tlc.log",
+      "command": [
+        "java",
+        "-Xmx256m",
+        "-XX:+UseParallelGC",
+        "-jar",
+        "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "-workers",
+        "1",
+        "-seed",
+        "1",
+        "-metadir",
+        "/tmp/pal-tlc-hsehl835",
+        "-config",
+        "ProviderCleanupOwnershipLostOwner.cfg",
+        "ProviderCleanupOwnership.tla"
+      ],
+      "returncode": 12,
+      "elapsed_seconds": 3.374
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnershipLostReceipt.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "negative",
+      "invariant": "NoRepeatedSuccess",
+      "status": "passed",
+      "input_sha256": {
+        "spec/channel/ProviderCleanupOwnershipLostReceipt.cfg": "fc5c258ea50a5f4d091b12ccf832b30b5a181579182c02f5c5d75f6d42ddec3c",
+        "spec/channel/EndpointHubImplementationReducer.tla": "3037baf57488cf361b1756e9e0e2a10a4949007def273906d302ede484ac2884",
+        "spec/channel/EndpointHubLifecycle.tla": "9193d3da210406e8a5565bdccd831ef9fa0870588096929d9b33bdfae9e19832",
+        "spec/channel/ProviderCleanupOwnership.tla": "0dcdf3f3250abd3df32209bca6422006605a58ad5089d1e08a3581162cbbb9b6"
+      },
+      "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-ProviderCleanupOwnershipLostReceipt/tlc.log",
+      "command": [
+        "java",
+        "-Xmx256m",
+        "-XX:+UseParallelGC",
+        "-jar",
+        "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "-workers",
+        "1",
+        "-seed",
+        "1",
+        "-metadir",
+        "/tmp/pal-tlc-besizckr",
+        "-config",
+        "ProviderCleanupOwnershipLostReceipt.cfg",
+        "ProviderCleanupOwnership.tla"
+      ],
+      "returncode": 12,
+      "elapsed_seconds": 3.476
+    },
+    {
+      "config": "spec/core/ShutdownDependencies.cfg",
+      "module": "spec/core/ShutdownDependencies.tla",
+      "kind": "positive",
+      "status": "passed",
+      "input_sha256": {
+        "spec/core/ShutdownDependencies.cfg": "086e1a49a40c891b787f3fe2ddc1d32d4184353696f07de9eab17537865fc46f",
+        "spec/core/PluginPublicationLifecycle.tla": "6c71a88aa459a27d0e987633c28c9d80b96ad35b768e6bcfe21dad1faf4a3a77",
+        "spec/core/RuntimeProjectionLifecycle.tla": "0fb75cb6c1a75a6310f48aa3300438d145a3fa9e26b247477a3049c7b73721fa",
+        "spec/core/ShutdownDependencies.tla": "f7e7ec8e4e45ceeb734b4a8aa75ee28df7b5793ee72c1616112afcdc155b7fe9"
+      },
+      "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/core-ShutdownDependencies/tlc.log",
+      "command": [
+        "java",
+        "-Xmx256m",
+        "-XX:+UseParallelGC",
+        "-jar",
+        "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "-workers",
+        "1",
+        "-seed",
+        "1",
+        "-metadir",
+        "/tmp/pal-tlc-vdb2o_9x",
+        "-config",
+        "ShutdownDependencies.cfg",
+        "ShutdownDependencies.tla"
+      ],
+      "returncode": 0,
+      "elapsed_seconds": 3.272
+    },
+    {
+      "config": "spec/core/ShutdownDependenciesUnsafe.cfg",
+      "module": "spec/core/ShutdownDependencies.tla",
+      "kind": "negative",
+      "invariant": "DependenciesAlive",
+      "status": "passed",
+      "input_sha256": {
+        "spec/core/ShutdownDependenciesUnsafe.cfg": "2594f9fef6c5ea224d973ab0462f44ae9566ffde525a771dffb5e8e7119be3a9",
+        "spec/core/PluginPublicationLifecycle.tla": "6c71a88aa459a27d0e987633c28c9d80b96ad35b768e6bcfe21dad1faf4a3a77",
+        "spec/core/RuntimeProjectionLifecycle.tla": "0fb75cb6c1a75a6310f48aa3300438d145a3fa9e26b247477a3049c7b73721fa",
+        "spec/core/ShutdownDependencies.tla": "f7e7ec8e4e45ceeb734b4a8aa75ee28df7b5793ee72c1616112afcdc155b7fe9"
+      },
+      "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/core-ShutdownDependenciesUnsafe/tlc.log",
+      "command": [
+        "java",
+        "-Xmx256m",
+        "-XX:+UseParallelGC",
+        "-jar",
+        "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "-workers",
+        "1",
+        "-seed",
+        "1",
+        "-metadir",
+        "/tmp/pal-tlc-82pft_tn",
+        "-config",
+        "ShutdownDependenciesUnsafe.cfg",
+        "ShutdownDependencies.tla"
+      ],
+      "returncode": 12,
+      "elapsed_seconds": 3.384
+    }
+  ],
+  "manifest_sha256": "3de29cb5660c01cdc2fcce9683acb8b3417aa83012022fd5382c28a0acd694e4",
+  "runner_sha256": "038a939d486a52c6262ecb0622bd404ddaa8c2512eae9b6a89e8063215cc40d4",
+  "revision": "f914d3cf3283524e0a023004b46c95b2596ac067",
+  "dirty": true,
+  "java": "Picked up JAVA_TOOL_OPTIONS: -Xmx256m -XX:CompressedClassSpaceSize=32m -XX:ReservedCodeCacheSize=32m -Xss512k -XX:ParallelGCThreads=1\nopenjdk version \"21.0.10\" 2026-01-20\nOpenJDK Runtime Environment (build 21.0.10+7-Debian-1deb13u1)\nOpenJDK 64-Bit Server VM (build 21.0.10+7-Debian-1deb13u1, mixed mode, sharing)\n",
+  "generated_checked": [
+    "spec/bunshin/ImplementationTopology.tla",
+    "spec/channel/EndpointHubImplementationReducer.tla",
+    "spec/foundation/FdLeaseImplementationTopology.tla"
+  ],
+  "passed": true
+}

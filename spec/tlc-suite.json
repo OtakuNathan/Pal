@@ -1,0 +1,674 @@
+{
+  "tool": {
+    "release": "v1.7.4",
+    "url": "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar",
+    "sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
+  },
+  "cases": [
+    {
+      "config": "docs/llm_projection_refactor/formal/isolation.cfg",
+      "module": "docs/llm_projection_refactor/formal/EndpointProjection.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "docs/llm_projection_refactor/formal/single.cfg",
+      "module": "docs/llm_projection_refactor/formal/EndpointProjection.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "docs/llm_projection_refactor/formal/stale_replay_mutant.cfg",
+      "module": "docs/llm_projection_refactor/formal/EndpointProjection.tla",
+      "kind": "negative",
+      "invariant": "DraftAligned"
+    },
+    {
+      "config": "spec/bunshin/ActiveLineageTriage.cfg",
+      "module": "spec/bunshin/ActiveLineageTriage.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ArchitectureLifecycle.cfg",
+      "module": "spec/bunshin/ArchitectureLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/BunshinRuntimeAuthority.cfg",
+      "module": "spec/bunshin/BunshinRuntimeAuthority.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ContinuationLifecycle.cfg",
+      "module": "spec/bunshin/ContinuationLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ContractWorkItemLifecycle.cfg",
+      "module": "spec/bunshin/ContractWorkItemLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DagLifecycle.cfg",
+      "module": "spec/bunshin/DagLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairCohort.cfg",
+      "module": "spec/bunshin/DependencyRepairCohort.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairCohortContractOnly.cfg",
+      "module": "spec/bunshin/DependencyRepairCohort.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairCohortInvalidScope.cfg",
+      "module": "spec/bunshin/DependencyRepairCohort.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairCohortPass.cfg",
+      "module": "spec/bunshin/DependencyRepairCohort.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairControlOverlay.cfg",
+      "module": "spec/bunshin/DependencyRepairControlOverlay.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairControlOverlayChangedCandidate.cfg",
+      "module": "spec/bunshin/DependencyRepairControlOverlay.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairControlOverlayChangedFinding.cfg",
+      "module": "spec/bunshin/DependencyRepairControlOverlay.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairControlOverlayCorrection.cfg",
+      "module": "spec/bunshin/DependencyRepairControlOverlay.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairControlOverlayLocal.cfg",
+      "module": "spec/bunshin/DependencyRepairControlOverlay.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairControlOverlayPass.cfg",
+      "module": "spec/bunshin/DependencyRepairControlOverlay.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairControlOverlayTerminalPeer.cfg",
+      "module": "spec/bunshin/DependencyRepairControlOverlay.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairControlOverlayTerminalSource.cfg",
+      "module": "spec/bunshin/DependencyRepairControlOverlay.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairLaterCohort.cfg",
+      "module": "spec/bunshin/DependencyRepairLaterCohort.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairObligationCarry.cfg",
+      "module": "spec/bunshin/DependencyRepairObligationCarry.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairPartialOverlap.cfg",
+      "module": "spec/bunshin/DependencyRepairPartialOverlap.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairPartialOverlapTwo.cfg",
+      "module": "spec/bunshin/DependencyRepairPartialOverlap.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DependencyRepairSetupOwnership.cfg",
+      "module": "spec/bunshin/DependencyRepairSetupOwnership.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/DurableEffects.cfg",
+      "module": "spec/bunshin/DurableEffects.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/GraphExecutionLifecycle.cfg",
+      "module": "spec/bunshin/GraphExecutionLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/GraphGenerationLifecycle.cfg",
+      "module": "spec/bunshin/GraphGenerationLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/HarnessGenerationLifecycle.cfg",
+      "module": "spec/bunshin/HarnessGenerationLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ImplementationTopology.cfg",
+      "module": "spec/bunshin/ImplementationTopology.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ImportedPlanLifecycle.cfg",
+      "module": "spec/bunshin/ImportedPlanLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/LogicalCoroutineSnapshotLifecycle.cfg",
+      "module": "spec/bunshin/LogicalCoroutineSnapshotLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ModuleLifecycle.cfg",
+      "module": "spec/bunshin/ModuleLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/OperatorTriageRecovery.cfg",
+      "module": "spec/bunshin/OperatorTriageRecovery.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/OperatorTriageRecoveryUnsafe.cfg",
+      "module": "spec/bunshin/OperatorTriageRecovery.tla",
+      "kind": "negative",
+      "invariant": "NoOldUnknownReplay"
+    },
+    {
+      "config": "spec/bunshin/OrchestrationLifecycle.cfg",
+      "module": "spec/bunshin/OrchestrationLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ProcessCapacityLifecycle.cfg",
+      "module": "spec/bunshin/ProcessCapacityLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ProcessCapacityLifecycleReuseCheckpoint.cfg",
+      "module": "spec/bunshin/ProcessCapacityLifecycle.tla",
+      "kind": "negative",
+      "invariant": "ReleaseRequiresReapAndCheckpoint"
+    },
+    {
+      "config": "spec/bunshin/ProduceCheckCycle.cfg",
+      "module": "spec/bunshin/ProduceCheckCycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ReplanReuseLifecycle.cfg",
+      "module": "spec/bunshin/ReplanReuseLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ResidentMailboxLifecycle.cfg",
+      "module": "spec/bunshin/ResidentMailboxLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/RoleAssignmentRecovery.cfg",
+      "module": "spec/bunshin/RoleAssignmentRecovery.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/StandaloneReviewLifecycle.cfg",
+      "module": "spec/bunshin/StandaloneReviewLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/StartupRecoveryLifecycle.cfg",
+      "module": "spec/bunshin/StartupRecoveryLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/StartupRecoveryLifecycleUnsafe.cfg",
+      "module": "spec/bunshin/StartupRecoveryLifecycle.tla",
+      "kind": "negative",
+      "invariant": "FreshStartNeverForgetsInitialization"
+    },
+    {
+      "config": "spec/bunshin/TaskDeliveryLifecycle.cfg",
+      "module": "spec/bunshin/TaskDeliveryLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/TaskWorkflowSelection.cfg",
+      "module": "spec/bunshin/TaskWorkflowSelection.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/TaskWorkflowSelectionUnsafe.cfg",
+      "module": "spec/bunshin/TaskWorkflowSelection.tla",
+      "kind": "negative",
+      "invariant": "DuplicateCannotBeHidden"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycle.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleCompletedLocked.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "DraftAllowsFindingCRUD"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleConflictingReplay.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "MutationReplayRejectsConflicts"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleHistoryRewrite.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "HistoryPreserved"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleOmitFinding.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "ReceiptFreezesBothDrafts"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleReceiptBlind.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "ReceiptFreezesBothDrafts"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleReceiptBlindInheritance.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "SourceReceiptsFreezeInheritance"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleReplayRewrite.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "ReceiptFreezesBothDrafts"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleStaleAuthority.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "MutationsUseCurrentAuthority"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleStaleEvidence.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "PassRequiresCurrentEvidence"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleSubmitWithoutCAS.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "negative",
+      "invariant": "AtomicSubmissionSnapshot"
+    },
+    {
+      "config": "spec/bunshin/VerifierDraftLifecycleWithdrawalWitness.cfg",
+      "module": "spec/bunshin/VerifierDraftLifecycle.tla",
+      "kind": "witness",
+      "invariant": "NoWithdrawalPassWitness"
+    },
+    {
+      "config": "spec/bunshin/VerifierFindingUpsert.cfg",
+      "module": "spec/bunshin/VerifierFindingUpsert.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/VerifierFindingUpsertCRUDWitness.cfg",
+      "module": "spec/bunshin/VerifierFindingUpsert.tla",
+      "kind": "witness",
+      "invariant": "NoCRUDWitness"
+    },
+    {
+      "config": "spec/bunshin/VerifierFindingUpsertConflictingReplay.cfg",
+      "module": "spec/bunshin/VerifierFindingUpsert.tla",
+      "kind": "negative",
+      "invariant": "ConflictReplayRejected"
+    },
+    {
+      "config": "spec/bunshin/VerifierFindingUpsertHistoryID.cfg",
+      "module": "spec/bunshin/VerifierFindingUpsert.tla",
+      "kind": "negative",
+      "invariant": "ProtectedIDsNeverCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierFindingUpsertReceiptBlind.cfg",
+      "module": "spec/bunshin/VerifierFindingUpsert.tla",
+      "kind": "negative",
+      "invariant": "ReceiptFreezesFindings"
+    },
+    {
+      "config": "spec/bunshin/VerifierFindingUpsertReplayWrite.cfg",
+      "module": "spec/bunshin/VerifierFindingUpsert.tla",
+      "kind": "negative",
+      "invariant": "ExactlyOneWritePerOperation"
+    },
+    {
+      "config": "spec/bunshin/VerifierFindingUpsertResurrect.cfg",
+      "module": "spec/bunshin/VerifierFindingUpsert.tla",
+      "kind": "negative",
+      "invariant": "RemovedIDsStayAbsent"
+    },
+    {
+      "config": "spec/bunshin/VerifierFindingUpsertStaleRevision.cfg",
+      "module": "spec/bunshin/VerifierFindingUpsert.tla",
+      "kind": "negative",
+      "invariant": "ExpectedRevisionWasCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentity.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityIgnoreCandidate.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "CandidateChangesNeverCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityIgnoreGeneration.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "NewGenerationNeverCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityIgnorePolicy.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "VerificationPolicyNeverIgnored"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityIgnoreProjection.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "SubmittedProjectionNeverCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityIgnoreReceipt.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "ReceiptBackedSourceNeverCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityIgnoreSemanticRef.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "SemanticRefChangesNeverCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityIgnoreSession.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "ForeignSessionNeverCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityMalformedAsExternal.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "MalformedIdentityNeverRebinds"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityRawFullRefs.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "OwnedRetryRetainsCurrent"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityRawFullRefsSilentPass.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "negative",
+      "invariant": "NoSilentPassWithoutCRUD"
+    },
+    {
+      "config": "spec/bunshin/VerifierRetryIdentityRebindWitness.cfg",
+      "module": "spec/bunshin/VerifierRetryIdentity.tla",
+      "kind": "witness",
+      "invariant": "NoSemanticRebindWitness"
+    },
+    {
+      "config": "spec/bunshin/WorkerProcessLifecycle.cfg",
+      "module": "spec/bunshin/WorkerProcessLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/channel/EndpointHubLifecycle.cfg",
+      "module": "spec/channel/EndpointHubLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnership.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnershipDuplicateTask.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "negative",
+      "invariant": "SinglePending"
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnershipEarlyClose.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "negative",
+      "invariant": "TransportBeforeClose"
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnershipLostOwner.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "negative",
+      "invariant": "CleanupOwned"
+    },
+    {
+      "config": "spec/channel/ProviderCleanupOwnershipLostReceipt.cfg",
+      "module": "spec/channel/ProviderCleanupOwnership.tla",
+      "kind": "negative",
+      "invariant": "NoRepeatedSuccess"
+    },
+    {
+      "config": "spec/core/PluginPublicationLifecycle.cfg",
+      "module": "spec/core/PluginPublicationLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/core/PluginPublicationLifecycleEarlyCleanupUnsafe.cfg",
+      "module": "spec/core/PluginPublicationLifecycle.tla",
+      "kind": "negative",
+      "invariant": "CleanupRetainsOwnership"
+    },
+    {
+      "config": "spec/core/PluginPublicationLifecycleUnsafe.cfg",
+      "module": "spec/core/PluginPublicationLifecycle.tla",
+      "kind": "negative",
+      "invariant": "PublicationAgrees"
+    },
+    {
+      "config": "spec/core/PluginPublicationLifecycleWithdrawalUnsafe.cfg",
+      "module": "spec/core/PluginPublicationLifecycle.tla",
+      "kind": "negative",
+      "invariant": "CleanupAfterWithdrawal"
+    },
+    {
+      "config": "spec/core/RuntimeProjectionLifecycle.cfg",
+      "module": "spec/core/RuntimeProjectionLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/core/ShutdownDependencies.cfg",
+      "module": "spec/core/ShutdownDependencies.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/core/ShutdownDependenciesUnsafe.cfg",
+      "module": "spec/core/ShutdownDependencies.tla",
+      "kind": "negative",
+      "invariant": "DependenciesAlive"
+    },
+    {
+      "config": "spec/execution/EntryWithdrawal.cfg",
+      "module": "spec/execution/EntryWithdrawal.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/execution/EntryWithdrawalUnsafe.cfg",
+      "module": "spec/execution/EntryWithdrawal.tla",
+      "kind": "negative",
+      "invariant": "NoRetarget"
+    },
+    {
+      "config": "spec/execution/ExtensionRollback.cfg",
+      "module": "spec/execution/ExtensionRollback.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/execution/ExtensionRollbackUnsafe.cfg",
+      "module": "spec/execution/ExtensionRollback.tla",
+      "kind": "negative",
+      "invariant": "CleanupOwned"
+    },
+    {
+      "config": "spec/execution/FileResultAuthorization.cfg",
+      "module": "spec/execution/FileResultAuthorization.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/execution/LifecycleAdmission.cfg",
+      "module": "spec/execution/LifecycleAdmission.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/foundation/FdLeaseLifecycle.cfg",
+      "module": "spec/foundation/FdLeaseLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/foundation/FdLeaseLifecycleUnsafe.cfg",
+      "module": "spec/foundation/FdLeaseLifecycle.tla",
+      "kind": "negative",
+      "invariant": "NoStaleUse"
+    },
+    {
+      "config": "spec/foundation/FdLeaseLifecycleUnsafePublish.cfg",
+      "module": "spec/foundation/FdLeaseLifecycle.tla",
+      "kind": "negative",
+      "invariant": "PublishedOnlyAfterDetach"
+    },
+    {
+      "config": "spec/llm/BrokerTransportLifecycle.cfg",
+      "module": "spec/llm/BrokerTransportLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/llm/EndpointInvocationLifecycle.cfg",
+      "module": "spec/llm/EndpointInvocationLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/llm/EndpointInvocationLifecycleFallback.cfg",
+      "module": "spec/llm/EndpointInvocationLifecycle.tla",
+      "kind": "negative",
+      "invariant": "EndpointSelectionStable"
+    },
+    {
+      "config": "spec/llm/ItemCommitLifecycle.cfg",
+      "module": "spec/llm/ItemCommitLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/llm/L1TurnLifecycle.cfg",
+      "module": "spec/llm/L1TurnLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/llm/PromptCacheAdmission.cfg",
+      "module": "spec/llm/PromptCacheAdmission.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/llm/PromptCacheAdmissionSharedSequence.cfg",
+      "module": "spec/llm/PromptCacheAdmission.tla",
+      "kind": "negative",
+      "invariant": "SubmittedCountExact"
+    },
+    {
+      "config": "spec/llm/PromptCacheFixedAnchors.cfg",
+      "module": "spec/llm/PromptCacheFixedAnchors.tla",
+      "kind": "retired",
+      "reason": "Historical cache policy; superseded by PromptCacheTail."
+    },
+    {
+      "config": "spec/llm/PromptCacheHandoff.cfg",
+      "module": "spec/llm/PromptCacheHandoff.tla",
+      "kind": "retired",
+      "reason": "Historical cache policy; superseded by PromptCacheTail."
+    },
+    {
+      "config": "spec/llm/PromptCacheSettlement.cfg",
+      "module": "spec/llm/PromptCacheSettlement.tla",
+      "kind": "retired",
+      "reason": "Historical cache policy; superseded by PromptCacheTail."
+    },
+    {
+      "config": "spec/llm/PromptCacheTail.cfg",
+      "module": "spec/llm/PromptCacheTail.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/llm/PromptCacheTailPrepareCommit.cfg",
+      "module": "spec/llm/PromptCacheTail.tla",
+      "kind": "negative",
+      "invariant": "AdmittedHistory"
+    },
+    {
+      "config": "spec/llm/RoundSubmission.cfg",
+      "module": "spec/llm/RoundSubmission.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/llm/RoundSubmission_early.cfg",
+      "module": "spec/llm/RoundSubmission.tla",
+      "kind": "negative",
+      "invariant": "SubmissionRequired"
+    },
+    {
+      "config": "spec/llm/RoundSubmission_erase_right.cfg",
+      "module": "spec/llm/RoundSubmission.tla",
+      "kind": "negative",
+      "invariant": "Conservation"
+    },
+    {
+      "config": "spec/llm/RoundSubmission_strip_reasoning.cfg",
+      "module": "spec/llm/RoundSubmission.tla",
+      "kind": "negative",
+      "invariant": "NativeRetained"
+    }
+  ],
+  "support_modules": [
+    {
+      "module": "spec/channel/EndpointHubImplementationReducer.tla",
+      "reason": "Generated implementation relation, checked for freshness and imported by its lifecycle model."
+    },
+    {
+      "module": "spec/foundation/FdLeaseImplementationTopology.tla",
+      "reason": "Generated implementation relation, checked for freshness and imported by its lifecycle model."
+    }
+  ]
+}

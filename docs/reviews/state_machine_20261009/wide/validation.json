@@ -1,0 +1,139 @@
+{
+  "note": "Composite evidence, not one full clean run on final source. Mypy incomplete due to resource limit.",
+  "full_batches_initial": {
+    "passed": 5629,
+    "failed": 19,
+    "skipped": 69,
+    "all_initial_failures_covered_by_final_revalidation": true
+  },
+  "final_focused_passed": 402,
+  "fresh_tlc_configurations_passed": 8,
+  "supplemental_parameterized_tlc_passed": 5,
+  "final_test_resource_cleanup_passed": 1,
+  "checks": {
+    "final-boundaries-v2": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_channel_provider_cleanup.py",
+        "tests/test_channel_replacement_cleanup.py",
+        "tests/test_package_cleanup_ownership.py",
+        "tests/test_channel_lifecycle.py",
+        "tests/test_plugin_entry_withdrawal.py",
+        "tests/test_plugin_publication_rollback.py",
+        "tests/test_package_installation.py",
+        "tests/test_plugin_uninstall.py",
+        "tests/test_tlc_runner.py",
+        "tests/test_dynamic_access.py",
+        "tests/test_plugin_raii.py",
+        "tests/test_lifecycle_gate_cancellation.py",
+        "tests/test_provider_install.py",
+        "tests/test_mcp_prompt_delivery.py",
+        "tests/test_bootstrap_and_repositories.py::PalV2BootstrapTests::test_runtime_shutdown_disposes_loaded_provider_raii_handle",
+        "tests/test_bootstrap_and_repositories.py::PalV2BootstrapTests::test_browser_read_has_no_provider_fallback_and_runtime_stop_runs_shutdown_hook",
+        "tests/test_bootstrap_and_repositories.py::PalV2BootstrapTests::test_compose_runtime_hydrates_channel_endpoints_inside_running_event_loop",
+        "tests/test_bootstrap_and_repositories.py::PalV2BootstrapTests::test_channel_endpoint_restart_rebuilds_only_endpoint_without_reloading_provider",
+        "tests/test_bootstrap_and_repositories.py::PalV2BootstrapTests::test_channel_reload_provider_is_scoped_and_provider_removal_is_non_durable",
+        "tests/test_bootstrap_and_repositories.py::PalV2BootstrapTests::test_channel_detach_repository_failure_restores_runtime_endpoint"
+      ],
+      "status": "passed",
+      "observed_peak_rss_mib": 467.7,
+      "elapsed_seconds": 224.7,
+      "jvm_heap": null,
+      "python_address_space_limit": "1GiB",
+      "returncode": 0
+    },
+    "tlc-fresh": {
+      "command": [
+        "python",
+        "scripts/run_tlc.py",
+        "--jar",
+        ".git/tla2tools.jar",
+        "--heap",
+        "256m",
+        "--workers",
+        "1",
+        "--timeout",
+        "1800",
+        "--output",
+        "docs/reviews/state_machine_20261009/wide/tlc-fresh",
+        "--case",
+        "spec/channel/EndpointHubLifecycle.cfg",
+        "--case",
+        "spec/channel/ProviderCleanupOwnership.cfg",
+        "--case",
+        "spec/channel/ProviderCleanupOwnershipDuplicateTask.cfg",
+        "--case",
+        "spec/channel/ProviderCleanupOwnershipEarlyClose.cfg",
+        "--case",
+        "spec/channel/ProviderCleanupOwnershipLostOwner.cfg",
+        "--case",
+        "spec/channel/ProviderCleanupOwnershipLostReceipt.cfg",
+        "--case",
+        "spec/core/ShutdownDependencies.cfg",
+        "--case",
+        "spec/core/ShutdownDependenciesUnsafe.cfg"
+      ],
+      "status": "passed",
+      "observed_peak_rss_mib": 293.8,
+      "elapsed_seconds": 54.0,
+      "jvm_heap": "256m",
+      "python_address_space_limit": null,
+      "returncode": 0
+    },
+    "imported-plan-tlc": {
+      "command": [
+        "env",
+        "TLA2TOOLS_JAR=/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_bunshin_imported_plan_model.py",
+        "-k",
+        "tlc",
+        "--junitxml=docs/reviews/state_machine_20261009/wide/imported-plan-tlc.xml"
+      ],
+      "status": "passed",
+      "observed_peak_rss_mib": 207.2,
+      "elapsed_seconds": 27.3,
+      "jvm_heap": "256m",
+      "python_address_space_limit": null,
+      "returncode": 0
+    },
+    "mypy-final": {
+      "command": [
+        "python",
+        "-m",
+        "mypy",
+        "--config-file",
+        "mypy-contracts.ini"
+      ],
+      "status": "resource_or_time_limit",
+      "observed_peak_rss_mib": 860.1,
+      "elapsed_seconds": 40.9,
+      "jvm_heap": null,
+      "python_address_space_limit": "1GiB",
+      "returncode": -9
+    },
+    "test-process-final": {
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_bootstrap_and_repositories.py::PalV2BootstrapTests::test_stub_runtime_provisions_builtin_plugins_for_fresh_compose"
+      ],
+      "status": "passed",
+      "observed_peak_rss_mib": 440.8,
+      "elapsed_seconds": 31.7,
+      "jvm_heap": null,
+      "python_address_space_limit": "1GiB",
+      "returncode": 0
+    }
+  },
+  "git_diff_check": "passed",
+  "commit_push_deploy_reload": false
+}

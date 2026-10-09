@@ -1,0 +1,163 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_ test_failed_attach_revokes_calls_even_if_registry_withdrawal_fails[publication] _
+
+live_plugin = (PalCore(context=MainContext(execution_runtime=<pal.execution.extensions.ExecutionSlot object at 0x7fa8de3620>, module...lambda> at 0x7fa8c96020>, 'handler': <function live_plugin.<locals>.<lambda> at 0x7fab3cb2e0>}, ['cleanup', 'handler'])
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa8da2b10>
+phase = 'publication'
+
+    @pytest.mark.parametrize("phase", ["publication", "replay"])
+    def test_failed_attach_revokes_calls_even_if_registry_withdrawal_fails(live_plugin, monkeypatch, phase):
+        core, host, _, services, events = live_plugin
+        runtime = core.context.execution_runtime
+        assert host.detach("demo")["status"] == "ok"
+        events.clear()
+        captured = []
+        name = "_publish_module_capabilities" if phase == "publication" else "_replay_optional_contributions"
+        original = getattr(host, name)
+        unmount = runtime.unmount_subtree
+    
+        def fail_publication(*args):
+            original(*args)
+            captured.append(runtime.registry_generation)
+            raise RuntimeError("publication failed")
+    
+        def fail_withdrawal(handle):
+            if handle.module_id == "demo":
+                raise RuntimeError("registry rebuild failed")
+            return unmount(handle)
+    
+        with monkeypatch.context() as patch:
+            patch.setattr(host, name, fail_publication)
+            patch.setattr(runtime, "unmount_subtree", fail_withdrawal)
+            assert host.attach("demo")["status"] == "error"
+            assert "cleanup" in events
+            result = runtime.invoke_direct_tool(new_tool_call(name="demo_read", args={}), generation=captured[0])
+>           assert result.error_code == "unknown_tool"
+                   ^^^^^^^^^^^^^^^^^
+
+tests/test_plugin_entry_withdrawal.py:111: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = CompleteResult(kind='complete', output={}, effect=<EffectOutcome.NONE: 'none'>, llm_text='{}', affordances=[], recovery_hint='', context_delivery=None, output_error='', snapshot_refs=(), replay_result_ref='', context_messages=())
+item = 'error_code'
+
+    def __getattr__(self, item: str) -> Any:
+        private_attributes = object.__getattribute__(self, '__private_attributes__')
+        if item in private_attributes:
+            attribute = private_attributes[item]
+            if hasattr(attribute, '__get__'):
+                return attribute.__get__(self, type(self))  # type: ignore
+    
+            try:
+                # Note: self.__pydantic_private__ cannot be None if self.__private_attributes__ has items
+                return self.__pydantic_private__[item]  # type: ignore
+            except KeyError as exc:
+                raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}') from exc
+        else:
+            # `__pydantic_extra__` can fail to be set if the model is not yet fully initialized.
+            # See `BaseModel.__repr_args__` for more details
+            try:
+                pydantic_extra = object.__getattribute__(self, '__pydantic_extra__')
+            except AttributeError:
+                pydantic_extra = None
+    
+            if pydantic_extra and item in pydantic_extra:
+                return pydantic_extra[item]
+            else:
+                if hasattr(self.__class__, item):
+                    return super().__getattribute__(item)  # Raises AttributeError if appropriate
+                else:
+                    # this is the current error
+>                   raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E                   AttributeError: 'CompleteResult' object has no attribute 'error_code'
+
+../../../.local/lib/python3.13/site-packages/pydantic/main.py:1026: AttributeError
+__ test_failed_attach_revokes_calls_even_if_registry_withdrawal_fails[replay] __
+
+live_plugin = (PalCore(context=MainContext(execution_runtime=<pal.execution.extensions.ExecutionSlot object at 0x7fa8bac690>, module...lambda> at 0x7fa8e22de0>, 'handler': <function live_plugin.<locals>.<lambda> at 0x7fa8cd7920>}, ['cleanup', 'handler'])
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa8e34a70>
+phase = 'replay'
+
+    @pytest.mark.parametrize("phase", ["publication", "replay"])
+    def test_failed_attach_revokes_calls_even_if_registry_withdrawal_fails(live_plugin, monkeypatch, phase):
+        core, host, _, services, events = live_plugin
+        runtime = core.context.execution_runtime
+        assert host.detach("demo")["status"] == "ok"
+        events.clear()
+        captured = []
+        name = "_publish_module_capabilities" if phase == "publication" else "_replay_optional_contributions"
+        original = getattr(host, name)
+        unmount = runtime.unmount_subtree
+    
+        def fail_publication(*args):
+            original(*args)
+            captured.append(runtime.registry_generation)
+            raise RuntimeError("publication failed")
+    
+        def fail_withdrawal(handle):
+            if handle.module_id == "demo":
+                raise RuntimeError("registry rebuild failed")
+            return unmount(handle)
+    
+        with monkeypatch.context() as patch:
+            patch.setattr(host, name, fail_publication)
+            patch.setattr(runtime, "unmount_subtree", fail_withdrawal)
+            assert host.attach("demo")["status"] == "error"
+            assert "cleanup" in events
+            result = runtime.invoke_direct_tool(new_tool_call(name="demo_read", args={}), generation=captured[0])
+>           assert result.error_code == "unknown_tool"
+                   ^^^^^^^^^^^^^^^^^
+
+tests/test_plugin_entry_withdrawal.py:111: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = CompleteResult(kind='complete', output={}, effect=<EffectOutcome.NONE: 'none'>, llm_text='{}', affordances=[], recovery_hint='', context_delivery=None, output_error='', snapshot_refs=(), replay_result_ref='', context_messages=())
+item = 'error_code'
+
+    def __getattr__(self, item: str) -> Any:
+        private_attributes = object.__getattribute__(self, '__private_attributes__')
+        if item in private_attributes:
+            attribute = private_attributes[item]
+            if hasattr(attribute, '__get__'):
+                return attribute.__get__(self, type(self))  # type: ignore
+    
+            try:
+                # Note: self.__pydantic_private__ cannot be None if self.__private_attributes__ has items
+                return self.__pydantic_private__[item]  # type: ignore
+            except KeyError as exc:
+                raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}') from exc
+        else:
+            # `__pydantic_extra__` can fail to be set if the model is not yet fully initialized.
+            # See `BaseModel.__repr_args__` for more details
+            try:
+                pydantic_extra = object.__getattribute__(self, '__pydantic_extra__')
+            except AttributeError:
+                pydantic_extra = None
+    
+            if pydantic_extra and item in pydantic_extra:
+                return pydantic_extra[item]
+            else:
+                if hasattr(self.__class__, item):
+                    return super().__getattribute__(item)  # Raises AttributeError if appropriate
+                else:
+                    # this is the current error
+>                   raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E                   AttributeError: 'CompleteResult' object has no attribute 'error_code'
+
+../../../.local/lib/python3.13/site-packages/pydantic/main.py:1026: AttributeError
+=============================== warnings summary ===============================
+../../../.local/lib/python3.13/site-packages/jieba/_compat.py:18
+  /home/nathan/.local/lib/python3.13/site-packages/jieba/_compat.py:18: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../../../../../usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147
+  /usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('logilab')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_plugin_entry_withdrawal.py::test_failed_attach_revokes_calls_even_if_registry_withdrawal_fails[publication]
+FAILED tests/test_plugin_entry_withdrawal.py::test_failed_attach_revokes_calls_even_if_registry_withdrawal_fails[replay]
+2 failed, 17 deselected, 2 warnings in 12.05s

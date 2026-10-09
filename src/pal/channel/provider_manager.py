@@ -22,6 +22,7 @@ from pal.channel.factory import ChannelEndpointFactory, SocketChannelEndpointFac
 from pal.channel.models import ChannelEndpointModel
 from pal.channel.repository import ChannelEndpointRepository
 from pal.channel.runtime import ChannelRuntime
+from pal.channel.cleanup import OwnedLifecycleStep
 from pal.shared import IntrospectionResult, RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
@@ -78,11 +79,15 @@ class ChannelProviderBuildContext:
 @dataclass
 class RuntimeChannelProviderHandle:
     manifest: RuntimeChannelProviderManifest
-    provider: ChannelProvider
+    provider: ChannelProvider | None
     module_names: tuple[str, ...]
     cleanup_callbacks: list[Callable[[], Any]] = field(default_factory=list)
     lifecycle_context: ChannelProviderBuildContext | None = None
     attached: bool = False
+    cleanup_started: bool = False
+    attach_step: OwnedLifecycleStep | None = None
+    detach_step: OwnedLifecycleStep | None = None
+    cleanup_step: OwnedLifecycleStep | None = None
 
 
 @dataclass(frozen=True)
@@ -352,6 +357,9 @@ class ChannelEndpointProviderManager:
         provider_id = str(provider.provider_id or "").strip()
         if not provider_id:
             raise ValueError("channel provider_id is required")
+        owned = self.runtime_provider_handles.get(provider_id)
+        if owned is not None and (owned.cleanup_started or owned.provider is not provider):
+            raise RuntimeError(f"provider '{provider_id}' still owns lifecycle/cleanup work")
         endpoint_types = tuple(
             dict.fromkeys(
                 normalized
@@ -389,11 +397,12 @@ class ChannelEndpointProviderManager:
 
     def list_providers(self) -> list[dict[str, Any]]:
         providers: list[dict[str, Any]] = []
-        provider_ids = set(self.providers) | set(self.discovered_runtime_providers)
+        provider_ids = set(self.providers) | set(self.discovered_runtime_providers) | set(self.runtime_provider_handles)
         for provider_id in sorted(provider_ids):
             provider = self.providers.get(provider_id)
             discovered = self.discovered_runtime_providers.get(provider_id)
-            manifest = discovered.manifest if discovered is not None else None
+            handle = self.runtime_provider_handles.get(provider_id)
+            manifest = discovered.manifest if discovered is not None else handle.manifest if handle else None
             endpoint_types = (
                 tuple(provider.endpoint_types)
                 if provider is not None
@@ -405,8 +414,10 @@ class ChannelEndpointProviderManager:
                 "provider_id": provider_id,
                 "endpoint_types": list(endpoint_types),
                 "reload_modules": list(getattr(provider, "reload_modules", ()) or ()) if provider else [],
-                "source": "runtime_root" if provider_id in self.runtime_provider_ids else "registered",
+                "source": "runtime_root" if manifest is not None else "registered",
                 "code_loaded": provider_id in self.runtime_provider_handles or provider_id not in self.runtime_provider_ids,
+                "cleanup_pending": bool(self.runtime_provider_handles.get(provider_id)
+                                        and self.runtime_provider_handles[provider_id].cleanup_started),
             }
             if manifest is not None:
                 row.update(
@@ -693,6 +704,7 @@ class ChannelEndpointProviderManager:
                             )
                 unchanged.append(provider_id)
                 continue
+            candidate = None
             try:
                 candidate = self._build_runtime_provider_handle(manifest)
                 endpoint_types = tuple(candidate.provider.endpoint_types)
@@ -726,13 +738,16 @@ class ChannelEndpointProviderManager:
                             f"{self.runtime.inspect_endpoint_hub(endpoint_id).get('last_error', '')}"
                         )
                 else:
-                    for cleanup_error in _dispose_runtime_provider_handle(
-                        candidate,
-                        runtime=self.runtime,
-                    ):
+                    for cleanup_error in self._unload_runtime_provider(provider_id):
                         errors.append(f"{provider_id}: {cleanup_error}")
                 added.append(provider_id)
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
+                if (candidate is not None and self.runtime_provider_handles.get(provider_id) is candidate
+                        and not candidate.cleanup_started):
+                    for cleanup_error in self._unload_runtime_provider(provider_id):
+                        exc.add_note(cleanup_error)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 errors.append(
                     f"{manifest.filesystem_path}: {exception_report(exc)}"
                 )
@@ -817,6 +832,11 @@ class ChannelEndpointProviderManager:
             for endpoint_id in endpoint_ids
             if self.runtime.get_endpoint(endpoint_id) is not None
         }
+        # A previous failed reload may have stopped transports successfully.
+        # Durable attach intent still needs restoration on the next retry.
+        previously_attached.update(record.endpoint_id for record in self.repository.list_all()
+                                   if record.endpoint_id in endpoint_ids and record.enabled
+                                   and record.detached_at is None)
         for endpoint_id in endpoint_ids:
             self.runtime.withdraw_endpoint(endpoint_id)
         stop_errors: list[str] = []
@@ -825,6 +845,8 @@ class ChannelEndpointProviderManager:
                 normalized,
                 reason="provider_reload",
             )
+            if stop_errors:
+                raise RuntimeError("; ".join(stop_errors))
             unload_errors = self._unload_runtime_provider(normalized)
             if unload_errors:
                 raise RuntimeError("; ".join(unload_errors))
@@ -854,7 +876,7 @@ class ChannelEndpointProviderManager:
                 if result.status != RuntimeStatus.OK:
                     raise RuntimeError(_provider_result_error(result))
                 attached.append(endpoint_id)
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             for endpoint_id in endpoint_ids:
                 self.runtime.withdraw_endpoint(endpoint_id)
             cleanup_errors = list(stop_errors)
@@ -871,6 +893,8 @@ class ChannelEndpointProviderManager:
             for endpoint_id in endpoint_ids:
                 if self.runtime.get_endpoint_hub(endpoint_id) is not None:
                     self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return IntrospectionResult(
                 status=RuntimeStatus.ERROR,
                 text=f"channel provider reload failed: {exc}",
@@ -932,6 +956,8 @@ class ChannelEndpointProviderManager:
         provider_id = str(manifest.provider_id or "").strip()
         if not provider_id:
             raise ValueError("provider_id is required")
+        if provider_id in self.runtime_provider_handles:
+            raise RuntimeError(f"provider '{provider_id}' still owns lifecycle/cleanup work")
         if provider_id in self.providers and provider_id not in self.runtime_provider_ids:
             raise ValueError(
                 f"provider_id '{provider_id}' conflicts with an existing channel provider"
@@ -950,9 +976,12 @@ class ChannelEndpointProviderManager:
             manifest=manifest,
             manager=self,
         )
+        handle = RuntimeChannelProviderHandle(manifest, None, (), build_context.cleanup_callbacks, build_context)
+        self.runtime_provider_handles[provider_id] = handle
         try:
             module = _load_source_module(module_name, entrypoint_path)
             provider = _provider_from_module(module, context=build_context)
+            handle.provider = provider
             actual_provider_id = str(getattr(provider, "provider_id", "") or "").strip()
             if actual_provider_id != provider_id:
                 raise ValueError(
@@ -976,16 +1005,11 @@ class ChannelEndpointProviderManager:
                     raise ValueError(
                         f"endpoint type '{endpoint_type}' is already owned by provider '{owner_id}'"
                     )
-        except Exception as exc:
-            for error in _run_cleanup_callbacks(build_context.cleanup_callbacks, runtime=self.runtime):
+        except (Exception, asyncio.CancelledError) as exc:
+            handle.module_names = tuple(name for name in set(sys.modules) - modules_before
+                                        if name.startswith(module_name.rpartition(".")[0]))
+            for error in self._unload_runtime_provider(provider_id):
                 exc.add_note("Provider cleanup also failed:\n" + error)
-            _remove_provider_modules(
-                tuple(
-                    name
-                    for name in set(sys.modules) - modules_before
-                    if name.startswith(module_name.rpartition(".")[0])
-                )
-            )
             raise
         module_names = tuple(
             sorted(
@@ -996,13 +1020,8 @@ class ChannelEndpointProviderManager:
                 or _module_loaded_from(name, provider_dir)
             )
         )
-        return RuntimeChannelProviderHandle(
-            manifest=manifest,
-            provider=provider,
-            module_names=module_names,
-            cleanup_callbacks=build_context.cleanup_callbacks,
-            lifecycle_context=build_context,
-        )
+        handle.module_names = module_names
+        return handle
 
     def _provider_endpoint_types(self, provider_id: str) -> tuple[str, ...]:
         provider = self.providers.get(provider_id)
@@ -1049,36 +1068,46 @@ class ChannelEndpointProviderManager:
 
     def _activate_runtime_provider_handle(self, handle: RuntimeChannelProviderHandle) -> None:
         provider_id = handle.manifest.provider_id
+        if handle.cleanup_started:
+            raise RuntimeError(f"provider '{provider_id}' cleanup is pending")
+        existing = self.runtime_provider_handles.get(provider_id)
+        if existing is not None and existing is not handle:
+            raise RuntimeError(f"provider '{provider_id}' already has a lifecycle owner")
+        self.runtime_provider_handles[provider_id] = handle
         context = handle.lifecycle_context
         if context is None:
             raise RuntimeError(f"provider '{provider_id}' has no lifecycle context")
         try:
-            cleanup = _invoke_provider_lifecycle(
-                handle.provider,
-                "attach",
-                context,
-                runtime=self.runtime,
-            )
+            handle.attached = True
+            handle.attach_step = OwnedLifecycleStep(lambda: _invoke_provider_lifecycle(
+                handle.provider, "attach", context, runtime=self.runtime, resolve=False))
+            cleanup = handle.attach_step.run(self.runtime._loop)
+            handle.attach_step = None
             if callable(cleanup):
                 context.register_cleanup(cleanup)
             handle.attached = True
             self.register_provider(handle.provider)
             self.runtime_provider_handles[provider_id] = handle
-        except Exception as exc:
-            for error in _dispose_runtime_provider_handle(handle, runtime=self.runtime):
+        except (Exception, asyncio.CancelledError) as exc:
+            if handle.attach_step is not None and handle.attach_step.pending is None:
+                handle.attach_step = None
+            for error in self._unload_runtime_provider(provider_id):
                 exc.add_note("Provider cleanup also failed:\n" + error)
             raise
 
     def _ensure_provider_loaded(self, provider_id: str) -> ChannelProvider:
+        retained = self.runtime_provider_handles.get(provider_id)
+        if retained is not None and retained.cleanup_started:
+            raise RuntimeError(f"provider '{provider_id}' cleanup is pending; retry reload")
         provider = self.providers.get(provider_id)
         if provider is not None:
             return provider
         discovered = self.discovered_runtime_providers.get(provider_id)
         if discovered is None:
             raise RuntimeError(f"channel provider is not physically available: {provider_id}")
-        handle = self._build_runtime_provider_handle(discovered.manifest)
+        handle = retained or self._build_runtime_provider_handle(discovered.manifest)
         if tuple(handle.provider.endpoint_types) != discovered.endpoint_types:
-            _dispose_runtime_provider_handle(handle, runtime=self.runtime)
+            self._unload_runtime_provider(provider_id)
             raise RuntimeError(
                 f"provider '{provider_id}' endpoint contract changed; run provider reload"
             )
@@ -1095,28 +1124,33 @@ class ChannelEndpointProviderManager:
                 if self.runtime.remove_endpoint(endpoint_id):
                     stopped.append(endpoint_id)
                 self.runtime.mark_endpoint_detached(endpoint_id, reason=reason)
-            except Exception as exc:
-                self.runtime.discard_endpoint_transport(endpoint_id)
+            except (Exception, asyncio.CancelledError) as exc:
                 self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
                 errors.append(f"{endpoint_id}: {exception_report(exc)}")
         return stopped, errors
 
     def _unload_runtime_provider(self, provider_id: str) -> list[str]:
-        handle = self.runtime_provider_handles.pop(provider_id, None)
+        handle = self.runtime_provider_handles.get(provider_id)
         if handle is None:
             return []
+        handle.cleanup_started = True
         self.unregister_provider(provider_id)
         discovered = self.discovered_runtime_providers.get(provider_id)
         if discovered is not None:
             for endpoint_type in discovered.endpoint_types:
                 self.endpoint_type_to_provider[endpoint_type] = provider_id
-        return _dispose_runtime_provider_handle(handle, runtime=self.runtime)
+        if any(self.runtime.owns_endpoint_transport(endpoint_id) for endpoint_id in self._provider_hub_ids(provider_id)):
+            return [f"provider '{provider_id}' still owns transport cleanup"]
+        errors = _dispose_runtime_provider_handle(handle, runtime=self.runtime)
+        if not errors:
+            self.runtime_provider_handles.pop(provider_id)
+        return errors
 
     def _unload_provider_if_idle(self, provider_id: str) -> None:
         if provider_id not in self.runtime_provider_handles:
             return
         if any(
-            self.runtime.get_endpoint(endpoint_id) is not None
+            self.runtime.owns_endpoint_transport(endpoint_id)
             for endpoint_id in self._provider_hub_ids(provider_id)
         ):
             return
@@ -1132,7 +1166,11 @@ class ChannelEndpointProviderManager:
         for endpoint_id in endpoint_ids:
             self.runtime.withdraw_endpoint(endpoint_id)
         _stopped, stop_errors = self._stop_provider_transports(provider_id, reason=reason)
+        if stop_errors:
+            raise RuntimeError("; ".join(stop_errors))
         unload_errors = self._unload_runtime_provider(provider_id)
+        if unload_errors:
+            raise RuntimeError("; ".join(unload_errors))
         for endpoint_type in discovered.endpoint_types:
             if self.endpoint_type_to_provider.get(endpoint_type) == provider_id:
                 self.endpoint_type_to_provider.pop(endpoint_type, None)
@@ -1161,13 +1199,20 @@ class ChannelEndpointProviderManager:
         except Exception as exc:
             errors.append(f"transports: {exception_report(exc)}")
         for provider_id in sorted(tuple(self.runtime_provider_handles)):
-            handle = self.runtime_provider_handles.pop(provider_id)
+            handle = self.runtime_provider_handles[provider_id]
+            handle.cleanup_started = True
             self.unregister_provider(provider_id)
             discovered = self.discovered_runtime_providers.get(provider_id)
             if discovered is not None:
                 for endpoint_type in discovered.endpoint_types:
                     self.endpoint_type_to_provider[endpoint_type] = provider_id
-            errors.extend(await _dispose_runtime_provider_handle_async(handle))
+            if any(self.runtime.owns_endpoint_transport(endpoint_id) for endpoint_id in self._provider_hub_ids(provider_id)):
+                errors.append(f"provider '{provider_id}' still owns transport cleanup")
+                continue
+            cleanup_errors = await _dispose_runtime_provider_handle_async(handle)
+            errors.extend(cleanup_errors)
+            if not cleanup_errors:
+                self.runtime_provider_handles.pop(provider_id)
         self.shutdown_errors = errors
 
 
@@ -1337,6 +1382,7 @@ def _invoke_provider_lifecycle(
     context: ChannelProviderBuildContext,
     *,
     runtime: ChannelRuntime,
+    resolve: bool = True,
 ) -> Any:
     hook = getattr(provider, lifecycle, None)
     if not callable(hook):
@@ -1352,22 +1398,7 @@ def _invoke_provider_lifecycle(
         for parameter in signature.parameters.values()
     )
     value = hook(context) if accepts_context else hook()
-    return _resolve_provider_awaitable(value, runtime=runtime)
-
-
-def _run_cleanup_callbacks(
-    callbacks: list[Callable[[], Any]],
-    *,
-    runtime: ChannelRuntime,
-) -> list[str]:
-    errors: list[str] = []
-    while callbacks:
-        callback = callbacks.pop()
-        try:
-            _resolve_provider_awaitable(callback(), runtime=runtime)
-        except Exception as exc:
-            errors.append(f"cleanup: {exception_report(exc)}")
-    return errors
+    return _resolve_provider_awaitable(value, runtime=runtime) if resolve else value
 
 
 def _remove_provider_modules(module_names: tuple[str, ...]) -> None:
@@ -1376,79 +1407,78 @@ def _remove_provider_modules(module_names: tuple[str, ...]) -> None:
         sys.modules.pop(module_name, None)
 
 
-def _dispose_runtime_provider_handle(
-    handle: RuntimeChannelProviderHandle,
-    *,
-    runtime: ChannelRuntime,
-) -> list[str]:
-    errors: list[str] = []
-    context = handle.lifecycle_context
-    if context is not None and handle.attached:
-        try:
-            _invoke_provider_lifecycle(
-                handle.provider,
-                "detach",
-                context,
-                runtime=runtime,
-            )
-        except Exception as exc:
-            errors.append(f"detach: {exception_report(exc)}")
-    errors.extend(_run_cleanup_callbacks(handle.cleanup_callbacks, runtime=runtime))
-    _remove_provider_modules(handle.module_names)
-    handle.attached = False
-    return errors
-
-
-async def _resolve_provider_awaitable_async(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
-async def _resolve_provider_awaitable_bounded(value: Any, *, timeout_seconds: float = 5.0) -> Any:
-    if not inspect.isawaitable(value):
-        return value
-    task = asyncio.ensure_future(value)
-    done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
-    if task not in done:
-        task.cancel()
-        raise TimeoutError(f"provider shutdown exceeded {timeout_seconds:g}s")
-    return task.result()
-
-
-async def _dispose_runtime_provider_handle_async(
-    handle: RuntimeChannelProviderHandle,
-) -> list[str]:
-    errors: list[str] = []
-    context = handle.lifecycle_context
-    if context is not None and handle.attached:
-        hook = getattr(handle.provider, "detach", None)
-        if callable(hook):
-            try:
-                signature = inspect.signature(hook)
-                accepts_context = any(
-                    parameter.kind
-                    in {
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.VAR_POSITIONAL,
-                    }
-                    for parameter in signature.parameters.values()
-                )
-                await _resolve_provider_awaitable_bounded(
-                    hook(context) if accepts_context else hook()
-                )
-            except Exception as exc:
-                errors.append(f"detach: {exception_report(exc)}")
+def _provider_cleanup_steps(handle, runtime=None):
+    # A timed-out attach still owns work. Settle it before attempting detach.
+    if handle.attach_step is not None:
+        yield "attach", handle.attach_step
+    if handle.attached and handle.lifecycle_context is not None:
+        if handle.detach_step is None:
+            handle.detach_step = OwnedLifecycleStep(lambda: _invoke_provider_lifecycle(
+                handle.provider, "detach", handle.lifecycle_context, runtime=runtime, resolve=False))
+        yield "detach", handle.detach_step
     while handle.cleanup_callbacks:
-        callback = handle.cleanup_callbacks.pop()
+        if handle.cleanup_step is None:
+            handle.cleanup_step = OwnedLifecycleStep(handle.cleanup_callbacks[-1])
+        yield "cleanup", handle.cleanup_step
+
+
+def _complete_provider_step(handle, kind, value):
+    if kind == "attach":
+        if callable(value):
+            handle.cleanup_callbacks.append(value)
+        handle.attach_step = None
+    elif kind == "detach":
+        handle.attached = False
+        handle.detach_step = None
+    else:
+        handle.cleanup_callbacks.pop()
+        handle.cleanup_step = None
+
+
+def _dispose_runtime_provider_handle(handle, *, runtime) -> list[str]:
+    handle.cleanup_started = True
+    for kind, step in _provider_cleanup_steps(handle, runtime):
         try:
-            await _resolve_provider_awaitable_bounded(callback())
+            value = step.run(runtime._loop)
+        except (Exception, asyncio.CancelledError) as exc:
+            if kind == "attach" and step.pending is None:
+                # Failed attach has settled; detach and registered resources
+                # still need cleanup, and the attach must never be reexecuted.
+                handle.attach_step = None
+                continue
+            return [f"{kind}: {exception_report(exc)}"]
+        _complete_provider_step(handle, kind, value)
+    try:
+        _remove_provider_modules(handle.module_names)
+    except Exception as exc:
+        return [f"imports: {exception_report(exc)}"]
+    return []
+
+
+async def _dispose_runtime_provider_handle_async(handle) -> list[str]:
+    handle.cleanup_started = True
+    for kind, step in _provider_cleanup_steps(handle):
+        try:
+            value = await step.run_async()
+        except asyncio.CancelledError as exc:
+            if asyncio.current_task().cancelling():
+                # The manager still owns this handle and the shielded step.
+                raise
+            if kind == "attach" and step.pending is None:
+                handle.attach_step = None
+                continue
+            return [f"{kind}: {exception_report(exc)}"]
         except Exception as exc:
-            errors.append(f"cleanup: {exception_report(exc)}")
-    _remove_provider_modules(handle.module_names)
-    handle.attached = False
-    return errors
+            if kind == "attach" and step.pending is None:
+                handle.attach_step = None
+                continue
+            return [f"{kind}: {exception_report(exc)}"]
+        _complete_provider_step(handle, kind, value)
+    try:
+        _remove_provider_modules(handle.module_names)
+    except Exception as exc:
+        return [f"imports: {exception_report(exc)}"]
+    return []
 
 
 def channel_endpoint_data_root(runtime_root: Path, endpoint_id: str) -> Path:

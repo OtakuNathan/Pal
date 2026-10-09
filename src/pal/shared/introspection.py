@@ -18,6 +18,7 @@ class IntrospectionResult:
     llm_text: str
     text: str = ""
     structured: dict[str, Any] | None = None
+    recovery_hint: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():

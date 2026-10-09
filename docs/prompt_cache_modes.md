@@ -25,8 +25,12 @@ Explicit mode still sends `{"mode": "explicit", "ttl": "30m"}` on both providers
 The OpenAI implementation keeps the last two distinct submitted tail positions.
 The next request carries the most recent still-valid position before its current
 C. Rebuilding a request or retrying the same C does not consume the previous
-position. Only submission changes history; usage, errors and late receipts do
-not. Turn completion clears it, and prefix changes invalidate affected positions.
+position. Only transport admission changes history: preparing/auditing a request does
+not. The admission callback (or the first response frame for compatibility
+transports) commits the frozen tail once, even if decoding subsequently fails.
+Pre-admission rejection cannot consume or evict a submitted position; late
+callbacks after invalidation cannot revive one. Provider usage, errors and late
+receipts do not move history. Turn completion clears it, and prefix changes invalidate affected positions.
 There is no R accumulator, profitability gate, estimated ACK, attempt budget or
 cooldown in this strategy.
 
@@ -96,6 +100,10 @@ compact-block positioning, fingerprint and role/protocol checks.
 
 `spec/llm/PromptCacheTail.tla` checks bounded ordered history, marker capacity,
 fixed anchors and submission-only updates across content/mode generations.
+Preparation and pre-admission rejection are explicit transitions, and every
+retained position must have been transport-admitted in its current generation.
+`PromptCacheTailPrepareCommit.cfg` is an expected-failure regression mutant
+that commits during preparation; TLC must reject its admitted-history invariant.
 The old Handoff, FixedAnchors and Settlement models are historical; the normal
 LLM model-checking script now runs PromptCacheTail instead.
 
@@ -125,3 +133,32 @@ TLC checked 84,825 distinct states for PromptCacheTail with no errors. The tests
 include the documented loss of C1 reuse when C2 fails; this remains an accepted
 strategy tradeoff. No paid cache canary or live host activation was performed.
 macOS / Python 3.12 were not executed in this environment.
+
+### Transport admission boundary
+
+`prepare_attempt` freezes provider-hook output, audits it, and records a
+`prepared` diagnostic. It does not consume a tail position. The invoker's
+`observe_submission` commits through `submit_attempt` on transport admission;
+its first-frame fallback shares the same once-only guard. A subsequent decode
+error or cancellation still leaves the admitted position in history.
+Preparation failures and transport rejection before admission do not.
+
+A plan captures both the exact scope incarnation and its content generation.
+The incarnation is never reused when the bounded scope cache evicts and recreates
+an entry, so a delayed old admission cannot consume the replacement entry's
+sequence. `PromptCacheTail`'s epoch abstracts both identities; `Invalidate`
+includes eviction/recreation as well as content/turn invalidation.
+
+Offline regressions in `test_cache_tail_admission.py` cover preparation-only,
+pre-admission rejection, rejection without evicting earlier admitted positions,
+post-admission failure, duplicate callback/first-frame notifications, turn close,
+recreated-scope callbacks, and terminal diagnostic settlement. Coordinator-only
+fixtures explicitly signal admission before simulating provider receipts.
+
+Overlapping preparations in the same scope have distinct planning sequences
+and separate once-only admission tokens. Preparing either consumes no submitted
+sequence; admitting both consumes two, even when their callbacks arrive in
+reverse order. Repeated callbacks consume neither again. Tail positions still
+advance monotonically, so a delayed shorter prefix cannot rewind the frontier.
+`PromptCacheAdmission` and the overlapping-preparation regression cover this
+boundary separately from `PromptCacheTail`'s single-pending-payload abstraction.

@@ -1,0 +1,116 @@
+Pal 状态机与资源归属复核（2026-10-09，第三轮）
+
+范围
+本轮沿正常卸载、失败回滚、取消、超时、重试、包文件替换、provider 构建与
+endpoint 替换追踪真实资源 owner；同时复查 execution 入口互斥、FD lease 和
+worker process 回收。前两轮的 review.txt、nightly_review.txt、deep_review.txt
+属于历史记录。本文件及 wide/ 下的证据描述本轮结果。
+
+已确认并修复的路径
+
+1. 正常插件 detach 没有复用失败 attach 的完整撤回屏障。
+   surface withdrawal 失败后仍可能释放其回调依赖的资源。
+   现在正常卸载也先撤回全部入口，成功后才关闭 scope；失败保留 generation。
+   状态记录写入成功后才移除 generation/handle，记录失败仍可重试。
+
+2. 包管理把 attached=False 当作没有资源。
+   失败构建/失败 attach 的 pending rollback 可能仍持有资源；旧逻辑会替换或
+   删除它正在使用的文件。RuntimeActivation.before 现在检查 generation、
+   pending rollback 和 provider handle。候选版本清理失败则保留候选文件，
+   不恢复旧代码到仍被新实例占用的路径。Provider 安装不再无条件调用插件
+   入口恢复；只有确实撤回入口时才恢复，避免掩盖原始错误。CancelledError 也进入文件回滚和
+   安装/卸载状态记录的失败路径。
+
+3. Provider factory、detach、cleanup 和 import cleanup 失败会丢失 owner。
+   构建前即注册临时 handle；callback 和 handle 均在成功之后移除。
+   attach 失败、发现元数据失败、普通卸载、reload 和 shutdown 使用同一归属规则。
+   无 discovery 元数据的失败构建也会出现在管理状态中，并阻止同名实例加载。
+
+4. 清理超时或等待者取消后，不能重新启动同一个尚未完成的清理。
+   OwnedLifecycleStep 保留原 Future/Task，重试等待原任务；完成结果也保留，
+   防止完成与等待者取消竞争时重放成功的 cleanup。异步 attach 超时必须先
+   等它结束，接收其返回的 cleanup，再运行 detach。显式失败的回调可重试。
+
+5. Transport stop 失败曾被当作 metadata 可直接丢弃。
+   现在 runtime 保留 exact endpoint 与 removal task；provider unload 发现
+   未回收 transport 时停止，不关闭 provider 资源，也不删除物理 hub。
+   多次 remove 共用同一个进行中的 stop；已成功 stop 的实例不因后续 metadata
+   失败重复关闭。失败 reload 的重试也保留 repository 中的 attach 意图。
+
+6. 替换 endpoint 的候选启动失败后，候选 cleanup 失败仍可能恢复旧 endpoint。
+   现在准备阶段、旧 endpoint stop 阶段和候选启动阶段失败都保留候选资源；
+   候选清理不完成就不重新启动旧 transport，也不允许下一次替换。
+   删除 hub 同样检查未注册但仍被拥有的候选。启动前的同步准备失败也保留
+   候选清理 owner；启动前异步替换必须同时登记 registry 和 hub transport。
+   endpoint base 现在明确声明生命周期 hook，移除迁移后多余的动态探测。
+   取消 replacement 的调用者会
+   等受保护的替换任务完成交接，然后再收到取消异常。
+
+7. Channel 管理工具没有加入 execution 生命周期写锁。
+   Provider reload / rescan 和 endpoint attach / detach / enable / disable /
+   restart 的别名与 canonical path 现在使用与 plugin/package activation
+   相同的写屏障，避免与已获准调用、其他生命周期修改并发。
+   Python 直接调用内部 manager API 仍要求调用方遵守生命周期串行契约。
+
+8. PluginScope 在 task cancellation 未完成时继续关闭后续依赖资源。
+   现在严格按 LIFO 清理，在第一个失败/未完成步骤停下，保留该步骤和更早注册
+   的依赖。已经成功的步骤不会重做。后台任务真正退出后，重试才关闭其资源。
+
+9. 顶层 shutdown 忽略子级失败后继续关闭依赖和数据库。
+   PluginHost 在依赖拓扑的第一个清理失败处停止，保留管理 owner 和剩余依赖，
+   并报告 shutdown_errors。运行时必须确认插件与 provider 完成关闭，才关闭
+   resident 服务和数据库；失败向调用方传播，成功的 hook 不会因重试重复执行。
+   ShutdownDependencies 的正向与故意忽略失败的负向配置覆盖该依赖链。
+
+TLA 与实现的对应
+EndpointHubLifecycle 的生成 reducer 只约束 hub 状态，不能证明上述 Python
+资源归属。新增 ProviderCleanupOwnership：正向配置加四个独立负向配置，检查
+owner 保留、单一 pending 调用、transport-before-close、成功结果不重复执行。
+具体映射和边界在 spec/channel/ProviderCleanupOwnership.txt，顶层关闭见
+spec/core/ShutdownDependencies.txt。
+四个 mutant 必须精确违反指定 invariant；解析错误、超时、空状态空间都不算通过。
+夜间 conformance 加入 provider cleanup、replacement cleanup 和 package owner
+回归。原有英国时间 02:00 的夜间计划保留；本地修改尚未发布到默认分支。
+
+不是全实现形式化证明：新模型手写、每层最多两次尝试，只证明有限安全性质。
+失败或永久挂起的第三方 hook 可以无限期保留 owner，不保证一定完成卸载。
+原始 FD close 不采用普通回调重试语义：FdLease 不确定关闭后进入 quarantine；
+worker process 则先确认进程组与管道回收，再释放登记和工作区。该两处未确认
+新的同类 owner 丢失问题。
+
+验证记录
+- 重启前并行大批次没有完成；丢失的 /tmp 日志不计作本轮通过。
+- 四个 CI 批次均按原选文件函数完成，拆成 46 组、每组最多 8 文件串行执行。
+  初次汇总 5629 passed / 19 failed / 69 skipped；保留初始失败日志。
+  19 个失败涉及新增回归的测试夹具、无效图片夹具、空入口恢复和动态访问检查，
+  均已修正。最终相关完整测试文件与 6 个真实 bootstrap 路径合计 402 passed，
+  覆盖全部 19 个初次失败。见 wide/batches-revalidated.json 和
+  wide/final-boundaries-v2.log。这是全批次加相关修复后复测的组合证据，
+  不是最终版本的一次完整全绿四批次运行。
+- 本轮实际运行 8 个 TLC 配置全部通过，包括新增归属模型 5 个、关闭依赖模型
+  2 个，以及现有 EndpointHubLifecycle。三个生成关系的新鲜度检查通过。
+  另实际运行 ImportedPlan 的 5 个参数化 TLC 用例全部通过；这些用例在初次
+  全批次中因未设置 jar 路径而跳过。见 wide/tlc-fresh/summary.json 和
+  wide/imported-plan-tlc.log。
+- 当前 117 个活跃模型配置的证据明细在 wide/models-validation.json：
+  8 个本轮运行，10 个历史归档原始日志已重新核验，99 个仅保留历史摘要且
+  输入哈希仍一致，重启丢失的原始日志无法重读。没有把历史结果冒充本轮运行。
+- 最终 mypy contracts 检查被 RSS 看门狗中止（观测 860.1 MiB，阈值 850 MiB），
+  未完成，不计作通过。见 wide/mypy-final.meta.json。没有提高阈值重跑。
+- 机器为 Linux aarch64 / Python 3.13；没有本地验证 macOS / Python 3.12。
+- 内核启动参数 cgroup_disable=memory，systemd MemoryMax 实际不可用。
+  后续检查采用每个 Python 子进程 1 GiB 地址空间硬限额、整组 RSS 850 MiB
+  看门狗；末轮检查额外保留至少 512 MiB 系统可用内存。CPU 最多两核，
+  pytest 串行。Java 使用 256 MiB 堆、单 worker。看门狗按采样检查，允许短时
+  越过阈值后被终止，并非内核级硬 RSS 上限。
+  完整 bootstrap 组观测峰值 825.3 MiB；最终 402 项回归 467.7 MiB；
+  8 个 TLC 配置 293.8 MiB；5 个参数化 TLC 用例 207.2 MiB。
+- 测试结束发现两个遗留 LSP/MCP manager，确认位于测试 scope 和临时 runtime
+  后仅终止该 scope，未触及 ~/.pal 常驻进程。测试保护从 Bunshin 扩展到
+  LSP/MCP 的父进程退出信号；同时修正 stub runtime 测试先关闭数据库、
+  后 teardown runtime 的顺序，改为先正常停止 runtime 再回收数据库与目录。
+  此处属于测试资源回收修复，不作为新增生产缺陷。单独复测 1 passed，
+  观测峰值 440.8 MiB，结束后测试 scope 无遗留进程；见 wide/test-process-final.log。
+- 最终 git diff --check 通过。
+
+所有修改只在本地工作树；未提交、推送、部署或主动 reload 常驻 Pal。

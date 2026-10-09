@@ -743,7 +743,8 @@ def _send_evidence(coordinator, request, context):
     plan = coordinator.plan(request, context, raw)
     encoded = coordinator.inject(raw, plan)
     identity = uuid4().hex
-    coordinator.start_attempt(plan, request=request, context=context, encoded=encoded, raw_encoded=raw, request_id=identity)
+    diagnostics = coordinator.start_attempt(plan, request=request, context=context, encoded=encoded, raw_encoded=raw, request_id=identity)
+    coordinator.submit_attempt(plan, request_id=identity, diagnostics=diagnostics)
     clean = clean_request(raw)
     span = next(s for s in clean.message_spans if s.message_id == plan.breakpoints[-1].message_id)
     tail = 0

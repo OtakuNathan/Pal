@@ -216,7 +216,10 @@ through the same hook instance again.
 - L1 is the only active-turn and compaction truth source.
 - Settled L1 preserves replay envelopes and reasoning until explicit compaction.
 - Every executable tool call has complete parsed object arguments.
-- Tool calls from truncated or unterminated responses are never executable.
+- Uncommitted tool drafts from truncated or unterminated responses are never
+  executable. Provider-committed tool items survive a non-error `length` terminal
+  and reach the normal agent loop; syntactically complete JSON alone is not a
+  provider commit. See `spec/llm/README.md` for the turn/item model mapping.
 - Endpoint schema and thinking enums are locally validated before a request.
 - The persisted endpoint row is the sole source of supported thinking values;
   preflight evaluates the fully hooked request.

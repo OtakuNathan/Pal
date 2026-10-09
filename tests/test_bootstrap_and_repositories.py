@@ -709,6 +709,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="pal_stub_builtin_test_"))
         wizard = WizardService()
         provisioned = wizard.provision_stub_runtime(root)
+        handle = None
         try:
             handle = self._compose_runtime(
                 wizard=wizard,
@@ -725,6 +726,9 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertEqual(bunshin_hit["module_id"], "bunshin")
             self.assertIn("input_shape", bunshin_hit)
         finally:
+            if handle is not None:
+                asyncio.run(handle.stop_async())
+                self._runtime_handles.remove(handle)
             provisioned.database.close()
             shutil.rmtree(root, ignore_errors=True)
 

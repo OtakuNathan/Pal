@@ -142,6 +142,21 @@ def _is_plugin_lifecycle_tool(name: object) -> bool:
     }
 
 
+def _is_lifecycle_mutation_tool(name: object) -> bool:
+    normalized = str(name or "").strip()
+    if _is_plugin_lifecycle_tool(normalized):
+        return True
+    return normalized in {
+        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
+        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "rescan_channel_providers",
+    } | {
+        f"op_channel_mgmt_{action}" for action in (
+            "attach", "detach", "enable", "disable", "restart_endpoint", "reload_provider"
+        )
+    } | {"op_channel_provider_rescan"}
+
+
 def _is_package_job_tool(name: object) -> bool:
     # These resident handlers only queue/wait/read jobs. The background package
     # owner holds the write fence for activation; a waiting read fence would
@@ -535,7 +550,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 handle.mounted_subtree.search_record_ids.extend(dynamic.search_record_ids)
             return
 
-    def mount_subtree(self, handle: "ModuleHandle") -> list[str]:
+    def mount_subtree(self, handle: "ModuleHandle", *, retire_replaced: bool = True) -> list[str]:
         subtree = handle.mounted_subtree
         if subtree is None:
             return []
@@ -550,33 +565,64 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 generation_id=current.generation_id + 1,
                 mounted_subtrees=mounted,
             )
+            if retire_replaced:
+                previous = current.mounted_subtrees.get(subtree.module_id)
+                if previous is not None:
+                    previous.admission.live = False
             self._registry_generation = candidate
+            subtree.bound_actions[:] = prepared.bound_actions
+            subtree.admission = prepared.admission
             subtree.mounted = True
         return [descriptor.name for descriptor in subtree.descriptors]
 
     def unmount_subtree(self, handle: "ModuleHandle") -> list[str]:
-        subtree = handle.mounted_subtree
-        if subtree is None:
-            return []
+        return self.unmount_subtrees((handle,))
+
+    def revoke_subtree_admission(self, handle: "ModuleHandle") -> None:
+        """Close a failed owner's entry even if registry reconstruction fails.
+
+        Keep the mounted marker so withdrawal can later remove its metadata.
+        The handle owns only its incarnation's token, never a replacement's.
+        """
         with self._registry_lock:
-            if not subtree.mounted:
-                return []
+            if handle.mounted_subtree is not None:
+                handle.mounted_subtree.admission.live = False
+
+    def unmount_subtrees(self, handles) -> list[str]:
+        """Withdraw a dependency closure atomically, revoking its admission."""
+        with self._registry_lock:
             current = self._registry_generation
             mounted = dict(current.mounted_subtrees)
-            mounted.pop(subtree.module_id, None)
+            removed = []
+            for handle in handles:
+                subtree = handle.mounted_subtree
+                if subtree is None or not subtree.mounted:
+                    continue
+                present = mounted.get(subtree.module_id)
+                if present is None:
+                    continue
+                # A stale handle must never withdraw a replacement with the
+                # same module/key. Frozen copies preserve mount authority.
+                if present.admission is not subtree.admission:
+                    continue
+                mounted.pop(subtree.module_id)
+                removed.append((subtree, present))
+            if not removed:
+                return []
             candidate = compile_registry_generation(
-                generation_id=current.generation_id + 1,
-                mounted_subtrees=mounted,
+                generation_id=current.generation_id + 1, mounted_subtrees=mounted,
             )
+            for subtree, present in removed:
+                present.admission.live = False
+                subtree.mounted = False
             self._registry_generation = candidate
-            subtree.mounted = False
-        return list(subtree.search_record_ids)
+            return [name for subtree, _ in removed for name in subtree.search_record_ids]
 
     def _prepared_subtree(self, subtree: MountedSubtreeHandle) -> MountedSubtreeHandle:
         prepared = MountedSubtreeHandle(module_id=subtree.module_id)
         prepared.nodes.extend(subtree.nodes)
         prepared.descriptors.extend(subtree.descriptors)
-        prepared.bound_actions.extend(subtree.bound_actions)
+        prepared.bound_actions.extend(replace(action, admission=prepared.admission) for action in subtree.bound_actions)
         prepared.node_ids.extend(subtree.node_ids)
         prepared.bound_action_keys.extend(subtree.bound_action_keys)
         prepared.search_record_ids.extend(subtree.search_record_ids)
@@ -721,6 +767,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         try:
             gate = self._invocation_gate(call.name)
             with gate:
+                unavailable = self._admit_record_binding(record, binding)
+                if unavailable is not None:
+                    return unavailable
                 raw = self._call_record_sync(
                     record, binding, call, validated, turn_id, budget, allow_tools
                 )
@@ -799,6 +848,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         try:
             gate = self._invocation_gate(call.name, asynchronous=True)
             async with gate:
+                unavailable = self._admit_record_binding(record, binding)
+                if unavailable is not None:
+                    return unavailable
                 raw = await self._call_record_async(
                     record, binding, call, validated, turn_id, budget, allow_tools
                 )
@@ -813,6 +865,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return self._rejected_error_result(exc)
         except Exception as exc:
             return self._handler_exception_result(record, exc)
+
+    def _admit_record_binding(self, record, binding) -> RejectedResult | None:
+        # The read lease plus this live-authority check is admission. Withdrawal
+        # revokes the same token under this lock; admitted calls retain their
+        # lease through worker completion, even after their entry is withdrawn.
+        with self._registry_lock:
+            if binding.admission.live:
+                return None
+        return rejection(
+            "unknown_tool",
+            f"tool entry was withdrawn before admission: {record.alias}",
+            retry=RetryDirective.CORRECT_INPUT,
+            affordances=[ToolAffordance(
+                tool="search_tools", arguments={"query": record.alias},
+                reason="The selected entry was withdrawn; rediscover the current tool before retrying.",
+            )],
+        )
 
     @staticmethod
     def _resolve_invocation_record(
@@ -1966,7 +2035,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def _invocation_gate(self, name: object, *, asynchronous: bool = False):
         if _is_package_job_tool(name):
             return contextlib.nullcontext()
-        if _is_plugin_lifecycle_tool(name):
+        if _is_lifecycle_mutation_tool(name):
             return self.lifecycle_gate.write_async() if asynchronous else self.lifecycle_gate.write()
         return self.lifecycle_gate.read_async() if asynchronous else self.lifecycle_gate.read()
 
@@ -1976,12 +2045,16 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return self._call_registered_unlocked(call)
 
     def _call_registered_unlocked(self, call: CapabilityCall) -> CapabilityResult:
-        generation = self._registry_generation
-        canonical_path = generation.capability_index.canonical_path_for(call.name)
-        call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
-        bound = self._resolve_binding(call, generation=generation)
-        if isinstance(bound, CapabilityResult):
-            return bound
+        with self._registry_lock:
+            generation = self._registry_generation
+            canonical_path = generation.capability_index.canonical_path_for(call.name)
+            call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
+            bound = self._resolve_binding(call, generation=generation)
+            if isinstance(bound, CapabilityResult):
+                return bound
+            if not bound.admission.live:
+                return CapabilityResult(status=RuntimeStatus.ERROR, text=f"unknown capability: {call.name}",
+                                        llm_text=f"unknown capability: {call.name}")
         result = bound.callable(call)
         if inspect.isawaitable(result):
             raise RuntimeError(f"capability requires async execution: {canonical_path}")
@@ -1993,12 +2066,16 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return await self._call_registered_async_unlocked(call)
 
     async def _call_registered_async_unlocked(self, call: CapabilityCall) -> CapabilityResult:
-        generation = self._registry_generation
-        canonical_path = generation.capability_index.canonical_path_for(call.name)
-        call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
-        bound = self._resolve_binding(call, generation=generation)
-        if isinstance(bound, CapabilityResult):
-            return bound
+        with self._registry_lock:
+            generation = self._registry_generation
+            canonical_path = generation.capability_index.canonical_path_for(call.name)
+            call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
+            bound = self._resolve_binding(call, generation=generation)
+            if isinstance(bound, CapabilityResult):
+                return bound
+            if not bound.admission.live:
+                return CapabilityResult(status=RuntimeStatus.ERROR, text=f"unknown capability: {call.name}",
+                                        llm_text=f"unknown capability: {call.name}")
         if bound.async_callable is not None:
             result = bound.async_callable(call)
             return await result if inspect.isawaitable(result) else result

@@ -358,6 +358,13 @@ class L1TurnStore:
         self.replace_all(turns)
 
     def add_change_listener(self, listener, *, validate=None) -> None:
+        """Register a core ownership hook, not an extension notification.
+
+        Validation may reject before publication. The ownership hook runs
+        inside publication and must handle ordinary failures conservatively
+        without raising. Extension notifications belong after root commit
+        (MemoryService's after_commit or Core's event bus).
+        """
         if listener not in self._change_listeners:
             self._change_listeners.append(listener)
             self._change_validators.append(validate)

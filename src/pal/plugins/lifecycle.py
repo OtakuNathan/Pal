@@ -73,9 +73,7 @@ class WriterPreferredRWGate:
         try:
             await asyncio.shield(acquired)
         except asyncio.CancelledError:
-            # The blocking worker cannot be cancelled.  Let it acquire, then
-            # balance the admission before propagating cancellation.
-            await asyncio.shield(acquired)
+            await self._drain_acquisition(acquired)
             self._release_read()
             raise
         try:
@@ -89,13 +87,25 @@ class WriterPreferredRWGate:
         try:
             await asyncio.shield(acquired)
         except asyncio.CancelledError:
-            await asyncio.shield(acquired)
+            await self._drain_acquisition(acquired)
             self._release_write()
             raise
         try:
             yield
         finally:
             self._release_write()
+
+    @staticmethod
+    async def _drain_acquisition(acquired: asyncio.Task[None]) -> None:
+        # The thread owns a pending lease, even when its waiter is cancelled.
+        # Repeated cancellation cannot abandon it: wait for acquisition before
+        # releasing exactly once and propagating the original cancellation.
+        while not acquired.done():
+            try:
+                await asyncio.shield(acquired)
+            except asyncio.CancelledError:
+                continue
+        acquired.result()
 
     def _acquire_read(self) -> None:
         with self._condition:
@@ -313,6 +323,7 @@ class PluginScope:
     handle: ModuleHandle | None = None
     published: bool = False
     _core_subscriptions: list[Any] = field(default_factory=list, repr=False)
+    _pending_cleanup: asyncio.Future[Any] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.context = StagedMainContext(self.core_context, self)
@@ -385,18 +396,28 @@ class PluginScope:
             handle.shutdown_sync = None
 
     def close(self) -> list[str]:
-        errors: list[str] = []
-        retry: list[Cleanup] = []
-        for cleanup in reversed(self.cleanups):
+        while self.cleanups:
+            cleanup = self.cleanups[-1]
             try:
-                result = cleanup()
-                if inspect.isawaitable(result):
+                result = self._pending_cleanup if self._pending_cleanup is not None else cleanup()
+                if asyncio.isfuture(result):
+                    # A sync hook can return work already scheduled on the
+                    # caller's loop. Never replay that hook while it runs or
+                    # block the loop it needs in order to finish.
+                    self._pending_cleanup = result
+                    if not result.done():
+                        raise RuntimeError("plugin cleanup task remains pending; retry after it settles")
+                    self._pending_cleanup = None
+                    result.result()
+                elif inspect.isawaitable(result):
                     _run_awaitable(result)
-            except Exception as exc:  # cleanup is best-effort but fully reported
-                errors.append(exception_report(exc))
-                retry.append(cleanup)
-        self.cleanups[:] = reversed(retry)
-        return errors
+            except (Exception, asyncio.CancelledError) as exc:
+                # LIFO registration expresses dependencies: a task registered
+                # after its resource must finish before that resource closes.
+                # Retain both the failed step and all earlier dependencies.
+                return [exception_report(exc)]
+            self.cleanups.pop()
+        return []
 
 
 def _run_awaitable(value: Awaitable[Any]) -> Any:
@@ -428,3 +449,4 @@ class PluginGeneration:
     scope: PluginScope
     handle: ModuleHandle
     cleanup_errors: tuple[str, ...] = ()
+    cleanup_started: bool = False

@@ -1,0 +1,15 @@
+{
+  "command": [
+    "python",
+    "-m",
+    "mypy",
+    "--config-file",
+    "mypy-contracts.ini"
+  ],
+  "status": "resource_or_time_limit",
+  "observed_peak_rss_mib": 860.1,
+  "elapsed_seconds": 40.9,
+  "jvm_heap": null,
+  "python_address_space_limit": "1GiB",
+  "returncode": -9
+}

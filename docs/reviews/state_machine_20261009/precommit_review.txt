@@ -1,0 +1,58 @@
+Pal 提交前复核（2026-10-09）
+
+范围
+复查待提交状态机修复、清理资源归属、执行 admission、缓存提交、历史快照、
+包回滚、Bunshin workflow 选择、TLA 清单及夜间 CI；以最终待提交内容为边界。
+历史报告保留原阶段口径；本文件补充本轮新发现。
+
+本轮新发现与修复
+1. OwnedLifecycleStep.run 在 owner loop 上调用同步 hook，若 hook 返回已经启动的
+   asyncio.Task，旧逻辑会报无法阻塞，但没有保存 Task。下次卸载重放 callback
+   可重复启动清理。现在先保留 Future/Task，再判断能否同步等待；异步关闭可接续。
+2. 同步等待另一事件循环的 pending Task 时，callback 的失败没有消费 pending，
+   重试会反复读取相同失败，无法重新执行可重试清理。现在区分等待超时与已完成
+   回调失败，消费后者；RuntimeError 与 callback 自身抛出的 TimeoutError 都覆盖。
+   回归通过事件循环 bridge 精确控制完成顺序，不靠固定 sleep 猜测线程时序。
+3. 核对远端最近 CI 的失败日志，macOS 的 shell 回归真实执行 rg，但 runner 没有
+   ripgrep，返回 127 被误作业务退出码失败。pytest job 现在显式确保 ripgrep 存在，
+   Ubuntu 用 apt、macOS 用 Homebrew；已有可执行文件则跳过安装。
+
+4. 扩大的同进程回归暴露 3 个 verifier 测试的模块代际隔离问题：测试类在
+   collection 时导入，而 monkeypatch 目标在测试执行时重新导入；前面的插件
+   reload 已替换模块，补丁打在新模块上，却调用旧类，造成观测丢失/等待超时。
+   现在一起捕获类与其模块，保证测试观测同一代实现。没有修改生产 verifier。
+   初次扩大回归为 495 passed / 3 failed，原日志保留为 precommit-tests.log。
+
+5. PluginScope 的通用 defer 回调也可能返回已经启动的 Future/Task；原来的
+   asyncio.run 桥接既不能消费 Future，又会在重试时重放 callback。现在 scope
+   保留同一个 Future，未结束则保留全部依赖，成功后只消费一次；明确失败后才
+   允许重试 callback。新增成功和失败后重试两个实际调度回归。
+
+模型边界
+上述两项资源修复落实已有 SinglePending / completed receipt 对应关系，不把
+新回归描述为全实现形式化证明。手写模型仍依赖串行 lifecycle 和可重试 hook 契约。
+英国时间 02:00 使用 cron + Europe/London，已核对官方时区支持：
+https://github.blog/changelog/2026-03-19-github-actions-late-march-2026-updates/
+
+提交范围
+包含本次状态机相关源码、回归、模型、CI 与审计记录。原始三个 ZIP、根目录工具
+审查文件以及先前另有的 Authorization 脱敏修改（core/turns.py、foundation/
+diagnostics.py、test_failure_delivery_redaction.py）保留工作树，不混入本次提交。
+分支原有 f914d3c 工具契约提交尚未推送，将随正常 main push 一并到远端。
+
+验证结果（提交前）
+- 扩大组合回归修正测试隔离后 498 passed，峰值 RSS 558.1 MiB；见
+  wide/precommit-final.log 和相应 meta.json。
+- PluginScope 最后补充修复后，相关插件/执行/provider 回归 114 passed，峰值
+  RSS 129.4 MiB；见 wide/precommit-scope.log。498 项先于该最后补充修复，
+  两组是组合验证，不宣称最终源码一次性完整全套通过。
+- 清单 65 正向、49 负向、3 witness、3 retired；三个生成关系保持一致。
+  本轮没有重跑全部 TLC；此前模型证据及局限见 comprehensive_review.txt。
+- workflow YAML 重复键检查、无模板 shell 片段 bash -n、git diff --check 通过。
+- 本机 Linux aarch64 / Python 3.13；类型检查的既有内存限制未放宽。推送后
+  由托管 CI 补验 Python 3.12 / Ubuntu / macOS、contracts mypy 和完整四批次。
+  托管 CI 与手动 TLC 的最终结果以对应提交的 GitHub Actions 运行记录为准。
+- 所有本机 pytest 均串行、有限内存。测试 scope 已退出。
+
+本轮代码审查与上述检查未发现尚未修复的阻塞问题；这不是全实现形式证明。
+未对常驻 Pal 做 reload 或部署。后续执行用户已授权的 commit + push。

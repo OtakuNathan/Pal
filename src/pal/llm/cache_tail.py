@@ -1,5 +1,5 @@
 """Bounded history of submitted positions; provider responses cannot move it."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pal.llm.cache_wire import Boundary
 
@@ -8,10 +8,12 @@ POLICY = "openai_eager_tail_v1"
 
 @dataclass
 class TailHistory:
+    incarnation: object = field(default_factory=object, repr=False, compare=False)
     turn: str = ""
     epoch: tuple = ()
     generation: int = 0
     sequence: int = 0
+    planned_sequence: int = 0
     tails: tuple[Boundary, ...] = ()
     continuity_id: str = ""
     continuity_turn: str = ""
@@ -35,12 +37,12 @@ class TailHistory:
             return None
         return next((b for b in reversed(self.tails) if b.path < current.path), None)
 
-    def submit(self, current: Boundary | None, generation: int, sequence: int) -> None:
-        # Sequence is reserved by planning and consumed once at submission.
-        # Same-tail retries do not evict the previous distinct position.
-        if self.closed or generation != self.generation or sequence <= self.sequence:
+    def submit(self, current: Boundary | None, generation: int) -> None:
+        # The coordinator deduplicates by attempt identity. Preparation order
+        # cannot identify admissions when multiple plans are outstanding.
+        if self.closed or generation != self.generation:
             return
-        self.sequence = sequence
+        self.sequence += 1
         if current is not None and current not in self.tails:
             if not self.tails or current.path > self.tails[-1].path:
                 self.tails = (*self.tails, current)[-2:]

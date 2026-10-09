@@ -1,0 +1,32 @@
+{
+  "config": "spec/core/ShutdownDependenciesUnsafe.cfg",
+  "module": "spec/core/ShutdownDependencies.tla",
+  "kind": "negative",
+  "invariant": "DependenciesAlive",
+  "status": "passed",
+  "input_sha256": {
+    "spec/core/ShutdownDependenciesUnsafe.cfg": "2594f9fef6c5ea224d973ab0462f44ae9566ffde525a771dffb5e8e7119be3a9",
+    "spec/core/PluginPublicationLifecycle.tla": "6c71a88aa459a27d0e987633c28c9d80b96ad35b768e6bcfe21dad1faf4a3a77",
+    "spec/core/RuntimeProjectionLifecycle.tla": "0fb75cb6c1a75a6310f48aa3300438d145a3fa9e26b247477a3049c7b73721fa",
+    "spec/core/ShutdownDependencies.tla": "f7e7ec8e4e45ceeb734b4a8aa75ee28df7b5793ee72c1616112afcdc155b7fe9"
+  },
+  "log": "/home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/core-ShutdownDependenciesUnsafe/tlc.log",
+  "command": [
+    "java",
+    "-Xmx256m",
+    "-XX:+UseParallelGC",
+    "-jar",
+    "/home/nathan/Documents/coding/Pal/.git/tla2tools.jar",
+    "-workers",
+    "1",
+    "-seed",
+    "1",
+    "-metadir",
+    "/tmp/pal-tlc-82pft_tn",
+    "-config",
+    "ShutdownDependenciesUnsafe.cfg",
+    "ShutdownDependencies.tla"
+  ],
+  "returncode": 12,
+  "elapsed_seconds": 3.384
+}

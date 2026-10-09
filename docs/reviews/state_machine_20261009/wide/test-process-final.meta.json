@@ -1,0 +1,15 @@
+{
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_bootstrap_and_repositories.py::PalV2BootstrapTests::test_stub_runtime_provisions_builtin_plugins_for_fresh_compose"
+  ],
+  "status": "passed",
+  "observed_peak_rss_mib": 440.8,
+  "elapsed_seconds": 31.7,
+  "jvm_heap": null,
+  "python_address_space_limit": "1GiB",
+  "returncode": 0
+}

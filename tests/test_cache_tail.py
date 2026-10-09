@@ -22,7 +22,9 @@ def context(mode="explicit", shape=WireShape.OPENAI_RESPONSE, provider="openai")
 
 def send(coordinator, request, ctx, identity):
     raw = codec_for_shape(ctx.wire_shape).encode(request, ctx)
-    return coordinator.prepare_attempt(request, ctx, raw, identity)
+    plan, encoded, diagnostics = coordinator.prepare_attempt(request, ctx, raw, identity)
+    coordinator.submit_attempt(plan, request_id=identity, diagnostics=diagnostics)
+    return plan, encoded, diagnostics
 
 
 @pytest.mark.parametrize("model", ["openai/gpt-6-luna", "openai/gpt-6-sol"])

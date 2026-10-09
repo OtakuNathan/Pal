@@ -1,0 +1,113 @@
+............FF.......................................................... [ 47%]
+............................................................... [ 88%]
+.................                                                        [100%]
+=================================== FAILURES ===================================
+__ test_prompt_call_tool_preserves_messages_and_read_receipt[messages2-False] __
+
+runtime = <pal.execution.extensions.ExecutionSlot object at 0x7f9a719fd0>
+asynchronous = False
+messages = [{'content': {'data': 'sample', 'mimeType': 'image/png', 'type': 'image'}, 'role': 'assistant'}]
+
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    @pytest.mark.parametrize("messages", [
+        [],
+        [{"role": "user", "content": {"type": "text", "text": "  complete prompt\n\n"}}],
+        [{"role": "assistant", "content": {"type": "image", "mimeType": "image/png", "data": "sample"}}],
+    ])
+    def test_prompt_call_tool_preserves_messages_and_read_receipt(runtime, asynchronous, messages):
+        payload = {"description": "complete prompt description", "messages": messages}
+    
+        class Invoker:
+            def render_prompt(self, server_id, prompt_name, arguments):
+                return payload
+    
+        snapshot = McpDiscoverySnapshot(server_id="review", transport="stdio",
+            prompts=(McpPromptSpec(name="code_review"),)).with_hash()
+        projection = McpCompiler().compile(module_id="mcp_review", snapshots=(snapshot,), invoker=Invoker())
+        runtime.mount_subtree(SimpleNamespace(mounted_subtree=projection.mounted_subtree))
+    
+        result = invoke(runtime, "render_mcp_review_code_review", {}, asynchronous=asynchronous)
+    
+>       assert result.ok, result.llm_text
+E       AssertionError: MCP protocol error:
+E         pal.mcp.model.McpProtocolError: Invalid MCP GetPromptResult at messages/0/content (anyOf)
+E         Failure details: {"error":"pal.mcp.model.McpProtocolError: Invalid MCP GetPromptResult at messages/0/content (anyOf)","error_code":"mcp_protocol_error","error_kind":"protocol","error_type":"McpProtocolError","mcp":{"kind":"prompt","name":"code_review","server_id":"review"},"next_step":"Use inspect_mcp_state and read_mcp_server(name='review') for transport/server state. Correct the reported cause; reconcile external writes before retrying. A quarantined server requires explicit attach after correction; rescan does not retry it.","protocol_details":{"raw_response":{"description":"complete prompt description","messages":[{"content":{"data":"sample","mimeType":"image/png","type":"image"},"role":"assistant"}]},"validation_error":"{'type': 'image', 'mimeType': 'image/png', 'data': 'sample'} is not valid under any of the given schemas"}}
+E         
+E         Full diagnostic:
+E         Output snapshot: /tmp/pytest-of-nathan/pytest-7/test_prompt_call_tool_preserve4/runtime/data/result-snapshots/007e8fc79a324f559a5929f66e4554cd.txt
+E         Coverage: complete failure diagnostic.
+E         Immutable captured output, not current source state. Locate relevant lines with rg -n; if file size is unknown, inspect it with wc -lc. Read bounded ranges with read_file. For oversized lines, use run_shell to extract bounded character/byte fragments from this file rather than copying it again. Query again if current state is needed; do not replay side-effecting operations merely to refresh output.
+E         
+E         Tool result metadata: {"effect":"unknown","error_code":"mcp_protocol_error","kind":"failed","recovery":"Inspect the MCP error and recovery affordances; reconcile external writes before retrying.","retry":"safe"}
+E       assert False
+E        +  where False = ToolExecutionResult(name='call_tool', ok=False, llm_text='MCP protocol error:\npal.mcp.model.McpProtocolError: Invalid...erage='complete failure diagnostic'),), replay_result_ref='call_f852208d407744d19e8713556bbeed8f', context_messages=()).ok
+
+tests/test_mcp_prompt_delivery.py:35: AssertionError
+__ test_prompt_call_tool_preserves_messages_and_read_receipt[messages2-True] ___
+
+runtime = <pal.execution.extensions.ExecutionSlot object at 0x7f96f38c00>
+asynchronous = True
+messages = [{'content': {'data': 'sample', 'mimeType': 'image/png', 'type': 'image'}, 'role': 'assistant'}]
+
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    @pytest.mark.parametrize("messages", [
+        [],
+        [{"role": "user", "content": {"type": "text", "text": "  complete prompt\n\n"}}],
+        [{"role": "assistant", "content": {"type": "image", "mimeType": "image/png", "data": "sample"}}],
+    ])
+    def test_prompt_call_tool_preserves_messages_and_read_receipt(runtime, asynchronous, messages):
+        payload = {"description": "complete prompt description", "messages": messages}
+    
+        class Invoker:
+            def render_prompt(self, server_id, prompt_name, arguments):
+                return payload
+    
+        snapshot = McpDiscoverySnapshot(server_id="review", transport="stdio",
+            prompts=(McpPromptSpec(name="code_review"),)).with_hash()
+        projection = McpCompiler().compile(module_id="mcp_review", snapshots=(snapshot,), invoker=Invoker())
+        runtime.mount_subtree(SimpleNamespace(mounted_subtree=projection.mounted_subtree))
+    
+        result = invoke(runtime, "render_mcp_review_code_review", {}, asynchronous=asynchronous)
+    
+>       assert result.ok, result.llm_text
+E       AssertionError: MCP protocol error:
+E         pal.mcp.model.McpProtocolError: Invalid MCP GetPromptResult at messages/0/content (anyOf)
+E         Failure details: {"error":"pal.mcp.model.McpProtocolError: Invalid MCP GetPromptResult at messages/0/content (anyOf)","error_code":"mcp_protocol_error","error_kind":"protocol","error_type":"McpProtocolError","mcp":{"kind":"prompt","name":"code_review","server_id":"review"},"next_step":"Use inspect_mcp_state and read_mcp_server(name='review') for transport/server state. Correct the reported cause; reconcile external writes before retrying. A quarantined server requires explicit attach after correction; rescan does not retry it.","protocol_details":{"raw_response":{"description":"complete prompt description","messages":[{"content":{"data":"sample","mimeType":"image/png","type":"image"},"role":"assistant"}]},"validation_error":"{'type': 'image', 'mimeType': 'image/png', 'data': 'sample'} is not valid under any of the given schemas"}}
+E         
+E         Full diagnostic:
+E         Output snapshot: /tmp/pytest-of-nathan/pytest-7/test_prompt_call_tool_preserve5/runtime/data/result-snapshots/56aeca1f465348558330a5372e0c6997.txt
+E         Coverage: complete failure diagnostic.
+E         Immutable captured output, not current source state. Locate relevant lines with rg -n; if file size is unknown, inspect it with wc -lc. Read bounded ranges with read_file. For oversized lines, use run_shell to extract bounded character/byte fragments from this file rather than copying it again. Query again if current state is needed; do not replay side-effecting operations merely to refresh output.
+E         
+E         Tool result metadata: {"effect":"unknown","error_code":"mcp_protocol_error","kind":"failed","recovery":"Inspect the MCP error and recovery affordances; reconcile external writes before retrying.","retry":"safe"}
+E       assert False
+E        +  where False = ToolExecutionResult(name='call_tool', ok=False, llm_text='MCP protocol error:\npal.mcp.model.McpProtocolError: Invalid...erage='complete failure diagnostic'),), replay_result_ref='call_504db8d855004888aa4a77225236a139', context_messages=()).ok
+
+tests/test_mcp_prompt_delivery.py:35: AssertionError
+=============================== warnings summary ===============================
+../../../.local/lib/python3.13/site-packages/jieba/_compat.py:18
+  /home/nathan/.local/lib/python3.13/site-packages/jieba/_compat.py:18: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    import pkg_resources
+
+../../../../../usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147
+  /usr/lib/python3/dist-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('logilab')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+tests/test_memory_dreaming.py::DreamingTests::test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline
+  /home/nathan/.local/lib/python3.13/site-packages/croniter/croniter.py:230: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    result = datetime.datetime.utcfromtimestamp(timestamp)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_mcp_prompt_delivery.py::test_prompt_call_tool_preserves_messages_and_read_receipt[messages2-False]
+FAILED tests/test_mcp_prompt_delivery.py::test_prompt_call_tool_preserves_messages_and_read_receipt[messages2-True]
+2 failed, 150 passed, 11 warnings, 9 subtests passed in 39.89s

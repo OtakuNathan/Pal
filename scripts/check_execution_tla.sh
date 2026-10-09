@@ -12,8 +12,10 @@ if [[ -z "${tla_jar}" || ! -f "${tla_jar}" ]]; then
 fi
 
 cd "${repo_root}"
-java -XX:+UseParallelGC -jar "${tla_jar}" \
-    -workers "${workers}" \
-    -cleanup \
-    -config spec/execution/FileResultAuthorization.cfg \
-    spec/execution/FileResultAuthorization.tla
+for model in FileResultAuthorization LifecycleAdmission EntryWithdrawal ExtensionRollback; do
+    java -XX:+UseParallelGC -jar "${tla_jar}" \
+        -workers "${workers}" \
+        -cleanup \
+        -config "spec/execution/${model}.cfg" \
+        "spec/execution/${model}.tla"
+done

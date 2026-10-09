@@ -1,0 +1,108 @@
+name: TLC nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+      timezone: Europe/London
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: tlc-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  models:
+    name: TLC / ${{ matrix.group }} / ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - {group: core, shard: 0, shards: 1}
+          - {group: execution, shard: 0, shards: 1}
+          - {group: llm, shard: 0, shards: 1}
+          - {group: foundation, shard: 0, shards: 1}
+          - {group: channel, shard: 0, shards: 1}
+          - {group: projection, shard: 0, shards: 1}
+          - {group: bunshin, shard: 0, shards: 3}
+          - {group: bunshin, shard: 1, shards: 3}
+          - {group: bunshin, shard: 2, shards: 3}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install model renderer dependencies
+        run: python -m pip install -e '.[test]'
+      - name: Fetch checksum-pinned TLC
+        run: python scripts/run_tlc.py --fetch-only --jar "$RUNNER_TEMP/tla2tools.jar"
+      - name: Check models and generated implementation relations
+        run: >-
+          python scripts/run_tlc.py --jar "$RUNNER_TEMP/tla2tools.jar"
+          --group '${{ matrix.group }}' --shard '${{ matrix.shard }}' --shards '${{ matrix.shards }}'
+          --heap 2g --workers 2 --timeout 1800 --output test-logs/tlc
+      - name: Preserve results, bounds and counterexamples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tlc-${{ matrix.group }}-${{ matrix.shard }}
+          path: test-logs/tlc
+          retention-days: 14
+          if-no-files-found: warn
+
+  conformance:
+    name: Runtime and model boundary regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: python -m pip install -e '.[test]'
+      - name: Fetch checksum-pinned TLC
+        run: python scripts/run_tlc.py --fetch-only --jar "$RUNNER_TEMP/tla2tools.jar"
+      - name: Test implementation boundaries and parameterized imported-plan mutants
+        env:
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
+        run: |
+          mkdir -p test-logs/conformance
+          python -m pytest -q --junitxml=test-logs/conformance/results.xml \
+            tests/test_tlc_runner.py tests/test_cache_tail_admission.py \
+            tests/test_channel_lifecycle.py tests/test_fd_lease.py tests/test_bunshin_kernel.py \
+            tests/test_channel_provider_cleanup.py tests/test_channel_replacement_cleanup.py \
+            tests/test_package_cleanup_ownership.py \
+            tests/test_lifecycle_gate_cancellation.py tests/test_plugin_publication_rollback.py \
+            tests/test_plugin_entry_withdrawal.py tests/test_execution_extension_admission.py \
+            tests/test_history_listener_noexcept.py tests/test_bunshin_workflow_selection.py \
+            tests/test_bunshin_verifier_authoring_runtime.py tests/test_bunshin_imported_plan_model.py \
+            tests/test_llm_fallback_switch.py tests/test_llm_sticky_fallback.py \
+            tests/test_model_switch.py tests/test_llm_ir_shapes.py \
+            2>&1 | tee test-logs/conformance/pytest.log
+      - name: Preserve regression results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tlc-conformance
+          path: test-logs/conformance
+          retention-days: 14
+          if-no-files-found: warn

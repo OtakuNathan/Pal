@@ -1,0 +1,16 @@
+{
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_channel_provider_cleanup.py",
+    "tests/test_channel_replacement_cleanup.py"
+  ],
+  "status": "passed",
+  "observed_peak_rss_mib": 120.1,
+  "elapsed_seconds": 9.0,
+  "jvm_heap": null,
+  "python_address_space_limit": "1GiB",
+  "returncode": 0
+}

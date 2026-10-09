@@ -16,7 +16,8 @@ from tests.test_tool_failure_affordances import runtime, invoke, metadata
 @pytest.mark.parametrize("messages", [
     [],
     [{"role": "user", "content": {"type": "text", "text": "  complete prompt\n\n"}}],
-    [{"role": "assistant", "content": {"type": "image", "mimeType": "image/png", "data": "sample"}}],
+    [{"role": "assistant", "content": {"type": "image", "mimeType": "image/png", "data":
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII="}}],
 ])
 def test_prompt_call_tool_preserves_messages_and_read_receipt(runtime, asynchronous, messages):
     payload = {"description": "complete prompt description", "messages": messages}

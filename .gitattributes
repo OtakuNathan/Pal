@@ -3,3 +3,6 @@
 # so editors/IDEs on any OS never reintroduce CRLF into these files.
 * text=auto
 *.py text eol=lf
+
+# Preserve captured audit output, including pytest's traceback whitespace.
+docs/reviews/state_machine_20261009/**/*.log -text -whitespace

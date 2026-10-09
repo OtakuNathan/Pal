@@ -144,7 +144,8 @@ def test_explicit_keeps_previous_tail_and_turn_anchor_across_projected_rounds(sh
         session.begin_round(attempt, requires_native=False)
         prepared = session.prepare(HistoryView(session.frontier, tail), request_shell=request)
         encoded = EncodedRequest(json.loads(prepared.payload_json), prepared.message_spans)
-        plan, _, _ = coordinator.prepare_attempt(request, ctx, encoded, str(round_index))
+        plan, _, diagnostics = coordinator.prepare_attempt(request, ctx, encoded, str(round_index))
+        coordinator.submit_attempt(plan, request_id=str(round_index), diagnostics=diagnostics)
         points = {point.label: point for point in plan.breakpoints}
         assert points['anchor_fixed'].message_id == 'task'
         assert points['tail_current'].message_id == f'r{round_index}'

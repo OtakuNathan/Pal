@@ -1,0 +1,74 @@
+Picked up JAVA_TOOL_OPTIONS: -Xmx256m -XX:CompressedClassSpaceSize=32m -XX:ReservedCodeCacheSize=32m -Xss512k -XX:ParallelGCThreads=1
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 25 and seed 1 with 1 worker on 4 cores with 228MB heap and 64MB offheap memory [pid: 28017] (Linux 6.18.39+rpt-rpi-v8 aarch64, Debian 21.0.10 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /home/nathan/Documents/coding/Pal/docs/reviews/state_machine_20261009/wide/tlc-fresh/channel-ProviderCleanupOwnershipLostReceipt/ProviderCleanupOwnership.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module ProviderCleanupOwnership
+Starting... (2026-10-09 16:50:32)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-09 16:50:33.
+Error: Invariant NoRepeatedSuccess is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ inflight = 0
+/\ owner = TRUE
+/\ starts = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ completions = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ phase = "idle"
+/\ finished = {}
+/\ stage = 0
+
+State 2: <Begin line 11, col 10 to line 14, col 61 of module ProviderCleanupOwnership>
+/\ inflight = 1
+/\ owner = TRUE
+/\ starts = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ completions = (0 :> 0 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ phase = "pending"
+/\ finished = {}
+/\ stage = 0
+
+State 3: <Success line 15, col 12 to line 18, col 58 of module ProviderCleanupOwnership>
+/\ inflight = 0
+/\ owner = TRUE
+/\ starts = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ completions = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ phase = "completed"
+/\ finished = {}
+/\ stage = 0
+
+State 4: <CancelAfterCompletion line 26, col 26 to line 28, col 95 of module ProviderCleanupOwnership>
+/\ inflight = 0
+/\ owner = TRUE
+/\ starts = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ completions = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ phase = "idle"
+/\ finished = {}
+/\ stage = 0
+
+State 5: <Begin line 11, col 10 to line 14, col 61 of module ProviderCleanupOwnership>
+/\ inflight = 1
+/\ owner = TRUE
+/\ starts = (0 :> 2 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ completions = (0 :> 1 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ phase = "pending"
+/\ finished = {}
+/\ stage = 0
+
+State 6: <Success line 15, col 12 to line 18, col 58 of module ProviderCleanupOwnership>
+/\ inflight = 0
+/\ owner = TRUE
+/\ starts = (0 :> 2 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ completions = (0 :> 2 @@ 1 :> 0 @@ 2 :> 0 @@ 3 :> 0)
+/\ phase = "completed"
+/\ finished = {}
+/\ stage = 0
+
+14 states generated, 12 distinct states found, 3 states left on queue.
+The depth of the complete state graph search is 6.
+The average outdegree of the complete state graph is 1 (minimum is 1, the maximum 2 and the 95th percentile is 2).
+Finished in 02s at (2026-10-09 16:50:33)

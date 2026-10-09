@@ -12,8 +12,10 @@ if [[ -z "${tla_jar}" || ! -f "${tla_jar}" ]]; then
 fi
 
 cd "${repo_root}"
-java -XX:+UseParallelGC -jar "${tla_jar}" \
-    -workers "${workers}" \
-    -cleanup \
-    -config spec/core/RuntimeProjectionLifecycle.cfg \
-    spec/core/RuntimeProjectionLifecycle.tla
+for model in RuntimeProjectionLifecycle PluginPublicationLifecycle; do
+    java -XX:+UseParallelGC -jar "${tla_jar}" \
+        -workers "${workers}" \
+        -cleanup \
+        -config "spec/core/${model}.cfg" \
+        "spec/core/${model}.tla"
+done

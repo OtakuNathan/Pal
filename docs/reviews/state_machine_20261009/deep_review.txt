@@ -1,0 +1,71 @@
+深入复核（2026-10-09，当前工作树；接续 nightly_review.txt）
+
+本轮又确认了 5 处问题，均已修复；没有把上一轮通过数当作停止检查的依据。
+结论仅针对以下边界及已有测试，不是整程序无缺陷证明。
+
+R4：扩展激活失败且恢复旧实现再次失败，遗失候选实现的清理 owner
+位置：src/pal/execution/extensions.py:44、129。
+旧异常路径先恢复、后登记 _pending_cleanup；恢复失败会跳过登记，且候选入口仍活着。
+现在先登记恢复/关闭义务，再撤销候选入口；uninstall 按顺序重试恢复和关闭。
+恢复成功但 close 失败时不重复恢复或重新发布；新的 install 一直被阻止。
+正式回归覆盖候选入口拒绝调用、恢复反复失败、后续 close 失败及 host/scope 集成。
+新增 ExtensionRollback 正反例；旧丢 owner 路径触发 CleanupOwned。
+
+R5：异步 start/晚期发布取消绕过回滚，取消 enable 还会残留 enabled=True
+位置：src/pal/plugins/host.py:385、856；src/pal/plugins/lifecycle.py:397。
+CancelledError 不属于 Exception。旧实现既未回滚 start 取消，也不能把取消的
+异步 cleanup 记录为待重试；外层 enable 的设置恢复同样会被异常跳过。
+现在 start/发布取消先回滚，再原样传播取消；被取消的 cleanup 保留，其他成功
+callback 不重复；enable 通过 finally 恢复此前设置。
+一方及第三方插件、早期 start 及晚期 replay、cleanup 成功/取消均有回归。
+模型 Fail 是抽象失败边，不能单凭它证明 Python 的异常类别已被正确映射。
+
+R6：发布失败后注册表撤销也失败，资源会先关闭，旧入口仍可调用
+位置：src/pal/plugins/host.py:882、981；src/pal/execution/runtime.py:566。
+旧 rollback 捕获撤销错误后继续 scope.close；真实复现中 cleanup 后旧捕获入口
+仍成功执行 handler。晚期 generation 的 detach 重试失败还可能标回 attached。
+现在独立撤销该 mount incarnation 的 admission，不依赖注册表重编译；保持 mounted
+标记用于移除残留元数据。其他发布 callback 未撤销成功前不关闭资源、不丢弃 handle
+或导入清理上下文。已经提交的 rollback 重试不再走 attached=True 的回退分支。
+错误期间工具发现可能仍含已拒绝调用的元数据；不宣称所有 metadata 已立即删除。
+回归覆盖 generation 建立前后、持续撤销失败、旧调用被拒绝、资源保持、后续成功
+清理且不重复。PluginPublicationLifecycle 增加独立撤销阶段及 CleanupAfterWithdrawal，
+新增提前关闭资源的反例。模型的 callable surface 与仍待撤销的 callbacks 现在分开。
+
+R7：CI 接受空初始状态的“成功”模型检查
+位置：scripts/run_tlc.py:115。
+使用真实 TLC 运行 Init == x \in {}，得到 exit 0、成功文案和 0 distinct states；
+原 verdict 会误报通过。现在要求正例完成、最终队列为空且 distinct states > 0。
+更严格的判定已重新检查前轮所有 106 个通过日志，未误拒绝正常结果。
+输入哈希改为从实际复制给 TLC 的文件计算，避免本地编辑造成源文件/执行字节错配。
+
+R8：正常 detach 的最后一步导入缓存清理失败后，重试会假成功
+位置：src/pal/plugins/host.py 的 _detach_generation 末尾。
+旧顺序先删除 generation/handle maps，再清理导入缓存；后一操作抛错会丢掉 owner，
+下一次 detach 看不到 generation，直接返回成功，未重试失败的步骤。
+现在完成导入清理和状态写入后才释放 owner，失败沿既有 committed-cleanup 分支重试。
+一方及第三方插件均有修复前失败、修复后成功的回归，且已完成的资源 callback 不重复。
+
+形式验证证据
+当前清单 110 个有效配置：63 正例、44 预期反例、3 witness；另有 3 个明确退役配置。
+全部有效配置均已有按最终判定规则通过的证据。deep-validation.json 汇总：
+103 个未改变配置沿用前轮日志，并逐个校验当前 TLA/config 字节哈希；本轮实际重跑
+7 个新增、改变或此前未完成的配置。不是声称本轮从头重跑了所有配置。
+此前超时的 VerifierDraftLifecycle 在不缩小边界下完成：1,113,100 distinct states，
+5,061,092 generated，队列为空；本地 1 GiB、3 workers，约 689 秒。
+新版 PluginPublicationLifecycle 及三个反例、ExtensionRollback 正反例均按预期通过。
+
+夜间 CI 保持英国时间每天 02:00，调整为 2 workers、2 GiB、每模型最多 1800 秒；
+超时仍报失败。9 个 matrix 分片恰好覆盖全部 110 个有效配置一次。
+尚未提交/推送，亦无托管 CI 成功运行记录；须合入默认分支才会定时执行。
+没有部署或重载运行中的 Pal。
+
+运行时验证与限制
+本轮较广集成回归 167 passed；模型 runner/动态 imported-plan TLC/架构组合 52 passed；
+最后的架构检查 19 passed；R8 补修后最终插件回归 73 passed；contract mypy 15 个文件
+通过。这些组有重叠，不相加。git diff --check 通过。
+关键修复前失败见 deep-red.log、deep-enable-red.log、deep-withdraw-red.log、deep-import-red.log；
+修复后日志、TLC 反例和 vacuous 示例见同目录 deep-*.log。
+完整临时证据位于 /tmp/pal-deep-review。未执行全部四批 CI、macOS 或 Python 3.12。
+手写 TLA/完整 Python 路径及跨子系统组合仍无机械 refinement 证明；外部文件写入
+与 durable receipt 原子性、任意第三方 callback 终止性仍是已有契约的边界。

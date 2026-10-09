@@ -169,7 +169,13 @@ class HistoryReadPort(Protocol):
     def add_change_listener(
         self, listener: Callable[[tuple[L1TurnIR, ...], tuple[L1TurnIR, ...]], None], *,
         validate: Callable[[tuple[L1TurnIR, ...]], None] | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Core ownership hooks only: validation may reject before publish;
+        listener must handle ordinary failures without raising. Extension
+        notifications use the post-root-commit service hook or Core event bus.
+        Process-control BaseExceptions are outside the no-throw contract.
+        """
+        ...
     def remove_change_listener(
         self, listener: Callable[[tuple[L1TurnIR, ...], tuple[L1TurnIR, ...]], None],
     ) -> None: ...

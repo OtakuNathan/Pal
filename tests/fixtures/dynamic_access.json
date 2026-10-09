@@ -7,10 +7,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bootstrap/service.py:StubRuntimeHandle.stop_async:getattr(self.channel_provider_manager, 'stop_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/bootstrap/service.py:compose_runtime:getattr(getattr(provider, 'repository', None), 'catalog', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -739,43 +735,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/channel/runtime.py:ChannelRuntime.remove_endpoint_async:getattr(endpoint, 'quiesce_delivery_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:ChannelRuntime.remove_endpoint_async:getattr(endpoint, 'stop_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/channel/runtime.py:ChannelRuntime.replace_endpoint:getattr(endpoint, 'prepare_replacement', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:ChannelRuntime.replace_endpoint_async:getattr(endpoint, 'prepare_replacement', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:ChannelRuntime.replace_endpoint_async:getattr(endpoint, 'start_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:ChannelRuntime.replace_endpoint_async:getattr(endpoint, 'stop_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:ChannelRuntime.replace_endpoint_async:getattr(endpoint, 'validate_replacement_startup', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:ChannelRuntime.replace_endpoint_async:getattr(old_endpoint, 'quiesce_delivery_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:ChannelRuntime.replace_endpoint_async:getattr(old_endpoint, 'start_async', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/channel/runtime.py:ChannelRuntime.replace_endpoint_async:getattr(old_endpoint, 'stop_async', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.channel.cleanup import OwnedLifecycleStep
+
 from pal.foundation.diagnostics import exception_report
 
 import asyncio
@@ -292,6 +294,10 @@ class ChannelRuntime(ChannelRuntimePort):
     )
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
+    _removal_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False, repr=False)
+    _replacement_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False, repr=False)
+    _pending_endpoint_cleanup: dict[str, tuple[Any, OwnedLifecycleStep]] = field(default_factory=dict, init=False, repr=False)
+    _stopped_endpoints: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.mailbox.on_put = self._notify_ready
@@ -320,6 +326,15 @@ class ChannelRuntime(ChannelRuntimePort):
             self._reply_waiters.pop(reply_id, None)
 
     def register_endpoint(self, endpoint: ChannelEndpointBase) -> None:
+        endpoint_id = endpoint.endpoint.endpoint_id
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        replacement = self._replacement_tasks.get(endpoint_id)
+        if (endpoint_id in self._pending_endpoint_cleanup or endpoint_id in self._removal_tasks
+                or (replacement is not None and replacement is not current)):
+            raise RuntimeError("endpoint lifecycle cleanup is pending")
         self._bind_endpoint_ready(endpoint)
         hub = self.ensure_endpoint_hub(
             endpoint.endpoint.endpoint_id,
@@ -472,6 +487,10 @@ class ChannelRuntime(ChannelRuntimePort):
         hub = self.endpoint_hubs.get(normalized)
         if hub is None or normalized == self.recovery_endpoint_id:
             return False
+        if self.owns_endpoint_transport(normalized):
+            raise EndpointHubInvariantError(
+                f"cannot remove physical endpoint while transport cleanup is owned: {normalized!r}"
+            )
         recovery = self.endpoint_hubs.get(self.recovery_endpoint_id)
         if recovery is None:
             raise EndpointHubInvariantError(
@@ -755,29 +774,76 @@ class ChannelRuntime(ChannelRuntimePort):
 
     async def stop_async(self) -> None:
         errors: list[str] = []
-        for endpoint in self.list_endpoints():
-            stopper = getattr(endpoint, "stop_async", None)
-            if callable(stopper):
-                try:
-                    task = asyncio.ensure_future(stopper())
-                    done, _pending = await asyncio.wait({task}, timeout=5.0)
-                    if task not in done:
-                        task.cancel()
-                        raise TimeoutError("endpoint shutdown exceeded 5s")
-                    task.result()
-                except Exception as exc:
-                    errors.append(
-                        f"{endpoint.endpoint.endpoint_id}: {exception_report(exc)}"
-                    )
-        self._started = False
-        self._loop = None
+        endpoint_ids = {endpoint.endpoint.endpoint_id for endpoint in self.list_endpoints()}
+        endpoint_ids.update(self._pending_endpoint_cleanup)
+        endpoint_ids.update(self._replacement_tasks)
+        for endpoint_id in sorted(endpoint_ids):
+            try:
+                self.withdraw_endpoint(endpoint_id)
+                task = self._endpoint_removal_task(endpoint_id)
+                done, _pending = await asyncio.wait({task}, timeout=5.0)
+                if task not in done:
+                    raise TimeoutError("endpoint shutdown exceeded 5s; cleanup remains owned")
+                task.result()
+            except (Exception, asyncio.CancelledError) as exc:
+                if isinstance(exc, asyncio.CancelledError) and asyncio.current_task().cancelling():
+                    raise
+                errors.append(f"{endpoint_id}: {exception_report(exc)}")
         if errors:
             raise RuntimeError("channel endpoint shutdown failed: " + "; ".join(errors))
+        self._started = False
+        self._loop = None
 
     async def replace_endpoint_async(
         self,
         endpoint: ChannelEndpointBase,
         *,
+        manage_transition: bool = True,
+    ) -> None:
+        endpoint_id = endpoint.endpoint.endpoint_id
+        if endpoint_id in self._pending_endpoint_cleanup:
+            raise RuntimeError("endpoint cleanup is pending; retry removal first")
+        if endpoint_id in self._replacement_tasks or endpoint_id in self._removal_tasks:
+            raise RuntimeError("endpoint lifecycle transition is pending")
+        task = asyncio.create_task(self._replace_endpoint_once(endpoint, manage_transition=manage_transition))
+        self._replacement_tasks[endpoint_id] = task
+        cancelled = False
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if task.cancelled():
+                        break
+                    cancelled = True
+                except Exception:
+                    break
+            task.result()
+            if cancelled:
+                raise asyncio.CancelledError
+        finally:
+            if task.done() and self._replacement_tasks.get(endpoint_id) is task:
+                self._replacement_tasks.pop(endpoint_id)
+
+    async def _replace_endpoint_once(
+        self, endpoint: ChannelEndpointBase, *, manage_transition: bool = True,
+    ) -> None:
+        cleanup = OwnedLifecycleStep(endpoint.stop_async)
+        try:
+            await self._replace_endpoint_impl(endpoint, manage_transition=manage_transition, cleanup=cleanup)
+        except (Exception, asyncio.CancelledError) as exc:
+            endpoint_id = endpoint.endpoint.endpoint_id
+            if (self.get_endpoint(endpoint_id) is not endpoint
+                    and not cleanup.completed and endpoint_id not in self._pending_endpoint_cleanup):
+                self._pending_endpoint_cleanup[endpoint_id] = (endpoint, cleanup)
+                try:
+                    await self._cleanup_failed_endpoint(endpoint_id)
+                except (Exception, asyncio.CancelledError) as cleanup_exc:
+                    exc.add_note("Replacement preparation cleanup also failed:\n" + exception_report(cleanup_exc))
+            raise
+
+    async def _replace_endpoint_impl(
+        self, endpoint: ChannelEndpointBase, *, cleanup: OwnedLifecycleStep,
         manage_transition: bool = True,
     ) -> None:
         old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
@@ -795,13 +861,12 @@ class ChannelRuntime(ChannelRuntimePort):
         if owns_transition:
             self.begin_endpoint_transition(endpoint_id, provider_id=hub.provider_id)
         self._bind_endpoint_ready(endpoint)
-        preparer = getattr(endpoint, "prepare_replacement", None)
         try:
-            if old_endpoint is not None and callable(preparer):
-                preparation = preparer(old_endpoint)
+            if old_endpoint is not None:
+                preparation = endpoint.prepare_replacement(old_endpoint)
                 if inspect.isawaitable(preparation):
                     await preparation
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             if owns_transition:
                 hub.last_error = exception_report(exc)
                 self._apply_hub_action(
@@ -816,23 +881,22 @@ class ChannelRuntime(ChannelRuntimePort):
         if not self._started:
             _transfer_endpoint_runtime_state(old_endpoint, endpoint)
             self.endpoint_registry.register(endpoint)
+            self._apply_hub_action(hub, EndpointHubAction.REGISTER_TRANSPORT)
             if owns_transition:
                 self.complete_endpoint_transition(endpoint_id)
             return
 
-        old_stopper = getattr(old_endpoint, "stop_async", None)
-        if old_endpoint is not None and callable(old_stopper):
+        if old_endpoint is not None:
             try:
-                quiescer = getattr(old_endpoint, "quiesce_delivery_async", None)
-                if callable(quiescer):
-                    quiescence = quiescer()
-                    if inspect.isawaitable(quiescence):
-                        await quiescence
-                await old_stopper()
-            except Exception as exc:
+                quiescence = old_endpoint.quiesce_delivery_async()
+                if inspect.isawaitable(quiescence):
+                    await quiescence
+                await old_endpoint.stop_async()
+            except (Exception, asyncio.CancelledError) as exc:
                 if owns_transition:
                     self.fail_endpoint_transition(endpoint_id, exception_report(exc))
                 raise
+            self._stopped_endpoints[endpoint_id] = old_endpoint
             if hub.state == EndpointHubState.TRANSITIONING:
                 # A transport may return scheduled-but-unconfirmed work to its
                 # local outboxes while stopping. Pull it behind the same fence
@@ -842,27 +906,27 @@ class ChannelRuntime(ChannelRuntimePort):
                 self._absorb_endpoint_transport_backlog(hub, old_endpoint)
         try:
             self._restore_endpoint_transport_backlog(hub, endpoint)
-            starter = getattr(endpoint, "start_async", None)
-            if callable(starter):
-                await starter()
-            validator = getattr(endpoint, "validate_replacement_startup", None)
-            if callable(validator):
-                validation = validator()
-                if inspect.isawaitable(validation):
-                    await validation
-        except Exception as exc:
-            failed_stopper = getattr(endpoint, "stop_async", None)
-            if callable(failed_stopper):
-                try:
-                    await failed_stopper()
-                except Exception as cleanup_exc:
-                    exc.add_note("Replacement transport cleanup also failed:\n" + exception_report(cleanup_exc))
+            await endpoint.start_async()
+            validation = endpoint.validate_replacement_startup()
+            if inspect.isawaitable(validation):
+                await validation
+        except (Exception, asyncio.CancelledError) as exc:
+            self._pending_endpoint_cleanup[endpoint_id] = (endpoint, cleanup)
+            try:
+                await self._cleanup_failed_endpoint(endpoint_id)
+            except (Exception, asyncio.CancelledError) as cleanup_exc:
+                exc.add_note("Replacement transport cleanup also failed:\n" + exception_report(cleanup_exc))
+                self.fail_endpoint_transition(endpoint_id, exception_report(exc))
+                raise exc
             self._absorb_endpoint_transport_backlog(hub, endpoint)
-            old_starter = getattr(old_endpoint, "start_async", None)
             if old_endpoint is not None:
                 self._restore_endpoint_transport_backlog(hub, old_endpoint)
-                if callable(old_starter):
-                    await old_starter()
+                self._stopped_endpoints.pop(endpoint_id, None)
+                try:
+                    await old_endpoint.start_async()
+                except (Exception, asyncio.CancelledError) as restore_exc:
+                    self.fail_endpoint_transition(endpoint_id, exception_report(restore_exc))
+                    raise
                 self._bind_endpoint_ready(old_endpoint)
                 self.endpoint_registry.register(old_endpoint)
                 self._apply_hub_action(hub, EndpointHubAction.REGISTER_TRANSPORT)
@@ -874,6 +938,7 @@ class ChannelRuntime(ChannelRuntimePort):
                     self.fail_endpoint_transition(endpoint_id, exception_report(exc))
             raise
         _transfer_endpoint_runtime_state(old_endpoint, endpoint)
+        self._stopped_endpoints.pop(endpoint_id, None)
         self.endpoint_registry.register(endpoint)
         self._apply_hub_action(hub, EndpointHubAction.REGISTER_TRANSPORT)
         self._queue_cached_control_catalog(endpoint)
@@ -887,6 +952,10 @@ class ChannelRuntime(ChannelRuntimePort):
         timeout_seconds: float = 10.0,
         manage_transition: bool = True,
     ) -> None:
+        endpoint_id = endpoint.endpoint.endpoint_id
+        if (endpoint_id in self._pending_endpoint_cleanup or endpoint_id in self._removal_tasks
+                or endpoint_id in self._replacement_tasks):
+            raise RuntimeError("endpoint lifecycle cleanup is pending")
         async def _replace() -> None:
             await self.replace_endpoint_async(endpoint, manage_transition=manage_transition)
 
@@ -903,42 +972,119 @@ class ChannelRuntime(ChannelRuntimePort):
             return
         if not self._started:
             old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
+            if old_endpoint is endpoint:
+                return
             hub = self._require_hub(endpoint.endpoint.endpoint_id)
             owns_transition = manage_transition and hub.state != EndpointHubState.TRANSITIONING
             if owns_transition:
                 self.begin_endpoint_transition(endpoint.endpoint.endpoint_id)
-            preparer = getattr(endpoint, "prepare_replacement", None)
-            if old_endpoint is not None and callable(preparer):
-                preparation = preparer(old_endpoint)
-                if inspect.isawaitable(preparation):
-                    raise RuntimeError(
-                        "async endpoint replacement preparation requires replace_endpoint_async"
-                    )
-            _transfer_endpoint_runtime_state(old_endpoint, endpoint)
-            self.register_endpoint(endpoint)
-            if owns_transition:
-                self.complete_endpoint_transition(endpoint.endpoint.endpoint_id)
+            preparation = None
+            try:
+                if old_endpoint is not None:
+                    preparation = endpoint.prepare_replacement(old_endpoint)
+                    if inspect.isawaitable(preparation):
+                        if inspect.iscoroutine(preparation):
+                            preparation.close()
+                            preparation = None
+                        raise RuntimeError(
+                            "async endpoint replacement preparation requires replace_endpoint_async"
+                        )
+                _transfer_endpoint_runtime_state(old_endpoint, endpoint)
+                self.register_endpoint(endpoint)
+                if owns_transition:
+                    self.complete_endpoint_transition(endpoint.endpoint.endpoint_id)
+            except (Exception, asyncio.CancelledError) as exc:
+                if self.get_endpoint(endpoint_id) is not endpoint:
+                    prepare_step = OwnedLifecycleStep(lambda: preparation) if inspect.isawaitable(preparation) else None
+                    async def finish_candidate():
+                        if prepare_step is not None:
+                            try:
+                                await prepare_step.run_async()
+                            except (Exception, asyncio.CancelledError) as prepare_exc:
+                                if (prepare_step.pending is not None or
+                                        isinstance(prepare_exc, asyncio.CancelledError) and asyncio.current_task().cancelling()):
+                                    raise
+                        await endpoint.stop_async()
+                    step = OwnedLifecycleStep(finish_candidate)
+                    self._pending_endpoint_cleanup[endpoint_id] = (endpoint, step)
+                    try:
+                        step.run(self._loop)
+                    except (Exception, asyncio.CancelledError) as cleanup_exc:
+                        exc.add_note("Replacement cleanup remains owned:\n" + exception_report(cleanup_exc))
+                    else:
+                        self._absorb_endpoint_transport_backlog(hub, endpoint)
+                        self._pending_endpoint_cleanup.pop(endpoint_id)
+                    if owns_transition and old_endpoint is not None:
+                        self.rollback_endpoint_transition(endpoint_id, attached=True)
+                if owns_transition and (old_endpoint is None or self.get_endpoint(endpoint_id) is endpoint):
+                    self.fail_endpoint_transition(endpoint_id, exception_report(exc))
+                raise
             return
         asyncio.run(_replace())
 
     async def remove_endpoint_async(self, endpoint_id: str) -> bool:
+        return await asyncio.shield(self._endpoint_removal_task(endpoint_id))
+
+    def _endpoint_removal_task(self, endpoint_id: str) -> asyncio.Task:
+        task = self._removal_tasks.get(endpoint_id)
+        if task is not None and not task.done():
+            return task
+        task = asyncio.create_task(self._remove_endpoint_once(endpoint_id))
+        self._removal_tasks[endpoint_id] = task
+        def completed(done):
+            # Observe a late failure, retain its endpoint, and let the next
+            # removal retry. Successful removal releases only this task owner.
+            if not done.cancelled() and done.exception() is None:
+                if self._removal_tasks.get(endpoint_id) is done:
+                    self._removal_tasks.pop(endpoint_id)
+        task.add_done_callback(completed)
+        return task
+
+    async def _remove_endpoint_once(self, endpoint_id: str) -> bool:
+        replacement = self._replacement_tasks.get(endpoint_id)
+        if replacement is not None:
+            try:
+                await asyncio.shield(replacement)
+            except (Exception, asyncio.CancelledError):
+                if not replacement.done():
+                    raise
+        cleaned_candidate = endpoint_id in self._pending_endpoint_cleanup
+        await self._cleanup_failed_endpoint(endpoint_id)
         endpoint = self.endpoint_registry.get(endpoint_id)
         if endpoint is None:
-            return False
-        stopper = getattr(endpoint, "stop_async", None)
-        if callable(stopper):
-            quiescer = getattr(endpoint, "quiesce_delivery_async", None)
-            if callable(quiescer):
-                quiescence = quiescer()
-                if inspect.isawaitable(quiescence):
-                    await quiescence
-            await stopper()
+            return cleaned_candidate
+        if self._stopped_endpoints.get(endpoint_id) is not endpoint:
+            quiescence = endpoint.quiesce_delivery_async()
+            if inspect.isawaitable(quiescence):
+                await quiescence
+            await endpoint.stop_async()
+            self._stopped_endpoints[endpoint_id] = endpoint
+        if self.endpoint_registry.get(endpoint_id) is not endpoint:
+            raise RuntimeError("endpoint incarnation changed during cleanup")
         hub = self.endpoint_hubs.get(endpoint_id)
         if hub is not None:
             self._absorb_endpoint_transport_backlog(hub, endpoint)
             self._apply_hub_action(hub, EndpointHubAction.TRANSPORT_REMOVED)
         self.endpoint_registry.unregister(endpoint_id)
+        self._stopped_endpoints.pop(endpoint_id, None)
         return True
+
+    async def _cleanup_failed_endpoint(self, endpoint_id: str) -> None:
+        pending = self._pending_endpoint_cleanup.get(endpoint_id)
+        if pending is None:
+            return
+        endpoint, step = pending
+        await step.run_async()
+        hub = self.endpoint_hubs.get(endpoint_id)
+        if hub is not None:
+            self._absorb_endpoint_transport_backlog(hub, endpoint)
+        self._pending_endpoint_cleanup.pop(endpoint_id)
+
+    def owns_endpoint_transport(self, endpoint_id: str) -> bool:
+        return (self.get_endpoint(endpoint_id) is not None
+                or endpoint_id in self._pending_endpoint_cleanup
+                or endpoint_id in self._replacement_tasks
+                or (endpoint_id in self._removal_tasks and not self._removal_tasks[endpoint_id].done()))
 
     def remove_endpoint(self, endpoint_id: str, *, timeout_seconds: float = 10.0) -> bool:
         async def _remove() -> bool:
@@ -954,7 +1100,8 @@ class ChannelRuntime(ChannelRuntimePort):
                 raise RuntimeError("remove_endpoint cannot block its owner event loop; use remove_endpoint_async")
             future = asyncio.run_coroutine_threadsafe(_remove(), loop)
             return bool(future.result(timeout=timeout_seconds))
-        if not self._started:
+        if (not self._started and endpoint_id not in self._pending_endpoint_cleanup
+                and endpoint_id not in self._removal_tasks and endpoint_id not in self._replacement_tasks):
             endpoint = self.endpoint_registry.get(endpoint_id)
             removed = endpoint is not None
             hub = self.endpoint_hubs.get(endpoint_id)
@@ -966,12 +1113,14 @@ class ChannelRuntime(ChannelRuntimePort):
         return bool(asyncio.run(_remove()))
 
     def discard_endpoint_transport(self, endpoint_id: str) -> bool:
-        """Forget a failed transport without invoking its shutdown hook again."""
+        """Forget metadata only after this exact transport finished shutdown."""
 
         endpoint = self.endpoint_registry.get(endpoint_id)
         hub = self.endpoint_hubs.get(endpoint_id)
         if endpoint is None:
             return False
+        if self._stopped_endpoints.get(endpoint_id) is not endpoint:
+            raise RuntimeError("cannot discard a transport with unconfirmed cleanup")
         if hub is not None:
             self._apply_hub_action(hub, EndpointHubAction.TRANSPORT_REMOVED)
         self.endpoint_registry.unregister(endpoint_id)

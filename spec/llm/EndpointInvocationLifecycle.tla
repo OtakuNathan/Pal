@@ -1,10 +1,14 @@
 -------------------- MODULE EndpointInvocationLifecycle --------------------
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Endpoints, HasCredential, NeedsCompact, MaxAttempts, NoEndpoint
+\* One invocation snapshots one user-selected endpoint. Retries stay there.
+\* A later explicit idle model switch starts a new invocation, not a fallback.
+\* AllowFallback is only the historical-behavior regression mutant.
+CONSTANTS Endpoints, HasCredential, NeedsCompact, MaxAttempts, NoEndpoint, AllowFallback
 
 VARIABLES state,
           endpoint,
+          selectedEndpoint,
           candidates,
           hookApplied,
           preflighted,
@@ -13,7 +17,7 @@ VARIABLES state,
           clients,
           retired
 
-vars == <<state, endpoint, candidates, hookApplied, preflighted, attempts,
+vars == <<state, endpoint, selectedEndpoint, candidates, hookApplied, preflighted, attempts,
           healthy, clients, retired>>
 
 TerminalStates == {"succeeded", "failed", "compact_required"}
@@ -21,6 +25,7 @@ TerminalStates == {"succeeded", "failed", "compact_required"}
 Init ==
     /\ state = "idle"
     /\ endpoint = NoEndpoint
+    /\ selectedEndpoint = NoEndpoint
     /\ candidates = Endpoints
     /\ hookApplied = FALSE
     /\ preflighted = FALSE
@@ -30,10 +35,11 @@ Init ==
     /\ retired = {}
 
 SelectEndpoint ==
-    /\ state \in {"idle", "endpoint_failed"}
+    /\ (state = "idle" \/ (AllowFallback /\ state = "endpoint_failed"))
     /\ candidates # {}
     /\ \E selected \in candidates:
         /\ endpoint' = selected
+        /\ selectedEndpoint' = IF state = "idle" THEN selected ELSE selectedEndpoint
         /\ candidates' = candidates \ {selected}
         /\ state' = "hook_pending"
         /\ hookApplied' = FALSE
@@ -45,7 +51,7 @@ ApplyModelHook ==
     /\ state = "hook_pending"
     /\ hookApplied' = TRUE
     /\ state' = "preflight_pending"
-    /\ UNCHANGED <<endpoint, candidates, preflighted, attempts,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, preflighted, attempts,
                     healthy, clients, retired>>
 
 PreflightCompact ==
@@ -54,7 +60,7 @@ PreflightCompact ==
     /\ endpoint \in NeedsCompact
     /\ preflighted' = TRUE
     /\ state' = "compact_required"
-    /\ UNCHANGED <<endpoint, candidates, hookApplied, attempts,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, hookApplied, attempts,
                     healthy, clients, retired>>
 
 PreflightReady ==
@@ -63,14 +69,14 @@ PreflightReady ==
     /\ endpoint \notin NeedsCompact
     /\ preflighted' = TRUE
     /\ state' = "prepared"
-    /\ UNCHANGED <<endpoint, candidates, hookApplied, attempts,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, hookApplied, attempts,
                     healthy, clients, retired>>
 
 MissingCredential ==
     /\ state = "prepared"
     /\ endpoint \notin HasCredential
     /\ state' = "endpoint_failed"
-    /\ UNCHANGED <<endpoint, candidates, hookApplied, preflighted,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, hookApplied, preflighted,
                     attempts, healthy, clients, retired>>
 
 BeginInvocation ==
@@ -79,14 +85,14 @@ BeginInvocation ==
     /\ state' = "invoking"
     /\ attempts' = 1
     /\ clients' = clients \cup {endpoint}
-    /\ UNCHANGED <<endpoint, candidates, hookApplied, preflighted,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, hookApplied, preflighted,
                     healthy, retired>>
 
 RetryableError ==
     /\ state = "invoking"
     /\ attempts < MaxAttempts
     /\ attempts' = attempts + 1
-    /\ UNCHANGED <<state, endpoint, candidates, hookApplied, preflighted,
+    /\ UNCHANGED <<state, endpoint, selectedEndpoint, candidates, hookApplied, preflighted,
                     healthy, clients, retired>>
 
 ExhaustedError ==
@@ -95,7 +101,7 @@ ExhaustedError ==
     /\ state' = "endpoint_failed"
     /\ clients' = clients \ {endpoint}
     /\ retired' = retired \cup {endpoint}
-    /\ UNCHANGED <<endpoint, candidates, hookApplied, preflighted,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, hookApplied, preflighted,
                     attempts, healthy>>
 
 CredentialRejected ==
@@ -103,21 +109,21 @@ CredentialRejected ==
     /\ state' = "endpoint_failed"
     /\ clients' = clients \ {endpoint}
     /\ retired' = retired \cup {endpoint}
-    /\ UNCHANGED <<endpoint, candidates, hookApplied, preflighted,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, hookApplied, preflighted,
                     attempts, healthy>>
 
 ProviderSuccess ==
     /\ state = "invoking"
     /\ state' = "succeeded"
     /\ healthy' = {endpoint}
-    /\ UNCHANGED <<endpoint, candidates, hookApplied, preflighted,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, hookApplied, preflighted,
                     attempts, clients, retired>>
 
 NoFallback ==
     /\ state = "endpoint_failed"
-    /\ candidates = {}
+    /\ (~AllowFallback \/ candidates = {})
     /\ state' = "failed"
-    /\ UNCHANGED <<endpoint, candidates, hookApplied, preflighted,
+    /\ UNCHANGED <<endpoint, selectedEndpoint, candidates, hookApplied, preflighted,
                     attempts, healthy, clients, retired>>
 
 Closed ==
@@ -144,6 +150,7 @@ TypeOK ==
         "compact_required"
        }
     /\ endpoint \in Endpoints \cup {NoEndpoint}
+    /\ selectedEndpoint \in Endpoints \cup {NoEndpoint}
     /\ candidates \subseteq Endpoints
     /\ hookApplied \in BOOLEAN
     /\ preflighted \in BOOLEAN
@@ -152,6 +159,7 @@ TypeOK ==
     /\ clients \subseteq Endpoints
     /\ retired \subseteq Endpoints
 
+EndpointSelectionStable == endpoint = selectedEndpoint
 PreflightUsesHookedRequest == preflighted => hookApplied
 InvocationRequiresPreflight == state = "invoking" => preflighted /\ hookApplied
 CompactDoesNotInvoke == state = "compact_required" => attempts = 0 /\ clients = {}

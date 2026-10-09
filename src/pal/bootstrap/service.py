@@ -8,6 +8,7 @@ from pal.channel import (
     ChannelRuntime,
     register_with_core as register_channel_with_core,
 )
+from pal.channel.provider_manager import ChannelEndpointProviderManager
 from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.runtime_config import RuntimeConfig
@@ -39,7 +40,7 @@ class StubRuntimeHandle:
     database: PalV2Database
     core: PalCore
     channel_runtime: ChannelRuntime
-    channel_provider_manager: object
+    channel_provider_manager: ChannelEndpointProviderManager
     identity_service: IdentityService
     llm_runtime: LLMRuntime
     memory_service: MemoryService
@@ -77,26 +78,25 @@ class StubRuntimeHandle:
         if dreaming is not None:
             await dreaming.shutdown()
         self.plugin_host.shutdown()
+        if self.plugin_host.shutdown_errors:
+            raise RuntimeError("plugin shutdown incomplete: " + "; ".join(self.plugin_host.shutdown_errors))
+        # Transports/providers can still use resident services and the database
+        # while closing. An unfinished child keeps those dependencies alive.
+        await self.channel_provider_manager.stop_async()
+        if self.channel_provider_manager.shutdown_errors:
+            raise RuntimeError("channel shutdown incomplete: " + "; ".join(self.channel_provider_manager.shutdown_errors))
         for module_id, handle in tuple(self.core.context.module_registry.modules.items()):
             if module_id == "channel":
                 continue
             shutdown_async = handle.shutdown_async
             shutdown_sync = handle.shutdown_sync
             if callable(shutdown_async):
-                try:
-                    await shutdown_async()
-                except Exception:
-                    continue
+                await shutdown_async()
+                handle.shutdown_async = None
+                handle.shutdown_sync = None
             elif callable(shutdown_sync):
-                try:
-                    shutdown_sync()
-                except Exception:
-                    continue
-        provider_stopper = getattr(self.channel_provider_manager, "stop_async", None)
-        if callable(provider_stopper):
-            await provider_stopper()
-        else:
-            await self.channel_runtime.stop_async()
+                shutdown_sync()
+                handle.shutdown_sync = None
         self.database.close()
 
 

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from pal.plugins.contracts import PluginFactory
 
+import asyncio
 import contextlib
 import importlib
 import inspect
 import sys
 import tomllib
 from pal.packages import installed_environment
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -107,11 +108,14 @@ class PluginHost:
     first_party_handles: dict[str, ModuleHandle] = field(default_factory=dict)
     third_party_handles: dict[str, ModuleHandle] = field(default_factory=dict)
     generations: dict[str, PluginGeneration] = field(default_factory=dict)
+    # An unsuccessful start can own resources before it returns a module handle.
+    _pending_rollbacks: dict[str, tuple[PluginScope | None, PluginRecord]] = field(default_factory=dict)
     manifests: dict[str, PluginManifest] = field(default_factory=dict)
     module_to_plugin: dict[str, str] = field(default_factory=dict)
     owner_id: str = "plugins"
     first_party_disabled: set[str] = field(default_factory=set)
     scan_errors: list[str] = field(default_factory=list)
+    shutdown_errors: list[str] = field(default_factory=list)
     last_scan_status: str = PLUGIN_STATUS_DISCOVERED
     _generation_counter: int = 0
     _management_handle: ModuleHandle | None = None
@@ -151,13 +155,24 @@ class PluginHost:
         return handle
 
     def shutdown(self) -> None:
-        if self._management_handle is not None and self._management_handle.shutdown_sync:
-            self._management_handle.shutdown_sync()
-        for plugin_id in reversed(self._topological_order(attached_only=True)):
-            with contextlib.suppress(Exception):
-                self._detach_generation(plugin_id)
+        self.shutdown_errors = []
+        try:
+            self._shutdown_owned()
+        except (Exception, asyncio.CancelledError) as exc:
+            self.shutdown_errors.append(exception_report(exc))
+
+    def _shutdown_owned(self) -> None:
         if self._management_handle is not None:
             self.context.execution_runtime.unmount_subtree(self._management_handle)
+            if self._management_handle.shutdown_sync:
+                self._management_handle.shutdown_sync()
+                self._management_handle.shutdown_sync = None
+        for plugin_id in reversed(self._topological_order(attached_only=True)):
+            if self._detach_generation(plugin_id) != RuntimeStatus.OK:
+                raise RuntimeError(f"plugin '{plugin_id}' cleanup remains owned; dependencies retained")
+        if self.generations or self._pending_rollbacks:
+            raise RuntimeError("plugin shutdown retained lifecycle owners")
+        if self._management_handle is not None:
             self._management_handle = None
         if self.context.port_registry.get("core:plugins") is self:
             self.context.port_registry.pop("core:plugins", None)
@@ -253,6 +268,9 @@ class PluginHost:
                     "blocked_by": list(self._blocked_by(str(item["plugin_id"]))),
                     "suspended_by": list(item.get("config", {}).get("suspended_by", [])),
                     "lifecycle_state": item.get("last_load_status"),
+                    "logical_unload_committed": bool(generation and generation.cleanup_started),
+                    "cleanup_pending": bool(generation and (generation.cleanup_started or generation.cleanup_errors))
+                    or str(item["plugin_id"]) in self._pending_rollbacks,
                 }
             )
             from pal.packages.service import PackageService
@@ -263,7 +281,7 @@ class PluginHost:
         return sorted(items, key=lambda item: (item["source"], item["plugin_id"]))
 
     def forget_uninstalled(self, plugin_id: str) -> None:
-        if plugin_id in self.generations:
+        if plugin_id in self.generations or plugin_id in self._pending_rollbacks:
             raise RuntimeError("Cannot forget a plugin with a remaining generation")
         self.manifests.pop(plugin_id, None)
         self.third_party_handles.pop(plugin_id, None)
@@ -284,6 +302,23 @@ class PluginHost:
             result["error"] = str((failed.last_error if failed else "") or facts.get("reason") or f"Plugin operation returned {status} for {plugin_id}")
             load_status = failed.last_load_status if failed else "not_found"
             result["error_code"] = "plugin_" + (load_status if load_status in {"load_failed", "cleanup_failed", "not_found"} else "operation_failed")
+            failed_id = str(facts.get("blocked_by") or plugin_id)
+            generation = self.generations.get(failed_id)
+            if failed_id in self._pending_rollbacks:
+                result.update(
+                    cleanup_pending=True, cleanup_plugin_id=failed_id, retry="reconcile_first",
+                    recovery_hint=(f"Plugin {failed_id!r} failed to attach and still owns cleanup work. "
+                                   "Retry detach_plugin for that plugin before attaching or replacing it."),
+                )
+            if generation is not None and generation.cleanup_started:
+                result.update(
+                    logical_unload_committed=True, cleanup_pending=True,
+                    cleanup_plugin_id=failed_id, retry="reconcile_first",
+                    recovery_hint=(f"Plugin {failed_id!r} is logically detached and its entry remains closed. "
+                                   "Resource cleanup is incomplete; inspect the error and retry detach_plugin "
+                                   "for that plugin before attaching or replacing it."),
+                )
+                result["error"] = f"Resource cleanup incomplete for logically detached plugin {failed_id!r}.\n" + result["error"]
         return result
 
     def reattach(self, plugin_id: str) -> dict[str, Any]:
@@ -299,6 +334,12 @@ class PluginHost:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
         if not record.enabled:
             return _plugin_disabled_result(plugin_id)
+        if plugin_id in self._pending_rollbacks:
+            if not reload:
+                return self._operation_result(plugin_id, RuntimeStatus.ERROR, reason="plugin_cleanup_pending")
+            detached = self.detach(plugin_id)
+            if detached["status"] != RuntimeStatus.OK:
+                return detached
         if not reload and plugin_id in self.generations:
             return {
                 "status": RuntimeStatus.OK if record.attached else RuntimeStatus.ERROR,
@@ -366,11 +407,14 @@ class PluginHost:
             if record.attached:
                 self.settings.set("plugin.enabled:" + plugin_id, True)
                 return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": True}
-            status = self._attach_with_dependencies(plugin_id)
-            if status != RuntimeStatus.OK:
-                record.enabled = previous_enabled
-                if was_disabled:
-                    self.first_party_disabled.add(plugin_id)
+            status = RuntimeStatus.ERROR
+            try:
+                status = self._attach_with_dependencies(plugin_id)
+            finally:
+                if status != RuntimeStatus.OK:
+                    record.enabled = previous_enabled
+                    if was_disabled:
+                        self.first_party_disabled.add(plugin_id)
             if status == RuntimeStatus.OK:
                 self.settings.set("plugin.enabled:" + plugin_id, True)
             return self._operation_result(plugin_id, status)
@@ -381,15 +425,18 @@ class PluginHost:
         row = self.third_party_repository.set_enabled(plugin_id, True)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        status = self._attach_with_dependencies(plugin_id)
-        if status != RuntimeStatus.OK:
-            self.third_party_repository.set_enabled(plugin_id, previous_enabled)
+        status = RuntimeStatus.ERROR
+        try:
+            status = self._attach_with_dependencies(plugin_id)
+        finally:
+            if status != RuntimeStatus.OK:
+                self.third_party_repository.set_enabled(plugin_id, previous_enabled)
         return self._operation_result(plugin_id, status)
 
     def disable(self, plugin_id: str) -> dict[str, Any]:
         if plugin_id in self.first_party_records:
             record = self.first_party_records[plugin_id]
-            if plugin_id in self.generations:
+            if plugin_id in self.generations or plugin_id in self._pending_rollbacks:
                 result = self.detach(plugin_id)
                 if result["status"] != RuntimeStatus.OK:
                     return result
@@ -401,7 +448,7 @@ class PluginHost:
         row = self.third_party_repository.get(plugin_id)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        if plugin_id in self.generations:
+        if plugin_id in self.generations or plugin_id in self._pending_rollbacks:
             result = self.detach(plugin_id)
             if result["status"] != RuntimeStatus.OK:
                 return result
@@ -466,7 +513,7 @@ class PluginHost:
                 removal = removal_record(self.runtime_root, manifest.plugin_id)
                 if removal:
                     # Failed cleanup still needs its dependency graph on retry.
-                    if manifest.plugin_id not in self.generations:
+                    if manifest.plugin_id not in self.generations and manifest.plugin_id not in self._pending_rollbacks:
                         self.manifests.pop(manifest.plugin_id, None)
                     continue
             except Exception as exc:
@@ -617,7 +664,7 @@ class PluginHost:
         nodes = {
             plugin_id
             for plugin_id in self.manifests
-            if not attached_only or plugin_id in self.generations
+            if not attached_only or plugin_id in self.generations or plugin_id in self._pending_rollbacks
         }
         visiting: set[str] = set()
         visited: set[str] = set()
@@ -656,7 +703,7 @@ class PluginHost:
                 if candidate in result or candidate == plugin_id:
                     continue
                 if any(dep in frontier for dep in manifest.requires_plugins):
-                    if not attached_only or candidate in self.generations:
+                    if not attached_only or candidate in self.generations or candidate in self._pending_rollbacks:
                         result.add(candidate)
                     next_frontier.add(candidate)
             if not transitive:
@@ -695,6 +742,8 @@ class PluginHost:
         return was_suspended and not suspended
 
     def _attach_with_dependencies(self, plugin_id: str) -> str:
+        if plugin_id in self._pending_rollbacks:
+            return RuntimeStatus.ERROR
         from pal.packages.uninstall import removal_record
         if removal_record(self.runtime_root, plugin_id):
             self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error="plugin uninstall is pending or completed")
@@ -712,7 +761,7 @@ class PluginHost:
                 if record is None or not record.enabled:
                     self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error=f"dependency disabled or missing: {dependency}")
                     return RuntimeStatus.ERROR
-                if dependency not in self.generations:
+                if dependency in self._pending_rollbacks or dependency not in self.generations:
                     status = self._attach_with_dependencies(dependency)
                     if status != RuntimeStatus.OK:
                         dependency_record = self._record(dependency)
@@ -751,6 +800,8 @@ class PluginHost:
             self._attaching.discard(plugin_id)
 
     def _attach_plugin(self, plugin_id: str) -> str:
+        if plugin_id in self._pending_rollbacks:
+            return RuntimeStatus.ERROR
         if plugin_id in self.generations:
             return RuntimeStatus.OK
         record = self._record(plugin_id)
@@ -758,6 +809,8 @@ class PluginHost:
         if record is None or manifest is None:
             return RuntimeStatus.NOT_FOUND
         plugin_dir = Path(record.filesystem_path) if record.filesystem_path else None
+        generation: PluginGeneration | None = None
+        scope: PluginScope | None = None
         try:
             if record.source == PLUGIN_SOURCE_THIRD_PARTY:
                 if plugin_dir is None or not plugin_dir.exists():
@@ -793,8 +846,8 @@ class PluginHost:
             handle.degraded = False
             self.context.register_module(handle)
             if handle.execution_extension is not None:
-                self.context.execution_runtime.install(handle.execution_extension, self.context, handle)
                 scope.defer(lambda: self.context.execution_runtime.uninstall(self.context, handle))
+                self.context.execution_runtime.install(handle.execution_extension, self.context, handle)
             scope.published = True
             self._restore_provider_refs(handle)
             self._restore_prompt_fragment_providers(handle)
@@ -812,29 +865,63 @@ class PluginHost:
             scope.publish_core_subscriptions()
             self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED)
             return RuntimeStatus.OK
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             errors = [exception_report(exc)]
-            if "scope" in locals():
-                candidate = getattr(scope, "handle", None)
-                if candidate is not None:
-                    for cleanup in (scope.absorb_handle_cleanups, self._withdraw_generation_surface, self.context.unregister_module):
-                        try:
-                            cleanup(candidate)
-                        except Exception as cleanup_exc:
-                            errors.append("Rollback failed:\n" + exception_report(cleanup_exc))
-                errors.extend(scope.close())
-            try:
-                self._drop_plugin_import_cache(
-                    record.entrypoint,
-                    plugin_id=plugin_id,
-                    first_party=record.source == PLUGIN_SOURCE_FIRST_PARTY,
-                    extra_prefixes=_record_reload_prefixes(record),
-                    plugin_dir=plugin_dir if record.source == PLUGIN_SOURCE_THIRD_PARTY else None,
-                )
-            except Exception as cleanup_exc:
-                errors.append("Import cleanup failed:\n" + exception_report(cleanup_exc))
-            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED, error="\n".join(errors))
+            errors.extend(self._rollback_plugin_scope(plugin_id, scope, record))
+            status = PLUGIN_STATUS_LOAD_FAILED
+            if generation is None and len(errors) > 1:
+                self._pending_rollbacks[plugin_id] = (scope, replace(record, config=dict(record.config)))
+                status = PLUGIN_STATUS_CLEANUP_FAILED
+            if generation is not None and self.generations.get(plugin_id) is generation:
+                # Replay/subscription callbacks need the staged generation in the
+                # maps before commit. Release only this attempt's entries once
+                # rollback has succeeded; real cleanup failures retain ownership
+                # so detach can retry instead of losing live resources.
+                if len(errors) > 1:
+                    generation.cleanup_errors = tuple(errors[1:])
+                    generation.cleanup_started = True
+                    status = PLUGIN_STATUS_CLEANUP_FAILED
+                else:
+                    self.generations.pop(plugin_id)
+                    for handles in (self.first_party_handles, self.third_party_handles):
+                        if handles.get(plugin_id) is generation.handle:
+                            handles.pop(plugin_id)
+            self._set_state(plugin_id, attached=False, status=status, error="\n".join(errors))
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return RuntimeStatus.ERROR
+
+    def _rollback_plugin_scope(self, plugin_id: str, scope: PluginScope | None,
+                               record: PluginRecord) -> list[str]:
+        errors: list[str] = []
+        if scope is not None:
+            candidate = scope.handle
+            if candidate is not None:
+                try:
+                    self.context.execution_runtime.revoke_subtree_admission(candidate)
+                    scope.absorb_handle_cleanups(candidate)
+                    self.context.execution_runtime.unmount_subtree(candidate)
+                    self._withdraw_generation_surface(candidate)
+                    self.context.unregister_module(candidate)
+                except (Exception, asyncio.CancelledError) as exc:
+                    # Entry revocation does not depend on registry compilation.
+                    # Keep resources alive until all other published callbacks
+                    # are removed, and keep the handle available for that retry.
+                    return ["Rollback failed:\n" + exception_report(exc)]
+            errors.extend(scope.close())
+            if errors:
+                return errors
+        try:
+            self._drop_plugin_import_cache(
+                record.entrypoint, plugin_id=plugin_id,
+                first_party=record.source == PLUGIN_SOURCE_FIRST_PARTY,
+                extra_prefixes=_record_reload_prefixes(record),
+                plugin_dir=(Path(record.filesystem_path) if record.source == PLUGIN_SOURCE_THIRD_PARTY
+                            and record.filesystem_path else None),
+            )
+        except Exception as exc:
+            errors.append("Import cleanup failed:\n" + exception_report(exc))
+        return errors
 
     def _withdraw_generation_surface(self, handle: ModuleHandle) -> None:
         self._withdraw_module_capabilities(handle.module_id)
@@ -854,7 +941,48 @@ class PluginHost:
             for generation in self.generations.values():
                 register(generation.handle)
 
+    def withdraw_tool_entries(self, plugin_id: str) -> tuple[tuple[str, PluginGeneration], ...]:
+        """Preflight and withdraw entry points, retaining all cleanup ownership."""
+        affected = self._dependents_of(plugin_id, transitive=True, attached_only=True)
+        ordered = [*reversed(self._topological_subset(affected)), plugin_id]
+        captured = tuple((name, self.generations[name]) for name in ordered if name in self.generations)
+        runtime = self.context.execution_runtime
+        for _, generation in captured:
+            runtime.check_detach(generation.handle)
+        # No gate wait under the registry lock. The runtime validates each
+        # exact mount authority before one atomic dependency-closure withdrawal.
+        runtime.unmount_subtrees(tuple(
+            generation.handle for name, generation in captured
+            if self.generations.get(name) is generation
+        ))
+        return captured
+
+    def restore_tool_entries(self, captured: tuple[tuple[str, PluginGeneration], ...]) -> None:
+        """Restore untouched owners only; failed cleanup stays unpublished."""
+        runtime = self.context.execution_runtime
+        for name, generation in reversed(captured):
+            with runtime._registry_lock:
+                handle = generation.handle
+                record = self._record(name)
+                subtree = handle.mounted_subtree
+                if (self.generations.get(name) is not generation or generation.cleanup_started
+                        or generation.cleanup_errors or not handle.mounted
+                        or record is None or not record.attached or subtree is None or subtree.mounted):
+                    continue
+                if subtree.module_id not in runtime.registry_generation.mounted_subtrees:
+                    runtime.mount_subtree(handle)
+
     def _detach_generation(self, plugin_id: str) -> str:
+        pending = self._pending_rollbacks.get(plugin_id)
+        if pending is not None:
+            errors = self._rollback_plugin_scope(plugin_id, *pending)
+            if errors:
+                self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED,
+                                error="\n".join(errors))
+                return RuntimeStatus.ERROR
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
+            self._pending_rollbacks.pop(plugin_id)
+            return RuntimeStatus.OK
         generation = self.generations.get(plugin_id)
         record = self._record(plugin_id)
         if generation is None:
@@ -862,43 +990,49 @@ class PluginHost:
                 self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
                 return RuntimeStatus.OK
             return RuntimeStatus.NOT_FOUND
+        if generation.cleanup_started:
+            assert record is not None
+            errors = self._rollback_plugin_scope(plugin_id, generation.scope, record)
+            if errors:
+                generation.cleanup_errors = tuple(errors)
+                self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED,
+                                error="\n".join(errors))
+                return RuntimeStatus.ERROR
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
+            self.generations.pop(plugin_id)
+            self.first_party_handles.pop(plugin_id, None)
+            self.third_party_handles.pop(plugin_id, None)
+            return RuntimeStatus.OK
         handle = generation.handle
         try:
             self.context.execution_runtime.check_detach(handle)
         except Exception as exc:
             self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED, error=exception_report(exc))
             return RuntimeStatus.ERROR
-        errors: list[str] = []
+        # Publication withdrawal is still reversible. Do not start resource
+        # cleanup if compilation/withdrawal itself fails.
         try:
-            self._withdraw_generation_surface(handle)
+            self.context.execution_runtime.unmount_subtree(handle)
         except Exception as exc:
-            errors.append("surface:\n" + exception_report(exc))
-        try:
-            self.context.unregister_module(handle)
-        except Exception as exc:
-            errors.append("unregister:\n" + exception_report(exc))
-        try:
-            generation.scope.absorb_handle_cleanups(handle)
-        except Exception as exc:
-            errors.append("provider:\n" + exception_report(exc))
-        errors.extend(generation.scope.close())
+            self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED, error=exception_report(exc))
+            return RuntimeStatus.ERROR
+        with self.context.execution_runtime._registry_lock:
+            generation.cleanup_started = True
+        # This is the logical unload commit. Arbitrary RAII callbacks can have
+        # irreversible effects; after this point failures retain cleanup ownership
+        # and never republish a potentially half-closed generation.
+        self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
+        assert record is not None
+        errors = self._rollback_plugin_scope(plugin_id, generation.scope, record)
         if errors:
             generation.cleanup_errors = tuple(errors)
             self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED, error="; ".join(errors))
             return RuntimeStatus.ERROR
         try:
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
             self.generations.pop(plugin_id, None)
             self.first_party_handles.pop(plugin_id, None)
             self.third_party_handles.pop(plugin_id, None)
-            assert record is not None
-            self._drop_plugin_import_cache(
-                record.entrypoint,
-                plugin_id=plugin_id,
-                first_party=record.source == PLUGIN_SOURCE_FIRST_PARTY,
-                extra_prefixes=_record_reload_prefixes(record),
-                plugin_dir=Path(record.filesystem_path) if record.source == PLUGIN_SOURCE_THIRD_PARTY and record.filesystem_path else None,
-            )
-            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_DETACHED)
             return RuntimeStatus.OK
         except Exception as exc:
             self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED, error=exception_report(exc))

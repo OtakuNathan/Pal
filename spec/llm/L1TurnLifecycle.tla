@@ -1,6 +1,13 @@
 -------------------------- MODULE L1TurnLifecycle --------------------------
 EXTENDS Naturals, FiniteSets
 
+\* Turn-level protocol/history abstraction, not a provider item-commit model.
+\* completeDrafts are assembled drafts; they are NOT provider-committed items.
+\* LengthOrBrokenTerminal drops only that uncommitted draft abstraction.
+\* ItemCommitLifecycle is authoritative for committed items surviving length:
+\* committed tools enter the normal execution queue after the terminal event.
+\* See spec/llm/README.md for the mapping and its unproved composition boundary.
+
 CONSTANT Calls
 
 VARIABLES turnState,

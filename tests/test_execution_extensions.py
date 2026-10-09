@@ -88,7 +88,9 @@ def test_activation_failure_leaves_original_projection(execution):
     extension.fail = True
     with pytest.raises(RuntimeError, match='activation failed'):
         slot.install(extension, core.context, ModuleHandle('test', MODULE_TIER_DETACHABLE))
-    assert slot.implementation is original and slot.registry_generation is generation
+    assert slot.implementation is original
+    assert slot.registry_generation is not generation
+    assert set(slot.registry_generation.search_records) == set(generation.search_records)
     assert core.context.introspection_registry['execution'] is provider
     assert len(extension.closed) == 1
 

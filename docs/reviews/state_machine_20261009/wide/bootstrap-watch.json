@@ -1,0 +1,8 @@
+{
+  "reason": "extend bootstrap group deadline without discarding the running test",
+  "rss_limit_mib": 850,
+  "available_memory_floor_mib": 512,
+  "peak_rss_mib": 825.3,
+  "status": "completed",
+  "elapsed_seconds": 215.8
+}

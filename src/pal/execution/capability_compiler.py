@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 from pydantic import Field, create_model
 
+from pal.shared.introspection import IntrospectionResult
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
 from pal.execution.tool_facade import (
     EffectKind,
@@ -415,4 +416,5 @@ def _attach_effect_receipt(
         structured=getattr(result, "structured", None),
         llm_text=str(getattr(result, "llm_text", "") or ""),
         effect_receipt=receipt,
+        recovery_hint=(result.recovery_hint if isinstance(result, IntrospectionResult) else ""),
     )

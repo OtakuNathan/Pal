@@ -1,0 +1,14 @@
+● pal-wide-batches.scope - [systemd-run] /usr/bin/python .git/pal-wide-audit-run.py
+     Loaded: loaded (/run/user/1000/systemd/transient/pal-wide-batches.scope; transient)
+  Transient: yes
+    Drop-In: /run/user/1000/systemd/transient/pal-wide-batches.scope.d
+             └─50-CPUQuota.conf
+     Active: active (running) since Fri 2026-10-09 15:49:41 BST; 1h 7min ago
+ Invocation: d3c233927a3b444b9b4533035eaeadd8
+      Tasks: 2 (limit: 3966)
+        CPU: 50min 7.220s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/pal-wide-batches.scope
+             ├─7189 /usr/bin/python -m pal.lsp.manager_main --runtime-root /tmp/pal_stub_builtin_test_q88mohje
+             └─7190 /usr/bin/python -m pal.mcp.manager_main --runtime-root /tmp/pal_stub_builtin_test_q88mohje
+
+Oct 09 15:49:41 Nathan systemd[1022]: Started pal-wide-batches.scope - [systemd-run] /usr/bin/python .git/pal-wide-audit-run.py.

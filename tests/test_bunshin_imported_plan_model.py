@@ -352,9 +352,6 @@ def test_imported_plan_tlc(tmp_path, mutant, invariant):
         cwd=tmp_path, capture_output=True, text=True, timeout=180, check=False,
     )
     output = result.stdout + result.stderr
-    if invariant:
-        assert result.returncode != 0, output
-        assert f"Invariant {invariant} is violated" in output
-    else:
-        assert result.returncode == 0, output
-        assert "Model checking completed. No error has been found." in output
+    from scripts.run_tlc import accepted
+    case = {"kind": "negative", "invariant": invariant} if invariant else {"kind": "positive"}
+    assert accepted(case, result.returncode, output), output

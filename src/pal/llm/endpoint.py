@@ -158,6 +158,7 @@ class ShapeEndpointInvoker:
             if submitted:
                 return
             submitted = True
+            self.prompt_cache.submit_attempt(plan, request_id=request_id, diagnostics=diagnostics)
             if submission_sink is not None:
                 submission_sink(RequestSubmission(
                     request_id=request_id,
