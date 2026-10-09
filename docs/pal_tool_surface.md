@@ -25,14 +25,24 @@ There is no tool-surface config file and no runtime refresh command. Changing di
 
 Search with English alias words in `[domain] [action] [object]` form, such as
 `remember memory`, `lsp incoming calls`, or `browser screenshot`. Exact aliases
-and alias prefixes also work. Search
-matches words, including words separated by underscores in aliases; `install`
+rank first, with case-sensitive exact lookup ahead of case-folded matches. Search
+matches complete words, including words separated by underscores in aliases; `install`
 does not match `uninstall`. Broad or unmatched queries can be refined using
 the result's hit and filter guidance.
 
+Discovery vocabulary is declared in `ToolGuidance.search_terms`: reviewed action and
+object synonyms, not arbitrary prose. Existing `search_objects` declarations remain
+supported. `search_enum_fields=("operation",)` explicitly includes string enum values
+from the selected input property, including local schema references. Unselected enums
+(such as output format) do not contribute. All query words must match alias words or
+this vocabulary. No fuzzy stemming, global action equivalence or negative-use prose is
+indexed. For an empty result, shorten to the domain/object and inspect the tool's schema.
+Discovery terms are hidden from normal model surfaces and included in the registry
+fingerprint. They survive scoped worker contract serialization.
+
 Important arguments:
 
-- `query`: natural-language search text or a partial capability name
+- `query`: short whole-word search terms or an exact capability alias
 - `namespace`: `inspect`/`introspection`, or `action`/`operation`. These select
   registry namespaces; read-only tools can also be registered under operation.
 - `family`: optional family filter

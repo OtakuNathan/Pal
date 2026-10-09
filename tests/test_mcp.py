@@ -79,19 +79,12 @@ class McpCompilerTests(unittest.TestCase):
             tools=(McpToolSpec(name="bad", input_schema={"type": "string"}),),
         ).with_hash()
 
-        projection = McpCompiler().compile(module_id="mcp", snapshots=(snapshot,), invoker=FakeInvoker())
-
-        self.assertEqual(projection.mounted_subtree.descriptors, [])
-        self.assertEqual(projection.snapshots[0].rejected_items[0].reason, "non_object_input_schema")
+        with self.assertRaises(McpProtocolError):
+            McpCompiler().compile(module_id="mcp", snapshots=(snapshot,), invoker=FakeInvoker())
 
     def test_invalid_raw_tool_schema_is_not_silently_treated_as_missing(self) -> None:
-        tool = normalize_tool_payload({"name": "bad.raw", "inputSchema": "not-a-schema"})
-        snapshot = McpDiscoverySnapshot(server_id="demo", transport="stdio", tools=(tool,)).with_hash()
-
-        projection = McpCompiler().compile(module_id="mcp", snapshots=(snapshot,), invoker=FakeInvoker())
-
-        self.assertEqual(projection.mounted_subtree.descriptors, [])
-        self.assertEqual(projection.snapshots[0].rejected_items[0].reason, "invalid_input_schema")
+        with self.assertRaises(McpProtocolError):
+            normalize_tool_payload({"name": "bad.raw", "inputSchema": "not-a-schema"})
 
     def test_tool_error_kinds_are_preserved(self) -> None:
         tool = McpToolSpec(name="run", input_schema={"type": "object", "properties": {}})
@@ -127,7 +120,7 @@ class McpCompilerTests(unittest.TestCase):
             arguments=(McpPromptArgumentSpec(name="diff", description="Patch diff", required=True),),
         )
         snapshot = McpDiscoverySnapshot(server_id="demo", transport="stdio", prompts=(prompt,)).with_hash()
-        invoker = FakeInvoker(prompt_result={"messages": [{"role": "user", "content": {"type": "image", "data": "..."}}]})
+        invoker = FakeInvoker(prompt_result={"messages": [{"role": "user", "content": {"type": "image", "data": "eA==", "mimeType": "image/png"}}]})
 
         projection = McpCompiler().compile(module_id="mcp", snapshots=(snapshot,), invoker=invoker)
 
@@ -289,7 +282,7 @@ class McpConnectorAndManagerTests(unittest.TestCase):
                     ident = payload.get("id")
                     params = payload.get("params") or {}
                     if method == "initialize":
-                        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "prompts": {}}, "serverInfo": {"name": "fake"}}
+                        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "prompts": {}}, "serverInfo": {"name": "fake", "version": "1"}}
                     elif not initialized:
                         result = {"error": "not initialized"}
                     elif method == "tools/list":
@@ -421,7 +414,7 @@ class McpPluginSidecarTests(unittest.TestCase):
                         continue
                     ident = payload.get("id")
                     if method == "initialize":
-                        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "prompts": {}}, "serverInfo": {"name": "fake"}}
+                        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "prompts": {}}, "serverInfo": {"name": "fake", "version": "1"}}
                     elif not initialized:
                         result = {"error": "not initialized"}
                     elif method == "tools/list":

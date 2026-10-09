@@ -1019,7 +1019,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     @staticmethod
     def _search_generation(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
-        query = str(args.get("query") or "").strip().lower()
+        raw_query = str(args.get("query") or "").strip()
+        query = raw_query.lower()
         namespace = str(args.get("namespace") or "").strip().lower()
         namespace = {"inspect": "introspection", "action": "operation"}.get(namespace, namespace)
         family = str(args.get("family") or "").strip().lower()
@@ -1046,14 +1047,16 @@ class ExecutionRuntime(ExecutionRuntimePort):
             item_tags = {str(tag).lower() for tag in item.get("tags", ())}
             alias_text = alias.lower()
             alias_terms = set(tool_search_terms(alias_text))
-            object_terms = set(item.get("search_objects", ()))
+            object_terms = set(item.get("search_terms", item.get("search_objects", ())))
             object_matches = terms & object_terms
             alias_matches = terms & alias_terms
             matched_terms = alias_matches | object_matches
             coverage = len(matched_terms)
-            # Only aliases and declared object vocabulary are positive evidence.
+            # Only aliases and declared discovery vocabulary are positive evidence.
             # Prose can contain negations or mention unrelated tools.
-            if query and alias_text == query:
+            if raw_query and alias == raw_query:
+                tier = 6
+            elif query and alias_text == query:
                 tier = 5
             elif terms and (terms == alias_terms or (
                     terms - object_terms == alias_terms - object_terms
@@ -1074,10 +1077,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     or (tags and not tags.issubset(item_tags))):
                 continue
             # This vocabulary belongs to the harness, not the model contract.
-            hit = {key: value for key, value in item.items() if key != "search_objects"}
+            hit = {key: value for key, value in item.items() if key not in {"search_objects", "search_terms"}}
             # All query words must match. Prefer exact aliases, then equivalent
             # object forms, then aliases containing additional words.
-            rank = (int(tier == 5), coverage, tier)
+            rank = (max(0, tier - 4), coverage, tier)
             score = 0
             for component in rank:
                 score = score * score_base + component
@@ -1120,7 +1123,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "Remove or correct filters using filter_suggestions; family is not module_name."
             )
         elif not scored:
-            result["usage_hint"] = "No matching tools. Try English alias keywords [domain] [action] [object] (e.g. 'lsp incoming calls', 'browser screenshot') or task synonyms; omit unknown filters."
+            result["usage_hint"] = "No matching tools. All query words must match an alias or declared discovery terms, including selected operation enums. Shorten to the object/domain (e.g. 'browser tabs'), omit unknown filters, then use read_tool to inspect available operations."
         return result
 
     @staticmethod

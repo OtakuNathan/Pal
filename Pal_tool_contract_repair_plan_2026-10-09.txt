@@ -1,0 +1,312 @@
+Pal 工具契约修复清单 — 2026-10-09
+
+一、来源与证据边界
+
+已分块完整阅读 Pal_tool_contract_review_2026-10-09.txt 全部 4992 行，
+包括正文、227 条主仓工具定义、15 条 native 工具以及提交附录。
+报告列出 15 组问题：2 P1、11 P2、2 P3。保留原编号，避免合并任务后漏项。
+当前 Pal HEAD：618f70f4d18b1972aae0580fd7955e8076479d0d。
+当前 ../pal-shell-native HEAD：d1883785ef5123d481659986a64b2c5442e1881a。
+两者均与报告审查版本一致；这不证明运行中的 Pal 已加载这些版本。
+
+初次整理阶段仅完成阅读、静态核对与修复准备；后续实施进展见文末。
+报告中的复现与测试成绩属于报告证据，不能说成本次独立跑过。
+已静态核对主要问题路径：Bunshin payload 层级与登记读取不一致、MCP 挂载结果
+与成功包装、MCP 响应默认补空、core namespace 不匹配、artifact_type 参数不匹配、
+provider 恢复指引、精确路径 strip、搜索大小写与 fingerprint、native 诊断截断。
+尚需在修复前将报告复现转成能在当前环境运行的回归用例。
+未展开另一份 TLA 审计 zip；不把它并入本次结论。
+
+前轮通过的测试不足以证明端到端契约成立。“基本干净”的判断过于乐观。
+本轮缺陷不能一概归为新增回归；报告同时包含原有缺陷和迁移遗漏。
+
+二、修复工作包（以链路合并，不逐条零散打补丁）
+
+A. Workflow 产物写入、登记、交付、错误恢复
+   R01 P1 + R07 P2 + R12 P2；主仓。
+   主要位置：src/pal/bunshin/scoped_execution.py、workspace_tools.py、
+   runner_components/artifacts.py、runner_components/text_deliverables.py、
+   execution/generated_tool_models.py，以及相应工具规格来源。
+
+R01：成功结果把 artifact 放在 structured.payload.artifact，消费者读取
+     structured.artifact，造成真实文件写了却未登记。文本兜底交付后清理暂存区，
+     可丢失原文件；有 primary 要求时也可能错误判断缺少交付物。
+     修复：统一产物结果契约，串通登记、Completion、promotion 和 terminal；
+     清理前确保真实产物已安全交付，不能让摘要兜底掩盖并删除未登记文件。
+R07：公开 schema 接受 artifact_type，handler 却拒绝；“创建或替换”的说明
+     也与默认重名后另起文件不一致。
+     修复：先确定公开能力，schema、handler、描述和恢复方式必须一致；
+     不因内部支持参数就自动全部公开。生成模型应从真实来源同步。
+R12：旧 adapter 只保留 str(exc)，丢失 cause；文件已追加、随后元数据读取失败，
+     仍可能给输入校验式恢复建议，诱导重复追加。
+     修复：区分写前拒绝、写入结果不确定、已写入但后处理失败；保留文件身份、
+     完整异常链和已知副作用，恢复前核对原文件。
+
+验收：通过公开 alias 调用写入/编辑，穿过实际注册和 runner 到最终文件。
+覆盖 required-primary、无 primary 要求、文本兜底、二次编辑、重名、公开参数、
+写前失败和写后元数据失败；检查最终字节、登记状态、暂存保全及不重复追加。
+适用范围遵循报告：普通 workflow artifact 路径，不将专用 submit handler 混为一谈。
+
+B. MCP 真实状态、协议响应和动态工具发现
+   R02 P1 + R09 P2 + R05 P2；主仓。
+   主要位置：src/pal/mcp/{manager,connector,normalize,compiler}.py 及 MCP plugin。
+
+R02：attach 失败后状态是 attached=false，但上层仍报 attached/complete/applied；
+     rescan 遗漏服务失败，connector 丢弃后 stderr 根因可能消失。
+     修复：以实际挂载变化决定结果；逐服务报告失败与部分成功；关闭 connector 前
+     保存 stderr、退出码、异常链，清理失败不能覆盖原始失败。
+R09：缺 result/error、result=null、不完整 content 等响应被默认成空成功。
+     修复：按协商版本验证 JSON-RPC envelope 与 MCP tools/call 内容，然后才验证
+     工具自定义输出；保留畸形原始响应。已派发写入而响应不可用，应为结果未知，
+     不能猜成功，也不能猜没有执行。合法空 content 仍允许。
+     不把业务对象中名为 error 的字段单独当作协议失败；实现时核对官方协议。
+R05：动态工具 search_objects 为空、指导模板泛化；camelCase 与过长服务名前缀
+     可能吞掉动作语义。
+     修复：支持可审阅的本地指导/对象词覆盖；正确拆词和分配 alias 长度，保留
+     稳定消歧与真实外部工具路由身份。自动模板不能冒充人工确认的用途/禁用条件。
+
+验收：实际隔离子进程覆盖启动失败、stderr+退出码、初始化成功后 list 失败、
+混合 rescan、清理失败；协议畸形/合法空结果/混合 content/structuredContent/isError；
+read_file、readFile、长服务名、名称碰撞、单复数搜索及调用路由一致性。
+先完成 R02/R09 的真值修复，再完成同模块 R05，避免发现能力掩盖执行错误。
+
+C. 主仓注册和搜索契约
+   R06 P2 + R04 P2 + R14 P3 + R15 P3；主仓。
+   主要位置：src/pal/core/capabilities.py、execution/capability_compiler.py、
+   execution/runtime.py、execution/tool_registry.py，以及多操作工具规格。
+
+R06：configure_core / configure_core_cache_warm_deadline 有声明和推荐，
+     但没有匹配 operation node，因此无法挂载。
+     修复：补齐应公开的 operation 节点；同时检查其他 action/node 配对。
+R04：manage/handle/control 类入口把动作藏在参数枚举，推荐的动作搜索查不到。
+     这不是 all-words-AND 算法违反自身约定，而是入口设计与搜索指引不匹配。
+     用户已定案：增加 search_terms，支持显式动作/对象同义词；增加
+     search_enum_fields，从指定操作参数提取枚举。保留 search_objects 兼容，
+     不自动索引格式等无关枚举，不改为 OR/模糊全文搜索。
+     浏览器、workflow control 等已复现入口必须有明确可用的发现路径。
+R14：调用查找区分大小写，搜索却先折叠大小写，合法同名大小写工具可选错。
+     建议先匹配原始 exact alias，再执行折叠匹配，保留现有合法 alias 的兼容性。
+R15：search_objects 改变召回，generation_hash 却不变。
+     修复：纳入影响发现的字段，或提供明确的 discovery hash。
+     这是指纹遗漏，不是新 generation 未生效；保留原有快照隔离。
+
+验收：真实 provider 注册→发布→search/read/call；动作查询与对象查询矩阵；
+空命中下一步实际有效；大小写 exact 查询与 invocation lookup 一致；
+词表变更改变相应指纹，相同语义指纹稳定，新旧 generation 各自行为正确。
+
+D. 恢复目标和文件身份
+   R08 P2 + R13 P2；主仓。
+   主要位置：src/pal/plugins/l3/sqlite_vec.py、src/pal/artifact/tools.py。
+
+R08：显式 provider A 写入结果未知，恢复却推荐使用指向 active provider B 的
+     recall_memory，查空后重试可重复创建 case。
+     修复：恢复动作绑定原 provider、原 mem_ref/候选内容；active provider 变化
+     不能改变核对目标。不要为恢复而切换全局 active provider。
+R13：import_artifact 对完整路径 strip，合法尾空格路径可被换成另一个文件。
+     修复：保留精确路径，只独立检查空输入；若不支持必须明确拒绝，不能替换身份。
+
+验收：A≠active B、提交后格式化失败、恢复中 active 切换、case 不重复；
+更新/删除核对同一 mem_ref。尾空格单文件与双文件冲突验证实际导入字节身份。
+
+E. Native provider 发现与远端诊断
+   R03 P2 + R10 P2 + R11 P2；独立 ../pal-shell-native 仓库。
+   主要位置：pal_plugin/ 下 native/remote 工具定义、pal_shell_remote/slot.py。
+
+R03：native 替换 builtin 后，大部分工具缺对象词，常见复数查询失效。
+     修复：同步 commands/sessions/targets/output/deadlines 等真实对象词；
+     shortcut 继承；start_remote_target 现有 wake/startup 等动作词不要当对象词。
+R10：远端探测失败只留泛化 code，并把鉴权失败推断为 needs_start。
+     修复：保留脱敏原因与观测时间；区分不可达、预期离线、已知关闭和未知。
+     “连不上”不足以推出“应该启动”。
+R11：启动动作 stdout 被丢弃，stderr 只剩尾部且二次截断，可失去唯一根因。
+     修复：保留双流证据，默认短摘要并提供完整读取方式；容量/保留期如有限制，
+     必须说明实际丢失，不能暗中抹掉。保持子进程继承管道时父命令完成不被拖住。
+
+验收：builtin/native 成对注册搜索矩阵；模拟 SSH 鉴权失败与其他不可达原因；
+隔离本地启动命令的 stdout-only 错误、stderr 首/中/尾原因、非零退出、超时，
+以及继承管道不阻塞。报告中的 native 测试不等于真实 SSH 或 C++ 后端已验证。
+
+三、执行顺序与统一完成标准
+
+1. 优先 A，以及 B 中 R02/R09：先阻止产物丢失与假成功。
+2. 完成 D、C、B 的发现部分和 E；按仓库/模块提交，关联问题一起验收。
+   R14/R15 随搜索模块一并处理，不遗落为无限期收尾。
+3. 每组先建立有意义的失败复现，再修复并跑相关测试；最后跑仓库要求的四个
+   CI batches，并补跨模块/跨 provider 验收。单测数量不能替代实际路径覆盖。
+4. 每项记录：原失败、修复后结果、尚未验证范围。所有 15 项有状态，才能宣称
+   本报告问题已处理；不能据此宣称整个系统再无问题。
+5. 提交、push、加载代码和运行时验证分别记录。本准备工作未执行后三类操作；
+   后续激活需按仓库 maintenance 约定区分 plugin/provider reload 与驻留代码重启。
+
+共同契约：
+工具找得到，公开 schema 确实能调用；成功必须对应真实结果。
+错误告诉模型哪里错、根因是什么、哪些已做/未做/未知，以及如何核对原目标。
+默认错误简短精确；完整证据保留且可取回，不受普通工具结果预算静默裁掉。
+副作用未知时明确未知；恢复建议不得鼓励无条件重复非幂等写入。
+最终文件、provider、远端目标都保持原始身份；提示词不能替代实现保证。
+
+
+四、实施进展（用户确认方案后）
+
+R01/R07/R12：已接通公开 artifact alias 到登记、完成门禁、文本兜底与文件交付；
+只清理已安全交付的登记来源，保留未登记证据；公开 schema 移除 handler 不支持的
+artifact_type，并说明重名编号行为。写前、写入不确定、已写入但元数据失败明确区分，
+完整异常链进入现有诊断快照。
+R02/R09：MCP attach/rescan 如实报告单服务失败与部分成功；完整 stderr 保存为
+私有临时文件，保留退出码、进程 ID、清理失败。清理失败禁止自动创建替代进程。
+JSON-RPC/MCP 内容验证阻止畸形空成功，已派发调用的结果不确定仍明确为 unknown。
+R03/R10/R11：独立 native 仓库已补对象词及 shortcut 继承；远端探测保留原因和
+观测时间，鉴权失败不再推断 needs_start；启动 stdout/stderr 完整落盘并返回读取路径，
+摘要简短，父进程退出不等待继承输出句柄的后代。SSH stderr 也有完整文件路径。
+R04/R14/R15：显式 search_terms 与 search_enum_fields 已接入真实 registry；浏览器、
+workflow、记忆整理、scoped artifact、native session 已补操作发现。原样 exact alias
+先于大小写折叠匹配；发现词及筛选字段纳入 fingerprint；词汇不泄漏到正常工具窗口。
+R05：动态 MCP 拆分 camelCase、给长 alias 的操作部分预留空间，保持原名路由；
+从名称补常见显式对象形式，提供本地 tool_guidance 覆盖，标明默认指导为生成内容。
+R06：补齐 core operation node，两个配置入口可挂载并通过公开调用验证。
+R08：provider 级变更的恢复动作绑定已解析原 provider 与记录身份；后端确认成功但
+渲染失败时保留 applied 与准确 mem_ref；未知提交仍标 unknown，输入拒绝标 not_started。
+R13：保留精确导入路径，单文件及同名尾空格冲突用例检查实际存储字节。
+
+新增主仓回归：tests/test_tool_contract_review_regressions.py，及
+ tests/test_memory_artifact_skill_fidelity.py 中的精确路径和原 provider 恢复用例。
+新增 native 回归：tests/pal_host/test_tool_contract_review.py。
+协议校验依据：https://modelcontextprotocol.io/specification/2025-06-18/schema
+本机没有 native C++ 扩展；native 验证使用禁止后端执行的替身，仅检查主机契约、
+真实本地子进程输出和注入的远端鉴权错误，不等于真实 SSH 或 C++ 后端验证。
+日志是临时文件，系统临时目录清理可能使其过期；读取路径明确返回给调用方。
+
+尚未提交、push、安装、热加载或重启 Pal。
+
+五、验证记录（2026-10-09，Linux / Python 3.13）
+
+四个完整批次均已运行；以下如实保留批次失败，不将后续定向复跑描述为全批次全绿：
+- core-a 最后一次完整运行：1680 passed、6 skipped、1 failed。
+  失败是新增 MCP 测试在模块重载后混用了旧 manager 类与新模块上的 patch。
+  已统一到当前模块实例；重载顺序组合复跑 63 passed。
+  初次运行另有动态访问约束和 artifact 故障注入问题，均已修正并被后续运行覆盖。
+- core-b：1416 passed、1 skipped、1 failed（403 subtests passed）。
+  失败是既有截图测试混用旧异常类和新加载的工具；已将注入异常与工具成对导入。
+  修复后的重载及错误契约组合复跑：88 passed。
+- bunshin-a：1290 passed、49 skipped、1 failed（218 subtests passed）。
+  失败为并行负载下只读 bwrap bootstrap 的 30 秒超时，日志停在 jieba 冷初始化；
+  隔离复跑 1 passed，耗时 27.98 秒。未放宽超时，仍存在负载敏感性。
+- bunshin-b：1038 passed、13 skipped（173 subtests passed）。
+
+最终生产代码的组合回归：232 passed，包含模块重载、发现、MCP、真实 IPC、
+provider 恢复、路径身份、sidecar、浏览器和架构动态访问约束。
+MCP 畸形响应证据经过 manager 的真实 IPC 仍可读取；通用 sidecar 显式传递脱敏 details。
+native 主机契约：9 passed（32 subtests passed），范围限制见上，不包含真实 SSH/C++。
+两个仓库 git diff --check 通过。未运行 Python 3.12/macOS 或真实线上激活验证。
+测试日志保存在 /tmp/pal-review-*.log；属于临时验证记录，不承诺永久保存。
+
+六、修改后复审（2026-10-09；本节覆盖第四节的完成判断）
+
+结论：15 组均有实现，但不能全部标为已闭环。以下 4 个代码缺口已隔离复现，
+本次 review 未修改生产代码、未提交、未激活。前述通过数量不能替代下列验收。
+
+Q01 / P1 / R02：清理失败保护可被配置移除绕过。
+位置：src/pal/mcp/manager.py:151、233、258。
+复现：模拟 initialize 失败且 close 报进程未退出；直接再次 attach 不创建实例。
+删除配置并 rescan，再恢复同一配置并 rescan，connector 实例数从 1 变为 2。
+原因：失败后 connector 已清空；移除配置直接删除承载 cleanup_error 的 state，
+未核对旧进程退出。新 state 无隔离标记，允许创建替代进程。
+需要：清理隔离状态跨配置移除/重新发现保留；所有 detach/close 失败路径统一处理，
+只有确认原进程终止后才解除。补配置删除/恢复及已挂载 connector 清理失败用例。
+
+Q02 / P2 / R09：MCP 内容校验遗漏已有可选字段的类型约束。
+位置：src/pal/mcp/normalize.py:117。
+复现：content=[{type:'text',text:'x',annotations:{priority:'not a number'}}]
+经过真实 compiler、registry、invoke_indirect_tool，仍得到 CompleteResult/applied。
+resource_link.size 为字符串、content block._meta 为 false 也被 normalize 接受。
+官方 2025-06-18 schema 对这些已知字段有类型要求；可选不等于传入后免校验。
+需要：完整验证支持版本的标准内容字段，并保留未知扩展字段的合法性；新增上述
+错误类型、合法 mixed content 及版本选择用例。不能将当前子集校验写成完整协议校验。
+
+Q03 / P2 / R02 + R09：attach 阶段仍丢结构化协议证据。
+位置：src/pal/mcp/manager.py:258-269。
+复现：initialize 抛 McpProtocolError(payload={raw_response:{marker:'ORIGINAL'}})，
+attach_server 返回结果和 read_server 保留异常文字，却不含 ORIGINAL。
+原因：_attach_state 捕获异常后只存 exception_report 和 connector.diagnostics，
+没有保存 exc.payload；异常被消费后，新加的 sidecar error_details 也无法接管。
+需要：将脱敏协议 details 存入 failure_details，覆盖 initialize/tools-list 失败，
+经实际 attach/read/IPC 验证原始响应仍能按引用或结构化字段取回。
+
+Q04 / P2 / R04 新索引边界：枚举提取把组合约束当成并集，忽略 $ref 同级约束。
+位置：src/pal/execution/discovery_terms.py:34-47。
+复现一：allOf=[enum(open,close),enum(close)]；复现二：$ref 指向 enum(open,close)，
+同级 enum(close)。两者实际都拒绝 operation=open，但 discovery_vocabulary 都索引 open。
+需要：提取有限候选后按完整字段约束过滤，或明确拒绝暂不支持的组合；不能将已被
+schema 排除的操作宣传为可调用。当前内置简单 Literal 枚举未受此复现影响，
+风险位于承诺支持引用/组合的动态 schema 路径。
+
+验收覆盖缺口（不据此断言对应实现一定有 bug）：
+- R08 新增用例用 SimpleNamespace 模拟 commit，未覆盖两个真实 provider、active 切换、
+  公开恢复 affordance 的实际执行及 case 不重复；update/delete 也缺对应恢复用例。
+- R03 native 新增查询矩阵只覆盖代表性入口，未覆盖全部 session alias，且没有
+  builtin/native 替换前后的成对查询。
+- R10 仅注入 publickey 鉴权失败，尚缺网络不可达、worker 未运行、预期离线等矩阵。
+- R11 新增测试覆盖长 stdout/stderr 和后代句柄，但未覆盖启动超时后的输出取回。
+- R07 同名写入测试只断言 stage 两份文件；缺同名 primary 最终 promotion 的字节/身份断言。
+
+本轮检查了两个仓库 diff 与原报告验收项；运行隔离 Python 复现及公开 runtime 调用，
+未重跑四个完整批次，未使用真实 SSH、C++ 后端或线上 Pal。
+
+七、MCP 严格边界实施（用户在复审后确认，2026-10-09）
+
+用户定案：Pal plugin 是主集成路径。MCP 仅支持明确版本内符合契约的服务；
+不修补畸形数据、不做缺 schema 的兼容兜底、不按部分合法工具挂载坏服务。
+本节覆盖前述 MCP 宽容策略；Q01–Q04 已按以下方式修正并加入回归。
+
+- 固定支持 MCP 2025-06-18；官方 schema 和 MIT 许可证随 wheel 分发，运行时不联网。
+  初始化、JSON-RPC envelope、发现列表、内容块与已传入的标准可选字段均校验。
+  工具 schema 明确支持 Draft 2020-12 及本地 JSON Pointer 引用；其他方言/远程引用
+  明确拒绝，不猜测解释。合法扩展字段、合法空结果和 mixed content 正常接受。
+- 无效版本、缺失/无效 schema、重复工具/参数身份、循环分页或发现响应畸形，
+  整个服务 attach 失败，不公布部分工具。移除 missing-schema 和部分编译兜底。
+- 调用的协议/传输失败、成功结果违反 outputSchema：撤下该服务 snapshot，关闭连接，
+  公开 plugin 刷新注册表撤下 aliases；已派发写入仍 unknown，不自动重放。
+  合法 isError=true 和合法 JSON-RPC error 如实报本次失败，不隔离正常协议服务。
+- 隔离记录存入 data/mcp/quarantine.json；rescan 不自动重试隔离服务。
+  修正普通协议/服务故障后需显式 attach；清理未确认时一直阻止替代实例。
+  删除/恢复配置和重启 manager 均不能抹掉清理保护。清理失败的人工恢复步骤见
+  docs/pal_mcp_contract.md；本轮未操作真实运行目录。
+- initialize、tools/list 与调用错误的原始协议 details 均保留，IPC 不再漏传；
+  模型侧继续使用既有短诊断/完整快照机制，stderr 仍保留私有完整文件。
+  非 JSON stdout 直接失败；非法 UTF-8 不再用替代字符修补，原字节以 base64 保留。
+- Q04：枚举候选按完整字段 schema 过滤，allOf 交集及 $ref 同级约束有效；
+  不再索引 schema 已禁止的动作。未扩大为任意描述文本搜索。
+
+新增 tests/test_mcp_strict_contract.py，使用真实隔离 stdio 子进程与真实 manager IPC，
+覆盖服务整体验证、调用隔离、标准业务失败、协议证据、清理失败持久隔离、
+配置删除/重加、manager 重建、显式恢复和公开 alias 撤下。
+原测试模拟服务缺 serverInfo.version 的“成功”样本已补为合法标准响应；
+原“坏工具可部分编译”的断言改为整个服务拒绝，符合用户新决定。
+
+第一轮严格组合回归 91 passed；加入公开撤下及搜索/架构/sidecar 后 154 passed。
+wheel 构建成功，校验 schema 和许可证均已包含；从 wheel 直接导入并执行验证成功。
+最终重载顺序组合 250 passed；最后的严格契约/编码及 schema 数据保真组合 36 passed。
+本轮未重跑四个完整 CI batches；第五节的完整批次成绩属于此前实现。
+最终 git diff --check 与 Python compileall 通过。
+第六节其他非 MCP 验收覆盖缺口仍保留，不能据本次 MCP 修复宣称全部补齐。
+未提交、push、安装或重启线上 Pal。
+
+
+八、提交前复查（2026-10-09）
+
+用户明确生命周期规则：capability 迟到早退，provider 早来晚走。
+新增顺序断言检查 provider initialize 前后尚未发布；正常 detach 和协议失败时，
+close 开始前 callable authority/snapshot 已撤下。清理未确认仍保留隔离记录。
+
+本次额外修复：本地 $ref 所指向的扩展位置也递归检查，不能间接藏入远程引用；
+隔离写盘失败保留原始协议证据并明确持久化失败，attach 不在写盘失败时发布能力。
+新增测试覆盖这两项，以及同名 primary 最终交付最新字节。
+新增 native 验证覆盖各 session alias、网络/worker/预期离线原因和真实 30 秒启动超时，
+超时后 stdout/stderr 可从返回路径完整读取。
+
+主仓复查组合 114 passed；最终修复/产物/架构组合 66 passed。
+native 主机回归 9 passed（包括真实启动超时）；初次命令漏带 python 目录导致导入错误，
+补齐 PYTHONPATH=pal_plugin:python 后通过。仍未验证真实 SSH 或 native C++ 后端。
+R07/R10/R11 上述覆盖缺口已补；R08 的真实双库切换恢复、builtin/native 全面对照
+仍属未验证范围，本次未将其伪称为已验证，也未发现这些路径的新增确定性缺陷。
+此前章节的未提交状态为各阶段记录。本节是提交前检查快照；实际 commit ID 见交付回复。

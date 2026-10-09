@@ -3,13 +3,14 @@
 Owns:
 - capability forest
 - immutable, generation-scoped tool registry
-- `ToolGuidance.search_objects`: internal whole-word object vocabulary, including
-  explicitly supported singular/plural forms. Declare objects only, never action
-  or domain synonyms. Empty declarations keep external tools compatible without
-  guessing vocabulary. Search requires every query word to match the alias
-  or these objects; purpose is display-only and never affects matching or ranking; exact aliases rank first. Object vocabulary is carried
-  across internal worker specs but omitted from model descriptions, tool schemas,
-  inventories, and search results.
+- `ToolGuidance.search_terms`: internal reviewed action/object synonyms. Legacy
+  `search_objects` remains supported. `search_enum_fields` explicitly selects
+  operation enum properties; unrelated format/value enums are not indexed.
+  Every query word must match the alias or declared vocabulary. Purpose and
+  negative-use prose are display-only. Raw exact aliases rank first, followed
+  by case-folded aliases and whole-word matches. Vocabulary survives worker
+  serialization, stays out of model-facing contracts/results, and contributes
+  to the immutable registry fingerprint.
 - O(1) bound action dispatch index
 - plugin registration surface
 - the only side-effect execution boundary

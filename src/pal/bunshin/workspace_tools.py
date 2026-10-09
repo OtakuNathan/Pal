@@ -8,6 +8,26 @@ from pathlib import Path
 from typing import Any
 
 from pal.shared import RuntimeStatus, ToolExecutionResult
+from pal.shared.diagnostics import exception_report, exception_summary
+
+
+class ArtifactWriteError(RuntimeError):
+    def __init__(self, path: Path, effect: str, phase: str):
+        super().__init__(f"Artifact {phase} failed: {path}")
+        self.path, self.effect, self.phase = str(path), effect, phase
+
+
+def _persist_artifact(root, path, args, *, final_root, append=False):
+    try:
+        with path.open("a" if append else "w", encoding="utf-8") as handle:
+            handle.write(str(args.get("content") or ""))
+    except Exception as exc:
+        raise ArtifactWriteError(path, "unknown", "write") from exc
+    try:
+        return _artifact_metadata(root, path, args, final_root=final_root)
+    except Exception as exc:
+        raise ArtifactWriteError(path, "applied", "metadata read after write") from exc
+
 
 def _workspace_tool_result(call: ToolCallIR, workspace: dict[str, Any]) -> ToolExecutionResult:
     try:
@@ -33,14 +53,19 @@ def _workspace_tool_result(call: ToolCallIR, workspace: dict[str, Any]) -> ToolE
             status=RuntimeStatus.OK,
         )
     except Exception as exc:
-        message = str(exc) or exc.__class__.__name__
+        message = exception_summary(exc)
+        effect = exc.effect if isinstance(exc, ArtifactWriteError) else "not_started"
+        recovery = (f"Inspect the exact file {exc.path!r} and reconcile its content before retrying; do not blindly append again."
+                    if isinstance(exc, ArtifactWriteError) else "Correct the reported input or workspace error before retrying; file content was not written.")
         return ToolExecutionResult(
             name=call.name,
             ok=False,
             text=message,
-            structured={"error": message, "error_type": exc.__class__.__name__},
+            structured={"error": exception_report(exc), "error_type": exc.__class__.__name__,
+                        "effect": effect, "recovery_hint": recovery,
+                        **({"path": exc.path, "phase": exc.phase} if isinstance(exc, ArtifactWriteError) else {})},
             call_id=call.call_id,
-            llm_text=message,
+            llm_text=f"{message}\nEffect: {effect}. {recovery}",
             status=RuntimeStatus.ERROR,
         )
 
@@ -194,8 +219,7 @@ def _write_bunshin_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> 
     if path.exists() and not overwrite:
         path = _next_available_artifact_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return _artifact_metadata(write_root, path, args, final_root=final_root)
+    return _persist_artifact(write_root, path, args, final_root=final_root)
 
 
 def _edit_bunshin_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
@@ -213,12 +237,7 @@ def _edit_bunshin_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> d
     if not path.exists() and not create_if_missing:
         raise ValueError("artifact does not exist")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if operation == "replace":
-        path.write_text(content, encoding="utf-8")
-    else:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(content)
-    return _artifact_metadata(write_root, path, args, final_root=final_root)
+    return _persist_artifact(write_root, path, args, final_root=final_root, append=operation == "append")
 
 
 def _artifact_metadata(root: Path, path: Path, args: dict[str, Any], *, final_root: Path | None = None) -> dict[str, Any]:

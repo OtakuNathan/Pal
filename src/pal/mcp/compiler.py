@@ -6,9 +6,6 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
-
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor
 from pal.execution.tool_facade import McpToolOutput
 from pal.execution.tool_facade import (
@@ -20,14 +17,14 @@ from pal.execution.tool_facade import (
     ToolExecutionSemantics,
     ToolGuidance,
 )
-from pal.mcp.model import McpDiscoverySnapshot, McpRejectedItem, McpToolSpec
+from pal.mcp.model import McpDiscoverySnapshot, McpToolSpec
+from pal.mcp.protocol import validate_discovery
 from pal.mcp.normalize import (
     normalize_prompt_result,
     normalize_protocol_error,
     normalize_tool_result,
     prompt_arguments_schema,
     sanitize_name,
-    schema_normalize_or_reject,
 )
 from pal.shared import BoundCapabilityAction, MountedSubtreeHandle, OPERATION_NAMESPACE, SINGLETON_TARGET
 from pal.skill.contracts import SKILL_SOURCE_DECLARED, SKILL_STATUS_ACTIVE, SkillApplicabilitySTAR, SkillDescriptor
@@ -51,7 +48,6 @@ class McpCompiledProjection:
 
 @dataclass
 class McpCompiler:
-    allow_missing_tool_schema: bool = True
 
     def compile(
         self,
@@ -67,10 +63,9 @@ class McpCompiler:
         compiled_snapshots: list[McpDiscoverySnapshot] = []
 
         for snapshot in sorted(snapshots, key=lambda item: item.server_id):
-            warnings: list[str] = []
-            rejected: list[McpRejectedItem] = []
+            validate_discovery(snapshot.tools, snapshot.prompts)
             for tool in sorted(snapshot.tools, key=lambda item: item.name):
-                descriptor, bound_action, tool_warnings, tool_rejection = self._compile_tool(
+                descriptor, bound_action = self._compile_tool(
                     module_id=module_id,
                     snapshot=snapshot,
                     invoker=invoker,
@@ -78,12 +73,6 @@ class McpCompiler:
                     used_paths=used_paths,
                     public_aliases=public_aliases,
                 )
-                warnings.extend(tool_warnings)
-                if tool_rejection is not None:
-                    rejected.append(tool_rejection)
-                    continue
-                if descriptor is None or bound_action is None:
-                    continue
                 _append_capability(subtree, descriptor, bound_action)
 
             for prompt in sorted(snapshot.prompts, key=lambda item: item.name):
@@ -104,7 +93,7 @@ class McpCompiler:
                         capability_ref=descriptor.name,
                     )
                 )
-            compiled_snapshots.append(snapshot.with_diagnostics(warnings=tuple(warnings), rejected_items=tuple(rejected)))
+            compiled_snapshots.append(snapshot.with_diagnostics(warnings=(), rejected_items=()))
 
         return McpCompiledProjection(
             module_id=module_id,
@@ -123,65 +112,13 @@ class McpCompiler:
         used_paths: set[str],
         public_aliases: dict[tuple[str, str, str], str],
     ):
-        if not tool.name:
-            return None, None, (), McpRejectedItem(kind="tool", external_name="", reason="missing_tool_name", raw=tool.raw)
-        schema, rejection, warnings = schema_normalize_or_reject(
-            tool.input_schema,
-            external_name=tool.name,
-            allow_missing=self.allow_missing_tool_schema,
-        )
-        if rejection is not None:
-            return None, None, warnings, rejection
-        try:
-            Draft202012Validator.check_schema(schema or {})
-        except SchemaError:
-            return (
-                None,
-                None,
-                warnings,
-                McpRejectedItem(
-                    kind="tool",
-                    external_name=tool.name,
-                    reason="invalid_input_json_schema",
-                    raw_schema=dict(schema or {}),
-                    raw=tool.raw,
-                ),
-            )
+        schema = tool.input_schema
         server_key = sanitize_name(snapshot.server_id, fallback="server")
         tool_key = sanitize_name(tool.name, fallback="tool")
         canonical_path = _unique_path(f"op_mcp_{server_key}_tool_{tool_key}", used_paths)
         alias = public_aliases[("call", snapshot.server_id, tool.name)]
-        if tool.output_schema is None:
-            output_schema = McpToolOutput.model_json_schema(mode="validation")
-        elif isinstance(tool.output_schema, dict):
-            output_schema = dict(tool.output_schema)
-            try:
-                Draft202012Validator.check_schema(output_schema)
-            except SchemaError:
-                return (
-                    None,
-                    None,
-                    warnings,
-                    McpRejectedItem(
-                        kind="tool",
-                        external_name=tool.name,
-                        reason="invalid_output_json_schema",
-                        raw_schema=output_schema,
-                        raw=tool.raw,
-                    ),
-                )
-        else:
-            return (
-                None,
-                None,
-                warnings,
-                McpRejectedItem(
-                    kind="tool",
-                    external_name=tool.name,
-                    reason="invalid_output_schema",
-                    raw=tool.raw,
-                ),
-            )
+        output_schema = (McpToolOutput.model_json_schema(mode="validation")
+                         if tool.output_schema is None else dict(tool.output_schema))
         descriptor = CapabilityDescriptor(
             name=alias,
             canonical_path=canonical_path,
@@ -195,10 +132,12 @@ class McpCompiler:
             InputModel=None,
             OutputModel=None,
             guidance=_mcp_guidance(
-                tool.description or f"MCP tool `{tool.name}` from `{snapshot.server_id}`."
+                tool.description or f"MCP tool `{tool.name}` from `{snapshot.server_id}`.",
+                external_name=tool.name, server_id=snapshot.server_id,
+                overrides=snapshot.server_info.get("pal_tool_guidance", {}).get(tool.name, {}),
             ),
             execution=_mcp_tool_execution(tool.annotations),
-            mcp_input_schema=dict(schema or {"type": "object", "properties": {}, "required": []}),
+            mcp_input_schema=dict(schema),
             mcp_output_schema=output_schema,
             metadata={
                 **_mcp_metadata(
@@ -223,7 +162,7 @@ class McpCompiler:
                 return normalize_protocol_error(exc, server_id=server_id, name=raw_tool_name, kind="tool")
             return normalize_tool_result(result, server_id=server_id, tool_name=raw_tool_name)
 
-        return descriptor, BoundCapabilityAction(canonical_path=canonical_path, target_id=SINGLETON_TARGET, descriptor=descriptor, callable=call_mcp_tool), warnings, None
+        return descriptor, BoundCapabilityAction(canonical_path=canonical_path, target_id=SINGLETON_TARGET, descriptor=descriptor, callable=call_mcp_tool)
 
     def _compile_prompt_render_capability(
         self,
@@ -252,7 +191,8 @@ class McpCompiler:
             InputModel=None,
             OutputModel=None,
             guidance=_mcp_guidance(
-                prompt.description or f"Render MCP prompt `{prompt.name}` from `{snapshot.server_id}`."
+                prompt.description or f"Render MCP prompt `{prompt.name}` from `{snapshot.server_id}`.",
+                external_name=prompt.name, server_id=snapshot.server_id,
             ),
             execution=ToolExecutionSemantics(
                 invocation_mode=InvocationMode.INDIRECT,
@@ -338,7 +278,11 @@ def _public_alias(verb: str, server_key: str, object_key: str) -> str:
     if len(alias) <= 64:
         return alias
     suffix = hashlib.sha256(alias.encode("utf-8")).hexdigest()[:12]
-    return alias[:51] + "_" + suffix
+    # Reserve the operation/object part before spending the remaining budget on the server.
+    prefix = f"{verb}_mcp_"
+    object_part = object_key[:32]
+    server_part = server_key[:64 - len(prefix) - len(object_part) - len(suffix) - 2]
+    return f"{prefix}{server_part}_{object_part}_{suffix}"
 
 
 def _projection_aliases(snapshots: tuple[McpDiscoverySnapshot, ...]) -> dict[tuple[str, str, str], str]:
@@ -385,14 +329,24 @@ def _unique_path(base: str, used_paths: set[str]) -> str:
     return value
 
 
-def _mcp_guidance(purpose: str) -> ToolGuidance:
-    return ToolGuidance(
+def _mcp_guidance(purpose: str, *, external_name: str = "", server_id: str = "", overrides=None) -> ToolGuidance:
+    words = set(sanitize_name(external_name).split("_"))
+    if server_id:
+        words.update(sanitize_name(server_id).split("_"))
+    for group in (("file", "files"), ("directory", "directories", "folder", "folders"),
+                  ("record", "records"), ("task", "tasks"), ("issue", "issues"),
+                  ("page", "pages"), ("message", "messages"), ("project", "projects")):
+        if words.intersection(group):
+            words.update(group)
+    defaults = ToolGuidance(
         search_objects=(),
+        search_terms=tuple(sorted(word for word in words if word and word[0].isalpha())),
         purpose=purpose,
-        use_when="The task requires this external MCP service and its declared capability.",
+        use_when="The external tool description and input schema match the task. This is generated guidance; consult any locally reviewed override for service-specific conditions.",
         do_not_use_when="Do not use when a Pal-owned tool matches the task or when the external MCP server is not trusted for the data.",
         failure_next_steps="Inspect the MCP error and recovery affordances; reconcile external writes before retrying.",
     )
+    return ToolGuidance.model_validate({**defaults.model_dump(), **(overrides or {})})
 
 
 def _mcp_tool_execution(annotations: dict[str, Any] | None) -> ToolExecutionSemantics:

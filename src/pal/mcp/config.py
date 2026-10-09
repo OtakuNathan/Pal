@@ -61,6 +61,7 @@ def _server_from_payload(*, server_id: str, payload: dict[str, Any]) -> McpServe
         request_timeout_ms=int(payload.get("request_timeout_ms") or payload.get("requestTimeoutMs") or 300_000),
         shutdown_timeout_ms=int(payload.get("shutdown_timeout_ms") or payload.get("shutdownTimeoutMs") or 5_000),
         kill_on_close=bool(payload.get("kill_on_close", payload.get("killOnClose", True))),
+        tool_guidance=_tool_guidance(payload.get("tool_guidance", {})),
         trust_level=str(payload.get("trust_level") or payload.get("trustLevel") or "unknown"),
     )
     if config.transport != "stdio":
@@ -94,3 +95,16 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _tool_guidance(value: Any) -> dict[str, dict[str, Any]]:
+    from pal.execution.tool_facade import ToolGuidance
+    if not isinstance(value, dict):
+        raise ValueError("tool_guidance must map exact external tool names to guidance overrides")
+    result = {}
+    for name, patch in value.items():
+        patch = _expect_mapping(patch, f"tool_guidance.{name}")
+        # Validate at config ingestion, not after a server has been attached.
+        ToolGuidance.model_validate({"purpose": "External tool", "use_when": "Requested", "do_not_use_when": "Unrelated", **patch})
+        result[str(name)] = dict(patch)
+    return result

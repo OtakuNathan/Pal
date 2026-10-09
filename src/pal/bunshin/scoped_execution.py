@@ -157,15 +157,16 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "guidance": {
             "search_objects": ('artifact', 'artifacts'),
             "purpose": "Write the profile-declared structured output artifact.",
-            "use_when": "The current role must create or replace its declared structured output artifact.",
+            "use_when": "Create a declared output artifact. An existing filename receives a new numbered name; use edit_workflow_artifact to replace it.",
             "do_not_use_when": "Architect roles must edit the Manager-preseeded architect.yaml instead. Do not write undeclared outputs.",
-            "failure_next_steps": "Correct the declared artifact type, relative path, or complete content from the returned validation error.",
+            "failure_next_steps": "For rejected input, correct the relative path or complete content. After a write failure, inspect the returned path and effect before retrying.",
         },
         "InputModel": BunshinScopedExecutionOpBunshinArtifactWriteInput,
     },
     "op_bunshin_artifact_edit": {
         "alias": "edit_workflow_artifact",
         "guidance": {
+            "search_enum_fields": ("operation",),
             "search_objects": ('artifact', 'artifacts'),
             "purpose": "Append to or replace one existing profile output artifact.",
             "use_when": "Supply relative_path, complete content, and operation=append|replace for a profile-owned output artifact.",
@@ -1035,7 +1036,7 @@ class BunshinScopedExecutionRuntime:
             turn_id=turn_id,
         )
         if call.name in {"op_bunshin_artifact_write", "op_bunshin_artifact_edit"} and result.ok:
-            artifact = dict((result.structured or {}).get("artifact") or {})
+            artifact = dict((result.structured or {}).get("payload", {}).get("artifact") or {})
             if artifact:
                 _append_unique_artifact(self.produced_artifacts, artifact)
         return result

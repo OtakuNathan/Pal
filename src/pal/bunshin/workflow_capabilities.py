@@ -58,6 +58,7 @@ BUNSHIN_START_WORKFLOW_PURPOSE = (
 )
 
 BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
+    search_enum_fields=("operation",),
     search_objects=('workflow', 'workflows'),
     purpose=BUNSHIN_START_WORKFLOW_PURPOSE,
     use_when=(
@@ -866,6 +867,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="control_workflow",
         guidance=ToolGuidance(
+            search_enum_fields=("command",), search_terms=("stop",),
             search_objects=('workflow', 'workflows'),
             purpose="Request asynchronous pause or cancel for a V2 workflow.",
             use_when="The user wants to stop a running workflow.",

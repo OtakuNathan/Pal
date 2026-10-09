@@ -53,14 +53,29 @@ _MANAGER_RETIRE_TIMEOUT_SECONDS = 5.0
 
 
 class _McpManagerInvoker:
-    def __init__(self, client: McpManagerClient) -> None:
+    def __init__(self, client: McpManagerClient, on_failure=None) -> None:
         self.client = client
+        self.on_failure = on_failure
 
     def call_tool(self, server_id: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return self.client.call_tool_sync(server_id, tool_name, arguments)
+        return self._invoke(self.client.call_tool_sync, server_id, tool_name, arguments)
 
     def render_prompt(self, server_id: str, prompt_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return self.client.render_prompt_sync(server_id, prompt_name, arguments)
+        return self._invoke(self.client.render_prompt_sync, server_id, prompt_name, arguments)
+
+
+    def _invoke(self, method, *args):
+        try:
+            return method(*args)
+        except Exception as exc:
+            # Refresh from the manager after it has withdrawn a quarantined server.
+            # Failure to refresh must never hide the original invocation failure.
+            if self.on_failure is not None:
+                try:
+                    self.on_failure()
+                except Exception as refresh_exc:
+                    exc.add_note("MCP projection refresh failed: " + str(refresh_exc))
+            raise
 
 
 @capability_node(
@@ -227,7 +242,7 @@ class McpManagerPluginProvider:
             result = self.client.attach_server_sync(str(call.args.get("name") or ""))
             self._refresh_projection()
             self._refresh_module_capabilities()
-            return _introspection_from_rpc("MCP server attached", result)
+            return _introspection_from_rpc("MCP server attached" if result.get("attached") else "MCP server attach failed", result)
         except Exception as exc:
             return _error_result("mcp server attach failed", exc)
 
@@ -437,8 +452,12 @@ class McpManagerPluginProvider:
             for item in list(payload.get("snapshots") or [])
             if isinstance(item, dict)
         )
-        self.projection = self.compiler.compile(module_id="mcp", snapshots=snapshots, invoker=_McpManagerInvoker(self.client))
+        self.projection = self.compiler.compile(module_id="mcp", snapshots=snapshots, invoker=_McpManagerInvoker(self.client, self._refresh_after_call_failure))
         self.last_health = dict(payload)
+
+    def _refresh_after_call_failure(self) -> None:
+        self._refresh_projection()
+        self._refresh_module_capabilities()
 
     def _refresh_module_capabilities(self) -> None:
         if self.refresh_capabilities is not None:
@@ -582,7 +601,7 @@ def build_mcp_plugin(*, runtime_root: Path) -> McpManagerPluginBundle:
 
 
 def _introspection_from_rpc(title: str, payload: dict[str, Any]) -> IntrospectionResult:
-    status = payload.get("status") or RuntimeStatus.OK
+    status = payload.get("status") or (RuntimeStatus.ERROR if payload.get("ok") is False else RuntimeStatus.OK)
     return IntrospectionResult(
         status=status,
         text=title,

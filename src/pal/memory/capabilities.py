@@ -132,7 +132,7 @@ class MemoryIntrospectionProvider:
         InputModel=DreamingInput, execution=INDIRECT_LOCAL_WRITE, aliases=("manage_memory_dreaming",),
         async_handler_name="dreaming_async",
         examples=({"operation": "status"}, {"operation": "start", "dry_run": True}),
-        guidance=ToolGuidance(search_objects=('consolidation', 'duplicate', 'duplicates'), purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
+        guidance=ToolGuidance(search_enum_fields=("operation",), search_objects=('consolidation', 'duplicate', 'duplicates'), purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
             use_when="The user requests dreaming, a dry run, its status/report, or changes to automatic scheduling and configuration.",
             do_not_use_when="For immediate memory corrections, use update_memory.",
             failure_next_steps="Read the run report; failed runs preserve the published generation."))

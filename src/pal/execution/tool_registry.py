@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from pal.execution.contracts import CapabilityDescriptor
+from pal.execution.discovery_terms import discovery_vocabulary
 from pal.execution.tool_presentation import compact_input_contract
 from pal.execution.tool_facade import (
     EffectKind,
@@ -329,6 +330,7 @@ def compile_registry_generation(
         search_records[alias] = {
             "alias": alias,
             "search_objects": record.guidance.search_objects,
+            "search_terms": discovery_vocabulary(record.guidance, record.input_schema),
             "search_text": record.search_document,
             "invocation_mode": record.execution.invocation_mode.value,
             "input_shape": record.compact_input_shape(),
@@ -363,6 +365,8 @@ def compile_registry_generation(
                 "input": (direct_aliases.get(alias) or indirect_aliases[alias]).input_schema,
                 "output": (direct_aliases.get(alias) or indirect_aliases[alias]).output_schema,
                 "description": (direct_aliases.get(alias) or indirect_aliases[alias]).compiled_description,
+                "discovery": {key: search_records[alias][key] for key in (
+                    "search_terms", "module_id", "namespace", "family", "tags")},
             }
             for alias in sorted(alias_to_canonical)
         ]

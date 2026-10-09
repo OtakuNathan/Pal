@@ -371,6 +371,7 @@ class FileCapabilityMixin:
         action_name="delete",
         guidance=ToolGuidance(
             search_objects=('path', 'paths', 'file', 'files', 'directory', 'directories', 'link', 'links'),
+            search_terms=('folder', 'folders'),
             purpose="Delete the file, directory, or symbolic link at the given path; deleting a link preserves its target.",
             use_when="Removing unwanted filesystem entries. Symbolic links, including links to directories and dangling links, are unlinked without following their targets; recursive=true is required only for real directories.",
             do_not_use_when="Moving or renaming files (use run_shell mv).",

@@ -50,6 +50,8 @@ required_wheel_paths=(
   "pal/lsp/server_templates/clangd.toml"
   "pal/lsp/server_templates/pyright.toml"
   "pal/mcp/templates/stdio_server.toml"
+  "pal/mcp/schema_2025_06_18.json"
+  "pal/mcp/SCHEMA_LICENSE.txt"
   "pal/bunshin/families.py"
   "pal/bunshin/harnesses.py"
   "pal/bunshin/profiles.py"

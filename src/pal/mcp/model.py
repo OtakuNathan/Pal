@@ -22,6 +22,7 @@ class McpServerConfig:
     shutdown_timeout_ms: int = 5_000
     kill_on_close: bool = True
     trust_level: str = "unknown"
+    tool_guidance: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -178,7 +179,13 @@ class McpProjectionResult:
 
 
 class McpProtocolError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, payload: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.payload = payload or {}
+
+
+class McpRemoteError(McpProtocolError):
+    """A valid JSON-RPC error response, not malformed protocol data."""
 
 
 class McpProjectionError(RuntimeError):

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import copy
 import re
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt
-from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpRejectedItem, McpToolSpec
+from pal.mcp.ipc import McpManagerRpcError
+from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpProtocolError, McpRemoteError, McpToolSpec
 from pal.shared import RuntimeStatus
 from pal.shared.diagnostics import diagnostic_text, exception_report
 from pal.shared.result_rendering import render_titled_structured_for_llm
@@ -16,13 +16,17 @@ _NAME_RE = re.compile(r"[^a-zA-Z0-9]+")
 
 
 def sanitize_name(value: str, *, fallback: str = "item") -> str:
-    cleaned = _NAME_RE.sub("_", str(value or "").strip()).strip("_").lower()
+    value = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", str(value or "").strip())
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    cleaned = _NAME_RE.sub("_", value).strip("_").lower()
     return cleaned or fallback
 
 
 def normalize_tool_payload(payload: dict[str, Any]) -> McpToolSpec:
+    from pal.mcp.protocol import validate_message
+    validate_message(payload, "Tool")
     return McpToolSpec(
-        name=str(payload.get("name") or "").strip(),
+        name=payload["name"],
         description=str(payload.get("description") or "").strip(),
         input_schema=payload.get("inputSchema"),
         output_schema=payload.get("outputSchema"),
@@ -32,62 +36,33 @@ def normalize_tool_payload(payload: dict[str, Any]) -> McpToolSpec:
 
 
 def normalize_prompt_payload(payload: dict[str, Any]) -> McpPromptSpec:
+    from pal.mcp.protocol import validate_message
+    validate_message(payload, "Prompt")
     arguments = []
     for item in list(payload.get("arguments") or []):
         if not isinstance(item, dict):
             continue
         arguments.append(
             McpPromptArgumentSpec(
-                name=str(item.get("name") or "").strip(),
+                name=item["name"],
                 description=str(item.get("description") or "").strip(),
                 required=bool(item.get("required", False)),
                 raw=dict(item),
             )
         )
     return McpPromptSpec(
-        name=str(payload.get("name") or "").strip(),
+        name=payload["name"],
         description=str(payload.get("description") or "").strip(),
         arguments=tuple(arguments),
         raw=dict(payload),
     )
 
 
-def schema_normalize_or_reject(
-    schema: dict[str, Any] | None,
-    *,
-    external_name: str,
-    allow_missing: bool = True,
-) -> tuple[dict[str, Any] | None, McpRejectedItem | None, tuple[str, ...]]:
-    if schema is None:
-        if not allow_missing:
-            return None, McpRejectedItem(kind="tool", external_name=external_name, reason="missing_input_schema"), ()
-        return {"type": "object", "properties": {}, "additionalProperties": False}, None, ("missing_input_schema",)
-    if not isinstance(schema, dict):
-        return None, McpRejectedItem(kind="tool", external_name=external_name, reason="invalid_input_schema", raw={}), ()
-
-    normalized = copy.deepcopy(schema)
-    schema_type = normalized.get("type")
-    if schema_type is None:
-        normalized["type"] = "object"
-    elif schema_type != "object":
-        return None, McpRejectedItem(kind="tool", external_name=external_name, reason="non_object_input_schema", raw_schema=schema), ()
-
-    properties = normalized.setdefault("properties", {})
-    if not isinstance(properties, dict):
-        return None, McpRejectedItem(kind="tool", external_name=external_name, reason="invalid_properties_schema", raw_schema=schema), ()
-    required = normalized.get("required")
-    if required is not None and not isinstance(required, list):
-        return None, McpRejectedItem(kind="tool", external_name=external_name, reason="invalid_required_schema", raw_schema=schema), ()
-    if required is None:
-        normalized["required"] = []
-    return normalized, None, ()
-
-
 def prompt_arguments_schema(prompt: McpPromptSpec) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
     for argument in prompt.arguments:
-        name = str(argument.name or "").strip()
+        name = argument.name
         if not name:
             continue
         properties[name] = {
@@ -105,7 +80,12 @@ def prompt_arguments_schema(prompt: McpPromptSpec) -> dict[str, Any]:
 
 
 def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: str) -> CapabilityResult:
-    raw = dict(result or {})
+    from pal.mcp.protocol import validate_tool_result
+    try:
+        validate_tool_result(result)
+    except McpProtocolError as exc:
+        return normalize_protocol_error(exc, server_id=server_id, name=tool_name, kind="tool")
+    raw = dict(result)
     text = _content_text(raw.get("content"))
     if not text:
         text = str(raw.get("structuredContent") or raw.get("content") or "").strip()
@@ -141,13 +121,15 @@ def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: 
 
 def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind: str) -> CapabilityResult:
     error_text = exception_report(exc)
+    remote_error = isinstance(exc, McpRemoteError) or (
+        isinstance(exc, McpManagerRpcError) and exc.kind == "remote")
     structured = {
         "mcp": {"server_id": server_id, "name": name, "kind": kind},
-        "error_kind": "protocol",
-        "error_code": "mcp_protocol_error",
+        "error_kind": "remote" if remote_error else "protocol",
+        "error_code": "mcp_remote_error" if remote_error else "mcp_protocol_error",
         "error": error_text,
         "error_type": exc.__class__.__name__,
-        "next_step": f"Use inspect_mcp_state and read_mcp_server(name={server_id!r}) for transport/server state. Correct the reported cause; reconcile external writes before retrying.",
+        "next_step": f"Use inspect_mcp_state and read_mcp_server(name={server_id!r}) for transport/server state. Correct the reported cause; reconcile external writes before retrying. A quarantined server requires explicit attach after correction; rescan does not retry it.",
     }
     if getattr(exc, "payload", None):
         structured["protocol_details"] = dict(exc.payload)
@@ -160,7 +142,12 @@ def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind:
 
 
 def normalize_prompt_result(result: dict[str, Any], *, server_id: str, prompt_name: str) -> CapabilityResult:
-    raw = dict(result or {})
+    from pal.mcp.protocol import validate_message
+    try:
+        validate_message(result, "GetPromptResult")
+    except McpProtocolError as exc:
+        return normalize_protocol_error(exc, server_id=server_id, name=prompt_name, kind="prompt")
+    raw = dict(result)
     messages = list(raw.get("messages") or [])
     unsupported = _unsupported_prompt_content_types(messages)
     structured = {

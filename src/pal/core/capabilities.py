@@ -38,6 +38,10 @@ class CoreSnapshot:
     source="builtin:core",
     target_kind="module",
 )
+@capability_node(
+    namespace=OPERATION_NAMESPACE, scope="module", kind="module",
+    source="builtin:core", target_kind="module",
+)
 @dataclass
 class CoreIntrospectionProvider:
     core: PalCore

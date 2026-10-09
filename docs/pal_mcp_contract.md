@@ -4,7 +4,9 @@ This document describes the current `pal.mcp` implementation.
 
 ## Boundary
 
-MCP is an external protocol adapter, not a Pal core model.
+Pal plugins are the primary integration path. MCP is a strict external adapter for
+conforming services; service-specific compatibility belongs in a Pal plugin.
+Pal supports MCP **2025-06-18** only. Unsupported negotiated versions fail attachment.
 
 PalCore does not understand MCP tools, prompts, stdio framing, cursors, server sessions, or child process details. PalCore only sees a detachable plugin that publishes Pal-native capabilities and declared skills.
 
@@ -68,13 +70,17 @@ Current defaults:
 
 ## Lifecycle
 
+Provider readiness precedes capability publication. Callable authority and discovery
+snapshots are withdrawn before provider cleanup starts. Failed cleanup retains a fence;
+it is not evidence that the provider has exited.
+
 ### Attach Manager
 
 `op_module_mcp_attach` starts the sidecar, asks it to rescan config, fetches discovery snapshots, compiles projections, and refreshes the module capability/skill publication.
 
 ### Rescan
 
-`op_module_mcp_rescan` makes the manager reread `runtime_root/plugins/mcp`, attach enabled servers, detach removed/disabled servers, rediscover tools/prompts, and refresh the Pal projection.
+`op_module_mcp_rescan` makes the manager reread `runtime_root/plugins/mcp`, attach new enabled servers, detach removed/disabled servers, and refresh the Pal projection. Already attached servers retain their discovery snapshot. Quarantined servers are not retried by rescan.
 
 ### Detach Manager
 
@@ -107,14 +113,25 @@ The MCP external tool name is preserved in metadata. The Pal canonical path is g
 
 Tool schema rules:
 
-- Valid object `inputSchema` is normalized and passed through.
-- Missing schema is allowed by compatibility policy and becomes an empty object schema with `additionalProperties: false`.
-- Invalid or non-object schema is rejected. Rejected tools are recorded in snapshot diagnostics and are not exposed as executable capabilities.
+- `inputSchema` must explicitly declare `type: object`; it is passed through unchanged.
+- Missing/invalid schemas, malformed discovery, duplicate identities, or unsupported
+  schema dialects reject attachment of the **entire server**. No partial tool list is published.
+- Tool schemas use JSON Schema Draft 2020-12 (also the default when `$schema` is absent).
+  Only local JSON Pointer `$ref` references are supported. Remote references, dynamic
+  references and nested resource identities fail explicitly; nothing is fetched or repaired.
+- Initialization, discovery, content blocks and optional standard fields use the vendored
+  official MCP schema, including standard format checks. Legal extension fields remain allowed.
 
 Tool result rules:
 
 - MCP `isError=true` is a tool execution error, not a protocol error.
-- Protocol/transport/session failures are protocol errors.
+- Malformed responses, transport failures, and successful results violating `outputSchema`
+  quarantine the server and withdraw its tools/prompts. Already dispatched writes remain
+  outcome-unknown; there is no automatic replay, reconnect, schema repair or empty-success fallback.
+- A valid JSON-RPC error response is reported as a remote error; like `isError=true`, it
+  does not itself quarantine a conforming service.
+- Stdio JSON messages have a 16 MiB reader limit. Oversized/unreadable framing is a protocol
+  failure; diagnostic details state the reader failure rather than inventing a result.
 - Tool error text is preserved in `CapabilityResult.text`, `structured.tool_text`, and `llm_text`.
 
 ## Prompt Compilation
@@ -164,3 +181,44 @@ The MCP plugin exposes:
 MCP annotations are hints, not policy truth.
 
 External MCP capabilities must still go through Pal execution, discovery, approval, and risk policy. MCP must not bypass capability governance.
+
+
+## Reviewed discovery guidance
+
+A server config may declare `tool_guidance` overrides keyed by the exact external tool
+name. These are local configuration, not instructions supplied by the external server:
+
+```toml
+[tool_guidance.readFile]
+search_terms = ["read", "file", "files", "document", "documents"]
+use_when = "Read a document from this configured repository."
+do_not_use_when = "The requested document belongs to another repository."
+```
+
+For a multiplex tool, `search_enum_fields = ["operation"]` includes that input property's
+string enum values. Do not list format/value enums as operations. CamelCase names retain
+word boundaries; long aliases reserve space for the operation. Routing always uses the
+original external name. Default guidance is explicitly generated; it does not claim
+service-specific conditions have been reviewed.
+
+## Failure fidelity
+
+Attach and rescan return actual server outcomes, including partial rescan failures;
+manager health is separate from attachment success. Failed attachment retains its
+exception chain, stderr path/tail and exit code. A failed process cleanup fences automatic
+replacement across config removal/recreation and manager restart. Quarantine state is
+retained in `data/mcp/quarantine.json`. After fixing a protocol/service fault and reconciling
+uncertain writes, explicitly attach the server. If cleanup failed, attachment remains blocked:
+confirm the retained process exited, then clear that server's quarantine entry with the manager
+stopped. Config edits, rescan and manager restart are not evidence of process termination.
+Stderr logs are private temporary files retained for diagnosis; OS temporary
+storage cleanup may remove them. Inspect reported paths promptly when needed.
+
+Call responses validate the JSON-RPC envelope and MCP content structure before tool
+outputSchema validation. Malformed responses to dispatched writes are failures with
+unknown effects, requiring reconciliation. Explicit valid empty content is allowed.
+Protocol reference: https://modelcontextprotocol.io/specification/2025-06-18/schema
+
+The protocol schema is vendored from the `2025-06-18` tag of
+`modelcontextprotocol/modelcontextprotocol` (`schema/2025-06-18/schema.json`), with its
+MIT license in `src/pal/mcp/SCHEMA_LICENSE.txt`. Runtime validation requires no network.

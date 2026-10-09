@@ -5,7 +5,8 @@ from pal.execution.tool_semantics import (
     INDIRECT_EXTERNAL_WRITE,
     INDIRECT_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import ToolGuidance, ToolAffordance, EffectReceipt, EffectOutcome
 
 from pal.execution.generated_tool_models import (
     PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
@@ -16,12 +17,13 @@ from pal.execution.generated_tool_models import (
 )
 
 import math
+from functools import wraps
 import uuid
 from dataclasses import InitVar, dataclass, field
 from typing import Any
 
 from pal.foundation import utc_now
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_report, exception_summary
 from pal.memory import (
     L2Entry,
     L3CommitRequest,
@@ -53,6 +55,7 @@ from pal.memory.rendering import (
 from pal.memory.schema import ensure_sqlite_vec_loaded
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
+    SINGLETON_TARGET,
     OPERATION_NAMESPACE,
     IntrospectionCall,
     IntrospectionResult,
@@ -61,6 +64,66 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+
+
+def _provider_recovery(handler):
+    """Keep uncertain mutation reconciliation on the originally selected store."""
+    @wraps(handler)
+    def invoke(self, call):
+        target = call.meta.get("resolved_target_id")
+        provider_name = target if target and target != SINGLETON_TARGET else self.provider_id
+        args = {"name": provider_name}
+        if call.args.get("mem_ref"):
+            args["mem_ref"] = call.args["mem_ref"]
+        else:
+            args["queries"] = [str(call.args.get("search_text") or call.args.get("summary") or "")]
+            if call.args.get("kind"):
+                args["kind"] = call.args["kind"]
+            if call.args.get("task_id"):
+                args["task_id"] = call.args["task_id"]
+        try:
+            result = handler(self, call)
+        except Exception as exc:
+            result = CapabilityResult(
+                status=RuntimeStatus.ERROR, text=exception_summary(exc),
+                llm_text=exception_summary(exc),
+                structured={"error": exception_report(exc), "provider_id": provider_name},
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN),
+            )
+        if isinstance(result, IntrospectionResult) and result.status == RuntimeStatus.INVALID:
+            return CapabilityResult(status=result.status, text=result.text, llm_text=result.llm_text,
+                structured=result.structured, effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
+                recovery_hint="Correct the reported input fields before retrying; the mutation did not start.")
+        if result.status != RuntimeStatus.OK and (result.structured or {}).get("mem_ref"):
+            args.pop("queries", None)
+            args["mem_ref"] = result.structured["mem_ref"]
+        hint = (f"Reconcile with recall_provider_memory using {args!r} before retrying. "
+                "Keep this provider and record identity even if the active provider changes; do not blindly repeat the write.")
+        if result.status != RuntimeStatus.OK:
+            return CapabilityResult(status=result.status, text=result.text, llm_text=result.llm_text,
+                structured=result.structured, effect_receipt=result.effect_receipt if isinstance(result, CapabilityResult) else None,
+                recovery_hint=hint, affordances=(ToolAffordance(
+                tool="call_tool", arguments={"name": "recall_provider_memory", "args": args},
+                reason="Inspect the original mutation target before retrying.",
+            ),))
+        return result
+    return invoke
+
+
+def _provider_mutation_result(operation: str, result: L3MutationResult) -> CapabilityResult:
+    try:
+        return CapabilityResult(
+            status=result.status, text=f"memory {operation} result",
+            structured=build_mutation_structured_payload(result),
+            llm_text=render_mutation_result_for_llm(operation, result),
+        )
+    except Exception as exc:
+        # Backend completion is known even when presentation subsequently fails.
+        return CapabilityResult(status=RuntimeStatus.ERROR, text=exception_summary(exc),
+            llm_text=exception_summary(exc), structured={"error": exception_report(exc),
+                "mem_ref": result.document_id, "backend_status": result.status},
+            effect_receipt=EffectReceipt(outcome=EffectOutcome.APPLIED
+                if result.status == RuntimeStatus.OK else EffectOutcome.UNKNOWN))
 
 
 def _stable_document_search_text(*parts: str) -> str:
@@ -279,14 +342,15 @@ class SQLiteVecL3Plugin:
             purpose="Commit a durable memory record.",
             use_when="Testing or operating the sqlite provider directly. summary is prompt-ready text; search_text is retrieval source text. For kind=case, provide STAR situation, task, action, and result fields.",
             do_not_use_when="Normal Pal memory writes (use remember_memory, which routes to the active provider).",
-            failure_next_steps="Correct invalid kind, summary, search_text, or STAR fields. If the write outcome is uncertain, reconcile with recall_memory using the candidate text before retrying so a duplicate record is not created.",
+            failure_next_steps="Correct invalid kind, summary, search_text, or STAR fields. If the write outcome is uncertain, reconcile with recall_provider_memory using the original provider name and candidate text before retrying so a duplicate record is not created.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginWriteInput,
         aliases=("write_provider_memory",),
         execution=INDIRECT_EXTERNAL_WRITE,
     )
-    def commit_write(self, call: IntrospectionCall) -> IntrospectionResult:
+    @_provider_recovery
+    def commit_write(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         kind = str(call.args.get("kind") or "").strip()
         title = str(call.args.get("title") or call.args.get("summary") or "").strip()
         summary = str(call.args.get("summary") or "").strip()
@@ -331,13 +395,7 @@ class SQLiteVecL3Plugin:
                 result_text=star_fields.get("result_text", ""),
             )
         )
-        payload = build_mutation_structured_payload(result)
-        return IntrospectionResult(
-            status=result.status,
-            text="memory commit result",
-            structured=payload,
-            llm_text=render_mutation_result_for_llm("commit", result),
-        )
+        return _provider_mutation_result("commit", result)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -349,14 +407,15 @@ class SQLiteVecL3Plugin:
             purpose="Update a memory record in the sqlite backend.",
             use_when="Correcting or superseding a stored memory record at the provider level.",
             do_not_use_when="High-level memory updates (use update_memory — it routes to the active provider).",
-            failure_next_steps="If the record is not found, copy the exact mem_ref from recall_memory. If the update outcome is uncertain, use recall_memory with that exact mem_ref and reconcile its current content before retrying.",
+            failure_next_steps="If the record is not found, copy the exact mem_ref from recall_provider_memory using the original provider name. If the update outcome is uncertain, use recall_provider_memory with the original provider name and that exact mem_ref and reconcile its current content before retrying.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
         aliases=("update_provider_memory",),
         execution=INDIRECT_EXTERNAL_WRITE,
     )
-    def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
+    @_provider_recovery
+    def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         mem_ref = _read_mem_ref(call.args)
         if not mem_ref:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="mem_ref is required", llm_text="mem_ref is required")
@@ -384,13 +443,7 @@ class SQLiteVecL3Plugin:
                 result_text=star_fields.get("result_text") if star else None,
             )
         )
-        payload = build_mutation_structured_payload(result)
-        return IntrospectionResult(
-            status=result.status,
-            text="memory update result",
-            structured=payload,
-            llm_text=render_mutation_result_for_llm("update", result),
-        )
+        return _provider_mutation_result("update", result)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -402,14 +455,15 @@ class SQLiteVecL3Plugin:
             purpose="Delete one durable memory record by exact mem_ref.",
             use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
             do_not_use_when="Normal Pal memory deletion (use forget_memory, which routes to the active provider).",
-            failure_next_steps="Copy the exact mem_ref from recall_memory. If deletion outcome is uncertain, reconcile by recalling that mem_ref before retrying; do not issue a blind duplicate delete.",
+            failure_next_steps="Copy the exact mem_ref from recall_provider_memory using the original provider name. If deletion outcome is uncertain, reconcile by recalling that mem_ref before retrying; do not issue a blind duplicate delete.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
         aliases=("delete_provider_memory",),
         execution=INDIRECT_EXTERNAL_WRITE,
     )
-    def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult:
+    @_provider_recovery
+    def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         mem_ref = _read_mem_ref(call.args)
         result = self.delete(
             L3DeleteRequest(
@@ -417,13 +471,7 @@ class SQLiteVecL3Plugin:
                 reason=str(call.args.get("reason") or ""),
             )
         )
-        payload = build_mutation_structured_payload(result)
-        return IntrospectionResult(
-            status=result.status,
-            text="memory delete result",
-            structured=payload,
-            llm_text=render_mutation_result_for_llm("delete", result),
-        )
+        return _provider_mutation_result("delete", result)
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(

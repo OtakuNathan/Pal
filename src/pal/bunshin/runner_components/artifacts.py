@@ -24,11 +24,23 @@ class Artifacts:
             return
         accepted_indexes = self.accepted_artifact_indexes()
         next_artifacts: list[dict[str, Any]] = []
-        for index, artifact in enumerate(list(self.produced_artifacts)):
+        registered = list(self.produced_artifacts)
+        for index, artifact in enumerate(registered):
             if index in accepted_indexes:
                 next_artifacts.append(self.promote_produced_artifact(artifact))
-            else:
-                self.delete_registered_artifact_paths(artifact)
+        protected = {str(item.get("path") or "") for item in next_artifacts}
+        for index, artifact in enumerate(registered):
+            if index not in accepted_indexes:
+                retired = dict(artifact)
+                for key in ("path", "stage_path"):
+                    if str(retired.get(key) or "") in protected:
+                        retired.pop(key, None)
+                self.delete_registered_artifact_paths(retired)
+        for artifact, promoted in zip((registered[i] for i in sorted(accepted_indexes)), next_artifacts):
+            # Promotion has completed. Remove only registered staged sources.
+            source = artifact.get("stage_path")
+            if source and source != promoted.get("path"):
+                self.delete_registered_artifact_paths({"stage_path": source})
         self.produced_artifacts[:] = next_artifacts
         self.cleanup_artifact_stage_dir()
 
@@ -58,18 +70,17 @@ class Artifacts:
             source = Path(source_text).expanduser()
             final_root = Path(final_root_text).expanduser().resolve()
             destination = (final_root / relative_path).resolve()
-            if destination != final_root and _path_is_relative_to(destination, final_root):
-                if source.exists():
-                    final_root.mkdir(parents=True, exist_ok=True)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        same_file = source.resolve() == destination.resolve()
-                    except OSError:
-                        same_file = False
-                    if not same_file:
-                        shutil.copy2(source, destination)
-                if destination.exists() and destination.is_file():
-                    promoted = self.refresh_artifact_file_metadata(promoted, destination)
+            if destination == final_root or not _path_is_relative_to(destination, final_root):
+                raise ValueError(f"Artifact destination escapes its root: {destination}")
+            if not source.is_file():
+                raise FileNotFoundError(f"Staged artifact is missing: {source}")
+            final_root.mkdir(parents=True, exist_ok=True)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, destination)
+            promoted = self.refresh_artifact_file_metadata(promoted, destination)
+        elif promoted.get("staged") or promoted.get("stage_path"):
+            raise ValueError("Staged artifact lacks its source, relative path or destination root")
         for key in ("staged", "stage_path", "final_artifact_dir", "requested_relative_path"):
             promoted.pop(key, None)
         return promoted
@@ -137,7 +148,12 @@ class Artifacts:
         with contextlib.suppress(OSError):
             root = root.resolve()
         if root.exists():
-            shutil.rmtree(root, ignore_errors=True)
+            # Unregistered files are evidence, not disposable staging noise.
+            for directory in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                with contextlib.suppress(OSError):
+                    directory.rmdir()
+            with contextlib.suppress(OSError):
+                root.rmdir()
 
     def prune_empty_artifact_dirs(self, path: Path, *, stop: Path) -> None:
         current = path

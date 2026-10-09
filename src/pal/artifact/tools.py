@@ -58,7 +58,7 @@ class ArtifactImportTool:
         started = False
         try:
             scope_key = _scope_from_runtime(kwargs.get("runtime"), kwargs.get("turn_id"))
-            raw_path = str(args.get("path") or "").strip()
+            raw_path = str(args.get("path") or "")
             if not raw_path:
                 return _result(RuntimeStatus.INVALID, "Artifact import failed", {"reason": "path_required"}, effect=EffectOutcome.NOT_STARTED)
             path = Path(raw_path).expanduser().resolve(strict=True)

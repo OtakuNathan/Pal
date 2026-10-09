@@ -5,6 +5,7 @@ import asyncio
 import builtins
 from dataclasses import replace
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -294,3 +295,38 @@ def test_expired_artifact_cleanup_failure_is_visible_and_does_not_claim_deletion
     assert "backend detail: storage unavailable" in exposure.text
     assert "managed bytes and representations deleted" not in exposure.text
     assert "not confirmed" in exposure.text
+
+
+@pytest.mark.parametrize('collision', [False, True])
+def test_import_preserves_exact_trailing_space_filename(services, tmp_path, collision):
+    _, manager = services
+    source = tmp_path / 'record.txt '
+    source.write_text('requested file')
+    if collision:
+        (tmp_path / 'record.txt').write_text('wrong file')
+    result = artifact_call(ArtifactImportTool(manager), {'path': str(source)})
+    assert result.status == 'ok', result.llm_text
+    # The manager's ingestion must receive the exact resource, not its stripped neighbour.
+    assert result.structured['artifact']['file_name'] == 'record.txt '
+    record = manager.repository.get_record(result.structured['artifact_id'])
+    assert Path(record.original_path).read_text() == 'requested file'
+
+
+def test_provider_mutation_recovery_keeps_original_provider_after_write(monkeypatch):
+    from pal.plugins.l3 import sqlite_vec
+    from pal.shared import IntrospectionCall
+    committed = []
+    provider = SimpleNamespace(provider_id='provider-a', commit=lambda request:
+        committed.append(request) or L3MutationResult(status='ok', document_id='case:original'))
+    monkeypatch.setattr(sqlite_vec, 'build_mutation_structured_payload', fail_with_cause)
+    result = sqlite_vec.SQLiteVecL3Plugin.commit_write(provider, IntrospectionCall(
+        name='write_provider_memory', args={'kind': 'fact', 'summary': 'candidate', 'search_text': 'candidate'}))
+    assert len(committed) == 1
+    assert result.status == 'error'
+    recovery = result.affordances[0].arguments
+    assert recovery['name'] == 'recall_provider_memory'
+    assert recovery['args']['name'] == 'provider-a'
+    assert recovery['args']['mem_ref'] == 'case:original'
+    assert result.effect_receipt.outcome.value == 'applied'
+    assert 'storage unavailable' in result.llm_text
+    assert 'provider-a' in result.recovery_hint

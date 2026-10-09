@@ -93,7 +93,7 @@ class ExecutionDiscoveryCapabilityMixin:
         guidance=ToolGuidance(
             search_objects=('tool', 'tools', 'capability', 'capabilities', 'alias', 'aliases'),
             purpose="Find callable tools using short English domain, action, and object keywords or an alias.",
-            use_when="When the callable alias is unknown. Search whole words in [domain] [action] [object] form; word order is flexible. All query words must match; use short keywords rather than a task sentence.",
+            use_when="When the callable alias is unknown. Search whole words in [domain] [action] [object] form; word order is flexible. All query words must match alias words or declared discovery terms, including selected operation enums; use short keywords rather than a task sentence. If empty, shorten to the object/domain and inspect the returned tool schema.",
             do_not_use_when="When you already know a callable alias and its arguments, invoke it directly or via call_tool according to its invocation mode.",
             failure_next_steps="For empty results, remove unnecessary query words or try another exact action/object word. If filters were supplied, use filter_suggestions or remove guessed filters. Use facets=true only when classification discovery is needed; family is not a business-domain taxonomy.",
             next_tool_hints=(

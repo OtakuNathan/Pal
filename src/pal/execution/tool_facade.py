@@ -131,16 +131,19 @@ class ToolGuidance(StrictToolModel):
     purpose: str
     use_when: str
     do_not_use_when: str
-    # Internal discovery vocabulary for objects only, never action/domain
-    # synonyms. Explicit forms avoid fuzzy stemming and are not rendered.
+    # Legacy object forms remain supported. New declarations can also provide
+    # reviewed action/object synonyms and explicitly selected operation enums.
+    # These fields are internal discovery metadata, never rendered descriptions.
     search_objects: tuple[str, ...] = ()
+    search_terms: tuple[str, ...] = ()
+    search_enum_fields: tuple[str, ...] = ()
     # Host-side failure fallback declaration. It intentionally does not enter
     # the default model description; execution offers it only when a real
     # failure result carries no more specific handler guidance.
     failure_next_steps: str = ""
     next_tool_hints: tuple[NextToolHint, ...] = ()
 
-    @field_validator("search_objects", mode="before")
+    @field_validator("search_objects", "search_terms", "search_enum_fields", mode="before")
     @classmethod
     def restore_search_objects(cls, value: Any) -> Any:
         # Internal capability specs cross JSON boundaries into worker registries.
@@ -156,6 +159,12 @@ class ToolGuidance(StrictToolModel):
             raise ValueError("search_objects must contain lowercase whole object words")
         if len(set(self.search_objects)) != len(self.search_objects):
             raise ValueError("search_objects must be unique")
+        if any(not re.fullmatch(r"[a-z][a-z0-9]*", word) for word in self.search_terms):
+            raise ValueError("search_terms must contain lowercase whole words")
+        for field_name, values in (("search_terms", self.search_terms),
+                                   ("search_enum_fields", self.search_enum_fields)):
+            if len(set(values)) != len(values) or any(not word for word in values):
+                raise ValueError(f"{field_name} must contain unique nonempty values")
         if len(names) != len(set(names)):
             raise ValueError("next tool names must be unique within one guidance contract")
         return self

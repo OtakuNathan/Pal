@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import msgpack
 
-from pal.foundation.diagnostics import diagnostic_text, exception_report
+from pal.foundation.diagnostics import diagnostic_text, diagnostic_value, exception_report
 from pal.foundation.fd_lease import (
     FdCancellationControl,
     FdCloseOutcome,
@@ -663,6 +663,7 @@ async def dispatch_sidecar_request(
     call_method: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
     *,
     error_kind: Callable[[Exception], str] | None = None,
+    error_details: Callable[[Exception], dict[str, Any]] | None = None,
     logger: Any | None = None,
 ) -> dict[str, Any]:
     request_id = str(request.get("id") or "")
@@ -685,5 +686,6 @@ async def dispatch_sidecar_request(
                 # a large exception message inside the bounded wire frame.
                 "message": diagnostic_text(f"{exc.__class__.__name__}: {exc}"),
                 "diagnostic": exception_report(exc),
+                **({"details": diagnostic_value(error_details(exc))} if error_details is not None else {}),
             },
         }

@@ -1280,7 +1280,6 @@ BunshinScopedExecutionOpBunshinArtifactWriteInput = _strict_model(
     {
         'relative_path': (str, Field(...)),
         'content': (Any, Field(...)),
-        'artifact_type': (str, Field(None)),
         'role': (str, Field(None)),
     },
 )

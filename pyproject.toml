@@ -76,7 +76,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "pal.lsp" = ["server_templates/*.toml"]
-"pal.mcp" = ["templates/*.toml"]
+"pal.mcp" = ["templates/*.toml", "schema_2025_06_18.json", "SCHEMA_LICENSE.txt"]
 "pal.bunshin" = [
     "architecture_templates/**/*.json",
     "architecture_templates/**/*.j2",

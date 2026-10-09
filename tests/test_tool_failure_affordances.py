@@ -419,7 +419,8 @@ def test_actual_effect_receipt_overrides_declared_no_effect(runtime, failed):
 
 @pytest.mark.parametrize("provisioning", [False, True])
 def test_screenshot_failure_preserves_code_retry_and_exception_chain(runtime, provisioning):
-    from pal.web_fetch.tools import BrowserScreenshotTool
+    # Keep the injected exception paired with the tool after plugin reload tests.
+    from pal.web_fetch.tools import BrowserScreenshotTool, BrowserServiceError
     def execute(**kwargs):
         try:
             raise OSError("underlying screenshot cause")
