@@ -18,7 +18,6 @@ from pal.execution.generated_tool_models import (
 
 import math
 from functools import wraps
-import uuid
 from dataclasses import InitVar, dataclass, field
 from typing import Any
 
@@ -141,19 +140,6 @@ def _read_task_id(args: dict[str, Any]) -> str | None:
 
 def _recall_scope_for_task_id(task_id: str | None) -> str | None:
     return "task" if task_id else None
-
-
-MEMORY_STAR_SCHEMA = {
-    "type": "object",
-    "description": "Required when kind='case'; omit for fact memories.",
-    "properties": {
-        "situation": {"type": "string", "description": "Situation or failure context."},
-        "task": {"type": "string", "description": "Task or objective in that situation."},
-        "action": {"type": "string", "description": "Action, repair, or decision that mattered."},
-        "result": {"type": "string", "description": "Outcome or reusable lesson."},
-    },
-    "required": ["situation", "task", "action", "result"],
-}
 
 
 def _extract_entry_topics(entry: L2Entry) -> list[str]:

@@ -62,8 +62,8 @@ from pal.bunshin.sessions import (
 )
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
 from pal.bunshin.semantic_orchestration.assignment_rules import _charged_role_failure_attempt_count, _assignment_input_fingerprint, _contract_submit_idempotency_key, _implementation_action_idempotency_key
-from pal.bunshin.semantic_orchestration.role_inputs import _assignment_role_input_refs, _candidate_tree_fingerprint, _durable_workspace_preparation, _role_uses_bound_durable_workspace, _semantic_role_input_refs
-from pal.bunshin.semantic_orchestration.architecture_instructions import _architect_authoring_locations, _skeleton_architecture_review_view, _stable_architecture_preflight_finding, _contract_architect_instruction
+from pal.bunshin.semantic_orchestration.role_inputs import _candidate_tree_fingerprint, _durable_workspace_preparation, _role_uses_bound_durable_workspace, _semantic_role_input_refs
+from pal.bunshin.semantic_orchestration.architecture_instructions import _architect_authoring_locations, _stable_architecture_preflight_finding, _contract_architect_instruction
 from pal.bunshin.semantic_orchestration.review_results import _bind_architecture_edit_instruction_for_review
 from pal.bunshin.semantic_orchestration.role_environment import _bind_role_attempt_sandbox, _refresh_ephemeral_role_reference_binds, _workspace_tooling_from_work_view, _prepare_role_workspace_before_environment, _workflow_skill_injections
 from pal.bunshin.semantic_orchestration.worker_results import _named_json_output, _recorded_role_metrics, _worker_event_timing
@@ -423,18 +423,6 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
                 mode="architecture",
             ),
             {"architecture_index": {"sha256": "architecture-sha"}},
-        )
-        self.assertEqual(
-            _assignment_role_input_refs(
-                {
-                    "requirements": {"sha256": "requirements-sha"},
-                    "workspace_preparation": {"sha256": "attempt-worktree-sha"},
-                }
-            ),
-            {
-                "requirements": {"sha256": "requirements-sha"},
-                "workspace_preparation": {"sha256": "attempt-worktree-sha"},
-            },
         )
 
     def test_workspace_preparation_artifact_omits_lsp_observation_noise(self) -> None:
@@ -4189,56 +4177,6 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(result, {"status": "superseded"})
-
-    def test_skeleton_architecture_review_view_preserves_complete_semantic_submission(self) -> None:
-        submission = {
-            "modules": {
-                "router": {
-                    "module_kind": "implementation",
-                    "depends_on": [],
-                    "consumes": [],
-                    "paths": {"implementation_scopes": [{"kind": "file", "path": "src/router.cpp"}]},
-                }
-            },
-            "future_semantic_section": {"boundary": "preserve this without a worker whitelist"},
-        }
-        view = _skeleton_architecture_review_view(
-            {
-                "submission": submission,
-                "changed_paths": ["include/router.h", "src/router.cpp"],
-                "skeleton_commit_sha": "manager-owned-sha",
-                "requirements_ref": {"sha256": "manager-owned-requirements-ref"},
-            }
-        )
-
-        self.assertEqual(view["modules"], submission["modules"])
-        self.assertEqual(view["future_semantic_section"], submission["future_semantic_section"])
-        self.assertEqual(view["changed_paths"], ["include/router.h", "src/router.cpp"])
-        self.assertEqual(
-            view["manager_derived_verification_policy"],
-            {
-                "architect_declares_test_scopes": False,
-                "tests_are_product_scenarios": False,
-                "developer_corpora": {
-                    "router": {
-                        "kind": "directory",
-                        "path": "tests/router/developer",
-                        "owner": "coder",
-                        "verifier_access": "read_only",
-                    }
-                },
-                "verification_corpora": {
-                    "router": {
-                        "kind": "directory",
-                        "path": "tests/router/verifier",
-                        "owner": "verifier",
-                        "coder_access": "read_only",
-                    }
-                },
-            },
-        )
-        self.assertNotIn("skeleton_commit_sha", view)
-        self.assertNotIn("requirements_ref", view)
 
     def test_architecture_reviewer_binds_human_edit_instruction_on_every_attempt(self) -> None:
         service = BunshinWorkflowService(self.runtime_root)

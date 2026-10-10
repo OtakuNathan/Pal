@@ -137,8 +137,6 @@ class Plugin(Protocol):
 class ExecutionProjectionPort(Protocol):
     def project_llm_text(self, value: object) -> str: ...
 
-    def project_llm_value(self, value: Any) -> Any: ...
-
 
 class ExecutionRuntimePort(ExecutionProjectionPort, Protocol):
     def register_provider_ref(self, provider_id: str, provider: Any) -> None:

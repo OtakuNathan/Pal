@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
-from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
+from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.dependency_repair_protocol import DependencyRepairCohort
 from pal.bunshin.graph_executor import GraphExecution
 from pal.bunshin.repository import BunshinRepository

@@ -73,33 +73,6 @@ def _memory_title_from_summary(summary: str) -> str:
     return normalized[:96].rstrip()
 
 
-MEMORY_STAR_SCHEMA = {
-    "type": "object",
-    "description": (
-        "Required when kind='case'; omit for fact memories. STAR case detail for reusable failures, repairs, or task lessons."
-    ),
-    "properties": {
-        "situation": {
-            "type": "string",
-            "description": "The situation or failure context that future Pal should recognize.",
-        },
-        "task": {
-            "type": "string",
-            "description": "The task or objective Pal was trying to complete in that situation.",
-        },
-        "action": {
-            "type": "string",
-            "description": "The action, repair, or decision that mattered.",
-        },
-        "result": {
-            "type": "string",
-            "description": "The outcome, lesson, or observed result that makes the case reusable.",
-        },
-    },
-    "required": ["situation", "task", "action", "result"],
-}
-
-
 @dataclass(frozen=True)
 class MemorySnapshot:
     l1_count: int
@@ -665,9 +638,3 @@ def register_with_core(
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)
     return handle
-
-
-def _dict_list(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    return [dict(item) for item in value if isinstance(item, dict)]

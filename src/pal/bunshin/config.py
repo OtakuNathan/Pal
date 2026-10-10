@@ -10,9 +10,7 @@ from pal.bunshin.ipc import bunshin_runtime_dir
 
 
 DEFAULT_MAX_PARALLEL_LLM_NODES = 5
-DEFAULT_MAX_PARALLEL_MODULES = DEFAULT_MAX_PARALLEL_LLM_NODES
 BUNSHIN_DB_FILENAME = "bunshin.sqlite3"
-BUNSHIN_RUNTIME_SETTING_KEYS = {"max_parallel_llm_nodes", "max_parallel_modules", "auto_resume_ready_modules"}
 BUNSHIN_RUNTIME_SETTINGS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS bunshin_runtime_settings (
     setting_key TEXT PRIMARY KEY,
@@ -73,41 +71,6 @@ def effective_bunshin_runtime_config(runtime_root: Path) -> dict[str, Any]:
     return config
 
 
-def merge_bunshin_runtime_config(runtime_root: Path, patch: dict[str, Any]) -> dict[str, Any]:
-    current = read_bunshin_runtime_config(runtime_root)
-    updated = {str(key): value for key, value in dict(current).items() if str(key) in BUNSHIN_RUNTIME_SETTING_KEYS}
-    if "max_parallel_llm_nodes" in patch or "max_parallel_modules" in patch:
-        raw_limit = patch.get("max_parallel_llm_nodes", patch.get("max_parallel_modules"))
-        max_parallel_llm_nodes = _positive_int(raw_limit, default=None)
-        if max_parallel_llm_nodes is None:
-            raise ValueError("max_parallel_llm_nodes must be a positive integer")
-        updated["max_parallel_llm_nodes"] = int(max_parallel_llm_nodes)
-        updated.pop("max_parallel_modules", None)
-    if "auto_resume_ready_modules" in patch:
-        auto_resume = _optional_bool(patch.get("auto_resume_ready_modules"))
-        if auto_resume is None:
-            raise ValueError("auto_resume_ready_modules must be boolean-like")
-        updated["auto_resume_ready_modules"] = bool(auto_resume)
-    path = bunshin_db_path(runtime_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(path)) as db:
-        ensure_bunshin_runtime_settings_schema(db)
-        for key in set(current) - BUNSHIN_RUNTIME_SETTING_KEYS:
-            db.execute("DELETE FROM bunshin_runtime_settings WHERE setting_key = ?", (str(key),))
-        for key, value in updated.items():
-            db.execute(
-                """
-                INSERT INTO bunshin_runtime_settings(setting_key, setting_value, updated_at)
-                VALUES (?, ?, datetime('now'))
-                ON CONFLICT(setting_key) DO UPDATE SET
-                    setting_value = excluded.setting_value,
-                    updated_at = excluded.updated_at
-                """,
-                (str(key), _encode_setting_value(value)),
-            )
-    return effective_bunshin_runtime_config(runtime_root)
-
-
 def _positive_int(value: Any, *, default: int | None) -> int | None:
     try:
         parsed = int(value)
@@ -127,10 +90,6 @@ def _optional_bool(value: Any) -> bool | None:
     if text in {"0", "false", "no", "off", "disabled"}:
         return False
     return None
-
-
-def _encode_setting_value(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _decode_setting_value(value: str) -> Any:

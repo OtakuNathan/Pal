@@ -55,15 +55,6 @@ class RoleAttemptState(StrEnum):
     CANCELLED = "cancelled"
 
 
-ACTIVE_ASSIGNMENT_STATES = frozenset(
-    {
-        RoleAssignmentState.CLAIMED,
-        RoleAssignmentState.RUNNING,
-        RoleAssignmentState.RESULT_RECORDED,
-    }
-)
-
-
 def canonical_role_profile_parts(profile_id: str) -> tuple[str, str]:
     """Parse the canonical profile identity used by durable role records.
 

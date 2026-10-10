@@ -173,7 +173,7 @@ class TestSeedFromWizard(unittest.TestCase):
         store = EncryptedFileSecretStore(str(secrets_path))
         key = store.get_secret(SecretRef(service="test-claude", account="api-key"))
         self.assertEqual(key, "sk-test-key-123")
-        endpoint = LLMEndpointRepository().get_primary_enabled()
+        endpoint = LLMEndpointRepository().list_enabled()[0]
         self.assertIsNotNone(endpoint)
         self.assertEqual(LLMCredentialResolver(secret_store=store).resolve_api_key(endpoint), "sk-test-key-123")
 
@@ -394,7 +394,7 @@ class TestSeedFromWizard(unittest.TestCase):
         self.wizard.seed_from_wizard(self.registration, updated)
 
         store = EncryptedFileSecretStore(str(self.runtime_root / "secrets.json"))
-        endpoint = LLMEndpointRepository().get_primary_enabled()
+        endpoint = LLMEndpointRepository().list_enabled()[0]
         self.assertIsNotNone(endpoint)
         self.assertEqual(
             LLMCredentialResolver(secret_store=store).resolve_api_key(endpoint),
@@ -715,22 +715,6 @@ class TestDependencyDoctor(unittest.TestCase):
         self.assertTrue(WizardDependencyCheck("required", "Required", "error", "error", required=True).blocking)
         self.assertFalse(WizardDependencyCheck("optional", "Optional", "warn", "warn", required=False).blocking)
         self.assertFalse(WizardDependencyCheck("ok", "OK", "ok", "ok", required=True).blocking)
-
-    def test_dependency_report_counts_blocking_and_warnings(self) -> None:
-        from pal.wizard import dependencies as dep_mod
-        from pal.wizard.dependencies import WizardDependencyCheck
-
-        checks = (
-            WizardDependencyCheck("python", "Python", "ok", "ok"),
-            WizardDependencyCheck("package", "Package", "missing", "missing", required=True),
-            WizardDependencyCheck("ollama", "Ollama", "warn", "warn", required=False),
-        )
-        with patch.object(dep_mod, "collect_dependency_checks", return_value=checks):
-            report = dep_mod.dependency_report()
-
-        self.assertFalse(report["ok"])
-        self.assertEqual(report["blocking_count"], 1)
-        self.assertEqual(report["warning_count"], 1)
 
     def test_dependency_doctor_exit_code_reflects_blocking_checks(self) -> None:
         from pal.wizard import cli as cli_mod

@@ -60,10 +60,6 @@ class FailureRuntime:
             }
         )
 
-    def absorb_secondary_issue(self, draft: FailureDraft, issue: str) -> None:
-        if issue and issue not in draft.secondary_issues:
-            draft.secondary_issues.append(issue)
-
     def record_document_checked(self, draft: FailureDraft, document: str) -> None:
         if document and document not in draft.documents_checked:
             draft.documents_checked.append(document)

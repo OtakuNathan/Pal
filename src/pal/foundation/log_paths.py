@@ -22,7 +22,3 @@ def pal_log_path(runtime_root: Path | str | None = None) -> Path:
 
 def pal_debug_log_path(runtime_root: Path | str | None = None) -> Path:
     return pal_log_root(runtime_root) / "pal-debug.log"
-
-
-def pal_component_log_path(runtime_root: Path | str | None, *parts: str) -> Path:
-    return pal_log_root(runtime_root).joinpath(*[str(part) for part in parts if str(part or "").strip()])

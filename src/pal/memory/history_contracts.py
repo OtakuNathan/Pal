@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Iterable, Mapping, Protocol, TYPE_CHECKING
 from uuid import uuid4
 
 from pal.llm.ir import LLMMessageIR

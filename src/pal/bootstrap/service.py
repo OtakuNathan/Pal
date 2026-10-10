@@ -64,15 +64,6 @@ class StubRuntimeHandle:
         manager = self.proactive_manager
         return getattr(manager, "repository", None)
 
-
-    @property
-    def skill_service(self):
-        return self._optional_port("skill:skill")
-
-    @property
-    def artifact_service(self):
-        return self._optional_port("artifact:artifact")
-
     async def stop_async(self) -> None:
         dreaming = self.core.context.port_registry.get("memory.dreaming:dreaming")
         if dreaming is not None:

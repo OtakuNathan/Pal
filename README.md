@@ -439,6 +439,20 @@ python -m pytest tests/test_architecture_skeleton.py::PalV2ArchitectureSkeletonT
 
 Tests use `unittest` with `tempfile.mkdtemp` for isolation. No Makefile or tox.
 
+For a cached reference inventory and candidate dead-code chains, run:
+
+```bash
+python scripts/audit_dead_code.py
+python scripts/audit_dead_code.py --focus src/pal/bunshin/ --changed src/pal/bunshin/verification.py
+```
+
+The script uses the standard library and writes its SQLite cache and JSON report
+under ignored `test-logs/dead-code-audit/`. It distinguishes runtime reachability
+from test-only references and estimates affected test files without running them.
+Use `--entry module:symbol` for additional dynamic entry points. Candidates need
+manual review: unknown receivers use conservative name matches, and external
+consumers or unmodelled dynamic dispatch can change the result.
+
 ## Database
 
 Pal stores runtime state in SQLite via Peewee, with Bunshin owning a separate

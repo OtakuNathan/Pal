@@ -38,7 +38,6 @@ from pal.llm.shapes.common import (
     openai_content,
     openai_tool_definition,
     role_value,
-    text_content,
     tool_calls,
     tool_results,
 )

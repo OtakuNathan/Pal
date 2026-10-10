@@ -34,11 +34,6 @@ class HeatState:
     def entry_id(self) -> str:
         return self.key
 
-    @property
-    def affordance_id(self) -> str:
-        return self.key
-
-
 @dataclass(frozen=True)
 class HeatTransition:
     key: str

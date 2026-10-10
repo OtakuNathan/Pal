@@ -6,7 +6,6 @@ import sqlite3
 import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
-from typing import Any
 
 from pal.control.contracts import (ControlRoute, InteractionButtonSpec, InteractionInputSpec,
     InteractionItemSpec, InteractionMessageSpec)

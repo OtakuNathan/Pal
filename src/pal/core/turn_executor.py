@@ -12,7 +12,7 @@ import inspect
 import json
 import logging
 from datetime import datetime, timezone
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import singledispatchmethod
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 from uuid import uuid4
@@ -147,9 +147,6 @@ class TurnExecutor:
         self._after_compaction = after_compaction
 
     # ── public entry point ──────────────────────────────────────────────
-
-    def execute_turn_effect(self, continuation, effect):
-        return asyncio.run(self.execute_turn_effect_async(continuation, effect))
 
     async def execute_turn_effect_async(self, continuation, effect):
         self._ensure_not_interrupted(continuation)
@@ -1629,19 +1626,6 @@ class TurnExecutor:
             timeout_ms=None,
         )
 
-    def _resolve_effective_max_output_tokens(self, continuation) -> int:
-        llm_runtime = self.context.port_registry.get("llm:llm")
-        if llm_runtime is not None:
-            fn = getattr(llm_runtime, "resolve_max_output_tokens", None)
-            if callable(fn):
-                try:
-                    result = fn(preferred_endpoint_id=continuation.preferred_llm_endpoint_id)
-                except TypeError:
-                    result = fn()
-                if isinstance(result, int) and result > 0:
-                    return result
-        return self._config.fallback_max_output_tokens
-
     @staticmethod
     def _estimate_ir_message_chars(message: LLMMessageIR) -> int:
         total = len(message.text) + len(message.reasoning_text)
@@ -1758,14 +1742,6 @@ class TurnExecutor:
     @staticmethod
     def _llm_runtime_supports_streaming(llm_runtime: LLMRuntimePort, request: LLMRequestIR | None = None) -> bool:
         return llm_runtime.supports_streaming(request)
-
-    @staticmethod
-    def _llm_runtime_endpoint_facts(llm_runtime: LLMRuntimePort, request: LLMRequestIR | None) -> dict[str, Any]:
-        metadata = request.metadata if request is not None else {}
-        return llm_runtime.resolve_endpoint_facts(
-            preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
-            preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
-        )
 
     def infer_response_mode(self, outcome: LLMGenerationResult | None, *, used_tools: bool) -> str:
         if outcome is not None:

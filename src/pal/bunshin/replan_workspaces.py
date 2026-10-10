@@ -299,26 +299,3 @@ def _recreate_replaced_module_worktree(
         branch=branch,
         start_sha=target_base,
     )
-
-
-def _carry_forward_candidate(
-    source_node: AggregateSnapshot,
-    target_node: AggregateSnapshot,
-    candidate_digest: str,
-) -> None:
-    source_git = Path(str(source_node.payload.get("common_git_dir") or ""))
-    target_git = Path(str(target_node.payload.get("common_git_dir") or ""))
-    target_worktree = Path(str(target_node.payload.get("workspace_path") or ""))
-    if not source_git.is_dir() or not target_git.is_dir() or not target_worktree.is_dir():
-        raise ValueError("Candidate carry-forward worktree metadata is incomplete")
-    ref_name = f"refs/pal-bunshin-v2/carry-forward/{_safe_ref(target_node.aggregate_id)}"
-    completed = subprocess.run(
-        ["git", f"--git-dir={target_git}", "fetch", "--no-tags", str(source_git), f"{candidate_digest}:{ref_name}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout or "failed to import reusable candidate")
-    _git(target_worktree, "reset", "--hard", candidate_digest)

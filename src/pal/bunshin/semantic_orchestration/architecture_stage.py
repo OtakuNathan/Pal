@@ -8,7 +8,7 @@ from pal.bunshin.semantic_orchestration.review_results import _path_pseudo_ref
 from pal.bunshin.semantic_orchestration.workspace_safety import _lease_is_live
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.bunshin.sessions import architect_session_id_for_revision

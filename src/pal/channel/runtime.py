@@ -420,17 +420,6 @@ class ChannelRuntime(ChannelRuntimePort):
             hubs = (hub for hub in hubs if hub.published)
         return tuple(sorted(hubs, key=lambda hub: (hub.channel_kind, hub.endpoint_id)))
 
-    def set_endpoint_published(self, endpoint_id: str, published: bool) -> None:
-        if published:
-            if not self.publish_endpoint(endpoint_id):
-                hub = self.endpoint_hubs.get(str(endpoint_id or "").strip())
-                if hub is None or not hub.published:
-                    raise EndpointHubInvariantError(
-                        f"cannot publish endpoint outside attached lifecycle: {endpoint_id!r}"
-                    )
-            return
-        self.withdraw_endpoint(endpoint_id)
-
     def set_recovery_endpoint(self, endpoint_id: str) -> None:
         normalized = str(endpoint_id or "").strip()
         if normalized not in self.endpoint_hubs:
@@ -656,11 +645,6 @@ class ChannelRuntime(ChannelRuntimePort):
         if endpoint is not None:
             self._absorb_endpoint_outboxes(hub, endpoint)
         return hub.transition_epoch
-
-    def bind_endpoint_provider(self, endpoint_id: str, provider_id: str) -> None:
-        self._call_on_owner_loop(
-            lambda: self.ensure_endpoint_hub(endpoint_id, provider_id=provider_id)
-        )
 
     def begin_provider_transition(self, endpoint_ids: tuple[str, ...] | list[str], *, provider_id: str) -> dict[str, int]:
         normalized_ids = tuple(endpoint_ids)
@@ -1111,20 +1095,6 @@ class ChannelRuntime(ChannelRuntimePort):
                 self.endpoint_registry.unregister(endpoint_id)
             return removed
         return bool(asyncio.run(_remove()))
-
-    def discard_endpoint_transport(self, endpoint_id: str) -> bool:
-        """Forget metadata only after this exact transport finished shutdown."""
-
-        endpoint = self.endpoint_registry.get(endpoint_id)
-        hub = self.endpoint_hubs.get(endpoint_id)
-        if endpoint is None:
-            return False
-        if self._stopped_endpoints.get(endpoint_id) is not endpoint:
-            raise RuntimeError("cannot discard a transport with unconfirmed cleanup")
-        if hub is not None:
-            self._apply_hub_action(hub, EndpointHubAction.TRANSPORT_REMOVED)
-        self.endpoint_registry.unregister(endpoint_id)
-        return True
 
     def get_endpoint(self, endpoint_id: str) -> ChannelEndpointBase | None:
         return self.endpoint_registry.get(endpoint_id)

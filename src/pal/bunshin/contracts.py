@@ -233,10 +233,6 @@ class AggregateVersionConflict(TransitionError):
     pass
 
 
-class AggregateNotFound(TransitionError):
-    pass
-
-
 @dataclass(frozen=True)
 class DispatchResult:
     snapshot: AggregateSnapshot

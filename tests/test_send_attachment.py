@@ -21,7 +21,6 @@ from tests.runtime_channel_providers import telegram_endpoint_module
 
 _telegram_module = telegram_endpoint_module()
 TelegramChannelEndpoint = _telegram_module.TelegramChannelEndpoint
-_telegram_markdown = _telegram_module._telegram_markdown
 _telegram_text_segments = _telegram_module._telegram_text_segments
 
 
@@ -211,16 +210,19 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(endpoint.outbox)
         self.assertEqual(str(bot.messages[0]["text"]).strip(), "hello")
 
-    def test_telegram_markdown_flattens_gfm_tables_to_readable_lists(self) -> None:
-        rendered, mode = _telegram_markdown(
+    def test_telegram_segments_flatten_gfm_tables_to_readable_lists(self) -> None:
+        segments = _telegram_text_segments(
             "# Pal Report\n\n"
             "| Item | Status | Detail |\n"
             "|------|--------|--------|\n"
             "| **Core** | OK | default |\n"
-            "| MCP | OK | 8 tools |\n"
+            "| MCP | OK | 8 tools |\n",
+            limit=4096,
         )
 
-        self.assertEqual(mode, "MarkdownV2")
+        self.assertTrue(segments)
+        self.assertTrue(all(segment.parse_mode == "MarkdownV2" for segment in segments))
+        rendered = "".join(segment.rendered_text for segment in segments)
         self.assertNotIn("```", rendered)
         self.assertNotIn("\\| Item", rendered)
         self.assertIn("Status:", rendered)

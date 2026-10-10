@@ -10,7 +10,6 @@ from pal.foundation.sidecar import (
     SidecarRpcClient,
     SidecarRpcError,
     cleanup_sidecar_endpoint,
-    open_sidecar_connection,
     run_blocking,
     start_sidecar_server,
 )
@@ -18,10 +17,6 @@ from pal.foundation.sidecar import (
 
 def lsp_runtime_dir(runtime_root: Path) -> Path:
     return Path(runtime_root) / "data" / "lsp"
-
-
-def lsp_config_root(runtime_root: Path) -> Path:
-    return Path(runtime_root) / "plugins" / "lsp" / "servers"
 
 
 def lsp_socket_path(runtime_root: Path) -> Path:
@@ -75,12 +70,6 @@ class LspManagerClient:
     def rescan_sync(self) -> dict[str, Any]:
         return self.request_sync("rescan")
 
-    def status_sync(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.request_sync("status", params)
-
-    def doctor_sync(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.request_sync("doctor", params)
-
     async def prepare_workspace(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self.request("prepare_workspace", params)
 
@@ -98,10 +87,6 @@ class LspManagerClient:
 
     def operation_sync(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         return self.request_sync(method, params)
-
-
-async def open_manager_connection(runtime_root: Path):
-    return await open_sidecar_connection(_lsp_endpoint(runtime_root))
 
 
 async def start_manager_server(runtime_root: Path, handler):

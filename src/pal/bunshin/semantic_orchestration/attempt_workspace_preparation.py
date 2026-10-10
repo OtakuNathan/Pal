@@ -4,12 +4,11 @@ from pal.bunshin.semantic_orchestration.role_inputs import _durable_workspace_pr
 from pal.bunshin.semantic_orchestration.role_environment import _prepare_role_workspace_before_environment
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
 from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.adapters import prepare_workspace_environment
 from pal.bunshin.lsp_prewarm import prewarm_workspace_lsp
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.contracts import AggregateType
 from pal.bunshin.paths import invocation_root, role_run_id
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole

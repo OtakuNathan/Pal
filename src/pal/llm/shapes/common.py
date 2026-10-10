@@ -15,10 +15,6 @@ from pal.llm.shapes.base import ShapeDecodeError
 from pal.shared.json_values import thaw_json
 
 
-def text_content(parts: Iterable[Any]) -> str:
-    return "".join(part.text for part in parts if isinstance(part, TextPartIR))
-
-
 def openai_content(parts: Iterable[Any]) -> str | list[dict[str, Any]]:
     rendered: list[dict[str, Any]] = []
     for part in parts:

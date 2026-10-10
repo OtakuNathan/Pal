@@ -1506,16 +1506,6 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             value = getattr(endpoint, field_name, None)
         return str(value or "").strip()
 
-    @staticmethod
-    def _llm_model_label(endpoint: Any) -> str:
-        endpoint_id = PalCore._llm_endpoint_field(endpoint, "endpoint_id")
-        display_name = PalCore._llm_endpoint_field(endpoint, "display_name")
-        model_id = PalCore._llm_endpoint_field(endpoint, "model_id")
-        label = display_name or model_id or endpoint_id
-        if endpoint_id and label != endpoint_id:
-            return f"{label} ({endpoint_id})"
-        return label or endpoint_id
-
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
         normalized = str(turn_id or "").strip()
         if not normalized:
@@ -2314,9 +2304,6 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     def withdraw_module_capabilities(self, module_id: str) -> list[str]:
         return self.module_lifecycle.withdraw_module_capabilities(module_id)
 
-    def mount_module(self, handle: ModuleHandle) -> ModuleHandle:
-        return self.module_lifecycle.mount_module(handle)
-
     def detach_module(self, module_id: str) -> str:
         return self.module_lifecycle.detach_module(module_id)
 
@@ -2342,20 +2329,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             model_hint=model_hint,
         )
 
-    def _execute_turn_effect(self, continuation: TurnContinuation, effect: EffectRequest) -> EffectResult:
-        return self.turn_executor.execute_turn_effect(continuation, effect)
-
     async def _execute_turn_effect_async(self, continuation: TurnContinuation, effect: EffectRequest) -> EffectResult:
         return await self.turn_executor.execute_turn_effect_async(continuation, effect)
 
     def _build_llm_tool_contracts(self) -> list[dict[str, object]]:
         return self.tool_surface.build_llm_tool_contracts()
-
-    def _build_tool_contracts_from_descriptors(self, descriptors: list[Any]) -> list[dict[str, object]]:
-        return self.tool_surface.build_tool_contracts_from_descriptors(descriptors)
-
-    def _select_failure_descriptors(self, signal: FailureSignal) -> list[Any]:
-        return self.tool_surface.select_failure_descriptors(signal)
 
     async def handle_failure_async(
         self,
@@ -2379,44 +2357,6 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         if tool_result.ok:
             return False
         return (tool_result.structured or {}).get("error_code") == "handler_exception"
-
-    def _stream_llm_request(
-        self,
-        continuation: TurnContinuation,
-        llm_runtime,
-        request: LLMRequestIR,
-    ) -> LLMGenerationResult:
-        return asyncio.run(self._stream_llm_request_async(continuation, llm_runtime, request))
-
-    async def _stream_llm_request_async(
-        self,
-        continuation: TurnContinuation,
-        llm_runtime,
-        request: LLMRequestIR,
-    ) -> LLMGenerationResult:
-        return await self.turn_executor.stream_llm_request_async(continuation, llm_runtime, request)
-
-    def _build_turn_prompt(
-        self,
-        continuation: TurnContinuation,
-        assembly_context: PromptAssemblyContext,
-        *,
-        max_output_tokens: int,
-    ) -> LLMRequestIR:
-        return self.turn_executor.build_turn_prompt(
-            continuation,
-            assembly_context,
-            max_output_tokens=max_output_tokens,
-        )
-
-    def _fallback_final_reply(self, continuation: TurnContinuation) -> str:
-        return self.turn_executor.fallback_final_reply(continuation)
-
-    def _infer_response_mode(self, outcome: LLMGenerationResult | None, *, used_tools: bool) -> str:
-        return self.turn_executor.infer_response_mode(outcome, used_tools=used_tools)
-
-    def _select_turn_temperature(self, response_mode: str) -> float:
-        return self.turn_executor.select_turn_temperature(response_mode)
 
     def _debug_log_prompt(self, *args) -> None:
         if not self._prompt_log_enabled_from_args(*args):
@@ -2470,19 +2410,6 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             return
         log_path = pal_log_path(Path(root))
         append_prompt_debug_log(log_path, text)
-
-    def _schedule_post_turn_commit(
-        self,
-        outcome: TurnOutcome,
-        *,
-        event: EventEnvelope | None = None,
-    ) -> None:
-        asyncio.run(
-            self._schedule_post_turn_commit_async(
-                outcome,
-                event=event,
-            )
-        )
 
     async def _schedule_post_turn_commit_async(
         self,
@@ -2551,17 +2478,6 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                             "error": f"{exc.__class__.__name__}: {exc}",
                         }
                     )
-
-def effect_result_to_observation(tool_result) -> "ToolObservation":
-    from pal.core.turns import ToolObservation
-
-    return ToolObservation(
-        tool_name=tool_result.name,
-        ok=tool_result.ok,
-        summary=tool_result.text or ("tool succeeded" if tool_result.ok else "tool failed"),
-        structured=tool_result.structured,
-    )
-
 
 def _utc_after_seconds(seconds: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()

@@ -21,8 +21,12 @@ Exposes:
 - `MemoryQuery`
 - `MemoryPack`
 - `MemoryService`
-- `MemoryCompactRequest` with a validated, rendered `summary_entry`
-- `L3RepositoryPort`
+- `MemoryCompactResult`
+- `L3ProviderPort`
+
+`MemoryCompactRequest` is a retained tombstone for the retired whole-source
+compaction interface. Current compaction captures LEFT history through
+`HistoryRoot` and preserves RIGHT history.
 
 Interaction rule:
 - Pal and Bunshin instantiate the same `MemoryService` behavior and

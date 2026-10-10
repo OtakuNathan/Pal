@@ -48,18 +48,6 @@ def _named_json_output(terminal: Mapping[str, Any], filename: str) -> dict[str, 
     return value
 
 
-def _meaningful_stderr_tail(stderr: str, *, limit: int = 4000) -> str:
-    lines = str(stderr or "").splitlines()
-    filtered = [
-        line
-        for line in lines
-        if "SyntaxWarning:" not in line
-        and "site-packages/jieba/" not in line
-        and not line.lstrip().startswith(("re_han_default =", "re_skip_default =", "re_skip ="))
-    ]
-    return "\n".join(filtered)[-limit:]
-
-
 def _terminal_nonretryable_blocker(payload: Mapping[str, Any]) -> str:
     kind = str(payload.get("blocker_kind") or "")
     return kind if kind in {

@@ -97,7 +97,7 @@ class ReplayCompatibilityTests(unittest.TestCase):
                 )})
                 self.assertTrue(runtime.model_switch_advice("b", request).compact_required)
                 with self.assertRaisesRegex(LLMRequestPreparationError, "previous model"):
-                    runtime._prepare_request(target, request)
+                    runtime._compile_request(target, request)
 
     def test_family_codec_replays_original_bytes_without_relabeling(self):
         source, target = endpoint(), endpoint("b", "gpt-5.6-terra")

@@ -10,7 +10,6 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DeferredEffectError, LeaseConflict, StaleFencingToken
-from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.worker_processes import WorkerProcesses
 from pal.bunshin.sessions import architect_session_id_for_revision

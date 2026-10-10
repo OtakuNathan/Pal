@@ -1,13 +1,6 @@
 from __future__ import annotations
 
-import contextlib
-
-from pal.core.module_registry import (
-    MODULE_TIER_CORE_FOUNDATION,
-    MODULE_TIER_DETACHABLE,
-    MODULE_TIER_MANAGED_ESSENTIAL,
-)
-from pal.shared import IntrospectionCall, RuntimeStatus
+from pal.shared import RuntimeStatus
 
 
 class ModuleLifecycle:
@@ -43,23 +36,6 @@ class ModuleLifecycle:
             handle.published_capabilities = []
         return names
 
-    def mount_module(self, handle):
-        self.context.register_module(handle)
-        try:
-            self._restore_provider_refs(handle)
-            self._restore_prompt_fragment_providers(handle)
-            self._restore_event_sources(handle)
-            self._restore_event_handlers(handle)
-            self.publish_module_capabilities(handle.module_id)
-            return handle
-        except Exception:
-            with contextlib.suppress(Exception):
-                self._detach_detachable_runtime_entries(handle)
-            self.context.unregister_module(handle)
-            handle.mounted = False
-            handle.degraded = True
-            raise
-
     def detach_module(self, module_id: str) -> str:
         owner = self.context.lifecycle_owner_registry.resolve(module_id)
         if owner is not None:
@@ -80,43 +56,6 @@ class ModuleLifecycle:
             return result.status
         self.context.module_registry.require(module_id)
         return RuntimeStatus.FORBIDDEN
-
-    def _restore_provider_refs(self, handle) -> None:
-        for provider_id in handle.provider_refs:
-            provider = handle.ports.get(f"provider:{provider_id}")
-            if provider is None:
-                continue
-            self.context.execution_runtime.register_provider_ref(provider_id, provider)
-            if hasattr(provider, "provider_id") and self.context.execution_runtime.l3_plugin_registry.get(provider_id) is None:
-                self.context.execution_runtime.l3_plugin_registry.register(provider)
-
-    def _detach_detachable_runtime_entries(self, handle) -> None:
-        self.withdraw_module_capabilities(handle.module_id)
-        self.context.prompt_fragment_registry.unregister_module(handle.module_id)
-        self.context.event_source_registry.detach_module(handle.module_id)
-        self.context.event_handler_registry.detach_module(handle.module_id)
-        self.context.control_action_registry.unregister_module(handle.module_id)
-        for provider_id in list(handle.provider_refs):
-            self.context.execution_runtime.unregister_provider_ref(provider_id)
-            if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
-                self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
-
-    def _restore_event_sources(self, handle) -> None:
-        for source in handle.event_sources:
-            self.context.event_source_registry.attach(handle.module_id, source)
-
-    def _restore_event_handlers(self, handle) -> None:
-        for event_kind, handlers in handle.event_handlers.items():
-            for handler in handlers:
-                self.context.event_handler_registry.register(event_kind, handler, module_id=handle.module_id)
-
-    def _restore_control_action_handlers(self, handle) -> None:
-        for action_kind, handler in handle.control_action_handlers.items():
-            self.context.control_action_registry.register(handle.module_id, action_kind, handler)
-
-    def _restore_prompt_fragment_providers(self, handle) -> None:
-        for provider in handle.prompt_fragment_providers:
-            self.context.prompt_fragment_registry.register(provider)
 
     def _register_skill_declarations(self, handle) -> None:
         skill = self.context.port_registry.get("skill:skill")

@@ -8,7 +8,7 @@ from pal.bunshin.semantic_orchestration.review_results import _bind_architecture
 from pal.bunshin.semantic_orchestration.workspace_safety import _lease_is_live
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT, software_contract_projection

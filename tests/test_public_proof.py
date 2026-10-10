@@ -23,12 +23,8 @@ class PublicProofTests(unittest.TestCase):
         self.database.parent.mkdir(parents=True)
         self.artifact = self.root / "data" / "bunshin" / "artifact.json"
         self.artifact.write_text('{"proof":true}\n', encoding="utf-8")
-        self.artifact_sha = MODULE._typed_artifact_digest(
-            self.artifact.read_bytes(),
-            artifact_type="DemoArtifact",
-            schema_version="1",
-            media_type="application/json",
-        )
+        # Fixed digest of the typed fixture, independent of the verifier.
+        self.artifact_sha = "a34625db3a0171de52394dcbe8fc03c9216529d95c7033ce81c0b7c3ad7deea7"
         self._seed_database()
 
     def tearDown(self) -> None:

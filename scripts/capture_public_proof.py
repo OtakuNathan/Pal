@@ -74,21 +74,6 @@ def _artifact_hashes(value: Any) -> set[str]:
     return found
 
 
-def _typed_artifact_digest(
-    data: bytes,
-    *,
-    artifact_type: str,
-    schema_version: str,
-    media_type: str,
-) -> str:
-    digest = hashlib.sha256()
-    for value in (artifact_type, schema_version, media_type):
-        digest.update(value.encode("utf-8"))
-        digest.update(b"\0")
-    digest.update(data)
-    return digest.hexdigest()
-
-
 def _typed_artifact_file_digest(
     path: Path,
     *,

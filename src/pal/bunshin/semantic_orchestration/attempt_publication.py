@@ -7,7 +7,6 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.paths import invocation_root
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.bunshin.turns import sanitize_runner_session_pack
 from pal.bunshin.harnesses import HARNESS_LAUNCH_PAL_SANDBOX
 from pal.bunshin.semantic_orchestration.role_environment import _bind_role_attempt_sandbox
 import json

@@ -63,18 +63,6 @@ class CompiledArchitectureDefinition:
                 )
         return tuple(rules)
 
-    def manager_payload(self) -> dict[str, Any]:
-        return {
-            "specialization_id": self.specialization_id,
-            "family_id": self.family_id,
-            "schema": copy.deepcopy(dict(self.schema)),
-            "template": self.template,
-            "graph_satellite_template": self.graph_satellite_template,
-            "example": copy.deepcopy(dict(self.example)),
-            "generation_hash": self.generation_hash,
-        }
-
-
 class BunshinArchitectureSpecializationProvider(Protocol):
     def declared_bunshin_architecture_specializations(
         self,

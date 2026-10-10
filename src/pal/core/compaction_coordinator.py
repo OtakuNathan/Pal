@@ -111,14 +111,6 @@ class CompactionGate:
         ticket = self.ticket_for(scope)
         return ticket is not None and ticket.phase != CompactionPhase.RELEASED
 
-    def is_cancelled(self, scope: str, op_id: str) -> bool:
-        ticket = self.ticket_for(scope)
-        return (
-            ticket is not None
-            and ticket.op_id == str(op_id)
-            and bool(ticket.cancelled)
-        )
-
     # ── mutation (transition lock held) ───────────────────────────────
 
     def _require_lock(self) -> None:

@@ -198,15 +198,6 @@ class MemoryCompactRequest:
     __slots__ = ()
 
 
-class StaleCompactionSource(ValueError):
-    """The captured compaction source no longer matches live memory.
-
-    Raised on source stamp or epoch mismatch, or when the successor active
-    turn changed. Callers must not restore their captured snapshot over the
-    newer live state (I03/I12/F18).
-    """
-
-
 @dataclass(frozen=True)
 class CompactionReceipt:
     """The single durable install fact for one compaction transaction."""

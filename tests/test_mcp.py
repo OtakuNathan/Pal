@@ -21,7 +21,7 @@ from pal.mcp.ipc import McpManagerClient
 from pal.mcp.manager import McpManager
 from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpToolSpec
 from pal.mcp.normalize import normalize_tool_payload
-from pal.mcp.plugin import McpManagerPluginProvider, build_mcp_plugin
+from pal.mcp.plugin import McpManagerPluginProvider
 from pal.plugins.host import PluginHost
 from pal.plugins.models import PluginBundleModel
 from pal.shared import RuntimeStatus
@@ -489,12 +489,23 @@ class McpPluginSidecarTests(unittest.TestCase):
     def test_plugin_attach_projects_capabilities_and_skills_through_sidecar(self) -> None:
         self._write_config_and_server()
         core, skill_service = self._core_with_services()
-        handle = build_mcp_plugin(runtime_root=self.root).register_with_core(core.context)
+        builtin = self.root / "plugins" / "_builtin" / "mcp"
+        builtin.mkdir(parents=True)
+        (builtin / "plugin.toml").write_text(
+            '\n'.join([
+                'plugin_id = "mcp"',
+                'entrypoint = "pal.plugins_builtin.mcp.runtime"',
+                'version = "0.1.0"',
+                'enabled_by_default = true',
+                'lifecycle_protocol = "raii.v1"',
+                'module_id = "mcp"',
+            ]),
+            encoding="utf-8",
+        )
         host = PluginHost(context=core.context, runtime_root=self.root)
-
-        handle.ports["mcp"].start_manager()
-        host._do_attach(handle)
+        host.rescan()
         try:
+            self.assertEqual(host.attach("mcp")["status"], RuntimeStatus.OK)
             search = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_search", args={"query": "alpha"}))
             alpha_hit = next(item for item in search.structured["hits"] if item["alias"] == "call_mcp_demo_alpha")
             alpha_read = core.context.execution_runtime.execute(
@@ -521,7 +532,7 @@ class McpPluginSidecarTests(unittest.TestCase):
             self.assertEqual(image_record.execution.idempotency, Idempotency.IDEMPOTENT)
             self.assertEqual(image_record.execution.retry_policy, RetryPolicy.AUTOMATIC)
         finally:
-            host._do_detach(handle)
+            self.assertEqual(host.detach("mcp")["status"], RuntimeStatus.OK)
         missing = core.context.execution_runtime.execute(CapabilityCall(name="call_mcp_demo_alpha", args={}))
         self.assertIn("unknown capability", missing.text)
 

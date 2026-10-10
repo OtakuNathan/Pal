@@ -205,33 +205,6 @@ class RoleSessionsStore:
             ).fetchone()
         return _decode_role_session(row) if row is not None else None
 
-    def list_role_sessions(
-        self,
-        *,
-        workflow_id: str,
-        aggregate_type: AggregateType | str,
-        aggregate_id: str,
-        role: str = "",
-    ) -> tuple[dict[str, Any], ...]:
-        self.database.ensure_schema()
-        clauses = ["workflow_id = ?", "aggregate_type = ?", "aggregate_id = ?"]
-        parameters: list[Any] = [
-            str(workflow_id),
-            AggregateType(str(aggregate_type)).value,
-            str(aggregate_id),
-        ]
-        if str(role or "").strip():
-            clauses.append("role = ?")
-            parameters.append(str(role))
-        with self.database.read_connection() as connection:
-            rows = connection.execute(
-                "SELECT * FROM bunshin_v2_role_sessions WHERE "
-                + " AND ".join(clauses)
-                + " ORDER BY created_at, session_id",
-                tuple(parameters),
-            ).fetchall()
-        return tuple(_decode_role_session(row) for row in rows)
-
     def complete_role_session(self, session_id: str, *, status: str = "completed") -> bool:
         normalized = str(status or "completed").strip().lower()
         if normalized not in {"completed", "cancelled"}:

@@ -55,6 +55,7 @@ implementation status.
 - [Archive index](archive/README.md): past plans, migration decisions, audits and delivery reports.
 - [Historical test log summary](archive/session_compaction/test_log_summary.md): original results and checksums; raw logs remain available locally and in Git history.
 - [Public proof evidence](evidence/2026-08-14-public-proof/README.md): reproducible demonstration evidence.
+- [State-machine review evidence](reviews/state_machine_20261009/README.md): historical reports, structured results and raw-output recovery instructions.
 - `spec/` and `llm_projection_refactor/formal/`: retain formal models and their validation resources alongside their owning subsystem.
 
 Write new test output under the ignored repository-root `test-logs/` directory

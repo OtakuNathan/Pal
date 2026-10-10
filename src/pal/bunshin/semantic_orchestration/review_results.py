@@ -7,35 +7,7 @@ from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateSnapshot
 from pal.bunshin.skeleton import SkeletonReviewFinding, SkeletonReviewResult
 from pal.bunshin.review_findings import structured_advisories, structured_findings
-from pal.bunshin.verification import VerificationCaseKind, VerificationCaseSpec, VerificationStatus
-from pal.bunshin.semantic_orchestration.verification_receipts import _semantic_locations
-from pal.bunshin.semantic_orchestration.verification_receipts import _semantic_requirement_refs
-
-
-def _parse_architecture_review(payload: Mapping[str, Any]) -> SkeletonReviewResult:
-    verdict = str(payload.get("verdict") or "").strip().upper()
-    if verdict not in {"PASS", "FAIL"}:
-        raise ValueError("architecture review verdict must be PASS or FAIL")
-    structured_advisories(payload)
-    findings = tuple(
-        SkeletonReviewFinding(
-            finding_key=str(
-                item.get("finding_id")
-                or item.get("finding_key")
-                or ""
-            ),
-            finding_kind=str(item["finding_kind"]),
-            priority=str(item["priority"]),
-            summary=str(item["summary"]),
-            locations=tuple(dict(location) for location in list(item.get("locations") or [])),
-        )
-        for item in structured_findings(payload)
-    )
-    if verdict == "PASS" and findings:
-        raise ValueError("PASS architecture review cannot contain findings")
-    if verdict == "FAIL" and not findings:
-        raise ValueError("FAIL architecture review requires typed findings")
-    return SkeletonReviewResult(verdict=verdict, findings=findings)
+from pal.bunshin.verification import VerificationStatus
 
 
 def _parse_skeleton_review(payload: Mapping[str, Any]) -> SkeletonReviewResult:
@@ -105,61 +77,6 @@ def _append_ref(existing: Any, value: Any) -> list[dict[str, Any]]:
         if all(str(item.get("sha256") or "") != digest for item in result):
             result.append(dict(value))
     return result
-
-
-def _verification_case_specs(value: Any) -> list[VerificationCaseSpec]:
-    cases = [_verification_case_spec(item) for item in list(value or [])]
-    names = [item.case_name for item in cases]
-    if len(set(names)) != len(names):
-        raise ValueError("verification case names must be unique semantic names")
-    return cases
-
-
-def _verification_case_spec(value: Any) -> VerificationCaseSpec:
-    if not isinstance(value, Mapping):
-        raise ValueError("verification case must be an object")
-    name = str(value.get("name") or "").strip()
-    if not name:
-        raise ValueError("verification case requires a semantic name")
-    command = tuple(str(item) for item in list(value.get("command") or []) if str(item))
-    if not command:
-        raise ValueError(f"verification case {name!r} requires a command argv")
-    requirements = _semantic_requirement_refs(value.get("requirements"), owner=f"case {name!r}")
-    locations = _semantic_locations(value.get("locations"), owner=f"case {name!r}")
-    invariants = tuple(str(item).strip() for item in list(value.get("invariants") or []) if str(item).strip())
-    if not (requirements or locations or invariants):
-        raise ValueError(
-            f"verification case {name!r} requires Requirement text, a source location, or an invariant"
-        )
-    case_kind = VerificationCaseKind(str(value.get("case_kind") or ""))
-    expected_exit_codes = tuple(int(item) for item in list(value.get("expected_exit_codes") or [0]))
-    case_key = hashlib.sha256(
-        json.dumps(
-            {
-                "name": name,
-                "case_kind": case_kind.value,
-                "command": command,
-                "expected_exit_codes": expected_exit_codes,
-                "requirements": requirements,
-                "locations": locations,
-                "invariants": invariants,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return VerificationCaseSpec(
-        case_id=f"case_{case_key[:20]}",
-        case_name=name,
-        case_kind=case_kind,
-        command=command,
-        expected_exit_codes=expected_exit_codes,
-        requirements=requirements,
-        locations=locations,
-        invariants=invariants,
-        description=str(value.get("description") or ""),
-    )
 
 
 def _compile_standalone_review_markdown(report: Mapping[str, Any]) -> str:

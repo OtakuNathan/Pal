@@ -52,12 +52,6 @@ def _ordered_dependency_closure(
     return tuple(ordered)
 
 
-def _topology_sinks(depends_on: Mapping[str, list[str]], node_ids: Mapping[str, str]) -> list[str]:
-    dependencies = {item for values in depends_on.values() for item in values}
-    sinks = sorted(set(depends_on) - dependencies)
-    return [node_ids[item] for item in sinks]
-
-
 def dependency_fingerprint(node: AggregateSnapshot, node_by_id: Mapping[str, AggregateSnapshot]) -> str:
     dependency_data = []
     for node_id in sorted(str(item) for item in list(node.payload.get("dependency_node_ids") or [])):

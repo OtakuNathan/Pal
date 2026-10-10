@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Iterable
 
 from pal.bunshin.contracts import (
@@ -92,8 +91,3 @@ class TransitionEngine:
                 if current_type == aggregate_type and current_state == state
             )
         )
-
-    def with_transition(self, transition: TransitionSpec) -> "TransitionEngine":
-        clone = TransitionEngine(self._table.values())
-        clone.register(replace(transition))
-        return clone

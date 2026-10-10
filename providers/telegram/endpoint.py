@@ -103,16 +103,6 @@ class TelegramBinding:
         return False
 
 
-def _telegram_markdown(text: str) -> tuple[str, str | None]:
-    normalized = _flatten_gfm_tables_for_telegram(str(text or ""))
-    try:
-        import telegramify_markdown
-
-        return telegramify_markdown.markdownify(normalized), "MarkdownV2"
-    except Exception:
-        return normalized, None
-
-
 def _flatten_gfm_tables_for_telegram(text: str) -> str:
     lines = str(text or "").splitlines()
     out: list[str] = []
@@ -1889,9 +1879,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self.last_delivery_error = ""
         return True
 
-    def _prune_interactive_messages(self, *, now: float | None = None) -> None:
-        self.prune_interactive_messages(now=now)
-
     async def _prune_interactive_messages_async(self, *, now: float | None = None) -> None:
         current = float(now if now is not None else time.monotonic())
         stale: list[tuple[str, dict[str, Any]]] = []
@@ -1959,20 +1946,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 target,
             )
         self._next_persisted_deadline_sweep_at = time.monotonic() + next_delay
-
-    def _forget_interactive_message(self, interaction_id: str) -> None:
-        super().forget_interaction_message(interaction_id)
-        if self._interaction_store is not None:
-            self._interaction_store.set_state(interaction_id, "resolved")
-
-    def _expired_interaction_text(self, interaction_kind: str) -> str:
-        return self.expired_interaction_text(interaction_kind)
-
-    def _build_interaction_action_map(self, spec: InteractionMessageSpec) -> dict[str, dict[str, Any]]:
-        return self.build_interaction_action_map(spec)
-
-    def _parse_interaction_callback_data(self, data: str) -> tuple[str, str]:
-        return self.parse_interaction_callback_data(data)
 
     def _remember_interaction(
         self,

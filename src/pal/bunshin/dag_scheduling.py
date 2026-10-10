@@ -1,5 +1,4 @@
 from __future__ import annotations
-from typing import Any
 from pal.bunshin.workspace_resources import exclusive_workspace_lock as exclusive_workspace_lock
 from dataclasses import dataclass
 from pathlib import Path

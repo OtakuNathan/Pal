@@ -88,7 +88,7 @@
 - N1→N4 新增套件：n1_root_lifecycle 12 / n11_followup 12 / n2_projection_fixes 5+5sub / n2_continuity 3 / n3_invoker 3 / n3_vertical 4（含 promote→compact 全链与 stale-left）——全绿
 - 继承族逐 gate 抽查：runtime_compaction / full_compaction_source / hot_cache / memory / history / projection 全系 / bunshin harnesses / hosts_recovery——绿
 - 全量回归（HEAD `3eb036b`，25:47）：**3134 passed + 491 subtests + 7 skipped，25 failed**。其中 3 个为本次引入的真回归（native_sink vs 收窄 invoker 签名，test_llm_runtime_ir stream）——单跑 3/3 复现、修复后套件全绿；其余 19 节点 + 3 subtest 行与上轮全量（695efbc）完全同集，单跑 **20/20 零复现**（logs_flake_rerun_af51d74fix.txt），与 3575e48/29a879f 三次同族，归因长跑资源争用/时序。不宣称全量全绿，干净环境重跑仍为最终归因步
-- acceptance_status.json：41/72 PASS（每项带真实 node/command/exit/product_sha，由 fill_ledger_v3.py 逐 node 实跑复核后写入）；其余 31 项 NOT_RUN 且关键项带原因备注（无 fill 脚本冒充）；28 项收口矩阵实况见 §8
+- [acceptance_status.json](acceptance_status.json)：41/72 PASS（每项带真实 node/command/exit/product_sha，由当时的 fill_ledger_v3.py 逐 node 实跑复核后写入）；其余 31 项 NOT_RUN 且关键项带原因备注（无 fill 脚本冒充）；28 项收口矩阵实况见 §8
 
 ## 6. 全链路逼出的真 bug（本任务）
 

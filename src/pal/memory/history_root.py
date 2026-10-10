@@ -25,10 +25,10 @@ session incarnation change (reset) invalidates them (I09).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import field, replace
 from enum import StrEnum
 import time
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
 from pal.llm.ir import LLMMessageIR, MessageRole, MessageState

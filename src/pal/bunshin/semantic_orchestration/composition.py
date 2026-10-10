@@ -53,7 +53,6 @@ from pal.bunshin.semantic_orchestration.standalone_review import StandaloneRevie
 from pal.bunshin.semantic_orchestration.aggregate_control import AggregateControl
 from pal.bunshin.semantic_orchestration.role_control import RoleControl
 from pal.bunshin.semantic_orchestration.effect_dispatch import EffectDispatch
-from typing import Callable
 
 
 @dataclass(frozen=True)

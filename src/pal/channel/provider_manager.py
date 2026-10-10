@@ -654,15 +654,6 @@ class ChannelEndpointProviderManager:
             llm_text=render_titled_structured_for_llm(result.llm_text or result.text, payload),
         )
 
-    def load_runtime_providers(self) -> dict[str, Any]:
-        result = self.rescan_providers()
-        runtime_result = dict(result.get("runtime_result") or {})
-        runtime_result.setdefault("runtime_provider_ids", sorted(self.runtime_provider_ids))
-        runtime_result.setdefault(
-            "runtime_provider_load_errors", list(self.runtime_provider_load_errors)
-        )
-        return runtime_result
-
     def rescan_providers(self) -> dict[str, Any]:
         before = sorted(set(self.providers) | set(self.discovered_runtime_providers))
         scan = self._scan_runtime_provider_manifests()
@@ -1180,10 +1171,6 @@ class ChannelEndpointProviderManager:
         lifecycle_errors = stop_errors + unload_errors
         if lifecycle_errors:
             raise RuntimeError("; ".join(lifecycle_errors))
-
-    def _clear_runtime_providers(self) -> None:
-        for provider_id in sorted(tuple(self.discovered_runtime_providers)):
-            self._remove_discovered_provider(provider_id, reason="provider_manager_clear")
 
     async def stop_async(self) -> None:
         errors: list[str] = []

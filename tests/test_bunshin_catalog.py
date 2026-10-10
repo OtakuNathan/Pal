@@ -277,7 +277,7 @@ class BunshinCatalogTests(unittest.TestCase):
         provider = BunshinManagerProvider(self.root)
         try:
             health = provider.attach_manager()
-            snapshot = provider.client.catalog_snapshot_sync(kind="profiles")
+            snapshot = provider.client.request_sync("catalog_snapshot", {"kind": "profiles"})
         finally:
             provider.detach_manager()
 

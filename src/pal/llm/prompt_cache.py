@@ -60,10 +60,6 @@ class PromptCacheTrackPlan:
 
 
     @property
-    def confirmed_message_id(self) -> str:
-        return ""
-
-    @property
     def confirmed_prefix_tokens(self) -> int:
         return 0
 
@@ -121,13 +117,6 @@ class PromptCachePlan:
         )
 
     @property
-    def candidate_prefix_tokens(self) -> int:
-        return max(
-            self.anchor.target_prefix_tokens,
-            self.frontier.target_prefix_tokens,
-        )
-
-    @property
     def reprocessed_delta_tokens(self) -> int:
         return max(
             self.anchor.reprocessed_delta_tokens,
@@ -148,10 +137,6 @@ class PromptCachePlan:
             self.frontier.estimated_net_tokens,
         )
 
-
-    @property
-    def confirmed_message_id(self) -> str:
-        return ""
 
     @property
     def confirmed_prefix_tokens(self) -> int:

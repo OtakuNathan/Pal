@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import subprocess
 from pal.bunshin.unit_of_work import BunshinUnitOfWork
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
@@ -55,52 +51,6 @@ class VerificationCaseKind(StrEnum):
 
 
 @dataclass(frozen=True)
-class VerificationCaseSpec:
-    case_id: str
-    case_kind: VerificationCaseKind
-    command: tuple[str, ...]
-    expected_exit_codes: tuple[int, ...] = (0,)
-    description: str = ""
-    case_name: str = ""
-    requirements: tuple[Mapping[str, str], ...] = ()
-    locations: tuple[Mapping[str, str], ...] = ()
-    invariants: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class VerificationCaseResult:
-    case_id: str
-    case_kind: VerificationCaseKind
-    status: VerificationStatus
-    command: tuple[str, ...]
-    exit_code: int | None
-    stdout_ref: Mapping[str, Any]
-    stderr_ref: Mapping[str, Any]
-    environment: Mapping[str, Any]
-    summary: str
-    case_name: str = ""
-    requirements: tuple[Mapping[str, str], ...] = ()
-    locations: tuple[Mapping[str, str], ...] = ()
-    invariants: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.case_name or self.case_id,
-            "case_kind": self.case_kind.value,
-            "status": self.status.value,
-            "command": list(self.command),
-            "exit_code": self.exit_code,
-            "stdout_ref": dict(self.stdout_ref),
-            "stderr_ref": dict(self.stderr_ref),
-            "environment": dict(self.environment),
-            "requirements": [dict(item) for item in self.requirements],
-            "locations": [dict(item) for item in self.locations],
-            "invariants": list(self.invariants),
-            "summary": self.summary,
-        }
-
-
-@dataclass(frozen=True)
 class UnknownPolicy:
     architecture_allows_platform_unknown: bool
     assumption_ref: Mapping[str, Any] | None
@@ -116,224 +66,9 @@ class UnknownPolicy:
 
 
 @dataclass
-class VerificationCaseRunner:
-    artifacts: ContentAddressedArtifactStore
-
-    def run(
-        self,
-        case: VerificationCaseSpec,
-        *,
-        cwd: Path,
-        environment: Mapping[str, str] | None = None,
-        timeout_seconds: float = 120.0,
-    ) -> VerificationCaseResult:
-        env = dict(os.environ)
-        env.update({str(key): str(value) for key, value in dict(environment or {}).items()})
-        try:
-            completed = subprocess.run(
-                list(case.command),
-                cwd=cwd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=max(0.1, timeout_seconds),
-                check=False,
-            )
-            exit_code: int | None = int(completed.returncode)
-            status = VerificationStatus.PASS if exit_code in case.expected_exit_codes else VerificationStatus.FAIL
-            stdout = completed.stdout
-            stderr = completed.stderr
-            summary = f"exit {exit_code}; expected {list(case.expected_exit_codes)}"
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            exit_code = None
-            status = VerificationStatus.UNKNOWN
-            stdout = bytes(getattr(exc, "stdout", b"") or b"")
-            stderr = bytes(getattr(exc, "stderr", b"") or str(exc).encode("utf-8"))
-            summary = str(exc)
-        stdout_ref = self.artifacts.put_bytes(
-            stdout,
-            artifact_type="VerificationStdoutArtifact",
-            media_type="text/plain",
-        )
-        stderr_ref = self.artifacts.put_bytes(
-            stderr,
-            artifact_type="VerificationStderrArtifact",
-            media_type="text/plain",
-        )
-        environment_record = {
-            "cwd": str(cwd.resolve()),
-            "selected_environment": dict(environment or {}),
-        }
-        return VerificationCaseResult(
-            case_id=case.case_id,
-            case_kind=case.case_kind,
-            status=status,
-            command=case.command,
-            exit_code=exit_code,
-            stdout_ref=stdout_ref.to_dict(),
-            stderr_ref=stderr_ref.to_dict(),
-            environment=environment_record,
-            summary=summary,
-            case_name=case.case_name,
-            requirements=case.requirements,
-            locations=case.locations,
-            invariants=case.invariants,
-        )
-
-
-@dataclass
 class VerificationService:
     repository: BunshinRepository
     artifacts: ContentAddressedArtifactStore
-
-    def publish_report(
-        self,
-        *,
-        node: AggregateSnapshot,
-        candidate_ref: Mapping[str, Any],
-        case_results: Sequence[VerificationCaseResult],
-        reviewer_summary: str,
-        findings: Sequence[Mapping[str, Any]] = (),
-        test_workspace_ref: Mapping[str, Any] | None = None,
-    ) -> tuple[ArtifactRef, VerificationStatus]:
-        if not case_results:
-            raise ValueError("verification report requires at least one test case")
-        validate_verification_case_order(
-            [item.case_kind for item in case_results],
-            historical_required=bool(node.payload.get("historical_repair_bill_refs")),
-        )
-        status = aggregate_verification_status(item.status for item in case_results)
-        payload = {
-            "schema_version": "1",
-            "workflow_id": node.workflow_id,
-            "node_run_id": node.aggregate_id,
-            "candidate_ref": dict(candidate_ref),
-            "status": status.value,
-            "cases": [item.to_dict() for item in case_results],
-            "findings": [semantic_finding_payload(item) for item in findings],
-            "reviewer_summary": reviewer_summary,
-            "test_workspace_ref": dict(test_workspace_ref or {}),
-        }
-        child_refs: list[tuple[str, str]] = []
-        if candidate_ref.get("sha256"):
-            child_refs.append((str(candidate_ref["sha256"]), "candidate"))
-        if test_workspace_ref and test_workspace_ref.get("sha256"):
-            child_refs.append((str(test_workspace_ref["sha256"]), "test_workspace"))
-        for item in case_results:
-            for relation, ref in (("stdout", item.stdout_ref), ("stderr", item.stderr_ref)):
-                if ref.get("sha256"):
-                    child_refs.append((str(ref["sha256"]), relation))
-        report_ref = self.artifacts.put_json(
-            payload,
-            artifact_type="VerificationArtifact",
-            child_refs=tuple(child_refs),
-        )
-        return report_ref, status
-
-    def publish_repair_bill(
-        self,
-        *,
-        node: AggregateSnapshot,
-        candidate_digest: str,
-        verification_ref: ArtifactRef,
-        defect_kind: DefectKind,
-        severity: str,
-        minimal_reproducer_ref: Mapping[str, Any],
-        test_artifact_ref: Mapping[str, Any],
-        expected: Any,
-        actual: Any,
-        suggested_repair_boundary: Sequence[str],
-        finding_section: str = "implementation",
-        finding_summary: str = "",
-        failure_reason: str = "",
-        case_name: str = "",
-        requirements: Sequence[Mapping[str, str]] = (),
-        locations: Sequence[Mapping[str, str]] = (),
-        invariants: Sequence[str] = (),
-        findings: Sequence[Mapping[str, Any]] = (),
-    ) -> tuple[ArtifactRef, str]:
-        finding_values = [dict(item) for item in findings]
-        all_requirements = [
-            dict(reference)
-            for item in finding_values
-            for reference in list(item.get("requirements") or [])
-        ] or [dict(item) for item in requirements]
-        all_locations = [
-            dict(reference)
-            for item in finding_values
-            for reference in list(item.get("locations") or [])
-        ] or [dict(item) for item in locations]
-        all_invariants = [
-            str(reference)
-            for item in finding_values
-            for reference in list(item.get("invariants") or [])
-        ] or [str(item) for item in invariants]
-        semantic_contract_refs = _semantic_reference_keys(
-            requirements=all_requirements,
-            locations=all_locations,
-            invariants=all_invariants,
-        )
-        semantic_case_names = sorted(
-            {
-                str(item).strip()
-                for item in (
-                    case_name,
-                    *(
-                        str(item.get("case_name") or item.get("case") or "")
-                        for item in finding_values
-                    ),
-                )
-                if str(item).strip()
-            }
-        )
-        reproducer_identity = _normalized_hash(
-            {"semantic_case_names": semantic_case_names}
-        )
-        fingerprint = finding_fingerprint(
-            defect_kind=defect_kind,
-            contract_refs=semantic_contract_refs,
-            reproducer_hash=reproducer_identity,
-            expected=expected,
-            actual=actual,
-        )
-        payload = {
-            "schema_version": "1",
-            "workflow_id": node.workflow_id,
-            "node_run_id": node.aggregate_id,
-            "candidate_digest": candidate_digest,
-            "verification_artifact_ref": verification_ref.to_dict(),
-            "defect_kind": defect_kind.value,
-            "module_name": str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
-            "severity": severity,
-            "finding_section": finding_section,
-            "finding_summary": finding_summary,
-            "failure_reason": failure_reason,
-            "case_name": case_name,
-            "requirements": [dict(item) for item in requirements],
-            "locations": [dict(item) for item in locations],
-            "invariants": [str(item) for item in invariants],
-            "findings": finding_values,
-            "finding_fingerprint": fingerprint,
-            "minimal_reproducer_ref": dict(minimal_reproducer_ref),
-            "test_artifact_ref": dict(test_artifact_ref),
-            "expected": expected,
-            "actual": actual,
-            "suggested_repair_boundary": list(suggested_repair_boundary),
-            "regression_test_obligation": {
-                "source_test_artifact_ref": dict(test_artifact_ref),
-                "instruction": "Add the relevant reviewer case to the project regression suite before repair acceptance.",
-            },
-        }
-        child_refs = [(verification_ref.sha256, "verification")]
-        for relation, ref in (("reproducer", minimal_reproducer_ref), ("test", test_artifact_ref)):
-            if ref.get("sha256"):
-                child_refs.append((str(ref["sha256"]), relation))
-        repair_ref = self.artifacts.put_json(
-            payload,
-            artifact_type="RepairBillArtifact",
-            child_refs=tuple(child_refs),
-        )
-        return repair_ref, fingerprint
 
     def submit_verdict(
         self,
@@ -524,22 +259,6 @@ class VerificationService:
 @dataclass
 class DefectPropagationService:
     repository: BunshinRepository
-
-    def propagate_dependency_defect(
-        self,
-        *,
-        workflow_id: str,
-        epoch_id: str,
-        dependency_node_id: str,
-        repair_bill_ref: ArtifactRef,
-        actor: str = "bunshin-manager",
-        reopen_action: str = "REOPEN_DEPENDENCY",
-    ) -> tuple[str, ...]:
-        return self.propagate_dependency_defects(
-            workflow_id=workflow_id, epoch_id=epoch_id,
-            dependency_node_ids=(dependency_node_id,), repair_bill_ref=repair_bill_ref,
-            actor=actor, reopen_action=reopen_action,
-        )
 
     def propagate_dependency_defects(
         self, *, workflow_id: str, epoch_id: str, dependency_node_ids: Sequence[str],
@@ -851,59 +570,6 @@ def historical_repair_checklist_items(work_view: Mapping[str, Any]) -> list[dict
     return items
 
 
-def aggregate_verification_status(statuses: Sequence[VerificationStatus] | Any) -> VerificationStatus:
-    values = tuple(statuses)
-    if any(item == VerificationStatus.FAIL for item in values):
-        return VerificationStatus.FAIL
-    if any(item == VerificationStatus.UNKNOWN for item in values):
-        return VerificationStatus.UNKNOWN
-    if values and all(item == VerificationStatus.NOT_APPLICABLE for item in values):
-        return VerificationStatus.NOT_APPLICABLE
-    return VerificationStatus.PASS
-
-
-def finding_fingerprint(
-    *,
-    defect_kind: DefectKind,
-    contract_refs: Sequence[str],
-    reproducer_hash: str,
-    expected: Any,
-    actual: Any,
-) -> str:
-    normalized = {
-        "defect_kind": defect_kind.value,
-        "contract_refs": sorted(str(item) for item in contract_refs),
-        "reproducer_hash": str(reproducer_hash),
-        "expected_hash": _normalized_hash(expected),
-        "actual_hash": _normalized_hash(actual),
-    }
-    return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-
-
-def _semantic_reference_keys(
-    *,
-    requirements: Sequence[Mapping[str, str]],
-    locations: Sequence[Mapping[str, str]],
-    invariants: Sequence[str],
-) -> list[str]:
-    values = [
-        *(f"requirement:{str(item.get('section') or '')}:{str(item.get('requirement') or '')}" for item in requirements),
-        *(
-            "location:"
-            + ":".join(
-                (
-                    str(item.get("path") or ""),
-                    str(item.get("symbol") or ""),
-                    str(item.get("section") or ""),
-                )
-            )
-            for item in locations
-        ),
-        *(f"invariant:{str(item)}" for item in invariants),
-    ]
-    return sorted(value for value in values if value)
-
-
 def no_progress_detected(history: Sequence[Mapping[str, Any]]) -> bool:
     if len(history) < 3:
         return False
@@ -981,9 +647,3 @@ def _node_action(
         idempotency_key=f"propagate:{node.aggregate_id}:{node.version}:{action_type}",
         payload=dict(payload),
     )
-
-
-def _normalized_hash(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()

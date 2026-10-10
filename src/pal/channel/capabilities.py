@@ -91,16 +91,6 @@ class ChannelEndpointListItem:
     default_destination_available: bool = False
 
 
-@dataclass(frozen=True)
-class ChannelEndpointSnapshot:
-    endpoint_id: str
-    channel_kind: str
-    binding_key: str
-    enabled: bool
-    attached: bool
-    paired: bool
-
-
 @capability_node(
     namespace=OPERATION_NAMESPACE,
     scope="endpoint",
@@ -160,10 +150,6 @@ class ChannelIntrospectionProvider:
 
     def iter_endpoints(self) -> list[ChannelEndpointTarget]:
         return self._targets_from_hubs(published_only=True)
-
-    def iter_internal_endpoints(self) -> list[ChannelEndpointTarget]:
-        """Management topology; unlike capability hydration, includes detached hubs."""
-        return self._targets_from_hubs(published_only=False)
 
     def _targets_from_hubs(self, *, published_only: bool) -> list[ChannelEndpointTarget]:
         targets: list[ChannelEndpointTarget] = []

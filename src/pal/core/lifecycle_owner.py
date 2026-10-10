@@ -16,20 +16,6 @@ class ModuleLifecycleOwnerResult:
     error: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
-    def as_dict(self) -> dict[str, Any]:
-        result = {
-            "status": self.status,
-            "module_id": self.module_id,
-            "owner_id": self.owner_id,
-            "fresh_instance": self.fresh_instance,
-            "reload_modules": list(self.reload_modules),
-        }
-        if self.error:
-            result["error"] = self.error
-        result.update(self.payload)
-        return result
-
-
 class ModuleLifecycleOwner(Protocol):
     owner_id: str
 
@@ -60,14 +46,6 @@ class ModuleLifecycleOwnerRegistry:
         if not module or not owner:
             return
         self.module_owners[module] = owner
-
-    def unbind_module(self, module_id: str, *, owner_id: str | None = None) -> None:
-        module = str(module_id or "").strip()
-        if not module:
-            return
-        if owner_id is not None and self.module_owners.get(module) != owner_id:
-            return
-        self.module_owners.pop(module, None)
 
     def resolve(self, module_id: str) -> ModuleLifecycleOwner | None:
         module = str(module_id or "").strip()

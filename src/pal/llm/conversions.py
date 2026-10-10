@@ -272,17 +272,6 @@ def message_ir_to_dict(message: LLMMessageIR) -> dict[str, Any]:
     return payload
 
 
-def tool_definition_ir_to_dict(tool: ToolDefinitionIR) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": thaw_json(tool.input_schema),
-        },
-    }
-
-
 def _content_text(value: Any) -> str:
     if isinstance(value, str):
         return value

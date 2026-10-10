@@ -13,11 +13,6 @@ class EdgeKind(StrEnum):
     CONTRACT = "contract"
 
 
-class ExecutionAdapter(StrEnum):
-    SOFTWARE_GIT = "software_git.v2"
-    ARTIFACT_BUNDLE = "artifact_bundle.v2"
-
-
 @dataclass(frozen=True)
 class SourceLocation:
     path: str
@@ -248,16 +243,6 @@ class GraphIR:
 
         return self.execution_predecessors(node_name)
 
-    def descendants(self, node_name: str) -> tuple[str, ...]:
-        """Return executable descendants used for readiness propagation."""
-
-        return self._descendants(node_name, execution_only=True)
-
-    def semantic_descendants(self, node_name: str) -> tuple[str, ...]:
-        """Return consumers affected by a provider's semantic output."""
-
-        return self._descendants(node_name, execution_only=False)
-
     def repair_descendants(self, node_name: str) -> tuple[str, ...]:
         """Actual affected closure, including synthetic checker dependencies.
 
@@ -275,27 +260,6 @@ class GraphIR:
             for consumer in consumers - seen:
                 seen.add(consumer)
                 pending.append(consumer)
-        seen.discard(node_name)
-        return tuple(sorted(seen))
-
-    def _descendants(
-        self,
-        node_name: str,
-        *,
-        execution_only: bool,
-    ) -> tuple[str, ...]:
-        seen: set[str] = set()
-        pending = [node_name]
-        while pending:
-            producer = pending.pop()
-            for edge in self.edges:
-                if edge.producer != producer:
-                    continue
-                if execution_only and edge.kind != EdgeKind.EXECUTION:
-                    continue
-                if edge.consumer not in seen:
-                    seen.add(edge.consumer)
-                    pending.append(edge.consumer)
         seen.discard(node_name)
         return tuple(sorted(seen))
 

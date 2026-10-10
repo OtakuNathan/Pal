@@ -780,7 +780,7 @@ class GraphExecutionTests(unittest.TestCase):
         execution = GraphExecution.start(graph)
         cycles = dict(execution.cycles)
         for name, cycle in cycles.items():
-            if name != current_node and name not in graph.semantic_descendants(
+            if name != current_node and name not in graph.repair_descendants(
                 current_node
             ):
                 cycles[name] = replace(

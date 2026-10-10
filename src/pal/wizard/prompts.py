@@ -678,10 +678,6 @@ def _append_prompted_endpoints(endpoints: list[WizardLLMEndpoint], *, start_inde
             break
 
 
-def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
-    return prompt_llm_endpoints_with_current()
-
-
 def prompt_llm_endpoints_with_current(
     current_endpoints: list[WizardLLMEndpoint] | None = None,
     current_active_endpoint_id: str | None = None,

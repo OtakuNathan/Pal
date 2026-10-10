@@ -110,7 +110,6 @@
   "semantic_orchestration/standalone_review.py",
   "semantic_orchestration/verification_completion.py",
   "semantic_orchestration/verification_policy.py",
-  "semantic_orchestration/verification_receipts.py",
   "semantic_orchestration/verification_run.py",
   "semantic_orchestration/verification_settlement.py",
   "semantic_orchestration/verification_snapshot.py",

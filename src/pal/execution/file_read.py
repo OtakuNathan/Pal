@@ -145,14 +145,6 @@ class FileVisibilityCache:
             while len(self._cache) > self._max:
                 self._cache.popitem(last=False)
 
-    def clear_scope(self, scope: str) -> None:
-        """Forget visibility for a completed or reset LLM context."""
-        if not scope:
-            return
-        with self._lock:
-            for key in [candidate for candidate in self._cache if candidate[0] == scope]:
-                self._cache.pop(key, None)
-
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()
@@ -194,10 +186,6 @@ class SessionFileVisibilityCache:
         # complete CapabilityResult has been returned successfully. Core-turn
         # results remain deferred until append_l1_tool_result succeeds.
         _ = (args, kwargs)
-
-    def clear_scope(self, scope: str) -> None:
-        _ = scope
-
 
 @dataclass
 class FileReadTool:

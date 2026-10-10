@@ -7,7 +7,7 @@ or deployment belong to the work described in each report. Use the
 
 | Area | Records |
 | --- | --- |
-| Session compaction | [Baseline](session_compaction/BASELINE.md), [gate design](session_compaction/P1_DESIGN.md), [capture/install design](session_compaction/P2_DESIGN.md), [delivery report](session_compaction/DELIVERY.md), [test log summary](session_compaction/test_log_summary.md) |
+| Session compaction | [Baseline](session_compaction/BASELINE.md), [gate design](session_compaction/P1_DESIGN.md), [capture/install design](session_compaction/P2_DESIGN.md), [delivery report](session_compaction/DELIVERY.md), [acceptance results](session_compaction/acceptance_status.json), [test log summary](session_compaction/test_log_summary.md) |
 | LLM projection refactor | [Baseline](llm_projection_refactor/baseline.md), [delivery report](llm_projection_refactor/DELIVERY.md) |
 | Prompt cache | [Retired handoff](prompt_cache/prompt_cache_handoff.md), [v2 offline repair](prompt_cache/prompt_cache_v2_offline_repair.md), [mode simplification plan](prompt_cache/prompt_cache_strategy_modes_plan.md) |
 | Bunshin V1 | [Implementation notes](bunshin_v1/pal_bunshin_v1.md), [Reviewer gate plan](bunshin_v1/pal_reviewer_gate_plan.md), [layered architect experiment](bunshin_v1/bunshin_layered_architect_planning.md), [state-machine inventory](bunshin_v1/bunshin_state_machine_inventory.md) |

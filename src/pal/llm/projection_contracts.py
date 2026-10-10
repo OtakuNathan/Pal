@@ -516,66 +516,6 @@ class ClosedRound:
 _TOOL_CALL_RESULT_CONTAINERS = ("messages", "input")
 
 
-def _payload_tool_inventories(payload: Mapping[str, Any]) -> tuple[set[str], set[str]]:
-    """Extract (call_ids, result_ids) from a provider payload for all shapes.
-
-    Recognized pairings:
-    - openai_completion: messages[].tool_calls[].id  <->  role:"tool" tool_call_id
-    - openai_response:   input[].function_call.call_id <-> function_call_output.call_id
-    - anthropic_messages: content[].tool_use.id      <->  content[].tool_result.tool_use_id
-    """
-
-    calls: set[str] = set()
-    results: set[str] = set()
-    container = next(
-        (key for key in _TOOL_CALL_RESULT_CONTAINERS if isinstance(payload.get(key), (list, tuple))),
-        None,
-    )
-    if container is None:
-        return calls, results
-    for item in payload[container]:
-        _collect_item_tool_ids(item, calls, results)
-    return calls, results
-
-
-def _collect_item_tool_ids(item: Any, calls: set[str], results: set[str]) -> None:
-    if not isinstance(item, Mapping):
-        return
-    if isinstance(item.get("tool_calls"), (list, tuple)):
-        for call in item["tool_calls"]:
-            if isinstance(call, Mapping):
-                call_id = str(call.get("id") or "").strip()
-                if call_id:
-                    calls.add(call_id)
-    if str(item.get("role") or "") == "tool":
-        result_id = str(item.get("tool_call_id") or "").strip()
-        if result_id:
-            results.add(result_id)
-    item_type = str(item.get("type") or "")
-    if item_type == "function_call":
-        call_id = str(item.get("call_id") or "").strip()
-        if call_id:
-            calls.add(call_id)
-    elif item_type == "function_call_output":
-        call_id = str(item.get("call_id") or "").strip()
-        if call_id:
-            results.add(call_id)
-    content = item.get("content")
-    if isinstance(content, (list, tuple)):
-        for block in content:
-            if not isinstance(block, Mapping):
-                continue
-            block_type = str(block.get("type") or "")
-            if block_type == "tool_use":
-                call_id = str(block.get("id") or "").strip()
-                if call_id:
-                    calls.add(call_id)
-            elif block_type == "tool_result":
-                call_id = str(block.get("tool_use_id") or "").strip()
-                if call_id:
-                    results.add(call_id)
-
-
 def _item_tool_events(item: Any) -> tuple[list[tuple[str, str]], list[str]]:
     """Ordered tool events and placement problems in ONE pass over the item.
 

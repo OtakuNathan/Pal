@@ -6,7 +6,6 @@ from typing import Any, Mapping
 from pal.bunshin.skill_context import normalized_skill_injection
 from pal.bunshin.harnesses import PAL_HARNESS_ID, BunshinHarnessRegistryGeneration, BunshinHarnessSpec
 from pal.bunshin.sandbox import with_bunshin_sandbox_metadata
-from pal.bunshin.turns import sanitize_runner_session_pack
 from pal.bunshin.adapters import prepare_role_workspace
 from pal.bunshin.contracts import PermanentEffectError, SubmissionInvariantError
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode

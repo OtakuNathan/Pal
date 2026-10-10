@@ -113,40 +113,6 @@ class MemoryDurableRepository:
         ensure_memory_schema(self.database)
         self.ensure_fts_indexes_synced()
 
-    def find_fact_by_canonical_key(self, canonical_key: str, *, scope="system", task_id=None) -> MemoryFactModel | None:
-        normalized = str(canonical_key or "").strip()
-        if not normalized:
-            return None
-        query = (
-            self.Fact.select()
-            .where((self.Fact.canonical_key == normalized) & (self.Fact.scope == scope)
-                   & (self.Fact.task_id == task_id) & (self.Fact.lifecycle == "active"))
-            .order_by(self.Fact.updated_at.desc(), self.Fact.fact_id.desc())
-        )
-        return query.first()
-
-    def find_fact_by_dedupe_fingerprint(self, dedupe_fingerprint: str) -> MemoryFactModel | None:
-        normalized = str(dedupe_fingerprint or "").strip()
-        if not normalized:
-            return None
-        query = (
-            self.Fact.select()
-            .where(self.Fact.dedupe_fingerprint == normalized)
-            .order_by(self.Fact.updated_at.desc(), self.Fact.fact_id.desc())
-        )
-        return query.first()
-
-    def find_case_by_dedupe_fingerprint(self, dedupe_fingerprint: str) -> MemoryCaseModel | None:
-        normalized = str(dedupe_fingerprint or "").strip()
-        if not normalized:
-            return None
-        query = (
-            self.Case.select()
-            .where(self.Case.dedupe_fingerprint == normalized)
-            .order_by(self.Case.updated_at.desc(), self.Case.case_id.desc())
-        )
-        return query.first()
-
     def upsert_fact(self, *, fact_id: str, payload: dict[str, Any]) -> MemoryFactModel:
         now = utc_now()
         instance = self.Fact.get_or_none(self.Fact.fact_id == fact_id)
@@ -595,10 +561,6 @@ class MemoryDurableRepository:
             scores[row.document_id] = scores.get(row.document_id, 0.0) + 1.0
         ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
         return dict(ordered)
-
-    def list_fts_candidates(self, text: str, *, limit: int) -> dict[str, float]:
-        scores, _ = self.collect_lexical_candidates(text, limit=limit)
-        return scores
 
     def list_fts_term_candidates(self, terms, *, limit: int) -> dict[str, float]:
         """One bounded lexical discovery query, for document-to-document work."""

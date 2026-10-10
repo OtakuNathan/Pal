@@ -7,7 +7,6 @@ from typing import Any
 from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, SOFTWARE_GIT_ADAPTER, artifact_tree_fingerprint
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
-from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.replan import architecture_revision_finding_value
 from pal.bunshin.role_contracts import OrchestrationRole, family_execution_adapter, validate_family_binding_payload

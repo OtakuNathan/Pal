@@ -4,9 +4,8 @@ from typing import Any, Mapping
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.candidate_builder import validate_candidate_submission
 from pal.bunshin.repository import BunshinRepository
-from pal.bunshin.verification import UnknownPolicy, VerificationCaseResult, VerificationCaseSpec, VerificationStatus, historical_repair_checklist_items
+from pal.bunshin.verification import UnknownPolicy
 from pal.bunshin.role_protocol import stable_hash
-from pal.bunshin.verification_lsp_policy import lsp_policy_errors
 
 
 def _validate_skeleton_coder_report(
@@ -290,90 +289,6 @@ def _manager_required_system_scenario_work_items(
         for name in (str(raw_name).strip(),)
         if name
     )
-
-
-def _validate_verification_policy(
-    plan: Mapping[str, Any],
-    cases: list[VerificationCaseSpec],
-    policy: Mapping[str, Any],
-    node: AggregateSnapshot,
-    *,
-    work_view: Mapping[str, Any],
-) -> None:
-    tags = {
-        str(tag)
-        for item in list(plan.get("recorded_results") or [])
-        for tag in list(dict(item or {}).get("obligation_tags") or [])
-    }
-    exceptions = dict(plan.get("policy_exceptions") or {})
-    obligations = (
-        ("require_focused_tests", "focused_tests"),
-        ("require_warning_clean", "warning_clean"),
-        ("require_consumer_probe", "consumer_probe"),
-        ("require_public_surface_dogfood", "public_surface_dogfood"),
-        ("require_platform_probe", "platform_probe"),
-        ("require_candidate_delta_review", "candidate_delta_review"),
-    )
-    for policy_key, obligation_tag in obligations:
-        if not bool(policy.get(policy_key, False)) or obligation_tag in tags:
-            continue
-        if not str(exceptions.get(obligation_tag) or "").strip():
-            raise ValueError(f"VerificationPolicy requires {obligation_tag} evidence or a concrete UNKNOWN reason")
-    if (
-        bool(policy.get("require_historical_regressions", False))
-        and node.payload.get("historical_repair_bill_refs")
-        and "historical_regressions" not in tags
-    ):
-        raise ValueError("VerificationPolicy requires historical RepairBill regressions first")
-    required_historical = historical_repair_checklist_items(work_view)
-    if required_historical:
-        historical_status = {
-            str(item.get("name") or ""): str(item.get("status") or "")
-            for item in list(plan.get("recorded_results") or [])
-            if str(dict(item or {}).get("case_kind") or "") == "historical_regression"
-        }
-        missing = [
-            str(item["case"])
-            for item in required_historical
-            if str(item["case"]) not in historical_status
-        ]
-        if missing:
-            raise ValueError(
-                "verification must replay every historical RepairBill case before submit: "
-                + ", ".join(missing)
-            )
-    lsp_errors = lsp_policy_errors(policy, list(plan.get("recorded_results") or []), exceptions)
-    if lsp_errors:
-        raise ValueError(lsp_errors[0])
-    allowed_obligations = {
-        str(item) for item in list(policy.get("allowed_obligations") or []) if str(item)
-    }
-    unexpected = tags - allowed_obligations if allowed_obligations else set()
-    if unexpected:
-        raise ValueError(
-            "verification evidence exceeds this node's declared scope: "
-            + ", ".join(sorted(unexpected))
-        )
-
-
-def _routable_verification_findings(
-    findings: list[Mapping[str, Any]],
-    case_results: list[VerificationCaseResult],
-    *,
-    status: VerificationStatus,
-) -> list[dict[str, Any]]:
-    if status not in {VerificationStatus.FAIL, VerificationStatus.UNKNOWN}:
-        return []
-    case_ids = {
-        item.case_id
-        for item in case_results
-        if item.status == status
-    }
-    return [
-        dict(item)
-        for item in findings
-        if str(item.get("case_id") or "") in case_ids
-    ]
 
 
 def _manager_unknown_policy(node: AggregateSnapshot) -> UnknownPolicy:

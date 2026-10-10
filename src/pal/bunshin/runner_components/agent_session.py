@@ -6,7 +6,6 @@ from pal.bunshin.runner_components.llm_settings import _resolve_bunshin_max_outp
 from pal.bunshin.runner_components.llm_settings import _bunshin_turn_settings_snapshot
 from pal.bunshin.runner_components.prompt_values import _bunshin_prompt_context
 from pal.bunshin.runner_components.prompt_values import _BUNSHIN_TOOL_RESULT_RETENTION_CALLS
-from pal.bunshin.runner_components.result_values import _memory_candidates_from_sink
 import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path

@@ -7,9 +7,9 @@ from pal.bunshin.semantic_orchestration.worker_results import _recorded_role_met
 from pal.bunshin.semantic_orchestration.review_results import _ref_from_mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
+from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT, software_contract_projection
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification import VerificationStatus
