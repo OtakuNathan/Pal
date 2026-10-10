@@ -30,6 +30,11 @@ files. A running native shell independently leases the snapshots visible to its
 launching request until observed execution termination or explicit session cleanup;
 compact and later requests cannot revoke that lease. Once the last owner is gone, Execution deletes the managed file.
 
+Execution extensions acquire that independent lease with
+`ResultSnapshotStore.lease_request(turn_id)` and release its returned owner with
+`release(owner)`. This public extension API is used by `pal-shell-native` outside
+the Pal repository; a missing in-repository caller does not make it unused.
+
 Reading a snapshot does not create another snapshot and grants no edit authority
 over the original resource. File tools reject modification of a managed copy.
 This is a file-tool contract, not a sandbox against arbitrary shell commands.
