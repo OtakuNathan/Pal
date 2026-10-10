@@ -332,21 +332,31 @@ def test_button_tool_failure_delivers_full_result_and_effect(control):
 
 
 @pytest.mark.parametrize("success", [False, True])
-def test_manual_compaction_delivers_failure_or_committed_cleanup_detail(control, monkeypatch, success):
+def test_manual_compaction_delivers_log_reference_and_retains_diagnostics(control, monkeypatch, success):
     core, route = control
     memory = MemoryService()
     monkeypatch.setattr(memory, "settled_transcripts", lambda: [["history"]])
     core.context.port_registry["memory:memory"] = memory
     result = CompactionRunResult(status="compacted" if success else "commit_failed", attempts=1,
+        diagnostic_reference="compact run=control-test",
         failure_details=() if success else (exception_report(failure()),),
         memory_result=MemoryCompactResult(summary="new summary", metadata={"post_commit_detail": exception_report(failure("cleanup failed"))}) if success else None)
     monkeypatch.setattr(core, "_run_control_compaction_async", AsyncMock(return_value=result))
     monkeypatch.setattr(core, "_start_next_queued_turn_async", AsyncMock())
     monkeypatch.setattr(core, "_deliver_compact_candidates_async", AsyncMock())
     asyncio.run(core.handle_control_action_async(ControlAction("compact_memory", "memory", route=route)))
-    assert_diagnostic(reply(core))
-    assert "memory state was left unchanged" not in reply(core)
+    text = reply(core)
+    assert "see service logs" in text
+    assert result.diagnostic_reference in text
+    assert "storage root cause" not in text
+    assert "Traceback" not in text
+    assert "hidden-secret" not in text
+    assert_diagnostic(result.diagnostic_details)
+    assert "Traceback" in result.diagnostic_details
+    assert "memory state was left unchanged" not in text
     if success:
-        assert "Context compacted" in reply(core)
-        assert "committed; follow-up failed" in reply(core)
+        assert "Context compacted" in text
+        assert "committed; follow-up failed" in result.diagnostic_details
+    else:
+        assert "Compaction did not complete (commit_failed)" in text
     assert not core._compaction_gate_active()
