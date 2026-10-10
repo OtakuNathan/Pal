@@ -4,7 +4,7 @@ from pal.bunshin.semantic_orchestration.review_results import _ref_from_mapping
 from pal.bunshin.semantic_orchestration.workspace_safety import _git_output
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, SOFTWARE_GIT_ADAPTER, ArtifactBundleAdapter
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType

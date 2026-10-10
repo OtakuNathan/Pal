@@ -414,23 +414,6 @@ def _argument_location(location: Any) -> str:
     return rendered
 
 
-def _schema_enum_values(schema: Any, path: str = "$") -> list[tuple[str, list[Any]]]:
-    values: list[tuple[str, list[Any]]] = []
-    if isinstance(schema, dict):
-        if isinstance(schema.get("enum"), list):
-            values.append((path, list(schema["enum"])))
-        if "const" in schema:
-            values.append((path, [schema["const"]]))
-        for key, item in schema.items():
-            if key in {"enum", "const"}:
-                continue
-            values.extend(_schema_enum_values(item, f"{path}.{key}"))
-    elif isinstance(schema, list):
-        for index, item in enumerate(schema):
-            values.extend(_schema_enum_values(item, f"{path}[{index}]"))
-    return values
-
-
 __all__ = [
     "CompleteResult",
     "EffectKind",

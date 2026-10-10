@@ -35,12 +35,6 @@ class ChannelEndpointFactoryRegistry:
     def get(self, channel_kind: str) -> ChannelEndpointFactory | None:
         return self.factories.get(str(channel_kind or "").strip())
 
-    def reload_modules_for_kind(self, channel_kind: str) -> tuple[str, ...]:
-        factory = self.factories.get(channel_kind)
-        if factory is None:
-            return ()
-        return tuple(str(item) for item in getattr(factory, "reload_modules", ()) if str(item).strip())
-
     def create(
         self,
         record: ChannelEndpointModel,

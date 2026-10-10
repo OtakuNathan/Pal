@@ -17,17 +17,6 @@ from pal.bunshin.role_input_identity import (
 )
 
 
-def _assignment_role_input_refs(
-    input_refs: Mapping[str, Mapping[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """Return the complete input identity for one concrete assignment request."""
-
-    return {
-        str(name): dict(ref)
-        for name, ref in sorted(input_refs.items())
-    }
-
-
 def _durable_workspace_preparation(
     preparation: Mapping[str, Any],
 ) -> dict[str, Any]:

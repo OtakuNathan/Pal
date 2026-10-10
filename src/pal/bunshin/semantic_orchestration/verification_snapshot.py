@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, LeaseConflict, StaleFencingToken, SubmissionInvariantError
-from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads

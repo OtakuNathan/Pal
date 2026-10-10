@@ -575,13 +575,6 @@ def _integer_list(value: Any) -> list[int]:
     return [int(item) for item in value]
 
 
-def _diagnostic_is_error(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    severity = value.get("severity")
-    return severity == 1 or str(severity or "").strip().lower() == "error"
-
-
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ValueError("invariants must be a string array")

@@ -44,12 +44,9 @@ from pal.bunshin.verification import (
     DefectPropagationService,
     UnknownPolicy,
     VerificationCaseKind,
-    VerificationCaseResult,
-    VerificationCaseRunner,
-    VerificationCaseSpec,
     VerificationService,
     VerificationStatus,
-    finding_fingerprint,
+    validate_verification_case_order,
     no_progress_detected,
     repair_bill_semantic_view,
 )
@@ -77,12 +74,10 @@ from pal.bunshin.swe_verification import (
 )
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.bunshin.task_ledger import TaskLedgerService
-from pal.bunshin.role_protocol import RoleAssignmentRequest
 from pal.shared import RuntimeStatus
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.semantic_orchestration.review_results import _compile_standalone_review_markdown, _verification_case_specs
-from pal.bunshin.semantic_orchestration.verification_receipts import _confirmed_verification_findings, _recorded_verification_case_results, _verification_findings
-from pal.bunshin.semantic_orchestration.verification_policy import _reject_manager_identity_fields, _routable_verification_findings, _resolve_dependency_node_id, _manager_required_system_scenario_work_items, _validate_skeleton_coder_report, _verification_repair_path_owners
+from pal.bunshin.semantic_orchestration.review_results import _compile_standalone_review_markdown
+from pal.bunshin.semantic_orchestration.verification_policy import _reject_manager_identity_fields, _resolve_dependency_node_id, _manager_required_system_scenario_work_items, _validate_skeleton_coder_report, _verification_repair_path_owners
 from pal.bunshin.semantic_orchestration.verification_workspace import _semantic_verifier_instruction, _module_verifier_git_diff_refs, _verification_workspace_changed_paths, _verification_workspace_from_prompt_pack
 from pal.bunshin.semantic_orchestration.role_inputs import _verifier_reference_refs
 
@@ -3234,172 +3229,6 @@ class BunshinV2VerificationTests(unittest.TestCase):
         self.assertEqual(compiled["defect_kind"], "module_defect")
         self.assertEqual(len(compiled["findings"]), 1)
 
-    def test_manager_accepts_exact_submission_receipt_from_prior_fence(self) -> None:
-        stage_dir = self.runtime_root / "artifact-stage-receipt"
-        workspace = self._bind_workspace(
-            {
-                "artifact_dir": str(self.runtime_root / "artifacts-receipt"),
-                "artifact_stage_dir": str(stage_dir),
-                "repo_path": str(self.runtime_root),
-            },
-            role="verifier",
-        )
-        recorded = self._record_lifecycle_case(workspace)
-        self.assertTrue(recorded.ok, recorded.text)
-        submitted = self._verification_call(
-            workspace,
-            "op_bunshin_verification_submit",
-            produced=[],
-        )
-        self.assertTrue(submitted.ok, submitted.text)
-        plan = json.loads(
-            (stage_dir / "verification_plan.json").read_text(encoding="utf-8")
-        )
-        cases = _verification_case_specs(plan["cases"])
-        retry_workspace = self._advance_worker_fence(workspace)
-        binding = dict(retry_workspace["bunshin_v2"])
-
-        results = _recorded_verification_case_results(
-            plan,
-            cases=cases,
-            artifacts=self.store,
-            runtime_root=self.runtime_root,
-            workflow_id=str(binding["workflow_id"]),
-            invocation_id=str(binding["invocation_id"]),
-            lease_resource_key=str(binding["lease_resource_key"]),
-            fencing_token=int(binding["fencing_token"]),
-            role="verifier",
-            mode="module",
-            draft_kind="verification",
-        )
-
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].status, VerificationStatus.PASS)
-
-    def test_manager_resolves_fenced_attempt_to_logical_role_session(self) -> None:
-        verifier_session_id = "inv_logical_verifier"
-        input_fingerprint = "logical-verifier-input"
-        self.repository.transitions.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_WORKFLOW",
-                workflow_id="wf_verify",
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id="wf_verify",
-                actor="test",
-                expected_version=0,
-            )
-        )
-        self.repository.transitions.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_NODE_RUN",
-                workflow_id="wf_verify",
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id="node_drawing",
-                actor="test",
-                expected_version=0,
-                payload={
-                    "epoch_id": "epoch",
-                    "module_name": "drawing",
-                    "unit_contract_ref": {"sha256": "contract-drawing"},
-                },
-            )
-        )
-        self.repository.role_sessions.ensure_role_session(
-            session_id=verifier_session_id,
-            workflow_id="wf_verify",
-            aggregate_type=AggregateType.DAG_NODE_RUN,
-            aggregate_id="node_drawing",
-            role="verifier",
-            mode="module",
-            role_profile_id="software_engineering.v2_verifier",
-            family_binding_sha="binding",
-            scope_kind="module",
-            subject_key="drawing",
-        )
-        assignment = self.repository.role_assignments.create_role_assignment(
-            RoleAssignmentRequest(
-                assignment_key="logical-verifier-assignment",
-                session_id=verifier_session_id,
-                workflow_id="wf_verify",
-                aggregate_type=AggregateType.DAG_NODE_RUN.value,
-                aggregate_id="node_drawing",
-                role="verifier",
-                mode="module",
-                role_profile_id="software_engineering.v2_verifier",
-                family_binding_sha="binding",
-                input_fingerprint=input_fingerprint,
-                required_inputs=(),
-                input_refs={},
-                execution_spec={"effect_type": "run_verifier_role"},
-                submission_kind="verification",
-            )
-        )
-        attempt = self.repository.role_assignments.claim_role_assignment(assignment["assignment_id"])
-        lease_resource_key = f"assignment:{assignment['assignment_id']}"
-        lease = self.repository.leases.claim_lease(
-            lease_resource_key,
-            str(attempt["attempt_id"]),
-            ttl_seconds=60,
-        )
-        prompt_ref = self.store.put_json(
-            {"role": "verifier"},
-            artifact_type="RolePromptPackArtifact",
-        )
-        self.repository.role_attempts.start_role_attempt(
-            assignment_id=str(assignment["assignment_id"]),
-            attempt_id_value=str(attempt["attempt_id"]),
-            lease_resource_key=lease_resource_key,
-            fencing_token=lease.fencing_token,
-            prompt_pack_ref=prompt_ref.to_dict(),
-        )
-        stage_dir = self.runtime_root / "artifact-stage-attempt-receipt"
-        workspace = {
-            "runtime_root": str(self.runtime_root),
-            "repo_path": str(self.runtime_root),
-            "review_scratch_dir": str(self.runtime_root / "scratch-attempt-receipt"),
-            "artifact_dir": str(self.runtime_root / "artifacts-attempt-receipt"),
-            "artifact_stage_dir": str(stage_dir),
-            "bunshin_v2": {
-                "workflow_id": "wf_verify",
-                "invocation_id": str(attempt["attempt_id"]),
-                "lease_resource_key": lease_resource_key,
-                "fencing_token": lease.fencing_token,
-                "role": "verifier",
-                "mode": "module",
-                "authoring_input_fingerprint": input_fingerprint,
-                "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
-            },
-        }
-        Path(str(workspace["review_scratch_dir"])).mkdir(parents=True, exist_ok=True)
-        recorded = self._record_lifecycle_case(workspace)
-        self.assertTrue(recorded.ok, recorded.text)
-        submitted = self._verification_call(
-            workspace,
-            "op_bunshin_verification_submit",
-            produced=[],
-        )
-        self.assertTrue(submitted.ok, submitted.text)
-        plan = json.loads(
-            (stage_dir / "verification_plan.json").read_text(encoding="utf-8")
-        )
-
-        results = _recorded_verification_case_results(
-            plan,
-            cases=_verification_case_specs(plan["cases"]),
-            artifacts=self.store,
-            runtime_root=self.runtime_root,
-            workflow_id="wf_verify",
-            invocation_id=verifier_session_id,
-            lease_resource_key="node:node_drawing:verifier",
-            fencing_token=999,
-            role="verifier",
-            mode="module",
-            draft_kind="verification",
-        )
-
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].status, VerificationStatus.PASS)
-
     def test_retry_fence_keeps_current_findings_until_explicit_edit(self) -> None:
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)},
@@ -3491,54 +3320,21 @@ class BunshinV2VerificationTests(unittest.TestCase):
         self.assertFalse(finding.ok)
         self.assertIn("priority", finding.llm_text)
 
-    def test_case_runner_persists_command_output(self) -> None:
-        result = VerificationCaseRunner(self.store).run(
-            VerificationCaseSpec(
-                case_id="case_1",
-                case_name="deterministic invariant probe",
-                case_kind=VerificationCaseKind.CONTRACT_ADVERSARIAL,
-                command=("sh", "-c", "printf pass-output"),
-                locations=({"path": "src/module.py", "section": "Invariants"},),
-            ),
-            cwd=self.runtime_root,
+    def test_recorded_case_persists_command_output(self) -> None:
+        workspace = self._bind_workspace(
+            {"repo_path": str(self.runtime_root)}, role="verifier"
         )
-        self.assertEqual(result.status, VerificationStatus.PASS)
-        self.assertEqual(self.store.read_bytes(result.stdout_ref), b"pass-output")
-        self.assertTrue(self.repository.artifacts.artifact_is_durable(str(result.stderr_ref["sha256"])))
-
-    def test_verifier_uses_semantic_names_and_manager_generates_case_keys(self) -> None:
-        plan = {
-            "cases": [
-                {
-                    "name": "released resource rejects use",
-                    "case_kind": "contract_adversarial",
-                    "command": ["sh", "-c", "exit 7"],
-                    "expected_exit_codes": [0],
-                    "locations": [{"path": "src/resource.py", "symbol": "use"}],
-                    "invariants": ["Released is terminal."],
-                    "description": "Exercise use after release.",
-                }
-            ],
-            "findings": [
-                {
-                    "case": "released resource rejects use",
-                    "finding_section": "lifecycle",
-                    "summary": "Use after release succeeds.",
-                    "failure_reason": "The public method returns success.",
-                    "severity": "blocker",
-                    "suggested_repair_boundary": ["src/resource.py"],
-                }
-            ],
-        }
-        _reject_manager_identity_fields(plan, owner="test verifier")
-        cases = _verification_case_specs(plan["cases"])
-        findings = _verification_findings(plan, cases)
-        self.assertTrue(cases[0].case_id.startswith("case_"))
-        self.assertNotEqual(cases[0].case_id, cases[0].case_name)
-        self.assertEqual(cases[0].requirements, ())
-        self.assertEqual(findings[0]["case_name"], cases[0].case_name)
-        with self.assertRaisesRegex(ValueError, "Manager-owned identity"):
-            _reject_manager_identity_fields({**plan, "finding_id": "F-1"}, owner="test verifier")
+        result = self._verification_call(
+            workspace,
+            "op_bunshin_verification_run_adversarial_case",
+            {"name": "deterministic invariant probe", "command": "printf pass-output", "path": "src/module.py"},
+        )
+        self.assertTrue(result.ok, result.llm_text)
+        case = result.structured["case"]
+        self.assertEqual(case["status"], "PASS")
+        self.assertEqual(self.store.read_bytes(case["stdout_ref"]), b"pass-output")
+        for stream in ("stdout_ref", "stderr_ref"):
+            self.assertTrue(self.repository.artifacts.artifact_is_durable(case[stream]["sha256"]))
 
     def test_verifier_cannot_author_requirement_records(self) -> None:
         work_view = self.runtime_root / "patch-work-view.json"
@@ -3690,177 +3486,66 @@ class BunshinV2VerificationTests(unittest.TestCase):
         )
 
     def test_case_order_is_blocking_only_for_historical_repair_bills(self) -> None:
-        node = self._reviewing_node("node_case_order")
-        candidate = self.store.put_json(
-            {"candidate_digest": "case-order"}, artifact_type="CandidateSnapshotArtifact"
-        )
-        runner = VerificationCaseRunner(self.store)
-        adversarial = runner.run(
-            VerificationCaseSpec(
-                case_id="case_adversarial",
-                case_name="adversarial",
-                case_kind=VerificationCaseKind.CONTRACT_ADVERSARIAL,
-                command=("sh", "-c", "exit 0"),
-                locations=({"path": "src/router.py"},),
-            ),
-            cwd=self.runtime_root,
-        )
-        historical = runner.run(
-            VerificationCaseSpec(
-                case_id="case_historical",
-                case_name="historical",
-                case_kind=VerificationCaseKind.HISTORICAL_REGRESSION,
-                command=("sh", "-c", "exit 0"),
-                locations=({"path": "src/router.py"},),
-            ),
-            cwd=self.runtime_root,
-        )
-        compile_result = runner.run(
-            VerificationCaseSpec(
-                case_id="case_compile",
-                case_name="compile",
-                case_kind=VerificationCaseKind.COMPILE,
-                command=("sh", "-c", "exit 0"),
-                locations=({"path": "src/router.py"},),
-            ),
-            cwd=self.runtime_root,
-        )
-
-        _, status = self.verification.publish_report(
-            node=node,
-            candidate_ref=candidate.to_dict(),
-            case_results=[adversarial, historical],
-            reviewer_summary="There is no historical RepairBill in this cycle.",
-        )
-        self.assertEqual(status, VerificationStatus.PASS)
-
-        historical_node = AggregateSnapshot(
-            aggregate_type=node.aggregate_type,
-            aggregate_id=node.aggregate_id,
-            workflow_id=node.workflow_id,
-            state=node.state,
-            version=node.version,
-            payload={**node.payload, "historical_repair_bill_refs": [{"sha256": "bill"}]},
-            created_at=node.created_at,
-            updated_at=node.updated_at,
+        adversarial = VerificationCaseKind.CONTRACT_ADVERSARIAL
+        historical = VerificationCaseKind.HISTORICAL_REGRESSION
+        compile_check = VerificationCaseKind.COMPILE
+        validate_verification_case_order(
+            [adversarial, historical], historical_required=False
         )
         with self.assertRaisesRegex(ValueError, "historical failures before"):
-            self.verification.publish_report(
-                node=historical_node,
-                candidate_ref=candidate.to_dict(),
-                case_results=[adversarial, historical],
-                reviewer_summary="The historical regression ran too late.",
+            validate_verification_case_order(
+                [adversarial, historical], historical_required=True
             )
-        _, status = self.verification.publish_report(
-            node=historical_node,
-            candidate_ref=candidate.to_dict(),
-            case_results=[historical, adversarial],
-            reviewer_summary="Historical regression ran first.",
+        validate_verification_case_order(
+            [historical, adversarial], historical_required=True
         )
-        self.assertEqual(status, VerificationStatus.PASS)
-        _, status = self.verification.publish_report(
-            node=historical_node,
-            candidate_ref=candidate.to_dict(),
-            case_results=[compile_result, historical, adversarial],
-            reviewer_summary="A compile smoke check may precede the historical regression.",
+        validate_verification_case_order(
+            [compile_check, historical, adversarial], historical_required=True
         )
-        self.assertEqual(status, VerificationStatus.PASS)
 
-    def test_repair_bill_has_stable_fingerprint_and_regression_obligation(self) -> None:
-        node = self._reviewing_node("node_repair")
-        candidate = self.store.put_json({"candidate_digest": "c1"}, artifact_type="CandidateSnapshotArtifact")
+    def test_legacy_repair_bill_preserves_semantics_and_regression_obligation(self) -> None:
         output = self.store.put_bytes(b"failure", artifact_type="VerificationStdoutArtifact")
-        case_result = VerificationCaseRunner(self.store).run(
-            VerificationCaseSpec(
-                case_id="case_fail",
-                case_name="released resource rejects use",
-                case_kind=VerificationCaseKind.CONTRACT_ADVERSARIAL,
-                command=("sh", "-c", "exit 7"),
-                requirements=(
-                    {
-                        "section": "Lifecycle",
-                        "requirement": "Released resources reject further use.",
-                    },
-                ),
-                locations=({"path": "src/module/core.py", "symbol": "use_resource"},),
-                invariants=("A released resource cannot return to ready.",),
-            ),
-            cwd=self.runtime_root,
-        )
-        report_ref, status = self.verification.publish_report(
-            node=node,
-            candidate_ref=candidate.to_dict(),
-            case_results=[case_result],
-            reviewer_summary="Invariant can be broken.",
-        )
-        self.assertEqual(status, VerificationStatus.FAIL)
-        repair_ref, fingerprint = self.verification.publish_repair_bill(
-            node=node,
-            candidate_digest="c1",
-            verification_ref=report_ref,
-            defect_kind=DefectKind.MODULE,
-            severity="high",
-            minimal_reproducer_ref=output.to_dict(),
-            test_artifact_ref=output.to_dict(),
-            expected={"returncode": 0},
-            actual={"returncode": 7},
-            suggested_repair_boundary=["src/module/**"],
-            finding_section="invariant",
-            finding_summary="Invariant can be broken",
-            failure_reason="case_fail exits 7",
-            case_name="released resource rejects use",
-            requirements=[
-                {
-                    "section": "Lifecycle",
-                    "requirement": "Released resources reject further use.",
-                }
-            ],
-            locations=[{"path": "src/module/core.py", "symbol": "use_resource"}],
-            invariants=["A released resource cannot return to ready."],
-        )
-        repair = self.store.read_json(repair_ref)
-        self.assertEqual(repair["finding_fingerprint"], fingerprint)
-        self.assertIn("regression_test_obligation", repair)
-        self.assertEqual(repair["finding_section"], "invariant")
-        self.assertNotIn("finding_id", repair)
-        self.assertNotIn("affected_refs", repair)
-        self.assertEqual(repair["locations"], [{"path": "src/module/core.py", "symbol": "use_resource"}])
-        self.assertEqual(
-            fingerprint,
-            finding_fingerprint(
-                defect_kind=DefectKind.MODULE,
-                contract_refs=[
-                    "requirement:Lifecycle:Released resources reject further use.",
-                    "location:src/module/core.py:use_resource:",
-                    "invariant:A released resource cannot return to ready.",
+        repair_ref = self.store.put_json(
+            {
+                "schema_version": "1",
+                "workflow_id": "legacy-workflow",
+                "node_run_id": "legacy-node",
+                "candidate_digest": "legacy-candidate",
+                "defect_kind": "module_defect",
+                "finding_section": "invariant",
+                "finding_summary": "Invariant can be broken",
+                "failure_reason": "case_fail exits 7",
+                "case_name": "released resource rejects use",
+                "minimal_reproducer_ref": output.to_dict(),
+                "requirements": [
+                    {"section": "Lifecycle", "requirement": "Released resources reject further use."}
                 ],
-                reproducer_hash=hashlib.sha256(
-                    json.dumps(
-                        {"semantic_case_names": ["released resource rejects use"]},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest(),
-                expected={"returncode": 0},
-                actual={"returncode": 7},
-            ),
+                "locations": [{"path": "src/module/core.py", "symbol": "use_resource"}],
+                "invariants": ["A released resource cannot return to ready."],
+                "expected": {"returncode": 0},
+                "actual": {"returncode": 7},
+                "regression_test_obligation": {
+                    "source_test_artifact_ref": output.to_dict(),
+                    "instruction": "Add the reviewer case to the project regression suite.",
+                },
+            },
+            artifact_type="RepairBillArtifact",
         )
         semantic = repair_bill_semantic_view(self.store, repair_ref)
-        encoded = str(semantic)
         self.assertEqual(semantic["case_name"], "released resource rejects use")
-        self.assertIn("src/module/core.py", encoded)
+        self.assertEqual(semantic["finding_section"], "invariant")
+        self.assertEqual(semantic["locations"], [{"path": "src/module/core.py", "symbol": "use_resource"}])
+        self.assertEqual(semantic["expected"], {"returncode": 0})
+        self.assertEqual(semantic["actual"], {"returncode": 7})
+        self.assertEqual(
+            semantic["regression_test_obligation"],
+            "Add the reviewer case to the project regression suite.",
+        )
+        encoded = str(semantic)
         for forbidden in ("workflow_id", "node_run_id", "candidate_digest", "sha256", "_ref"):
             self.assertNotIn(forbidden, encoded)
 
-    def test_repair_bill_can_batch_all_dominant_findings(self) -> None:
-        node = self._reviewing_node("node_batch_repair")
-        report = self.store.put_json(
-            {"status": "FAIL"}, artifact_type="VerificationArtifact"
-        )
-        reproducer = self.store.put_json(
-            {"cases": [{"name": "integer"}, {"name": "finite"}]},
-            artifact_type="VerificationReproducerSetArtifact",
-        )
+    def test_legacy_repair_bill_preserves_all_findings(self) -> None:
         findings = [
             {
                 "case_name": "integer",
@@ -3889,129 +3574,19 @@ class BunshinV2VerificationTests(unittest.TestCase):
                 "defect_kind": "contract_defect",
             },
         ]
-        repair_ref, fingerprint = self.verification.publish_repair_bill(
-            node=node,
-            candidate_digest="candidate",
-            verification_ref=report,
-            defect_kind=DefectKind.CONTRACT,
-            severity="major",
-            minimal_reproducer_ref=reproducer.to_dict(),
-            test_artifact_ref=reproducer.to_dict(),
-            expected={"cases": ["integer", "finite"]},
-            actual={"cases": ["accepted", "accepted"]},
-            suggested_repair_boundary=["src/router.py"],
-            finding_section="interface",
-            finding_summary=findings[0]["summary"],
-            failure_reason=findings[0]["failure_reason"],
-            case_name=findings[0]["case_name"],
-            requirements=findings[0]["requirements"],
-            locations=findings[0]["locations"],
-            findings=findings,
+        repair_ref = self.store.put_json(
+            {"schema_version": "1", "findings": findings},
+            artifact_type="RepairBillArtifact",
         )
-        repair = self.store.read_json(repair_ref)
-        self.assertEqual(repair["finding_fingerprint"], fingerprint)
-        self.assertEqual(len(repair["findings"]), 2)
         semantic = repair_bill_semantic_view(self.store, repair_ref)
         self.assertEqual(len(semantic["findings"]), 2)
-
-    def test_fail_routing_excludes_unknown_findings_from_repair_bill_scope(self) -> None:
-        results = [
-            VerificationCaseResult(
-                case_id="case_fail",
-                case_kind=VerificationCaseKind.CONTRACT_ADVERSARIAL,
-                status=VerificationStatus.FAIL,
-                command=("false",),
-                exit_code=1,
-                stdout_ref={},
-                stderr_ref={},
-                environment={},
-                summary="contract failed",
-            ),
-            VerificationCaseResult(
-                case_id="case_unknown",
-                case_kind=VerificationCaseKind.PLATFORM_ASSUMPTION,
-                status=VerificationStatus.UNKNOWN,
-                command=(),
-                exit_code=None,
-                stdout_ref={},
-                stderr_ref={},
-                environment={},
-                summary="device unavailable",
-            ),
-        ]
-        findings = [
-            {
-                "case_id": "case_fail",
-                "defect_kind": "contract_defect",
-                "summary": "public contract is invalid",
-            },
-            {
-                "case_id": "case_unknown",
-                "defect_kind": "architecture_defect",
-                "summary": "OHOS device is unavailable",
-            },
-        ]
-
-        routed = _routable_verification_findings(
-            findings,
-            results,
-            status=VerificationStatus.FAIL,
-        )
-
-        self.assertEqual([item["case_id"] for item in routed], ["case_fail"])
         self.assertEqual(
-            dominant_verification_defect_kind(routed),
-            "contract_defect",
+            [item["case"] for item in semantic["findings"]], ["integer", "finite"]
         )
-
-    def test_unknown_case_does_not_synthesize_a_module_finding(self) -> None:
-        cases = [
-            VerificationCaseSpec(
-                case_id="case_unknown",
-                case_name="lsp unavailable",
-                case_kind=VerificationCaseKind.PLATFORM_ASSUMPTION,
-                command=("<unavailable>", "lsp"),
-                description="The workspace has no configured LSP server.",
-                locations=({"path": "src/router.py"},),
-            ),
-            VerificationCaseSpec(
-                case_id="case_fail",
-                case_name="invalid route",
-                case_kind=VerificationCaseKind.CONTRACT_ADVERSARIAL,
-                command=("false",),
-                description="Invalid input violates the route contract.",
-                locations=({"path": "src/router.py"},),
-            ),
-        ]
-        results = [
-            VerificationCaseResult(
-                case_id="case_unknown",
-                case_kind=VerificationCaseKind.PLATFORM_ASSUMPTION,
-                status=VerificationStatus.UNKNOWN,
-                command=("<unavailable>", "lsp"),
-                exit_code=None,
-                stdout_ref={},
-                stderr_ref={},
-                environment={"runner": "unavailable"},
-                summary="LSP is unavailable.",
-            ),
-            VerificationCaseResult(
-                case_id="case_fail",
-                case_kind=VerificationCaseKind.CONTRACT_ADVERSARIAL,
-                status=VerificationStatus.FAIL,
-                command=("false",),
-                exit_code=1,
-                stdout_ref={},
-                stderr_ref={},
-                environment={},
-                summary="The route is invalid.",
-            ),
-        ]
-
-        findings = _confirmed_verification_findings([], cases, results)
-
-        self.assertEqual([item["case_id"] for item in findings], ["case_fail"])
-        self.assertEqual(findings[0]["severity"], "major")
+        self.assertEqual(
+            [item["requirements"] for item in semantic["findings"]],
+            [item["requirements"] for item in findings],
+        )
 
     def test_verification_defect_reopens_accepted_module_at_verifier_queue(self) -> None:
         node = self._reviewing_node("node_reopen_verifier")
@@ -4031,10 +3606,10 @@ class BunshinV2VerificationTests(unittest.TestCase):
             artifact_type="RepairPacketArtifact",
         )
 
-        DefectPropagationService(self.repository).propagate_dependency_defect(
+        DefectPropagationService(self.repository).propagate_dependency_defects(
             workflow_id=accepted.workflow_id,
             epoch_id=str(accepted.payload.get("epoch_id") or ""),
-            dependency_node_id=accepted.aggregate_id,
+            dependency_node_ids=(accepted.aggregate_id,),
             repair_bill_ref=repair_ref,
             reopen_action="REOPEN_VERIFICATION",
         )
@@ -4384,10 +3959,10 @@ class BunshinV2VerificationTests(unittest.TestCase):
             actor="reviewer",
         ).snapshot
 
-        affected = DefectPropagationService(self.repository).propagate_dependency_defect(
+        affected = DefectPropagationService(self.repository).propagate_dependency_defects(
             workflow_id=upstream.workflow_id,
             epoch_id="epoch",
-            dependency_node_id=upstream.aggregate_id,
+            dependency_node_ids=(upstream.aggregate_id,),
             repair_bill_ref=repair_ref,
         )
 

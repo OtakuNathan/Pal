@@ -5,7 +5,7 @@ from pal.memory.contracts import MEMORY
 from dataclasses import dataclass, replace
 import asyncio
 import json
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 from uuid import uuid4
 
 from pal.core.core_events import (

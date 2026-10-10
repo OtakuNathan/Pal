@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import tempfile
 import unittest
@@ -9,8 +10,9 @@ from pathlib import Path
 from pal.provider_install import (
     ProviderInstallError,
     inspect_provider_wheel,
-    install_provider_wheel,
 )
+from pal.packages.service import PackageService
+from pal.provider_cli import run_provider_cli
 
 
 def _write_provider_wheel(
@@ -54,19 +56,18 @@ class ProviderInstallTests(unittest.TestCase):
             _write_provider_wheel(wheel_path)
 
             wheel = inspect_provider_wheel(wheel_path)
-            result = install_provider_wheel(wheel_path, runtime_root=runtime_root)
+            result = PackageService(runtime_root).install(wheel_path)
+            target_dir = runtime_root.resolve() / "channel" / "providers" / "example"
 
             self.assertEqual(wheel.provider_id, "example")
             self.assertEqual(wheel.provider_version, "1.2.3")
-            self.assertEqual(
-                result.target_dir,
-                runtime_root.resolve() / "channel" / "providers" / "example",
-            )
-            self.assertEqual((result.target_dir / "helper.py").read_text(), "VALUE = 1\n")
-            receipt = json.loads((result.target_dir / ".pal-provider-install.json").read_text())
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["id"], "example")
+            self.assertEqual((target_dir / "helper.py").read_text(), "VALUE = 1\n")
+            receipt = json.loads((target_dir / ".pal-provider-install.json").read_text())
             self.assertEqual(receipt["provider_id"], "example")
             self.assertEqual(receipt["provider_version"], "1.2.3")
-            self.assertEqual(receipt["wheel_sha256"], result.wheel_sha256)
+            self.assertEqual(receipt["wheel_sha256"], result["sha256"])
 
     def test_update_archives_previous_provider_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -76,20 +77,23 @@ class ProviderInstallTests(unittest.TestCase):
             second = root / "second.whl"
             _write_provider_wheel(first, provider_version="1.0.0")
             _write_provider_wheel(second, provider_version="2.0.0")
-            first_result = install_provider_wheel(first, runtime_root=runtime_root)
-            (first_result.target_dir / "local-note.txt").write_text("preserve me")
+            service = PackageService(runtime_root)
+            service.install(first)
+            target_dir = runtime_root / "channel" / "providers" / "example"
+            (target_dir / "local-note.txt").write_text("preserve me")
 
-            second_result = install_provider_wheel(second, runtime_root=runtime_root)
+            second_result = service.install(second)
+            archived_dirs = list((service.root / "previous" / "provider" / "example").iterdir())
 
-            self.assertEqual(second_result.provider_version, "2.0.0")
-            self.assertIsNotNone(second_result.archived_previous_dir)
-            assert second_result.archived_previous_dir is not None
+            self.assertEqual(second_result["version"], "2.0.0")
+            self.assertEqual(second_result["status"], "ready")
+            self.assertEqual(len(archived_dirs), 1)
             self.assertEqual(
-                (second_result.archived_previous_dir / "local-note.txt").read_text(),
+                (archived_dirs[0] / "local-note.txt").read_text(),
                 "preserve me",
             )
             self.assertEqual(
-                (second_result.target_dir / "provider.toml").read_text().split('version = "')[1].split('"')[0],
+                (target_dir / "provider.toml").read_text().split('version = "')[1].split('"')[0],
                 "2.0.0",
             )
 
@@ -99,12 +103,17 @@ class ProviderInstallTests(unittest.TestCase):
             wheel_path = root / "example.whl"
             runtime_root = root / "runtime"
             _write_provider_wheel(wheel_path)
-            install_provider_wheel(wheel_path, runtime_root=runtime_root)
+            args = argparse.Namespace(
+                provider_command="install", wheels=[wheel_path],
+                runtime_root=runtime_root, force=False,
+            )
+            self.assertEqual(run_provider_cli(args), 0)
 
-            with self.assertRaisesRegex(ProviderInstallError, "already installed"):
-                install_provider_wheel(wheel_path, runtime_root=runtime_root)
-            result = install_provider_wheel(wheel_path, runtime_root=runtime_root, force=True)
-            self.assertIsNotNone(result.archived_previous_dir)
+            self.assertEqual(run_provider_cli(args), 2)
+            args.force = True
+            self.assertEqual(run_provider_cli(args), 0)
+            archives_root = PackageService(runtime_root).root / "previous" / "provider" / "example"
+            self.assertEqual(len(list(archives_root.iterdir())), 1)
 
     def test_rejects_metadata_and_manifest_version_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

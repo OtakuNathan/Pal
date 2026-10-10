@@ -491,14 +491,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/verification.py:VerificationCaseRunner.run:getattr(exc, 'stderr', b'')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/verification.py:VerificationCaseRunner.run:getattr(exc, 'stdout', b'')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/channel/capabilities.py:ChannelIntrospectionProvider._is_current_peer_reply:getattr(continuation, 'delivery_binding', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -1367,10 +1359,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/module_lifecycle.py:ModuleLifecycle._restore_provider_refs:hasattr(provider, 'provider_id')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/module_lifecycle.py:ModuleLifecycle._unregister_skill_declarations:getattr(skill, 'unregister_declared_module', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -2012,10 +2000,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/turn_executor.py:TurnExecutor._resident_compaction_replay_request:getattr(tool, 'payload', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/turn_executor.py:TurnExecutor._resolve_effective_max_output_tokens:getattr(llm_runtime, 'resolve_max_output_tokens', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

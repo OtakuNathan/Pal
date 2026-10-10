@@ -10,7 +10,6 @@ from typing import Any, Mapping
 from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
-from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.swe_verification import semantic_verification_submission_errors, verification_finding_route_errors
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.review_findings import structured_advisories, structured_findings

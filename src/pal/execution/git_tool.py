@@ -4,7 +4,7 @@ import os
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -12,17 +12,6 @@ from uuid import uuid4
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
 
-
-GIT_TOOL_DESCRIPTION = (
-    "Run git through Pal's structured git wrapper instead of shell. Use this for repository status, diffs, history, "
-    "changed-file evidence, and conservative audited git mutations. Dangerous history or destructive operations are refused."
-)
-
-GIT_TOOL_CMD_DESCRIPTION = (
-    "Git command without shell syntax, for example `status --short`, `diff -- src/app.py`, "
-    "`log --oneline -5`, `restore -- path.py`, or `revert --no-commit HEAD`. "
-    "An optional leading `git` is accepted."
-)
 
 _SHELL_SYNTAX_RE = re.compile(r"&&|\|\||[;|<>`]|[$][(]")
 _DISALLOWED_GLOBAL_OPTIONS = {
@@ -453,10 +442,6 @@ def classify_git_command(cmd: object) -> GitCommandPolicy:
     if subcommand in _REJECTED_SUBCOMMANDS:
         return GitCommandPolicy(raw=raw, tokens=tuple(tokens), subcommand=subcommand, reason=f"git {subcommand} is not allowed")
     return GitCommandPolicy(raw=raw, tokens=tuple(tokens), subcommand=subcommand, reason=f"unsupported git subcommand: {subcommand}")
-
-
-def git_command_is_mutation(cmd: object) -> bool:
-    return classify_git_command(cmd).is_mutation
 
 
 def _classify_branch(raw: str, tokens: list[str], args: list[str]) -> GitCommandPolicy:

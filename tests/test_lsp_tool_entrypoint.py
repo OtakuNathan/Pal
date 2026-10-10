@@ -153,5 +153,3 @@ def test_manager_liveness_comes_from_process_not_cache(tmp_path, returncode, exp
     assert shown["manager_running"] is expected_running
     assert shown["manager_owned"] is expected_running
     assert shown["last_error"] == "current"
-    if not expected_running:
-        assert provider._manager_running() is False

@@ -150,17 +150,6 @@ class CompactionSnapshot:
 
         return _current_summary(self.memory_items)
 
-    @property
-    def has_compactable_history(self) -> bool:
-        return bool(
-            any(
-                not _transcript_is_summary(transcript)
-                for transcript in self.memory_items
-                if transcript
-            )
-            or self.previous_summary is not None
-        )
-
 
 class CompactionPolicy(Protocol):
     policy_id: str
@@ -1039,14 +1028,6 @@ async def _preflight(
         return await llm_runtime.apreflight(LLMPreflightRequest(request=request))
     except Exception:
         return None
-
-
-def _positive_int(value: Any) -> int | None:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
 
 
 def _preflight_requires_compaction(advice: Any | None) -> bool:

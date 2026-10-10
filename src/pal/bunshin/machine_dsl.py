@@ -265,9 +265,6 @@ class MachineSpec:
             if self.control_disposition(intent, state) == disposition
         )
 
-    def runtime_for_state(self, state: str) -> StateRuntimeSpec | None:
-        return self.runtime_states.get(str(state))
-
     def states_for_activation(self, activation: RoleActivation) -> frozenset[str]:
         return frozenset(
             state

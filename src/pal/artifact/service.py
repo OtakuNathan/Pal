@@ -65,10 +65,6 @@ class ArtifactRepresentationRegistry:
         REPRESENTATION_PAGE_TEXT,
         REPRESENTATION_TRANSCRIPT,
     )
-    image_kinds: tuple[str, ...] = (
-        REPRESENTATION_NORMALIZED_IMAGE,
-        REPRESENTATION_PAGE_IMAGE,
-    )
     auto_priority: dict[str, tuple[str, ...]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -82,9 +78,6 @@ class ArtifactRepresentationRegistry:
 
     def is_textual(self, representation_kind: str) -> bool:
         return representation_kind in self.text_kinds
-
-    def is_image(self, representation_kind: str) -> bool:
-        return representation_kind in self.image_kinds
 
     def auto_candidates(self, artifact_kind: str) -> tuple[str, ...]:
         return self.auto_priority.get(artifact_kind, (REPRESENTATION_METADATA,))

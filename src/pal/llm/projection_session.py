@@ -1451,11 +1451,6 @@ class EndpointProjectionSession:
         self.observe_commit(receipt, accepted_messages=tuple(accepted))
         return receipt
 
-    def _encode_messages(self, messages: tuple[LLMMessageIR, ...]) -> list[dict]:
-        encoded = self._encode_request(messages)
-        container = _ITEM_CONTAINER_KEY.get(self.binding.wire_shape.value, "input")
-        return list(encoded.payload.get(container) or [])
-
     def _encode_request(self, messages: tuple[LLMMessageIR, ...]):
         codec = codec_for_shape(self.binding.wire_shape)
         context = self._shape_context()
@@ -1476,33 +1471,6 @@ def _merge_system_instruction_text(left: str, right: str) -> str:
     if left.strip() and right.strip():
         return f"{left.rstrip()}\n\n{right.lstrip()}"
     return left or right
-
-
-def _merge_anthropic_user_boundary(items: list[dict], boundary: int) -> tuple[bool, list[dict]]:
-    """Merge the pending/tail boundary the way Anthropic's encoder would.
-
-    Mirrors the codec's _append_message merge for adjacent user messages
-    with list content: content blocks concatenate into one message.  This is
-    the explicit boundary rule that keeps assembled incremental requests
-    byte-equal to whole-history encodings (review F2).
-    """
-
-    if boundary < 0 or boundary + 1 >= len(items):
-        return False, items
-    left = items[boundary]
-    right = items[boundary + 1]
-    if (
-        isinstance(left, dict)
-        and isinstance(right, dict)
-        and left.get("role") == "user"
-        and right.get("role") == "user"
-        and isinstance(left.get("content"), list)
-        and isinstance(right.get("content"), list)
-    ):
-        merged_item = dict(left)
-        merged_item["content"] = [*left["content"], *right["content"]]
-        return True, [*items[:boundary], merged_item, *items[boundary + 2 :]]
-    return False, items
 
 
 def _remap_path_into_assembled(
@@ -1657,7 +1625,7 @@ def _merge_anthropic_user_boundary_pairs(
     conversation: list[tuple[dict, tuple[str, ...], tuple[tuple[str, ...], ...]]],
     boundary: int,
 ) -> list[tuple[dict, tuple[str, ...], tuple[tuple[str, ...], ...]]]:
-    """Span-aware mirror of _merge_anthropic_user_boundary (F5).
+    """Merge adjacent Anthropic user messages with span ownership (F5).
 
     The merged item owns the UNION of both sides' item spans.  S1 (review
     7d182fd): the per-BLOCK ownership concatenates in the same order the

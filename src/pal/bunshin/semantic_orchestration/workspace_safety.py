@@ -71,10 +71,3 @@ def _lease_is_live(lease: Mapping[str, Any]) -> bool:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     return expires_at > datetime.now(timezone.utc)
-
-
-def _clarification_question_text(value: Any) -> str:
-    if not isinstance(value, Mapping):
-        return str(value)
-    item = dict(value)
-    return str(item.get("question") or item.get("clarification") or item.get("topic") or "Clarification required")

@@ -9,14 +9,9 @@ from pal.foundation.sidecar import (
     SidecarRpcClient,
     SidecarRpcError,
     cleanup_sidecar_endpoint,
-    open_sidecar_connection,
     run_blocking,
     start_sidecar_server,
 )
-
-
-def mcp_runtime_dir(runtime_root: Path) -> Path:
-    return Path(runtime_root) / "data" / "mcp"
 
 
 def mcp_socket_path(runtime_root: Path) -> Path:
@@ -85,14 +80,8 @@ class McpManagerClient:
     async def list_servers(self) -> dict[str, Any]:
         return await self.request("list_servers")
 
-    def list_servers_sync(self) -> dict[str, Any]:
-        return self.request_sync("list_servers")
-
     async def read_server(self, server_id: str) -> dict[str, Any]:
         return await self.request("read_server", {"server_id": server_id})
-
-    def read_server_sync(self, server_id: str) -> dict[str, Any]:
-        return self.request_sync("read_server", {"server_id": server_id})
 
     async def attach_server(self, server_id: str) -> dict[str, Any]:
         return await self.request("attach_server", {"server_id": server_id})
@@ -123,10 +112,6 @@ class McpManagerClient:
 
     def shutdown_sync(self) -> dict[str, Any]:
         return self.request_sync("shutdown")
-
-
-async def open_manager_connection(runtime_root: Path):
-    return await open_sidecar_connection(_mcp_endpoint(runtime_root))
 
 
 async def start_manager_server(runtime_root: Path, handler):

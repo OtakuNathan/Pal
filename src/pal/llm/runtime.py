@@ -23,8 +23,6 @@ from pal.llm.contracts import (
     LLMPreflightRequest,
     LLMRuntimePort,
     LLMProjectionPort,
-    ThinkingChoice,
-    ThinkingContract,
 )
 from pal.llm.credentials import LLMCredentialResolver, LLMCredentialUnavailableError
 from pal.llm.endpoint import ShapeEndpointInvoker
@@ -666,18 +664,6 @@ class LLMRuntime:
         close = getattr(self.endpoint_invoker, "close", None)
         if callable(close):
             close()
-
-    def thinking_contract(self, endpoint_id: str | None = None) -> ThinkingContract | None:
-        endpoint = self._endpoint_by_id(endpoint_id) if endpoint_id else self.active_endpoint()
-        if endpoint is None:
-            return None
-        levels = self._thinking_levels(endpoint)
-        if not levels:
-            return None
-        return ThinkingContract(
-            choices=tuple(ThinkingChoice(level, level.replace("xhigh", "extra high").title()) for level in levels),
-            default_choice_id=str(endpoint.default_thinking_level),
-        )
 
     def thinking_status(self, endpoint_id: str | None = None) -> dict[str, Any]:
         endpoint = self._endpoint_by_id(endpoint_id) if endpoint_id else self.active_endpoint()
@@ -1665,13 +1651,6 @@ class LLMRuntime:
             estimated_input_tokens=_estimate_request_tokens(prepared),
             target_input_budget=target,
         )
-
-    def _prepare_request(
-        self,
-        endpoint: LLMEndpointModel,
-        request: LLMRequestIR,
-    ) -> LLMRequestIR:
-        return self._compile_request(endpoint, request).request
 
     def _enabled_endpoints(self, request: LLMRequestIR | None) -> list[LLMEndpointModel]:
         metadata = dict(request.metadata) if request is not None else {}

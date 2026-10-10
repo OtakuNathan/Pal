@@ -180,10 +180,6 @@ class ToolRegistryGeneration:
         translations = _unambiguous_alias_translations(self.capability_index.aliases)
         return _project_llm_text(str(value or ""), translations, unknown="redact")
 
-    def project_llm_value(self, value: Any) -> Any:
-        translations = _unambiguous_alias_translations(self.capability_index.aliases)
-        return _project_llm_value(value, translations, unknown="redact")
-
 
 def compile_registry_generation(
     *,
@@ -827,16 +823,6 @@ def _deep_freeze(value: Any) -> Any:
     return value
 
 
-def _deep_thaw(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _deep_thaw(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_deep_thaw(item) for item in value]
-    if isinstance(value, set | frozenset):
-        return [_deep_thaw(item) for item in value]
-    return value
-
-
 def _project_llm_text(
     value: str,
     translations: list[tuple[str, str]],
@@ -908,21 +894,6 @@ def _project_llm_schema(value: Any, translations: list[tuple[str, str]]) -> Any:
             item = {name: _project_llm_schema(child, translations) for name, child in item.items()}
         result[key] = item
     return result
-
-
-def _project_llm_value(
-    value: Any,
-    translations: list[tuple[str, str]],
-    *,
-    unknown: str = "raise",
-) -> Any:
-    if isinstance(value, str):
-        return _project_llm_text(value, translations, unknown=unknown)
-    if isinstance(value, dict):
-        return {key: _project_llm_value(item, translations, unknown=unknown) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_project_llm_value(item, translations, unknown=unknown) for item in value]
-    return value
 
 
 __all__ = [

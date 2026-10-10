@@ -41,7 +41,6 @@ from pal.memory.contracts import (
     MemoryPackRequest,
     MemoryServicePort,
     CompactionReceipt,
-    StaleCompactionSource,
 )
 from pal.memory.compact import (
     SUMMARY_ENTRY_ID,

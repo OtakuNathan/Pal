@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from pal.memory.candidates import memory_star_from_args
-from pal.memory.contracts import L1MessageKind, L1TranscriptMessage, L2Entry
+from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
 
 SUMMARY_ENTRY_ID = "memory_summary_current"
 SUMMARY_TITLE = "Conversation Summary"
@@ -119,38 +119,6 @@ def flatten_l1_context(items: list[list[L1TranscriptMessage]]) -> list[L1Transcr
 
 def strip_persistent_system_reminders(text: str) -> str:
     return _PERSISTENT_SYSTEM_REMINDER_RE.sub("\n\n", str(text or "")).strip()
-
-
-def current_summary_from_l1(items: list[list[L1TranscriptMessage]]) -> L2Entry | None:
-    for message in flatten_l1_context(items):
-        kind = normalize_l1_message_kind(
-            message.kind,
-            role=str(message.role or "").strip(),
-            tool_calls=message.tool_calls,
-            tool_call_id=message.tool_call_id,
-        )
-        if kind != L1MessageKind.RUNTIME_CONTEXT_SUMMARY:
-            continue
-        content = str(message.content or "").strip()
-        if not content:
-            continue
-        payload = dict(message.payload or {})
-        summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-        summary_text = str(summary_payload.get("summary") or "").strip() if isinstance(summary_payload, dict) else ""
-        search_text = str(summary_payload.get("search_text") or "").strip() if isinstance(summary_payload, dict) else ""
-        return L2Entry(
-            entry_id=SUMMARY_ENTRY_ID,
-            kind="summary",
-            scope="system",
-            title=SUMMARY_TITLE,
-            summary=summary_text or content,
-            source_kind="l1_compaction",
-            candidate_state="stable",
-            rendered=content,
-            search_text=search_text or summary_text or content,
-            payload=payload,
-        )
-    return None
 
 
 def memory_candidates_from_compact_result(result: Any) -> list[dict[str, Any]]:

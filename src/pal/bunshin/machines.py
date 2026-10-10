@@ -629,20 +629,6 @@ def _node_kind(expected: str):
     return guard
 
 
-def _node_kind_in(*expected: str):
-    allowed = frozenset(expected)
-
-    def guard(payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
-        actual = str(payload.get("node_kind") or "unit")
-        if actual not in allowed:
-            expected_text = ", ".join(sorted(allowed))
-            raise TransitionGuardError(
-                f"action requires node_kind in {{{expected_text}}}, found {actual}"
-            )
-
-    return guard
-
-
 def _lease_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
     token = action.payload.get("fencing_token")
     if not isinstance(token, int) or token <= 0:

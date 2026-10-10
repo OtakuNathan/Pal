@@ -2182,10 +2182,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
         generation = self.registry_generation
         return generation.project_llm_text(value)
 
-    def project_llm_value(self, value: Any) -> Any:
-        generation = self.registry_generation
-        return generation.project_llm_value(value)
-
     def execute(self, call: CapabilityCall) -> CapabilityResult:
         try:
             return self.call_registered(

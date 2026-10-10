@@ -6,7 +6,7 @@ import base64
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.paths import resolve_project_git_layout

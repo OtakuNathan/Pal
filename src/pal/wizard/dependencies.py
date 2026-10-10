@@ -4,7 +4,6 @@ import importlib.util
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,18 +60,6 @@ def collect_dependency_checks(runtime_root: Path | None = None) -> tuple[WizardD
         _check_service_manager(),
     ]
     return tuple(checks)
-
-
-def dependency_report() -> dict[str, object]:
-    checks = collect_dependency_checks()
-    blocking = [check for check in checks if check.blocking]
-    warnings = [check for check in checks if check.status == CHECK_STATUS_WARN]
-    return {
-        "ok": not blocking,
-        "blocking_count": len(blocking),
-        "warning_count": len(warnings),
-        "checks": [check.to_dict() for check in checks],
-    }
 
 
 def _check_python_version() -> WizardDependencyCheck:

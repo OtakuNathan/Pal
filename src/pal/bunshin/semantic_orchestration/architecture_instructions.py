@@ -2,9 +2,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any, Mapping
-from pal.bunshin.contracts import SubmissionInvariantError
-from pal.bunshin.skeleton import SemanticReferenceError
-from pal.bunshin.workspace_paths import ARCHITECT_AUTHORING_RELATIVE_PATH, module_developer_test_path, module_verification_corpus_path
+from pal.bunshin.workspace_paths import ARCHITECT_AUTHORING_RELATIVE_PATH
 
 
 def _architect_authoring_locations(
@@ -154,8 +152,6 @@ def _stable_architecture_preflight_finding(
     }
     if affected_modules:
         payload["affected_modules"] = sorted(affected_modules)
-    if isinstance(exc, SemanticReferenceError):
-        payload["semantic_reference_error"] = exc.to_dict()
     return payload
 
 
@@ -208,41 +204,3 @@ def _contract_architect_instruction(
             "The Manager checks checklist and structural closure; the Reviewer decides whether the repair is semantically correct."
         )
     return instruction
-
-
-def _skeleton_architecture_review_view(
-    artifact: Mapping[str, Any],
-) -> dict[str, Any]:
-    submission = artifact.get("submission")
-    if not isinstance(submission, Mapping):
-        raise SubmissionInvariantError("architecture skeleton is missing its semantic submission")
-    review_view = dict(submission)
-    review_view["changed_paths"] = list(artifact.get("changed_paths") or [])
-    modules = dict(submission.get("modules") or {})
-    review_view["manager_derived_verification_policy"] = {
-        "architect_declares_test_scopes": False,
-        "tests_are_product_scenarios": False,
-        "developer_corpora": {
-            str(name): {
-                "kind": "directory",
-                "path": module_developer_test_path(str(name)),
-                "owner": "coder",
-                "verifier_access": "read_only",
-            }
-            for name, raw_module in modules.items()
-            if str(dict(raw_module or {}).get("module_kind") or "")
-            == "implementation"
-        },
-        "verification_corpora": {
-            str(name): {
-                "kind": "directory",
-                "path": module_verification_corpus_path(str(name)),
-                "owner": "verifier",
-                "coder_access": "read_only",
-            }
-            for name, raw_module in modules.items()
-            if str(dict(raw_module or {}).get("module_kind") or "")
-            == "implementation"
-        },
-    }
-    return review_view

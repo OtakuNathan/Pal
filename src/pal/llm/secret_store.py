@@ -163,7 +163,6 @@ class EncryptedFileSecretStore:
         self._fernet: object | None = None
         self._legacy_fernets: list[object] | None = None
         self._cache: dict[tuple[str, str], str] = {}
-        self._loaded_mtime_ns: int | None = None
         self._lock = RLock()
         self._transaction_depth = 0
         with self.transaction():
@@ -234,7 +233,6 @@ class EncryptedFileSecretStore:
         import json
 
         if not self._path.exists():
-            self._loaded_mtime_ns = None
             return
         os.chmod(self._path, 0o600)
         raw = json.loads(self._path.read_text(encoding="utf-8"))
@@ -265,8 +263,6 @@ class EncryptedFileSecretStore:
                 dirty = True
         if dirty:
             self._flush()
-        else:
-            self._mark_loaded()
 
     def _flush(self) -> None:
         import json
@@ -292,23 +288,6 @@ class EncryptedFileSecretStore:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        self._mark_loaded()
-
-    def _mark_loaded(self) -> None:
-        try:
-            self._loaded_mtime_ns = self._path.stat().st_mtime_ns
-        except OSError:
-            self._loaded_mtime_ns = None
-
-    def _refresh_if_changed(self) -> None:
-        try:
-            current_mtime_ns = self._path.stat().st_mtime_ns
-        except OSError:
-            current_mtime_ns = None
-        if current_mtime_ns == self._loaded_mtime_ns:
-            return
-        self._cache.clear()
-        self._load()
 
     def _decrypt_encrypted_value(self, encrypted: str) -> tuple[str, bool] | None:
         self._ensure_fernet()

@@ -8,7 +8,6 @@ from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 
 
 ACTIVE_LLM_ENDPOINT_SETTING_KEY = "active_llm_endpoint_id"
-LEGACY_THINK_LEVEL_SETTING_KEY = "think_level"
 THINK_LEVEL_SETTING_PREFIX = "think_level:"
 # Retained only to identify legacy data; this setting has no runtime effect.
 LLM_ENDPOINT_FALLBACK_SETTING_KEY = "llm.endpoint_fallback_enabled"
@@ -72,16 +71,6 @@ class LLMEndpointRepository:
         )
         return bool(deleted)
 
-    def get_primary_enabled(self) -> LLMEndpointModel | None:
-        query = (
-            LLMEndpointModel.select()
-            .where(LLMEndpointModel.enabled == True)
-            .order_by(LLMEndpointModel.priority, LLMEndpointModel.endpoint_id)
-            .limit(1)
-        )
-        return query.first()
-
-
 class RuntimeSettingRepository:
     def selection_transaction(self):
         return PalRuntimeSettingModel._meta.database.atomic()
@@ -128,13 +117,6 @@ class RuntimeSettingRepository:
 
     def delete_active_llm_endpoint_id(self) -> bool:
         return self.delete(ACTIVE_LLM_ENDPOINT_SETTING_KEY)
-
-    def get_legacy_think_level(self) -> str | None:
-        value = str(self.get(LEGACY_THINK_LEVEL_SETTING_KEY) or "").strip()
-        return value or None
-
-    def delete_legacy_think_level(self) -> bool:
-        return self.delete(LEGACY_THINK_LEVEL_SETTING_KEY)
 
     def get_active_llm_endpoint_id(self) -> str | None:
         value = str(self.get(ACTIVE_LLM_ENDPOINT_SETTING_KEY) or "").strip()

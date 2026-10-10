@@ -9,10 +9,7 @@ from pal.llm.ir import (
     ImagePartIR,
     LLMFinishReason,
     LLMMessageIR,
-    LLMResponseDeltaKind,
-    LLMResponseItemKind,
     LLMResponseIR,
-    LLMResponseUpdate,
     LLMUsageIR,
     MessageRole,
     MessageState,
@@ -27,36 +24,6 @@ from pal.shared.tool_protocol import (
     ToolCallIR,
     ToolResultIR,
 )
-
-
-def update_to_payload(update: LLMResponseUpdate) -> dict[str, Any]:
-    return {
-        "response": response_to_payload(update.response),
-        "delta_kind": update.delta_kind.value,
-        "text_delta": update.text_delta,
-        "tool_call": part_to_payload(update.tool_call) if update.tool_call else None,
-        "item_id": update.item_id,
-        "item_kind": update.item_kind.value if update.item_kind is not None else None,
-    }
-
-
-def update_from_payload(payload: Mapping[str, Any]) -> LLMResponseUpdate:
-    call_payload = payload.get("tool_call")
-    call = part_from_payload(call_payload) if isinstance(call_payload, Mapping) else None
-    if call is not None and not isinstance(call, ToolCallIR):
-        raise ValueError("stream update tool_call is not a tool call")
-    return LLMResponseUpdate(
-        response=response_from_payload(dict(payload.get("response") or {})),
-        delta_kind=LLMResponseDeltaKind(str(payload.get("delta_kind") or "state")),
-        text_delta=str(payload.get("text_delta") or ""),
-        tool_call=call,
-        item_id=str(payload.get("item_id") or ""),
-        item_kind=(
-            LLMResponseItemKind(str(payload.get("item_kind")))
-            if payload.get("item_kind")
-            else None
-        ),
-    )
 
 
 def response_to_payload(response: LLMResponseIR) -> dict[str, Any]:

@@ -35,7 +35,6 @@ from pal.web_fetch.runtime_paths import (
     _chromium_installed,
 )
 
-INSTALL_TIMEOUT_SECONDS = 420
 PROFILE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 PROFILE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024

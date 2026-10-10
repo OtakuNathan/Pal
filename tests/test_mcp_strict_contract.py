@@ -12,6 +12,8 @@ from pal.mcp.connector import AsyncStdioMcpConnector
 from pal.mcp.compiler import McpCompiler
 from pal.mcp.model import McpProtocolError, McpRemoteError, McpServerConfig
 from pal.mcp.ipc import mcp_config_root, McpManagerClient, McpManagerRpcError, start_manager_server, cleanup_manager_endpoint
+# Keep the normalizer and its IPC error type together across hot-reload tests.
+from pal.mcp.normalize import normalize_protocol_error
 from pal.mcp.protocol import validate_tool_result, validate_tool_schema
 
 
@@ -265,7 +267,6 @@ def test_selected_enum_excludes_values_forbidden_by_full_field_contract(field):
 
 
 def test_valid_remote_error_keeps_its_kind_across_ipc(tmp_path):
-    from pal.mcp.normalize import normalize_protocol_error
     config(tmp_path, 'rpc_error')
     async def run():
         manager = McpManager(tmp_path)

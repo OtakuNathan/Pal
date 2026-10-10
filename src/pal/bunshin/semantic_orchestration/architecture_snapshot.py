@@ -7,10 +7,9 @@ from pal.bunshin.semantic_orchestration.review_results import _ref_from_mapping
 from pal.bunshin.semantic_orchestration.workspace_safety import _raise_if_workspace_held
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, LeaseConflict, StaleFencingToken, SubmissionInvariantError
-from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.skeleton import ARCHITECTURE_REPAIR_BASELINE_ARTIFACT, ArchitectureWorkspace, architecture_revision_path_states
 from pal.bunshin.workflow_runtime import WorkflowCoordinator

@@ -5,9 +5,6 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 
-RequirementRef = tuple[str, str]
-
-
 def raise_submission_errors(errors: Iterable[Any], *, owner: str) -> None:
     unique_by_message: dict[str, Any] = {}
     for item in errors:
@@ -64,73 +61,3 @@ def bound_reference_payload(
     if required:
         raise ValueError(f"bound input {name!r} is required for submit preflight")
     return {}
-
-
-def requirement_refs_from_view(view: Mapping[str, Any]) -> set[RequirementRef]:
-    raw_requirements: Any = view.get("requirements", view)
-    if isinstance(raw_requirements, Mapping):
-        requirements = dict(raw_requirements)
-        allowed = {
-            (str(section), str(requirement))
-            for section, values in dict(requirements.get("sections") or {}).items()
-            for requirement in list(values or [])
-            if str(section).strip() and str(requirement).strip()
-        }
-    else:
-        allowed = {
-            (
-                str(dict(item or {}).get("section") or "Requirements"),
-                str(dict(item or {}).get("statement") or dict(item or {}).get("requirement") or ""),
-            )
-            for item in list(raw_requirements or [])
-            if isinstance(item, Mapping)
-        }
-        allowed = {(section, requirement) for section, requirement in allowed if section and requirement}
-    return allowed
-
-
-def submission_requirement_refs(value: Mapping[str, Any]) -> set[RequirementRef]:
-    references: set[RequirementRef] = set()
-    for owner in (value, *list(value.get("cases") or []), *list(value.get("findings") or [])):
-        if not isinstance(owner, Mapping):
-            continue
-        for raw in list(owner.get("requirements") or []):
-            if not isinstance(raw, Mapping):
-                continue
-            section = str(raw.get("section") or "")
-            requirement = str(raw.get("requirement") or "")
-            if section or requirement:
-                references.add((section, requirement))
-    return references
-
-
-def validate_bound_requirement_refs(
-    references: Iterable[RequirementRef],
-    *,
-    allowed: set[RequirementRef],
-    owner: str,
-) -> tuple[str, ...]:
-    unknown = sorted(set(references) - allowed)
-    if not unknown:
-        return ()
-    rendered = "; ".join(f"{section}: {requirement}" for section, requirement in unknown)
-    allowed_rendered = "; ".join(
-        f"{section}: {requirement}" for section, requirement in sorted(allowed)
-    ) or "<none>"
-    return (
-        f"{owner} used an advisory Requirement citation outside its exact bound text: {rendered}. "
-        f"Available exact Requirement text: {allowed_rendered}",
-    )
-
-
-def validate_submission_requirement_refs(
-    value: Mapping[str, Any],
-    *,
-    work_view: Mapping[str, Any],
-    owner: str,
-) -> tuple[str, ...]:
-    return validate_bound_requirement_refs(
-        submission_requirement_refs(value),
-        allowed=requirement_refs_from_view(work_view),
-        owner=owner,
-    )

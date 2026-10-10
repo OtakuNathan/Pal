@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR
 
-from dataclasses import replace
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -79,14 +78,6 @@ class ResponseIRBuilder:
         self.parts.append(tool_call)
         self.finish_reason = LLMFinishReason.TOOL_CALLS
         return self.update(LLMResponseDeltaKind.TOOL_CALL, tool_call=tool_call)
-
-    def set_usage(self, usage: LLMUsageIR) -> None:
-        self.usage = usage
-
-    def set_generation_id(self, generation_id: str) -> None:
-        value = str(generation_id or "").strip()
-        if value:
-            self.provider_generation_id = value
 
     def mark_complete(self, finish_reason: LLMFinishReason | str | None = None) -> LLMResponseUpdate:
         if finish_reason is not None:

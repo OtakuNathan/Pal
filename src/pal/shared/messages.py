@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -87,18 +86,6 @@ class BunshinInvocationPack:
             continuity=_dict(payload.get("continuity")),
             metadata=_dict(payload.get("metadata")),
         )
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
-
-    @classmethod
-    def from_json(cls, raw: str) -> "BunshinInvocationPack":
-        try:
-            payload = json.loads(str(raw or "{}"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"BunshinInvocationPack JSON is invalid: {exc}") from exc
-        return cls.from_dict(payload)
-
 
 @dataclass(frozen=True)
 class BunshinApprovalDecision:

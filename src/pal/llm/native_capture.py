@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
-from typing import Any
 
 from pal.llm.ir import LLMResponseUpdate, ReplayEnvelope, WireShape
 from pal.shared.json_values import thaw_json

@@ -696,22 +696,6 @@ def _normalize_command_name(value: str) -> str:
     return text
 
 
-def _route_from_payload(payload: object) -> ControlRoute | None:
-    if not isinstance(payload, dict):
-        return None
-    endpoint_id = str(payload.get("endpoint_id") or "").strip()
-    channel_kind = str(payload.get("channel_kind") or "").strip()
-    if not endpoint_id or not channel_kind:
-        return None
-    return ControlRoute(
-        endpoint_id=endpoint_id,
-        channel_kind=channel_kind,
-        reply_target=dict(payload.get("reply_target") or {}),
-        control_scope_key=str(payload.get("control_scope_key") or ""),
-        correlation_id=str(payload.get("correlation_id") or "") or None,
-    )
-
-
 def _with_interaction_context(action: ControlAction, result: InteractionResult) -> ControlAction:
     args = dict(action.args)
     args["interaction_origin"] = "button"

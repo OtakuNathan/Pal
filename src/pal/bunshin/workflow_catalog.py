@@ -9,14 +9,11 @@ from pal.bunshin.profiles import BunshinProfile, BunshinProfileRegistry
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
 from pal.bunshin.role_contracts import (
-    REQUIRED_ORCHESTRATION_ROLES,
     TASK_PROFILE_BINDING,
     family_execution_adapter,
     validate_role_bindings,
 )
 
-
-CONTRACT_DAG_ROLES = REQUIRED_ORCHESTRATION_ROLES
 
 REGISTERED_ADAPTERS = frozenset({"software_git.v2", "artifact_bundle.v2"})
 
@@ -92,9 +89,6 @@ class BunshinWorkflowCatalog:
             raise ValueError(f"unknown bunshin family: {family_id or '<empty>'}")
         return family
 
-    def validate_family_exists(self, family_id: str) -> None:
-        self.family(family_id)
-
     def profile(self, profile_id: str) -> BunshinProfile:
         if not str(profile_id or "").strip():
             raise ValueError("task requires an explicit primary bunshin profile")
@@ -103,10 +97,6 @@ class BunshinWorkflowCatalog:
         if profile is None:
             raise ValueError(f"unknown bunshin profile: {profile_id or '<empty>'}")
         return profile
-
-    def family_for_profile(self, profile_id: str) -> BunshinFamilyManifest:
-        profile = self.profile(profile_id)
-        return self.family(profile.profile_group)
 
     def publish_family_binding(self, primary_profile_id: str) -> ArtifactRef:
         profile_registry = BunshinProfileRegistry(runtime_root=Path(self.runtime_root))

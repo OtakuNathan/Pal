@@ -6,7 +6,6 @@ from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole
 from pal.bunshin.semantic_orchestration.role_environment import _role_submission_kind
 from pal.bunshin.semantic_orchestration.role_policy import _role_primary_artifact_name
-from pal.bunshin.turns import sanitize_runner_session_pack
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity

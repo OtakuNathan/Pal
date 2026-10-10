@@ -56,13 +56,6 @@ def _extract_ask_user_question_payload(text: str) -> dict[str, Any]:
     return payload
 
 
-def _coerce_int(value: Any, *, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(default)
-
-
 def _extract_lessons_and_clean_summary(text: str) -> dict[str, Any]:
     raw = str(text or "").strip()
     lessons = {"task_lessons": [], "system_lessons": []}
@@ -143,39 +136,6 @@ def _lesson_heading_kind(text: str) -> str:
     if lowered.startswith(("system lesson:", "system lessons:", "system wise lessons:", "system-wise lessons:")):
         return "system_lessons"
     return ""
-
-
-def _extract_lessons(text: str) -> dict[str, list[str]]:
-    payload = _extract_lessons_and_clean_summary(text)
-    return {
-        "task_lessons": list(payload.get("task_lessons") or []),
-        "system_lessons": list(payload.get("system_lessons") or []),
-    }
-    raw = str(text or "").strip()
-    lessons = {"task_lessons": [], "system_lessons": []}
-    if not raw:
-        return lessons
-    loaded = _try_extract_json(raw)
-    if isinstance(loaded, dict):
-        lessons["task_lessons"].extend(_string_items(loaded.get("task_lessons") or loaded.get("taskLessons") or loaded.get("task_lessons_to_remember")))
-        lessons["system_lessons"].extend(_string_items(loaded.get("system_lessons") or loaded.get("systemLessons") or loaded.get("system_lesson_candidates")))
-    current: str | None = None
-    for line in raw.splitlines():
-        stripped = line.strip().strip("-* ")
-        lowered = stripped.lower()
-        if lowered.startswith(("task lesson:", "task lessons:", "task_lessons:", "task-wise lessons:", "task wise lessons:")):
-            current = "task_lessons"
-            value = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
-        elif lowered.startswith(("system lesson:", "system lessons:", "system_lessons:", "system-wise lessons:", "system wise lessons:")):
-            current = "system_lessons"
-            value = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
-        elif current and stripped:
-            value = stripped
-        else:
-            value = ""
-        if current and value and value.lower() not in {"none", "n/a", "无", "没有"}:
-            lessons[current].append(value)
-    return {key: _dedupe_nonempty(value) for key, value in lessons.items()}
 
 
 def _try_extract_json(text: str) -> Any:

@@ -5,6 +5,7 @@ import asyncio
 import json
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -237,7 +238,7 @@ def test_submit_receipt_uncertainty_is_not_validation_rejection(verifier):
 
 
 def test_unknown_ready_requires_explicit_reason_only_at_submission(verifier):
-    _, _, _, call, _, _ = verifier
+    _, workspace, _, call, _, _ = verifier
     payload(run_delta(verifier))
     state = status(verifier)
     assert state['ready_by_outcome']['unknown'] is True
@@ -245,6 +246,9 @@ def test_unknown_ready_requires_explicit_reason_only_at_submission(verifier):
     assert any('unknown' in item.get('outcomes', []) for item in state['next_actions'])
     assert not call('submit_verification_unknown', reason='').ok
     assert payload(call('submit_verification_unknown', reason='Required platform unavailable; rerun there before acceptance.'))['submitted']
+    submission = json.loads((Path(workspace['artifact_stage_dir']) / 'verification_submission.json').read_text())
+    assert submission['outcome'] == 'unknown'
+    assert submission['findings'] == []
 
 
 def test_empty_corpus_is_reported_before_submit(verifier):

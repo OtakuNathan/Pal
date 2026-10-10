@@ -768,9 +768,6 @@ class BunshinScopedExecutionRuntime:
     def project_llm_text(self, value: object) -> str:
         return self.registry_generation.project_llm_text(value)
 
-    def project_llm_value(self, value: Any) -> Any:
-        return self.registry_generation.project_llm_value(value)
-
     def build_llm_tool_contracts(self) -> list[dict[str, Any]]:
         generation = self.registry_generation
         return [dict(generation.provider_specs[alias]) for alias in sorted(generation.provider_specs)]

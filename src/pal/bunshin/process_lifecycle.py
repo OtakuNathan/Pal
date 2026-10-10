@@ -386,11 +386,6 @@ class WorkerProcessOwner:
                 self.workspace_locks.release(self.lock_key)
             self._closed = True
 
-    def _require_process(self) -> asyncio.subprocess.Process:
-        if self._process is None:
-            raise RuntimeError("worker process has not started")
-        return self._process
-
     async def write_control(self, message: bytes) -> bool:
         process = self._process
         if (

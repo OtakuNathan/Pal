@@ -8,7 +8,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
@@ -68,26 +67,6 @@ _SENSITIVE_BASENAMES = frozenset(
 # when Pal snapshots its own repository.
 _PRIVATE_KEY_MARKER = b"-----BEGIN " + b"PRIVATE KEY-----"
 _MAX_SNAPSHOT_FILE_BYTES = 25 * 1024 * 1024
-
-
-class SemanticReferenceError(ValueError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        reference: Mapping[str, Any] | None = None,
-        possible_matches: Sequence[Mapping[str, Any]] = (),
-    ) -> None:
-        super().__init__(message)
-        self.reference = dict(reference or {})
-        self.possible_matches = tuple(dict(item) for item in possible_matches)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "error": str(self),
-            "reference": self.reference,
-            "possible_matches": list(self.possible_matches),
-        }
 
 
 @dataclass(frozen=True)
@@ -286,96 +265,6 @@ class SkeletonReviewResult:
             "verdict": self.verdict,
             "findings": [item.to_dict() for item in self.findings],
         }
-
-
-def resolve_evidence_reference(
-    reference: Mapping[str, Any],
-    *,
-    workspace_root: Path,
-    reference_roots: Mapping[str, Path] | None = None,
-    evidence_catalog: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    value = {str(key): item for key, item in dict(reference or {}).items() if item not in (None, "")}
-    kind = str(value.get("kind") or "").strip()
-    path_value = str(value.get("path") or "").strip()
-    if path_value:
-        root = Path(workspace_root)
-        reference_name = str(value.get("reference") or value.get("reference_name") or "").strip()
-        if kind.startswith("reference_") or reference_name:
-            roots = {str(key): Path(item) for key, item in dict(reference_roots or {}).items()}
-            if reference_name:
-                root = roots.get(reference_name, Path())
-            elif len(roots) == 1:
-                root = next(iter(roots.values()))
-            else:
-                raise SemanticReferenceError(
-                    "Reference evidence must name its declared reference root.", reference=value
-                )
-        if not str(root):
-            raise SemanticReferenceError("Evidence reference root cannot be resolved.", reference=value)
-        relative = _normalized_repo_path(path_value)
-        target = (root.expanduser().resolve() / relative).resolve()
-        if not target.is_relative_to(root.expanduser().resolve()) or not target.is_file():
-            raise SemanticReferenceError("Evidence path does not exist in its declared root.", reference=value)
-        symbol = str(value.get("symbol") or "").strip()
-        if symbol:
-            content = target.read_text(encoding="utf-8", errors="replace")
-            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", content) is None:
-                candidates = _symbol_suggestions(symbol, content)
-                raise SemanticReferenceError(
-                    "Evidence symbol cannot be located in the referenced file.",
-                    reference=value,
-                    possible_matches=[{"path": relative, "symbol": item} for item in candidates],
-                )
-        return value
-    catalog_entries = list(dict(evidence_catalog or {}).get("evidence") or [])
-    matches = [entry for entry in catalog_entries if _evidence_semantically_matches(value, dict(entry or {}))]
-    if len(matches) == 1:
-        return value
-    if kind in {"documentation", "research_conclusion"} and not catalog_entries:
-        raise SemanticReferenceError("Evidence catalog is unavailable for this semantic source.", reference=value)
-    if len(matches) > 1:
-        raise SemanticReferenceError(
-            "Evidence reference is ambiguous.", reference=value, possible_matches=[dict(item) for item in matches]
-        )
-    raise SemanticReferenceError("Evidence reference cannot be resolved.", reference=value)
-
-
-def _semantic_reference_warning(
-    error: SemanticReferenceError,
-    *,
-    code: str,
-    subject_kind: str,
-    subject_name: str,
-) -> ValidationIssue:
-    reference = dict(error.reference)
-    location = {
-        key: str(reference[key])
-        for key in ("path", "symbol", "section")
-        if str(reference.get(key) or "").strip()
-    }
-    candidates = list(error.possible_matches)
-    suffix = (
-        " Suggested matches: "
-        + "; ".join(
-            ": ".join(
-                str(item.get(key) or "")
-                for key in ("section", "requirement", "path", "symbol")
-                if str(item.get(key) or "").strip()
-            )
-            for item in candidates[:5]
-        )
-        if candidates
-        else ""
-    )
-    return ValidationIssue(
-        "warning",
-        code,
-        str(error) + suffix,
-        subject_kind=subject_kind,
-        subject_name=subject_name,
-        location=location or None,
-    )
 
 
 def analyze_architecture_submission(
@@ -1950,22 +1839,6 @@ def architecture_revision_path_states(worktree: Path, base_sha: str) -> dict[str
     return states
 
 
-def architecture_revision_changed_paths_since(
-    worktree: Path,
-    base_sha: str,
-    baseline_states: Mapping[str, str],
-) -> list[str]:
-    """Return the local delta since a rejected, stable architecture candidate."""
-
-    current = architecture_revision_path_states(worktree, base_sha)
-    baseline = {str(path): str(value) for path, value in baseline_states.items()}
-    return sorted(
-        path
-        for path in set(current) | set(baseline)
-        if current.get(path) != baseline.get(path)
-    )
-
-
 def _find_architecture_commit(worktree: Path, commit_key: str) -> str:
     output = _git(worktree, "log", "--all", "--format=%H%x00%B%x00")
     values = output.split("\0")
@@ -1997,50 +1870,6 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(dict(payload), sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
-
-
-def _evidence_semantically_matches(reference: Mapping[str, Any], entry: Mapping[str, Any]) -> bool:
-    keys = ("source", "section", "conclusion", "path", "symbol")
-    compared = False
-    for key in keys:
-        expected = str(reference.get(key) or "").strip()
-        if not expected:
-            continue
-        compared = True
-        actual = str(entry.get(key) or entry.get("location") or entry.get("summary") or "").strip()
-        if _normalized_semantic_text(expected) != _normalized_semantic_text(actual):
-            return False
-    return compared
-
-
-def _symbol_suggestions(symbol: str, content: str) -> tuple[str, ...]:
-    wanted = symbol.casefold()
-    identifiers = sorted(set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", content)))
-    ranked = sorted(identifiers, key=lambda item: (_edit_distance(wanted, item.casefold()), item))
-    return tuple(ranked[:5])
-
-
-def _edit_distance(left: str, right: str) -> int:
-    previous = list(range(len(right) + 1))
-    for index, left_char in enumerate(left, start=1):
-        current = [index]
-        for other_index, right_char in enumerate(right, start=1):
-            current.append(
-                min(
-                    current[-1] + 1,
-                    previous[other_index] + 1,
-                    previous[other_index - 1] + (left_char != right_char),
-                )
-            )
-        previous = current
-    return previous[-1]
-
-
-def _normalized_semantic_text(value: str) -> str:
-    text = unicodedata.normalize("NFKC", str(value or ""))
-    text = text.translate(str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "—": "-", "–": "-"}))
-    text = re.sub(r"\s+", " ", text).strip().rstrip(".。;；")
-    return text.casefold()
 
 
 def _normalized_repo_path(value: str) -> str:
@@ -2079,18 +1908,6 @@ def _safe_component(value: str) -> str:
 def _artifact_belongs_to_another_workflow(artifact: Mapping[str, Any], workflow_id: str) -> bool:
     source_workflow_id = str(dict(artifact.get("graph_ir") or {}).get("graph_id") or "")
     return bool(workflow_id and source_workflow_id and source_workflow_id != workflow_id)
-
-
-def _git_object_exists(git_dir: Path, object_name: str) -> bool:
-    if not object_name or not git_dir.is_dir():
-        return False
-    completed = subprocess.run(
-        ["git", f"--git-dir={git_dir}", "cat-file", "-e", f"{object_name}^{{commit}}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return completed.returncode == 0
 
 
 def _git_branch_exists(git_dir: Path, branch: str) -> bool:

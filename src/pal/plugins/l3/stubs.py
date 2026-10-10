@@ -60,19 +60,6 @@ def _recall_scope_for_task_id(task_id: str | None) -> str | None:
     return "task" if task_id else None
 
 
-MEMORY_STAR_SCHEMA = {
-    "type": "object",
-    "description": "Required when kind='case'; omit for fact memories.",
-    "properties": {
-        "situation": {"type": "string", "description": "Situation or failure context."},
-        "task": {"type": "string", "description": "Task or objective in that situation."},
-        "action": {"type": "string", "description": "Action, repair, or decision that mattered."},
-        "result": {"type": "string", "description": "Outcome or reusable lesson."},
-    },
-    "required": ["situation", "task", "action", "result"],
-}
-
-
 @capability_node(
     namespace=OPERATION_NAMESPACE,
     scope="provider",

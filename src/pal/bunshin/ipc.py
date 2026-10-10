@@ -38,10 +38,6 @@ def bunshin_role_socket_path(runtime_root: Path) -> Path:
     return _bunshin_role_endpoint(runtime_root).socket_path
 
 
-def bunshin_role_port_path(runtime_root: Path) -> Path:
-    return _bunshin_role_endpoint(runtime_root).port_path
-
-
 class BunshinManagerRpcError(SidecarRpcError):
     pass
 
@@ -91,20 +87,11 @@ class BunshinManagerClient:
     def health_sync(self) -> dict[str, Any]:
         return self.request_sync("health")
 
-    def list_runs_sync(self) -> dict[str, Any]:
-        return self.request_sync("list_runs")
-
-    def read_run_sync(self, run_id: str) -> dict[str, Any]:
-        return self.request_sync("read_run", {"run_id": run_id})
-
     def send_decision_sync(self, decision: dict[str, Any]) -> dict[str, Any]:
         return self.request_sync("send_decision", {"decision": dict(decision)})
 
     def send_clarification_sync(self, clarification: dict[str, Any]) -> dict[str, Any]:
         return self.request_sync("send_clarification", {"clarification": dict(clarification)})
-
-    def reload_runtime_config_sync(self) -> dict[str, Any]:
-        return self.request_sync("reload_runtime_config")
 
     async def refresh_llm_endpoints(self) -> dict[str, Any]:
         return await self.request("refresh_llm_endpoints")
@@ -116,81 +103,6 @@ class BunshinManagerClient:
         return self.request_sync(
             "replace_harness_registry",
             {"generation": dict(generation)},
-        )
-
-    def catalog_snapshot_sync(
-        self,
-        *,
-        kind: str = "all",
-        query: str = "",
-        include_definitions: bool = False,
-    ) -> dict[str, Any]:
-        return self.request_sync(
-            "catalog_snapshot",
-            {"kind": kind, "query": query, "include_definitions": include_definitions},
-        )
-
-    def refresh_catalog_sync(self, *, actor: str = "pal") -> dict[str, Any]:
-        return self.request_sync("catalog_refresh", {"actor": actor})
-
-    def set_profile_override_sync(
-        self,
-        *,
-        profile: str,
-        changes: dict[str, Any],
-        actor: str = "pal",
-        if_generation: str = "",
-    ) -> dict[str, Any]:
-        return self.request_sync(
-            "catalog_set_profile_override",
-            {
-                "profile": profile,
-                "changes": dict(changes),
-                "actor": actor,
-                "if_generation": if_generation,
-            },
-        )
-
-    def reset_profile_override_sync(
-        self,
-        *,
-        profile: str,
-        actor: str = "pal",
-        if_generation: str = "",
-    ) -> dict[str, Any]:
-        return self.request_sync(
-            "catalog_reset_profile_override",
-            {"profile": profile, "actor": actor, "if_generation": if_generation},
-        )
-
-    def set_family_override_sync(
-        self,
-        *,
-        family: str,
-        changes: dict[str, Any],
-        actor: str = "pal",
-        if_generation: str = "",
-    ) -> dict[str, Any]:
-        return self.request_sync(
-            "catalog_set_family_override",
-            {
-                "family": family,
-                "changes": dict(changes),
-                "actor": actor,
-                "if_generation": if_generation,
-            },
-        )
-
-    def reset_family_override_sync(
-        self,
-        *,
-        family: str,
-        actor: str = "pal",
-        if_generation: str = "",
-    ) -> dict[str, Any]:
-        return self.request_sync(
-            "catalog_reset_family_override",
-            {"family": family, "actor": actor, "if_generation": if_generation},
         )
 
     def shutdown_sync(self, *, graceful: bool = True, timeout_seconds: float | None = None) -> dict[str, Any]:

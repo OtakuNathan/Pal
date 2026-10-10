@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import os
 import re
 import shutil
 import stat
-import tempfile
 import tomllib
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
-from uuid import uuid4
 
 
 _PROVIDER_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -35,15 +30,6 @@ class ProviderWheel:
     provider_version: str
     payload_root: PurePosixPath
     payload_files: tuple[PurePosixPath, ...]
-    wheel_sha256: str
-
-
-@dataclass(frozen=True)
-class ProviderInstallResult:
-    provider_id: str
-    provider_version: str
-    target_dir: Path
-    archived_previous_dir: Path | None
     wheel_sha256: str
 
 
@@ -114,79 +100,6 @@ def inspect_provider_wheel(wheel_path: Path) -> ProviderWheel:
         payload_root=payload_root,
         payload_files=payload_files,
         wheel_sha256=wheel_sha256,
-    )
-
-
-def install_provider_wheel(
-    wheel_path: Path,
-    *,
-    runtime_root: Path,
-    force: bool = False,
-) -> ProviderInstallResult:
-    wheel = inspect_provider_wheel(wheel_path)
-    runtime = Path(runtime_root).expanduser().resolve(strict=False)
-    providers_root = runtime / "channel" / "providers"
-    archives_root = runtime / "channel" / "provider-archives" / wheel.provider_id
-    providers_root.mkdir(parents=True, exist_ok=True)
-    target_dir = providers_root / wheel.provider_id
-    if target_dir.is_symlink():
-        raise ProviderInstallError(f"provider target must not be a symlink: {target_dir}")
-    if target_dir.exists() and not target_dir.is_dir():
-        raise ProviderInstallError(f"provider target is not a directory: {target_dir}")
-
-    installed_version = _installed_provider_version(target_dir)
-    if installed_version == wheel.provider_version and not force:
-        raise ProviderInstallError(
-            f"provider {wheel.provider_id!r} version {wheel.provider_version} is already installed; "
-            "pass --force to reinstall it"
-        )
-
-    staging_dir = Path(
-        tempfile.mkdtemp(
-            prefix=f".{wheel.provider_id}.install-",
-            dir=providers_root,
-        )
-    )
-    archived_previous: Path | None = None
-    try:
-        _extract_provider_payload(wheel, staging_dir)
-        receipt = {
-            "schema_version": 1,
-            "provider_id": wheel.provider_id,
-            "provider_version": wheel.provider_version,
-            "distribution": wheel.distribution,
-            "distribution_version": wheel.distribution_version,
-            "wheel_filename": wheel.wheel_path.name,
-            "wheel_sha256": wheel.wheel_sha256,
-            "installed_at": datetime.now(timezone.utc).isoformat(),
-        }
-        (staging_dir / _RECEIPT_FILENAME).write_text(
-            json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        if target_dir.exists():
-            archives_root.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-            archived_previous = archives_root / (
-                f"{timestamp}-{_safe_archive_label(installed_version)}-{uuid4().hex[:8]}"
-            )
-            os.replace(target_dir, archived_previous)
-        try:
-            os.replace(staging_dir, target_dir)
-        except Exception:
-            if archived_previous is not None and archived_previous.exists() and not target_dir.exists():
-                os.replace(archived_previous, target_dir)
-            raise
-    except Exception:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-
-    return ProviderInstallResult(
-        provider_id=wheel.provider_id,
-        provider_version=wheel.provider_version,
-        target_dir=target_dir,
-        archived_previous_dir=archived_previous,
-        wheel_sha256=wheel.wheel_sha256,
     )
 
 
@@ -263,11 +176,6 @@ def _installed_provider_version(target_dir: Path) -> str:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return ""
     return str(manifest.get("version") or "").strip()
-
-
-def _safe_archive_label(value: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
-    return normalized[:80] or "unknown"
 
 
 def _sha256_file(path: Path) -> str:

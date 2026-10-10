@@ -3,7 +3,6 @@ from __future__ import annotations
 from pal.plugins.contracts import PluginFactory
 
 import asyncio
-import contextlib
 import importlib
 import inspect
 import sys
@@ -1038,48 +1037,6 @@ class PluginHost:
             self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_CLEANUP_FAILED, error=exception_report(exc))
             return RuntimeStatus.ERROR
 
-    def _reload_plugin(self, plugin_id: str) -> str:
-        status = self.detach(plugin_id)["status"]
-        if status != RuntimeStatus.OK:
-            return status
-        return self._attach_with_dependencies(plugin_id)
-
-    # --- first-party lifecycle ---
-
-    def _load_and_attach_first_party(self, plugin_id: str) -> str:
-        return self._attach_with_dependencies(plugin_id)
-
-    def _instantiate_first_party(self, plugin_id: str) -> str:
-        return RuntimeStatus.OK if plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
-
-    def _attach_first_party(self, plugin_id: str, *, refresh: bool = False) -> str:
-        if refresh and plugin_id in self.generations:
-            return self._reload_plugin(plugin_id)
-        return self._attach_with_dependencies(plugin_id)
-
-    def _detach_first_party(self, plugin_id: str) -> str:
-        return self._detach_generation(plugin_id)
-
-    # --- community (third-party) lifecycle ---
-
-    def _load_and_attach_community(self, plugin_id: str, *, refresh: bool = False) -> str:
-        return self._reload_plugin(plugin_id) if refresh and plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
-
-    def _instantiate_community(self, plugin_id: str) -> str:
-        return RuntimeStatus.OK if plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
-
-    def _attach_community(self, plugin_id: str, *, refresh: bool = False) -> str:
-        return self._reload_plugin(plugin_id) if refresh and plugin_id in self.generations else self._attach_with_dependencies(plugin_id)
-
-    def _detach_community(self, plugin_id: str) -> str:
-        return self._detach_generation(plugin_id)
-
-    def _forget_first_party_handle(self, plugin_id: str) -> None:
-        self._detach_generation(plugin_id)
-
-    def _forget_community_handle(self, plugin_id: str) -> None:
-        self._detach_generation(plugin_id)
-
     def _bind_plugin_module(self, plugin_id: str, handle: ModuleHandle) -> None:
         module_id = str(handle.module_id)
         record = self.first_party_records.get(plugin_id)
@@ -1125,9 +1082,6 @@ class PluginHost:
             return ()
         return tuple(dict.fromkeys(str(item).strip() for item in configured if str(item).strip()))
 
-    def _forget_module_handle(self, handle: ModuleHandle) -> None:
-        self.context.unregister_module(handle)
-
     def _drop_plugin_import_cache(
         self,
         entrypoint: str,
@@ -1151,47 +1105,6 @@ class PluginHost:
                 continue
             if root is not None and _module_loaded_from(module_name, root):
                 sys.modules.pop(module_name, None)
-
-    # --- shared attach/detach logic ---
-
-    def _do_attach(self, handle: ModuleHandle) -> None:
-        try:
-            handle.mounted = True
-            handle.degraded = False
-            self._restore_provider_refs(handle)
-            self._restore_prompt_fragment_providers(handle)
-            self._restore_event_sources(handle)
-            self._restore_event_handlers(handle)
-            self._restore_control_action_handlers(handle)
-            self._publish_module_capabilities(handle.module_id)
-        except Exception:
-            self._rollback_failed_attach(handle)
-            raise
-
-    def _do_detach(self, handle: ModuleHandle) -> None:
-        self._withdraw_module_capabilities(handle.module_id)
-        self.context.prompt_fragment_registry.unregister_module(handle.module_id)
-        self.context.event_source_registry.detach_module(handle.module_id)
-        self.context.event_handler_registry.detach_module(handle.module_id)
-        self.context.control_action_registry.unregister_module(handle.module_id)
-        for provider_id in list(handle.provider_refs):
-            self.context.execution_runtime.unregister_provider_ref(provider_id)
-            if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
-                self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
-        if callable(handle.shutdown_async):
-            _run_awaitable(handle.shutdown_async())
-            handle.shutdown_async = None
-            handle.shutdown_sync = None
-        elif callable(handle.shutdown_sync):
-            handle.shutdown_sync()
-            handle.shutdown_sync = None
-        for cleanup in reversed(list(handle.cleanup_callbacks)):
-            try:
-                cleanup()
-            except Exception:
-                pass
-        handle.cleanup_callbacks.clear()
-        handle.mounted = False
 
     # --- factory ---
 
@@ -1269,40 +1182,6 @@ class PluginHost:
         skill_unregister = getattr(skill, "unregister_declared_module", None)
         if callable(skill_unregister):
             skill_unregister(module_id)
-
-    def _rollback_failed_attach(self, handle: ModuleHandle) -> None:
-        with contextlib.suppress(Exception):
-            self._withdraw_module_capabilities(handle.module_id)
-        with contextlib.suppress(Exception):
-            self.context.prompt_fragment_registry.unregister_module(handle.module_id)
-        with contextlib.suppress(Exception):
-            self.context.event_source_registry.detach_module(handle.module_id)
-        with contextlib.suppress(Exception):
-            self.context.event_handler_registry.detach_module(handle.module_id)
-        with contextlib.suppress(Exception):
-            self.context.control_action_registry.unregister_module(handle.module_id)
-        for provider_id in list(handle.provider_refs):
-            with contextlib.suppress(Exception):
-                self.context.execution_runtime.unregister_provider_ref(provider_id)
-            with contextlib.suppress(Exception):
-                if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
-                    self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
-        if callable(handle.shutdown_async):
-            with contextlib.suppress(Exception):
-                _run_awaitable(handle.shutdown_async())
-            handle.shutdown_async = None
-            handle.shutdown_sync = None
-        elif callable(handle.shutdown_sync):
-            with contextlib.suppress(Exception):
-                handle.shutdown_sync()
-            handle.shutdown_sync = None
-        for cleanup in reversed(list(handle.cleanup_callbacks)):
-            with contextlib.suppress(Exception):
-                cleanup()
-        handle.cleanup_callbacks.clear()
-        handle.mounted = False
-        handle.degraded = True
-
 
 def _plugin_disabled_result(plugin_id: str) -> dict[str, Any]:
     return {

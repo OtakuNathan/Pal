@@ -535,7 +535,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         bunshin_source = (ROOT / "src/pal/bunshin/source.py").read_text(encoding="utf-8")
         control_interactions = (ROOT / "src/pal/control/interactions.py").read_text(encoding="utf-8")
         bunshin_interactions = (ROOT / "src/pal/bunshin/interactions.py").read_text(encoding="utf-8")
-        memory_interactions = (ROOT / "src/pal/memory/interactions.py").read_text(encoding="utf-8")
+        memory_review = (ROOT / "src/pal/memory/review.py").read_text(encoding="utf-8")
 
         self.assertNotIn("InteractionMessageSpec(", core_runtime)
         self.assertNotIn("InteractionButtonSpec(", core_runtime)
@@ -570,8 +570,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("bunshin_", control_interactions)
         self.assertIn("InteractionMessageSpec(", bunshin_interactions)
         self.assertIn("InteractionButtonSpec(", bunshin_interactions)
-        self.assertIn("InteractionMessageSpec(", memory_interactions)
-        self.assertIn("InteractionButtonSpec(", memory_interactions)
+        self.assertIn("InteractionMessageSpec(", memory_review)
+        self.assertIn("InteractionButtonSpec(", memory_review)
 
     def test_retired_legacy_files_and_aliases_are_not_referenced(self) -> None:
         old_bridge_alias = "codex_" + "proxy"

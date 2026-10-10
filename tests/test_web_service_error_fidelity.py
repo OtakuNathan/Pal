@@ -395,6 +395,7 @@ def test_shutdown_keeps_original_error_when_reading_output_also_fails(tmp_path, 
 def sidecar(tmp_path, monkeypatch, request):
     class Worker:
         in_flight = 0
+        last_activity_at = browser.time.monotonic()
         def health(self):
             return {"ok": True, "healthy": True}
         def install_in_progress(self):
@@ -408,6 +409,8 @@ def sidecar(tmp_path, monkeypatch, request):
                 return {"unserializable": object()}
             raise BrowserServiceError("browser operation failed", code="cli_command_failed", state_unknown=True) from failure()
     monkeypatch.setattr(browser, "_PlaywrightCliWorker", lambda **kwargs: Worker())
+    # HTTPServer's loopback reverse-DNS lookup can exceed startup time on macOS.
+    monkeypatch.setattr(browser.socket, "getfqdn", lambda name="": "localhost")
     server_class = browser.ThreadingHTTPServer
     servers = []
     ready = threading.Event()
@@ -420,16 +423,17 @@ def sidecar(tmp_path, monkeypatch, request):
     thread = threading.Thread(target=browser.run_browser_service_cli, kwargs={
         "runtime_root": tmp_path, "host": "127.0.0.1", "port": 0, "token": "test-token",
         "idle_timeout_seconds": 300, "max_concurrency": 1,
-    })
+    }, daemon=True)
     thread.start()
-    assert ready.wait(5)
-    manager = BrowserServiceManager(tmp_path)
-    resource = SimpleNamespace(host="127.0.0.1", port=servers[0].server_port, token="test-token")
-    monkeypatch.setattr(manager, "_ensure_started", lambda: resource)
     try:
+        assert ready.wait(5)
+        manager = BrowserServiceManager(tmp_path)
+        resource = SimpleNamespace(host="127.0.0.1", port=servers[0].server_port, token="test-token")
+        monkeypatch.setattr(manager, "_ensure_started", lambda: resource)
         yield manager
     finally:
-        servers[0].shutdown()
+        for server in servers:
+            server.shutdown()
         thread.join(5)
         assert not thread.is_alive()
 

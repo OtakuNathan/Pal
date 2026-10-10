@@ -163,44 +163,6 @@ class CyclesStore:
             json.loads(str(row["payload_json"]))
         )
 
-    def store_node_cycle(
-        self,
-        *,
-        workflow_id: str,
-        graph: GraphIR,
-        cycle: NodeCycle,
-    ) -> None:
-        if cycle.node_name not in graph.nodes:
-            raise ValueError("node cycle does not belong to GraphIR")
-        self.database.ensure_schema()
-        now = utc_now()
-        payload = _cycle_payload(cycle)
-        with self.database.write_connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO bunshin_v2_node_cycles(
-                    cycle_id, workflow_id, graph_id, graph_generation,
-                    node_name, state, payload_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(cycle_id) DO UPDATE SET
-                    graph_generation = excluded.graph_generation,
-                    state = excluded.state,
-                    payload_json = excluded.payload_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    cycle.cycle_id,
-                    workflow_id,
-                    graph.graph_id,
-                    graph.generation,
-                    cycle.node_name,
-                    cycle.state.value,
-                    _json(payload),
-                    now,
-                    now,
-                ),
-            )
-
     def read_node_cycles(
         self,
         *,

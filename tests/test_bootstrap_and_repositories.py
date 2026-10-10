@@ -1180,33 +1180,40 @@ class PalV2BootstrapTests(unittest.TestCase):
             registration=self.registration,
             database=self.database,
         )
-        module = runtime.core.context.module_registry.require("l3.sqlite_vec_l3")
+        self.assertEqual(runtime.plugin_host.detach("sqlite_vec_l3")["status"], RuntimeStatus.OK)
         event_kind = "test.plugin.rollback"
         action_kind = "test.plugin.rollback.action"
-        event_handler = object()
         cleanup_calls: list[str] = []
-        runtime.core.context.event_handler_registry.register(
-            event_kind,
-            event_handler,  # type: ignore[arg-type]
-            module_id=module.module_id,
-        )
-        runtime.core.context.control_action_registry.register(
-            module.module_id,
-            action_kind,
-            lambda _action: None,
-        )
-        module.cleanup_callbacks.append(lambda: cleanup_calls.append("cleanup"))
+        failed_handles = []
 
-        runtime.plugin_host._rollback_failed_attach(module)
+        def fail_publication(module_id):
+            module = runtime.core.context.module_registry.require(module_id)
+            failed_handles.append(module)
+            runtime.core.context.event_handler_registry.register(
+                event_kind, object(), module_id=module_id,
+            )
+            runtime.core.context.control_action_registry.register(
+                module_id, action_kind, lambda _action: None,
+            )
+            module.cleanup_callbacks.append(lambda: cleanup_calls.append("cleanup"))
+            raise RuntimeError("publication failed after runtime contributions")
 
+        with patch.object(runtime.plugin_host, "_publish_module_capabilities", side_effect=fail_publication):
+            result = runtime.plugin_host.attach("sqlite_vec_l3")
+
+        self.assertEqual(result["status"], RuntimeStatus.ERROR)
+        self.assertIn("publication failed", result["error"])
+        self.assertEqual(len(failed_handles), 1)
+        module = failed_handles[0]
         self.assertNotIn(module.module_id, runtime.core.context.event_handler_registry.by_module)
         self.assertNotIn(event_kind, runtime.core.context.event_handler_registry.handlers)
         self.assertNotIn(module.module_id, runtime.core.context.control_action_registry.by_module)
         self.assertNotIn(action_kind, runtime.core.context.control_action_registry.handlers)
+        self.assertIsNone(runtime.core.context.module_registry.get(module.module_id))
+        self.assertNotIn("sqlite_vec_l3", runtime.plugin_host.generations)
         self.assertEqual(cleanup_calls, ["cleanup"])
         self.assertEqual(module.cleanup_callbacks, [])
         self.assertFalse(module.mounted)
-        self.assertTrue(module.degraded)
 
     def test_failed_plugin_attach_discards_spent_handle_before_retry(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -2185,7 +2192,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             repository=repository,
             runtime_root=self.runtime_root,
         )
-        provider.provider_manager.load_runtime_providers()
+        provider.provider_manager.rescan_providers()
         old_endpoint = runtime.get_endpoint("telegram_main")
         self.assertIsNotNone(old_endpoint)
         pending_reply_id = old_endpoint.queue_reply(
@@ -4994,7 +5001,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             "actions": {},
         }
 
-        self.endpoint._prune_interactive_messages(now=2.0)
+        self.endpoint.prune_interactive_messages(now=2.0)
 
         self.assertNotIn("expired", self.endpoint._interactive_messages)
 

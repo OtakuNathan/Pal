@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Protocol, runtime_checkable

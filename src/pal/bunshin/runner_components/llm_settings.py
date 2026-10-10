@@ -204,9 +204,3 @@ def _max_output_tokens_from_context_window(context_window: int, llm_runtime: Any
     usable = max(512, context_window - margin)
     context_fraction = max(512, context_window // 4)
     return max(512, min(cap, max(floor, context_fraction), usable))
-
-
-_DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 3600.0
-
-
-_MAX_MANAGER_TURN_TIMEOUT_SECONDS = 3600.0

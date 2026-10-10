@@ -6,12 +6,9 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.role_contracts import OrchestrationRole
 from typing import Mapping
 from pal.shared import BunshinInvocationPack
-from pal.bunshin.semantic_orchestration.role_policy import apply_research_capability_policy
-from pal.bunshin.semantic_orchestration.role_policy import apply_role_capability_policy
 from pal.bunshin.semantic_orchestration.role_policy import apply_revision_scope_capability_policy
 from pal.bunshin.semantic_orchestration.verification_policy import _manager_routed_findings
 from pal.bunshin.semantic_orchestration.verification_policy import _manager_required_system_scenario_work_items
-from pal.bunshin.profiles import resolve_pinned_bunshin_pack
 from pal.bunshin.role_protocol import stable_hash
 from pal.bunshin.semantic_orchestration.attempt_models import BoundRolePlaybook, InitialRolePrompt, PreparedRoleWorkspace, RoleAttemptRequest
 

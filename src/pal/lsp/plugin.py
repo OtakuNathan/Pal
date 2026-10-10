@@ -58,91 +58,6 @@ from pal.shared.tool_protocol import ToolAffordance
 _MANAGER_RETIRE_TIMEOUT_SECONDS = 5.0
 
 
-def _file_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "file": {"type": "string"},
-            "workspace_root": {"type": "string"},
-            "name": {"type": "string", "description": "Optional server name returned by inspect_lsp_status."},
-        },
-        "required": ["file"],
-    }
-
-
-def _doctor_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "file": {"type": "string"},
-            "path": {"type": "string"},
-            "workspace_root": {"type": "string"},
-            "name": {"type": "string", "description": "Optional server name returned by inspect_lsp_status."},
-        },
-    }
-
-
-def _prepare_workspace_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "workspace_root": {
-                "type": "string",
-                "description": "Canonical project/worktree root to prepare for later LSP queries.",
-            },
-            "primary_language": {
-                "type": "string",
-                "description": "Optional primary language; omit to detect it from workspace source files.",
-            },
-            "languages": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional additional workspace languages.",
-            },
-            "compile_commands_path": {
-                "type": "string",
-                "description": "Optional existing compile_commands.json path for C/C++/Objective-C.",
-            },
-            "include_paths": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Existing project include directories, relative to workspace_root or absolute.",
-            },
-            "stub_include_paths": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Existing caller-created SDK/stub include directories; LSP never fabricates these APIs.",
-            },
-            "cpp_standard": {
-                "type": "string",
-                "description": "Optional C/C++ language standard such as c++17.",
-            },
-            "lsp_compile_flags": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional fallback compile flags when no project compile database exists.",
-            },
-            "prewarm": {
-                "type": "boolean",
-                "default": True,
-                "description": "Initialize matching language servers immediately after preparing the environment.",
-            },
-        },
-        "required": ["workspace_root"],
-    }
-
-
-def _position_schema() -> dict[str, Any]:
-    schema = _file_schema()
-    schema["properties"] = {
-        **schema["properties"],
-        "line": {"type": "integer", "description": "0-based line number"},
-        "character": {"type": "integer", "description": "0-based UTF-16 character offset"},
-    }
-    schema["required"] = ["file", "line", "character"]
-    return schema
-
-
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
     scope="module",
@@ -601,11 +516,6 @@ class LspManagerPluginProvider:
             "last_error": self.last_error,
             "cached_snapshot": dict(self.last_health or {}),
         }
-
-    def _manager_running(self) -> bool:
-        process_status = self._process_status()
-        return process_status is not None and process_status[1] is None
-
 
 def _failing_servers(payload: dict[str, Any]) -> list[str]:
     failing: list[str] = []
