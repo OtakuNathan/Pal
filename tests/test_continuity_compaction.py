@@ -48,8 +48,15 @@ def test_invalid_body_is_rejected_instead_of_silently_dropped(policy, bad):
     elif bad == "nested": value["continuity"]["state"] = [{"text": "critical fact"}]
     elif bad == "empty_string": value["continuity"]["state"] = [" "]
     else: value["summary"]["search_text"] = "old schema"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as error:
         policy.validate_checkpoint(json.dumps(value), None)
+    if bad == "unknown":
+        assert str(error.value) == (
+            "continuity has extra fields: open_items; "
+            "allowed fields: constraints, decisions, references, state"
+        )
+    elif bad == "summary_extra":
+        assert str(error.value) == "summary has extra fields: search_text; allowed fields: summary"
 
 
 def test_bunshin_rejects_memory_candidates_even_when_empty():

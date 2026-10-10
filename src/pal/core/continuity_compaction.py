@@ -82,8 +82,12 @@ def render_context(*, kind: str, summary: str, payload: dict[str, Any]) -> str:
 def _exact_fields(value: Any, fields: set[str], label: str) -> None:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be an object")
-    if set(value) - fields:
-        raise ValueError(f"{label} has extra fields")
+    extra_fields = set(value) - fields
+    if extra_fields:
+        raise ValueError(
+            f"{label} has extra fields: {', '.join(sorted(extra_fields))}; "
+            f"allowed fields: {', '.join(sorted(fields))}"
+        )
     if fields - set(value):
         raise ValueError(f"{label} missing fields: " + ", ".join(sorted(fields - set(value))))
 
