@@ -75,6 +75,13 @@ changing the Family binding. Each attempt captures one registry generation, so
 detach affects only later attempts. Two failed attempts on a preferred external
 harness fall back to Pal for that assignment.
 
+Role profiles may override `metadata.max_output_tokens`. Pal-backed roles apply
+this value to their private endpoint view, and Manager validates provider requests
+against the same Task-bound budget. The resident endpoint configuration is unchanged;
+roles without an override inherit it. The context window still bounds the role
+budget. Endpoint refresh preserves the override. Catalog overrides affect newly
+created Tasks; existing Tasks retain their pinned profile values.
+
 ## Contract Protocol
 
 The only architecture handoff is `ContractArtifact`. Manager combines its base

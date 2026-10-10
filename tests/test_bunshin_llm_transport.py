@@ -34,6 +34,10 @@ from pal.bunshin.ipc import cleanup_manager_endpoint, start_manager_server
 from pal.bunshin.llm_transport import ManagerProxyTransport
 from pal.bunshin.manager import BunshinManager, BunshinRunState
 from pal.bunshin.manager_main import _open_runtime_database
+from pal.bunshin.llm_output_budget import with_role_output_budget
+from pal.bunshin.runner_components.runtime_build import build_role_llm
+from pal.bunshin.runner_components.llm_settings import _resolve_bunshin_max_output_tokens
+from pal.core.runtime_config import RuntimeConfig
 from pal.shared import BunshinInvocationPack
 from pal.wizard.runtime import ALL_MODELS
 
@@ -138,6 +142,95 @@ def _params(endpoint, *, request_id: str = "request-1") -> dict:
 
 
 class BunshinLLMTransportTests(unittest.TestCase):
+    def test_role_output_override_reaches_provider_without_changing_global_budget(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory(prefix="pal-bunshin-output-override-") as tmp:
+                root = Path(tmp)
+                database, manager = _manager(root)
+                _register_endpoint()
+                endpoint = LLMEndpointRepository().upsert(
+                    endpoint_id="proxy-endpoint", context_window=1_000_000,
+                    max_output_tokens=12_288,
+                )
+                pack = BunshinInvocationPack(
+                    invocation_id="bunshin-1",
+                    metadata={"preferred_endpoint_id": endpoint.endpoint_id, "max_output_tokens": 65_535},
+                )
+                manager.runs["run-1"] = BunshinRunState(
+                    bunshin_id="bunshin-1", run_id="run-1", pack=pack,
+                )
+                capture = _CapturingTransport()
+                manager._llm_json_transport = capture
+                server, _ = await start_manager_server(root, manager._handle_client)
+                runtime = build_role_llm(
+                    llm_authority="manager_proxy", runtime_root=root, run_id="run-1",
+                    llm_repository=LLMEndpointRepository(), settings=RuntimeSettingRepository(),
+                    config=RuntimeConfig.load(root), max_output_tokens_override=65_535,
+                )
+                request = LLMRequestIR(
+                    messages=(LLMMessageIR(MessageRole.USER, (TextPartIR("small task"),)),),
+                    tools=(),
+                    policy=GenerationPolicyIR(max_output_tokens=65_535),
+                    metadata={"preferred_endpoint_id": endpoint.endpoint_id},
+                    logical_scope_id="bunshin:output-override",
+                )
+                try:
+                    self.assertEqual(_resolve_bunshin_max_output_tokens(runtime, pack), 65_535)
+                    await asyncio.to_thread(runtime.generate, request)
+                    self.assertEqual(capture.requests[-1].payload["max_tokens"], 65_535)
+                    runtime.refresh_llm_endpoints()
+                    await asyncio.to_thread(runtime.generate, request)
+                    self.assertEqual(capture.requests[-1].payload["max_tokens"], 65_535)
+                    self.assertEqual(LLMEndpointRepository().get(endpoint.endpoint_id).max_output_tokens, 12_288)
+
+                    # A role without a bound override still uses the resident limit.
+                    manager.runs["run-2"] = BunshinRunState(
+                        bunshin_id="bunshin-2", run_id="run-2",
+                        pack=BunshinInvocationPack(invocation_id="bunshin-2"),
+                    )
+                    default_runtime = build_role_llm(
+                        llm_authority="manager_proxy", runtime_root=root, run_id="run-2",
+                        llm_repository=LLMEndpointRepository(), settings=RuntimeSettingRepository(),
+                        config=RuntimeConfig.load(root),
+                    )
+                    try:
+                        await asyncio.to_thread(default_runtime.generate, request)
+                        self.assertEqual(capture.requests[-1].payload["max_tokens"], 12_288)
+                    finally:
+                        default_runtime.close()
+
+                    # Worker-supplied payloads cannot exceed the Manager-bound budget.
+                    scoped = with_role_output_budget(endpoint, 65_535)
+                    proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
+                    before = len(capture.requests)
+                    with self.assertRaisesRegex(RuntimeError, "exceeds endpoint output authority"):
+                        await asyncio.to_thread(lambda: list(proxy.frames(scoped, EncodedTransportRequest(
+                            request_id="over-budget", wire_shape=WireShape.OPENAI_COMPLETION,
+                            timeout_seconds=30, stream=True,
+                            payload={"model": endpoint.model_id, "max_tokens": 65_536},
+                        ))))
+                    self.assertEqual(len(capture.requests), before)
+                finally:
+                    runtime.close()
+                    server.close()
+                    await server.wait_closed()
+                    await cleanup_manager_endpoint(root)
+                    database.close()
+
+        with patch.dict(os.environ, {"PAL_BUNSHIN_SANDBOXED": "0"}, clear=False):
+            asyncio.run(scenario())
+
+    def test_role_output_override_respects_context_window_and_smaller_budget(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal-bunshin-output-context-") as tmp:
+            database, _manager_instance = _manager(Path(tmp))
+            try:
+                endpoint = _register_endpoint()
+                self.assertEqual(with_role_output_budget(endpoint, 65_535).max_output_tokens, 8192)
+                self.assertEqual(with_role_output_budget(endpoint, 256).max_output_tokens, 256)
+                self.assertEqual(endpoint.max_output_tokens, 512)
+            finally:
+                database.close()
+
     def test_manager_owner_worker_preserves_frame_backpressure(self) -> None:
         class _BackpressureTransport:
             def __init__(self) -> None:

@@ -228,26 +228,6 @@ class BunshinSandboxTests(unittest.TestCase):
         invalid = BunshinInvocationPack(invocation_id="temperature-invalid", goal="g", metadata={"temperature": 3})
         self.assertEqual(_bunshin_temperature(invalid, fallback=0.7), 0.7)
 
-    def test_bunshin_output_budget_is_capped_by_endpoint_limit(self) -> None:
-        class Runtime:
-            def resolve_max_output_tokens(self, **_kwargs):
-                return 12_288
-
-        runtime = Runtime()
-        oversized = BunshinInvocationPack(
-            invocation_id="oversized-output-budget",
-            goal="g",
-            metadata={"max_output_tokens": 65_536},
-        )
-        bounded = BunshinInvocationPack(
-            invocation_id="bounded-output-budget",
-            goal="g",
-            metadata={"max_output_tokens": 8_192},
-        )
-
-        self.assertEqual(_resolve_bunshin_max_output_tokens(runtime, oversized), 12_288)
-        self.assertEqual(_resolve_bunshin_max_output_tokens(runtime, bounded), 8_192)
-
     def test_bunshin_output_budget_uses_endpoint_limit_without_profile_override(self) -> None:
         class Runtime:
             def resolve_max_output_tokens(self, **_kwargs):

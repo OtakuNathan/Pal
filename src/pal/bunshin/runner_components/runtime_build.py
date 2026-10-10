@@ -10,7 +10,7 @@ from pal.core.runtime_config import RuntimeConfig
 from pal.core.runtime_state import RuntimeSnapshotCoordinator
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database
-from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LLMCredentialResolver, RuntimeSettingRepository, build_default_endpoint_invoker
+from pal.llm import LLMEndpointRepository, LLMRuntime, LLMCredentialResolver, RuntimeSettingRepository, build_default_endpoint_invoker
 from pal.llm.endpoint import ShapeEndpointInvoker
 from pal.llm.repository import RuntimeSettingSnapshot
 from pal.llm.secret_store import EncryptedFileSecretStore
@@ -20,6 +20,7 @@ from pal.memory import L3ProviderSelector, MemoryService, build_ollama_embedding
 from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core
 from pal.skill.repository import ReadOnlySkillRepository
 from pal.bunshin.llm_transport import ManagerProxyTransport
+from pal.bunshin.llm_output_budget import BunshinEndpointResolver
 from pal.bunshin.web_broker import BunshinBrokerWebClient
 from pal.plugins.l3 import SQLiteVecL3Plugin, register_with_core as register_l3_with_core
 from pal.web_fetch import BrowserServiceManager, WebFetchService, register_with_core as register_web_fetch_with_core
@@ -36,6 +37,7 @@ def build_slim_bunshin_runtime(
     llm_authority: Literal["manager_proxy", "host", "none"],
     memory_workflow_id: str = "",
     snapshot_root: Path | None = None,
+    max_output_tokens_override: int | None = None,
 ) -> BunshinRuntimeBundle:
     """Build one runtime with an explicit LLM owner.
 
@@ -92,7 +94,8 @@ def build_slim_bunshin_runtime(
         writable=not read_only_database,
     )
     llm_runtime = build_role_llm(llm_authority=llm_authority, runtime_root=runtime_root, run_id=run_id,
-                                 llm_repository=llm_repository, settings=settings, config=config)
+                                 llm_repository=llm_repository, settings=settings, config=config,
+                                 max_output_tokens_override=max_output_tokens_override)
     register_execution_with_core(context)
     from pal.execution.worker_extensions import activate_worker_extension
     activate_worker_extension(context, Path(runtime_root), database_path=configured_db_path or None)
@@ -186,9 +189,12 @@ async def _bunshin_noop_failure_handler(*args: Any, **kwargs: Any) -> _BunshinFa
 def build_role_llm(
     *, llm_authority: Literal["manager_proxy", "host", "none"], runtime_root: Path, run_id: str,
     llm_repository: LLMEndpointRepository, settings: RuntimeSettingRepository, config: RuntimeConfig,
+    max_output_tokens_override: int | None = None,
 ) -> LLMRuntime | None:
     if llm_authority == "manager_proxy":
-        endpoint_resolver = EndpointResolver(repository=llm_repository)
+        endpoint_resolver = BunshinEndpointResolver(
+            repository=llm_repository, max_output_tokens_override=max_output_tokens_override,
+        )
         local_settings = RuntimeSettingSnapshot(
             settings,
             endpoint_ids=tuple(
@@ -208,7 +214,9 @@ def build_role_llm(
         )
     elif llm_authority == "host":
         llm_runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=llm_repository),
+            endpoint_resolver=BunshinEndpointResolver(
+                repository=llm_repository, max_output_tokens_override=max_output_tokens_override,
+            ),
             settings_repository=settings,
             endpoint_invoker=build_default_endpoint_invoker(
                 credentials=LLMCredentialResolver(secret_store=EncryptedFileSecretStore(secrets_path=str(Path(runtime_root) / "secrets.json"))),

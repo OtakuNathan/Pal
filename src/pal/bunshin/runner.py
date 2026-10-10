@@ -8,6 +8,7 @@ from pal.bunshin.runner_components.models import EventWriter as EventWriter
 from pal.bunshin.runner_components.models import DecisionReader as DecisionReader
 from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runtime as build_slim_bunshin_runtime
 from pal.bunshin.runner_components.llm_settings import _prompt_observation_tag_from_pack as _prompt_observation_tag_from_pack
+from pal.bunshin.runner_components.numeric_values import _optional_positive_int
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +53,7 @@ class BunshinRunner:
                 self.runtime_root,
                 run_id=self.run_id,
                 llm_authority="manager_proxy",
+                max_output_tokens_override=_optional_positive_int(self.pack.metadata.get("max_output_tokens")),
                 snapshot_root=Path(self.pack.workspace["run_dir"]) if self.pack.workspace.get("run_dir") else None,
                 memory_workflow_id=str((self.pack.workspace.get("bunshin_v2") or {}).get("workflow_id")
                     or (self.pack.metadata.get("bunshin_v2") or {}).get("workflow_id") or ""),

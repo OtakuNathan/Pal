@@ -37,6 +37,7 @@ from pal.bunshin.producer_tool_diagnostics import (
     MAX_PRODUCER_TOOL_DIAGNOSTICS, ProducerToolDiagnostic, is_producer_pack,
 )
 from pal.bunshin.catalog import BunshinCatalogService
+from pal.bunshin.llm_output_budget import with_role_output_budget
 from pal.bunshin.config import effective_bunshin_runtime_config
 from pal.bunshin.event_delivery import BunshinEventDelivery
 from pal.bunshin.ipc import (
@@ -1723,6 +1724,7 @@ class BunshinManager:
                 f"LLM endpoint is unavailable: {endpoint_id}",
                 kind="endpoint_spec_stale",
             )
+        endpoint = with_role_output_budget(endpoint, pack_metadata.get("max_output_tokens"))
         requested_shape = str(params.get("wire_shape") or "").strip()
         if requested_shape != str(endpoint.wire_shape):
             raise _ManagerTransportError(
