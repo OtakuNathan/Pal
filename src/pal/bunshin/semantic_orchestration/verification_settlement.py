@@ -9,6 +9,7 @@ from pal.bunshin.semantic_orchestration.verification_policy import _verification
 from pal.bunshin.swe_verification import infer_repair_target_modules, verification_finding_route_errors
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -515,12 +516,46 @@ def _publish_repair_evidence(
     return defect_kind, fingerprint, module_node_id, repair_node_ids, repair_ref, target_modules
 
 
+_SNAPSHOT_DELIVERY_HINT = re.compile(r"Output snapshot: \S+")
+
+
+def _stable_failure_evidence(item: Any) -> dict[str, Any] | None:
+    """Stable execution-result content for one failing command/lsp receipt.
+
+    Oversized reruns deliver output through a fresh random snapshot file whose
+    path lands in output_text, and structured shell results carry volatile
+    bookkeeping such as session identifiers; neither changes failure meaning.
+    Return None for checks that succeeded.
+    """
+    structured = dict(item.get("structured") or {})
+
+    def stable(value: Any) -> str:
+        return _SNAPSHOT_DELIVERY_HINT.sub("Output snapshot: <snapshot>", str(value or ""))
+
+    exit_code = structured.get("exit_code")
+    if exit_code is None:
+        exit_code = structured.get("returncode")
+    if item.get("ok") is True and exit_code in (None, 0):
+        return None
+    output = stable(item.get("output_text"))
+    if not output:
+        output = stable(structured.get("stdout")) + "\n" + stable(structured.get("stderr"))
+    return {
+        "tool_name": item.get("tool_name"),
+        "exit_code": exit_code,
+        "signal": structured.get("signal") or 0,
+        "output": output,
+    }
+
+
 def _repair_failure_fingerprint(outcome: str, findings: Any, receipts: Any) -> str:
     """Compare failure meaning, not fresh finding identities or receipt counts.
 
     Candidate trees are compared separately by no_progress_detected. Full
     receipts remain in the repair packet; successful checks and test writes
-    do not establish progress on an unchanged blocking failure.
+    do not establish progress on an unchanged blocking failure. Snapshot
+    delivery paths are normalized so an identical rerun of the same failing
+    command keeps one identity across rounds.
     """
     def canonical(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -534,15 +569,10 @@ def _repair_failure_fingerprint(outcome: str, findings: Any, receipts: Any) -> s
     for item in receipts:
         if item.get("kind") not in {"command", "lsp"}:
             continue
-        structured = dict(item.get("structured") or {})
-        exit_code = structured.get("exit_code")
-        if item.get("ok") is True and exit_code in (None, 0):
+        evidence = _stable_failure_evidence(item)
+        if evidence is None:
             continue
-        failures.add(canonical({
-            "tool_name": item.get("tool_name"),
-            "exit_code": exit_code,
-            "output": item.get("output_text") or item.get("output_sha256") or "",
-        }))
+        failures.add(canonical(evidence))
     return hashlib.sha256(canonical({
         "outcome": outcome, "findings": semantic_findings, "failures": sorted(failures),
     }).encode("utf-8")).hexdigest()

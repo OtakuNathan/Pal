@@ -22,6 +22,7 @@ from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.role_protocol import RoleAssignmentRequest, stable_hash
 from pal.bunshin.semantic_orchestration.role_inputs import _node_role_session_id, _verifier_reference_refs
+from pal.bunshin.semantic_orchestration.verification_settlement import _repair_failure_fingerprint
 from pal.bunshin.verification import VerificationService, VerificationStatus
 from pal.bunshin.review_findings import structured_findings
 from pal.execution.contracts import CapabilityCall
@@ -402,21 +403,16 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self._assert_restore_rolls_back(current_receipt_patch={"role_submission_payload_hash": "different-current-receipt"})
 
     def _settle_no_progress(self):
-        import hashlib
-        import json
-
         self._prepare_pending(submission=self.fx._submission([self.fx.fifo]), edit_corpus=False)
         # Seed the two prior identical observations, then let the real snapshot
         # and verdict path record the third observation as terminal no_progress.
         self.fx._git("add", "-A")
         tree = self.fx._git("write-tree").strip()
-        fingerprint = hashlib.sha256(json.dumps({
-            "outcome": self.submission["outcome"],
-            "findings": structured_findings(self.submission),
-            "changed_test_paths": [],
-            "receipt_hashes": [str(item.get("output_sha256") or "") for item in self.submission["tool_receipts"]],
-            "candidate_tree": tree,
-        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        fingerprint = _repair_failure_fingerprint(
+            str(self.submission["outcome"] or "").strip(),
+            structured_findings(self.submission),
+            self.submission["tool_receipts"],
+        )
         self._enter_triage(extra_payload={"failure_history": [
             {"finding_fingerprint": fingerprint, "candidate_tree_hash": tree},
             {"finding_fingerprint": fingerprint, "candidate_tree_hash": tree},
