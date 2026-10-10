@@ -7,6 +7,7 @@ from pal.execution.generated_tool_models import (
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import signal
 import shutil
@@ -85,6 +86,8 @@ class _ShellExecution:
     output_error: str = ""
     output_error_code: str = ""
     started: bool = True
+    stdout_sha256: str = ""
+    stderr_sha256: str = ""
 
 
 @dataclass(eq=False)
@@ -148,7 +151,13 @@ class _ShellProcessSupervisor:
                         self._proc = None
             output_error = ""
             output_error_code = ""
+            stream_digests = {}
             try:
+                # Hash complete bytes before snapshotting or preview budgeting.
+                # Presentation paths and decoding must never define execution identity.
+                for label, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+                    with path.open("rb") as stream:
+                        stream_digests[label] = hashlib.file_digest(stream, "sha256").hexdigest()
                 captured = self.capture_output(stdout_path, stderr_path) if self.capture_output else None
             except Exception as exc:
                 captured = None
@@ -176,6 +185,8 @@ class _ShellProcessSupervisor:
                 snapshot_text=captured[1] if captured else "",
                 output_error=output_error,
                 output_error_code=output_error_code,
+                stdout_sha256=stream_digests.get("stdout", ""),
+                stderr_sha256=stream_digests.get("stderr", ""),
             )
             return self.execution
 
@@ -375,6 +386,8 @@ class ShellExecTool:
             "returncode": execution.returncode,
             "stdout": execution.stdout,
             "stderr": execution.stderr,
+            "stdout_sha256": execution.stdout_sha256,
+            "stderr_sha256": execution.stderr_sha256,
             "stdout_truncated": bool(execution.snapshot_refs),
             "stderr_truncated": bool(execution.snapshot_refs),
             "timeout_ms": timeout_ms,

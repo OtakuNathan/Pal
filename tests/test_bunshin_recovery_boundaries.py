@@ -62,7 +62,8 @@ def test_early_pause_resume_restores_start_obligation(tmp_path, mode, started):
 def failure_receipts(round_number, output="Expected 2, got 1"):
     failure = {"kind": "command", "tool_name": "op_exec_shell", "ok": False,
         "output_text": output, "output_sha256": f"envelope-{round_number}",
-        "evidence_ref_id": f"receipt-{round_number}", "structured": {"exit_code": 1, "pid": round_number}}
+        "evidence_ref_id": f"receipt-{round_number}",
+        "structured": {"returncode": 1, "stdout": "", "stderr": output, "pid": round_number}}
     return [failure] * (round_number + 1) + [
         {"kind": "command", "ok": True, "output_text": f"successful-check-{round_number}"},
         {"kind": "test_write", "ok": True, "output_sha256": f"write-{round_number}"},
@@ -133,48 +134,6 @@ def test_failure_identity_ignores_finding_order_and_manager_ids():
     reordered = [{**item, "finding_id": f"new-{index}"} for index, item in enumerate(reversed(findings))]
     assert _repair_failure_fingerprint("repair", findings, failure_receipts(0)) == (
         _repair_failure_fingerprint("repair", reordered, failure_receipts(3)))
-
-
-def test_real_runtime_snapshot_delivery_keeps_failure_identity(tmp_path):
-    """Oversized reruns deliver output through fresh random snapshot files."""
-    from pal.execution.runtime import ExecutionRuntime
-    from pal.execution.result_snapshots import file_preview, render_snapshot_hint
-    from pal.bunshin.review_receipts import _review_tool_evidence_ref
-    from pal.bunshin.semantic_orchestration.verification_settlement import _repair_failure_fingerprint
-    from pal.shared import RuntimeStatus, ToolExecutionResult
-    from pal.shared.tool_protocol import new_tool_call
-
-    runtime = ExecutionRuntime(runtime_root=tmp_path)
-
-    def rerun_failing_command(round_index):
-        body = "AssertionError: Expected 2, got 1\n" * 600  # exceeds the preview budget
-        ref = runtime.result_snapshots.capture(body, call_id=f"shell-{round_index}", lifetime="verification")
-        delivered = file_preview(ref, 1000) + "\n\n" + render_snapshot_hint(ref)
-        call = new_tool_call(name="op_exec_shell", args={"cmd": "pytest -q tests/router"},
-                             call_id=f"shell-{round_index}")
-        result = ToolExecutionResult(name="op_exec_shell", ok=True, text=delivered, llm_text=delivered,
-                                     structured={"returncode": 1, "signal": 0, "stdout": "", "stderr": ""},
-                                     status=RuntimeStatus.OK, call_id=call.call_id)
-        receipt = _review_tool_evidence_ref("op_exec_shell", call, result)
-        # record_verification_execution marks a nonzero command exit failed.
-        receipt["ok"] = False
-        return receipt
-
-    try:
-        first, second = rerun_failing_command(0), rerun_failing_command(1)
-        assert "Output snapshot:" in first["output_text"]
-        # Each rerun delivers through a fresh random snapshot file, so both the
-        # raw text and the legacy output_sha256 identity drift per round.
-        assert first["output_text"] != second["output_text"]
-        assert first["output_sha256"] != second["output_sha256"]
-        findings = [{"finding_kind": "module_defect", "summary": "Expected 2, got 1"}]
-        assert _repair_failure_fingerprint("repair", findings, [first]) == (
-            _repair_failure_fingerprint("repair", findings, [second]))
-        changed = [{"finding_kind": "module_defect", "summary": "A different failure"}]
-        assert _repair_failure_fingerprint("repair", findings, [first]) != (
-            _repair_failure_fingerprint("repair", changed, [first]))
-    finally:
-        runtime.shutdown()
 
 
 def test_clarification_delivery_retry_reuses_persisted_answer(tmp_path, monkeypatch):

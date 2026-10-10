@@ -380,6 +380,8 @@ ExecutionShellExecShellExecCapabilityMixinShellOutput = _strict_model(
         'stderr': (str, Field(None)),
         'stdout_truncated': (bool, Field(None)),
         'stderr_truncated': (bool, Field(None)),
+        'stdout_sha256': (str, Field(None)),
+        'stderr_sha256': (str, Field(None)),
         'timeout_ms': (int, Field(None)),
         'display_text': (str, Field(None)),
         'timed_out': (bool, Field(None)),
