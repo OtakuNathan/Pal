@@ -4984,7 +4984,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             self.assertIn("identity-light executor work", start_descriptor.guidance.use_when)
             self.assertIn("not by prose length or step count", start_descriptor.guidance.use_when)
             self.assertIn("strongly bound to Pal's relationship with the user", start_descriptor.guidance.do_not_use_when)
-            self.assertIn("In the gray area Pal handles the task directly", start_descriptor.guidance.do_not_use_when)
+            self.assertIn("delegated repository investigation can use direct mode", start_descriptor.guidance.do_not_use_when)
+            self.assertEqual(start_schema["properties"]["execution_mode"]["default"], "planned")
+            self.assertEqual(start_schema["properties"]["execution_mode"]["enum"], ["planned", "direct"])
+            self.assertIn("software_engineering new_requirement", start_descriptor.guidance.use_when)
+            self.assertIn("skips Architect and Architect Reviewer", start_descriptor.guidance.use_when)
+            self.assertIn("same complete task and frozen source inputs", start_descriptor.guidance.use_when)
             decision_schema = next(
                 descriptor.InputModel.model_json_schema(mode="validation")
                 for descriptor in core.context.capability_registry.descriptors.values()

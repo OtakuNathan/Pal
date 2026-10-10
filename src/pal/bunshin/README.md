@@ -17,6 +17,14 @@ Package layout:
 All built-in roles, including Architect, run through the Pal worker and use
 Pal's configured LLM endpoints and tool surface.
 
+`start_workflow.execution_mode` defaults to `planned`. For software-engineering
+`new_requirement` workflows, `direct` binds the complete task to one repository
+Coder/Verifier pair and skips Architect, Architecture Reviewer, and architecture
+approval. The Manager supplies a single-node graph solely as execution metadata;
+no role authors an execution plan. Both roles receive the same immutable task
+ledger and work view. See [direct mode](../../../docs/bunshin_direct_mode.md) for
+inputs, reports, clarification, recovery, and activation.
+
 Pal workers enqueue events into a bounded FIFO. One sender
 task owns nonblocking JSON-line writes to stdout; model and tool execution do
 not await progress delivery. A full queue applies asynchronous backpressure.

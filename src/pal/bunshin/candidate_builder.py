@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.workspace_paths import path_scope_matches
 
 from pal.shared.tool_protocol import ToolCallIR
 
@@ -41,6 +42,7 @@ CANDIDATE_BUILDER_CAPABILITIES = (
     "op_bunshin_candidate_submit",
     "op_bunshin_candidate_report_architecture_defect",
     "op_bunshin_candidate_request_module_split",
+    "op_bunshin_candidate_report_task_blocker",
 )
 
 
@@ -116,6 +118,18 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 
+CANDIDATE_BUILDER_TOOL_SPECS["op_bunshin_candidate_report_task_blocker"] = {
+    "alias": "report_task_blocker",
+    "guidance": {
+        "purpose": "Return a conflicting or underspecified direct task to Pal for clarification.",
+        "use_when": "The original task and confirmed decisions cannot be implemented without a decision from Pal. Explain the conflict and the exact question.",
+        "do_not_use_when": "Ordinary debugging, test failures, or implementation choices within the task remain the coder's responsibility.",
+        "failure_next_steps": "Correct the blocker explanation and resubmit.",
+        "search_objects": ("task", "blocker"),
+    },
+    "InputModel": BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput,
+}
+
 for _tool_name, _tool_spec in CANDIDATE_BUILDER_TOOL_SPECS.items():
     assert_authoring_schema_budget(
         _tool_spec["InputModel"].model_json_schema(mode="validation", union_format="primitive_type_array"),
@@ -143,6 +157,10 @@ async def candidate_builder_tool_result(
     name = str(call.name or "")
     progress = _SubmissionProgress()
     try:
+        if name == "op_bunshin_candidate_report_task_blocker":
+            if workspace.get("execution_mode") != "direct":
+                raise ValueError("task blocker is only available in direct mode")
+            return _submit_candidate(call, workspace, produced_artifacts, progress=progress, status="task_blocked")
         if name == "op_bunshin_candidate_submit":
             return _submit_candidate(call, workspace, produced_artifacts, progress=progress, status="candidate_ready")
         if name == "op_bunshin_candidate_report_architecture_defect":
@@ -203,6 +221,12 @@ def _submit_candidate(
                     )
                 ],
             ) from exc
+        if work_view.get("execution_mode") == "direct":
+            repo = Path(str(workspace["repo_path"])).resolve()
+            for relative in work_view.get("deliverable_paths", []):
+                target = repo / relative
+                if target.is_symlink() or not target.is_file() or not target.resolve().is_relative_to(repo):
+                    raise ValueError(f"required deliverable is missing or unsafe: {relative}")
         if args:
             raise ToolRejectedError(
                 "submit_candidate takes no arguments",
@@ -316,7 +340,7 @@ def validate_candidate_submission(
     ):
         raise ValueError("candidate report work_items must be an object array")
     status = str(value.get("status") or "")
-    if status not in {"candidate_ready", "architecture_defect", "module_split_request"}:
+    if status not in {"candidate_ready", "architecture_defect", "module_split_request", "task_blocked"}:
         raise ValueError("candidate report has invalid status")
     _validate_reported_changed_paths(value.get("files_changed"), work_view=work_view)
     if status != "candidate_ready":
@@ -387,8 +411,7 @@ def _git_paths(repo_path: Path, *args: str) -> list[str]:
 
 
 def _scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
-    target = str(scope.get("path") or "").replace("\\", "/").strip("/")
-    return path == target if str(scope.get("kind") or "") == "file" else path == target or path.startswith(target + "/")
+    return path_scope_matches(path, scope)
 
 
 def _validate_defect_args(args: Mapping[str, Any], *, work_view: Mapping[str, Any]) -> None:

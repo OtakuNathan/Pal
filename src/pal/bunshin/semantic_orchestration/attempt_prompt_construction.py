@@ -136,5 +136,5 @@ class PromptConstruction:
             raise ValueError(
                 f"FamilyBindingArtifact has no pinned role profile for role {role}"
             )
-        pinned_profile = _role_mode_profile_payload(pinned_profile, mode=mode)
+        pinned_profile = _role_mode_profile_payload(pinned_profile, mode=mode, execution_mode=str(workspace.get("execution_mode") or "planned"))
         return InitialRolePrompt(base_manifest_ref=base_manifest_ref, input_fingerprint=input_fingerprint, pack=pack, pinned_profile=pinned_profile, revision_scope=revision_scope)

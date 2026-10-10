@@ -424,7 +424,14 @@ class VerificationService:
                     "candidate_tree_hash": candidate_tree_hash,
                 }
             )
-            if correction_errors and verification_correction_count(node) >= MAX_VERIFICATION_CORRECTIONS:
+            if (node.payload.get("execution_mode") == "direct"
+                    and defect_kind in {DefectKind.CONTRACT, DefectKind.ARCHITECTURE, DefectKind.REQUIREMENTS}):
+                from pal.bunshin.direct_contract import task_requirement_blocker
+                action_type = "ENTER_TRIAGE"
+                payload = {**common, "repair_bill_ref": repair_bill_ref.to_dict(),
+                           "failure_history": history,
+                           "blocker": task_requirement_blocker(self.artifacts, verification_ref)}
+            elif correction_errors and verification_correction_count(node) >= MAX_VERIFICATION_CORRECTIONS:
                 action_type = "ENTER_TRIAGE"
                 payload = {
                     **common,

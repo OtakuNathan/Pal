@@ -58,12 +58,15 @@ BUNSHIN_START_WORKFLOW_PURPOSE = (
 )
 
 BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
-    search_enum_fields=("operation",),
+    search_enum_fields=("operation", "execution_mode"),
     search_objects=('workflow', 'workflows'),
     purpose=BUNSHIN_START_WORKFLOW_PURPOSE,
     use_when=(
         "Use when the requested work is identity-light executor work: a medium-to-large or long-running project, work "
-        "that benefits from architect/coder/verifier gates, or a task the user explicitly asks Bunshin to perform. "
+        "that benefits from architect/coder/verifier gates, or sandboxed changes and investigation delegated to Bunshin. "
+        "Select execution_mode=direct for a clear task or agreed plan; use planned when architecture design is needed. "
+        "Direct mode supports software_engineering new_requirement workflows: it skips Architect and Architect Reviewer, "
+        "and gives Coder and Verifier the same complete task and frozen source inputs in an isolated repository workspace. "
         "Choose by identity binding and task nature, not by prose length or step count. Reuse known skill contracts, "
         "discovery results, and the user's existing approval for this workflow. Use search_skills only when relevant "
         "manuals still need discovery; read_tool is needed only for missing contract information. For newly selected "
@@ -73,9 +76,8 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
     ),
     do_not_use_when=(
         "Do not use for work strongly bound to Pal's relationship with the user, including conversation, Q&A, "
-        "check-ins, quizzes, personal technical discussion, a single-point code investigation, or reading code and "
-        "giving conclusions. In the gray area Pal handles the task directly unless the user explicitly requests Bunshin. "
-        "Do not inspect or implement the target in the foreground first. After acceptance, do not poll status or create "
+        "check-ins, quizzes, or personal technical discussion. A delegated repository investigation can use direct mode. "
+        "Do not inspect or implement a delegated target concurrently in the foreground. After acceptance, do not poll status or create "
         "a proactive polling task; callbacks deliver clarification, review, and completion events."
     ),
     failure_next_steps=(
@@ -127,6 +129,9 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
             "lifestyle.nutritionist. Required when task is omitted and immutable after "
             "Task creation."
         ),
+    )
+    execution_mode: Literal["planned", "direct"] = Field(
+        default="planned", description="For software_engineering new_requirement: direct runs one repository Coder/Verifier pair with the same full task and frozen inputs, skipping Architect and Architect Reviewer. Choose it for bounded changes, an agreed plan, or investigation; planned designs and reviews module contracts first. In task_spec, deliverable_paths optionally lists repository-relative report files to verify and deliver as attachments.",
     )
     operation: Literal[
         "new_requirement",
@@ -665,8 +670,8 @@ class BunshinPublicProvider:
         action_name="restart_execution",
         guidance=ToolGuidance(
             search_objects=('execution', 'executions', 'attempt', 'attempts'),
-            purpose="Discard the current execution attempt and restart from its accepted architecture.",
-            use_when="When execution policy or Coder behavior changed but the accepted architecture remains the intended baseline.",
+            purpose="Discard the current execution attempt and restart from its accepted architecture or direct task baseline.",
+            use_when="When execution policy or Coder behavior changed but the accepted architecture or direct task remains the intended baseline. Direct mode retains its pinned source snapshot and skips planning.",
             do_not_use_when="Not for architecture changes (start a new workflow). Not for transient failures (use resolve_bunshin_triage).",
             failure_next_steps="Correct invalid input; reconcile with read_bunshin_task_status before retrying.",
         ),

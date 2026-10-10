@@ -6,6 +6,7 @@ from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateSnapshot
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT, software_contract_projection
+from pal.bunshin.direct_contract import DIRECT_EXECUTION_ARTIFACT, report_only_changes
 from pal.bunshin.verification import repair_bill_semantic_view
 
 
@@ -32,6 +33,9 @@ class UnitWorkViewBuilder:
     def build(self, node: AggregateSnapshot) -> ArtifactRef:
         manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
         record = self.contracts.repository.artifacts.read_artifact_record(str(manifest_ref.get("sha256") or ""))
+        if record and record.get("artifact_type") == DIRECT_EXECUTION_ARTIFACT:
+            artifact = dict(self.contracts.artifacts.read_json(manifest_ref))
+            return self._build_skeleton_view(node, artifact_override=artifact)
         if record and str(record.get("artifact_type") or "") == CONTRACT_ARTIFACT:
             adapter = str(node.payload.get("execution_adapter") or "")
             if adapter == SOFTWARE_GIT_ADAPTER:
@@ -63,6 +67,21 @@ class UnitWorkViewBuilder:
         manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
         artifact = dict(self.contracts.artifacts.read_json(manifest_ref))
         adapter = str(node.payload.get("execution_adapter") or "")
+        if artifact.get("execution_mode") == "direct":
+            from pal.bunshin.skeleton import _git
+            from pathlib import Path
+            outputs = list(artifact.get("deliverable_paths") or [])
+            target = str(node.payload.get("candidate_digest") or "")
+            changed = _git(Path(str(node.payload["workspace_path"])), "diff", "--name-only", "-z",
+                           str(artifact["base_commit_sha"]), target, "--").split("\0")
+            report_only = report_only_changes(outputs, changed)
+            return self.contracts.artifacts.put_json(
+                {"execution_mode": "direct", "requirements_ref": artifact["requirements_ref"],
+                 "deliverable_paths": outputs, "report_only": report_only, "scenarios": {}, "entrypoints": []},
+                artifact_type="SystemDeliveryViewArtifact",
+                child_refs=((manifest_ref["sha256"], "task_binding"),
+                            (node.payload["candidate_ref"]["sha256"], "candidate")),
+            )
         if adapter == SOFTWARE_GIT_ADAPTER:
             full_contract = software_contract_projection(
                 dict(artifact.get("contract") or {})
@@ -172,6 +191,10 @@ class UnitWorkViewBuilder:
         bound_scenarios = dict(contract.get("scenarios") or {})
         payload = {
             "schema_version": "3",
+            "execution_mode": str(artifact.get("execution_mode") or "planned"),
+            "requirements_ref": dict(artifact.get("requirements_ref") or {}),
+            "deliverable_paths": list(artifact.get("deliverable_paths") or []),
+            "direct_reference_refs": dict(artifact.get("direct_reference_refs") or {}),
             "module_name": module_name,
             "graph_sink": bool(node.payload.get("graph_sink")),
             "context": dict(submission.get("context") or {}),

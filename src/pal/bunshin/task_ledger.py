@@ -66,7 +66,7 @@ class TaskRevisionAuthority(_StrictModel):
     question: str = Field(min_length=1)
     answer: str = Field(min_length=1)
     observed_at: str = Field(min_length=1)
-    origin: Literal["architect_user_clarification"]
+    origin: Literal["architect_user_clarification", "direct_user_clarification"]
 
     @field_validator("title", "question", "answer")
     @classmethod

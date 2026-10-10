@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.workspace_paths import path_scope_matches
 import os
 import shutil
 import subprocess
@@ -88,13 +89,20 @@ def _verification_workspace_from_prompt_pack(
     return review_workspace, review_scratch
 
 
-def _semantic_verifier_instruction(*, graph_sink: bool) -> str:
+def _semantic_verifier_instruction(*, graph_sink: bool, direct: bool = False) -> str:
     scratch_rule = (
         "Put every transient configure, build, and test output under the exact "
         "workspace.build_scratch_dir from your invocation pack (for example, pass that path to "
         "CMake with `-B`). Never create build output in the repository worktree; only durable "
         "verifier cases may be written under the bound verification corpus. "
     )
+    if direct:
+        return scratch_rule + (
+            "Verify the current Candidate against reference:task and the exact shared module_work_view. "
+            "Independently check requested report files and conclusions against original evidence, or run "
+            "focused behavioral checks for code changes. Regress prior findings, inspect the current delta, "
+            "and submit one evidence-backed outcome. No authored architecture or dependency assumptions apply."
+        )
     if graph_sink:
         return (
             scratch_rule
@@ -159,16 +167,7 @@ def _verification_corpus_files(
 
 
 def _semantic_path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
-    normalized = str(path).replace(os.sep, "/").strip("/")
-    target = str(scope.get("path") or "").replace(os.sep, "/").strip("/")
-    if not target:
-        return False
-    kind = str(scope.get("kind") or "").strip().lower()
-    if kind == "file":
-        return normalized == target
-    if kind == "directory":
-        return normalized == target or normalized.startswith(target + "/")
-    return False
+    return path_scope_matches(path, scope)
 
 
 def _ensure_workspace_directory(workspace: Path, relative_path: str) -> Path:

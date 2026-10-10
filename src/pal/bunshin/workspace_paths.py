@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Iterable
+from pathlib import PurePosixPath
+from typing import Any, Mapping
 
 
 SYSTEM_VERIFICATION_CORPUS_PATH = "tests/system/verifier"
@@ -11,6 +13,34 @@ ARCHITECT_AUTHORING_RELATIVE_PATH = (
 _REPOSITORY_CONTROL_ROOTS = frozenset(
     {".git", ".hg", ".svn", MANAGER_ARCHITECT_DIRECTORY}
 )
+
+
+def path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
+    """Match compiled scopes, including Manager-owned whole-repository scope.
+
+    Repository scope never grants access to control state or immutable inputs.
+    Role-owned overlays (notably verifier tests) are checked by the caller.
+    """
+    normalized = str(path).replace("\\", "/").strip("/")
+    target = str(scope.get("path") or "").replace("\\", "/").strip("/")
+    kind = str(scope.get("kind") or "").strip().lower()
+    if kind == "repository":
+        parsed = PurePosixPath(normalized)
+        return bool(target == "." and normalized and normalized not in {".", ".."}
+                    and not str(path).startswith(("/", "\\")) and ".." not in parsed.parts
+                    and parsed.as_posix() == normalized
+                    and not repository_path_targets_control_plane(normalized)
+                    and parsed.parts[0] != "inputs"
+                    and normalized not in {"coder_report.json", "producer_report.json"}
+                    and not normalized.startswith("tests/repository/verifier/")
+                    and normalized != "tests/repository/verifier")
+    if not target:
+        return False
+    if kind == "file":
+        return normalized == target
+    if kind == "directory":
+        return normalized == target or normalized.startswith(target + "/")
+    return False
 
 
 def repository_path_targets_control_plane(path: str) -> bool:

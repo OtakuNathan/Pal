@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.workspace_paths import path_scope_matches
 from pal.bunshin.workspace_git import _git as _git
 from pal.bunshin.workspace_git import _git_bytes as _git_bytes
 from pal.bunshin.workspace_git import git_changed_paths as git_changed_paths
@@ -197,16 +198,7 @@ def _validate_skeleton_candidate_paths(
 
 
 def _path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
-    normalized = str(path).replace(os.sep, "/").strip("/")
-    target = str(scope.get("path") or "").replace(os.sep, "/").strip("/")
-    kind = str(scope.get("kind") or "")
-    if not target:
-        return False
-    if kind == "file":
-        return normalized == target
-    if kind == "directory":
-        return normalized == target or normalized.startswith(target + "/")
-    return False
+    return path_scope_matches(path, scope)
 
 
 def _matches_any(path: str, patterns: list[str]) -> bool:

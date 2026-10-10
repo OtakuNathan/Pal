@@ -17,7 +17,7 @@ from pal.bunshin.contracts import (
     DeferredEffectError,
     PermanentEffectError,
 )
-from pal.bunshin.delivery import DeliveryReceipt
+from pal.bunshin.delivery import DeliveryReceipt, DirectDeliveryReceipt
 from pal.bunshin.dag_scheduling import DagScheduler
 from pal.bunshin.epoch_compilation import ExecutionCompiler
 from pal.bunshin.machine_dsl import ControlDisposition, ControlIntent
@@ -989,40 +989,55 @@ class BunshinOutboxProcessor:
         if normalized_status == "completed" and result_sha:
             record = self.repository.artifacts.read_artifact_record(result_sha)
             if record and str(record.get("artifact_type") or "") == "DeliveryReceiptArtifact":
-                delivery_receipt = DeliveryReceipt.model_validate(
-                    self.service.artifacts.read_json(result_artifact_ref)
-                )
-                patch_bytes = self.service.artifacts.read_bytes(delivery_receipt.patch_ref)
-                if (
-                    hashlib.sha256(patch_bytes).hexdigest()
-                    != delivery_receipt.patch_content_sha256
-                ):
-                    raise IOError("delivery patch content hash does not match its receipt")
-                patch_record = self.repository.artifacts.read_artifact_record(
-                    str(delivery_receipt.patch_ref.get("sha256") or "")
-                )
-                if (
-                    patch_record is None
-                    or str(patch_record.get("artifact_type") or "")
-                    != "GitFormatPatchArtifact"
-                ):
-                    raise ValueError("delivery patch artifact metadata is unavailable")
-                patch_path = Path(str(patch_record.get("storage_path") or ""))
-                if not patch_path.is_file():
-                    raise FileNotFoundError("delivery patch artifact file is unavailable")
-                friendly_name = Path(delivery_receipt.patch_path).name
-                summary = "Bunshin workflow completed. Verified Git patch attached."
-                attachments.append(
-                    {
-                        "path": str(patch_path),
-                        "file_name": friendly_name,
-                        "mime_type": "text/x-patch",
-                        "caption": (
-                            "Bunshin verified patch for commit "
-                            f"{delivery_receipt.commit_sha[:12]}"
-                        ),
-                    }
-                )
+                payload = self.service.artifacts.read_json(result_artifact_ref)
+                if payload.get("schema_version") == "4":
+                    direct_receipt = DirectDeliveryReceipt.model_validate(payload)
+                    for item in direct_receipt.files:
+                        content = self.service.artifacts.read_bytes(item.artifact_ref)
+                        if hashlib.sha256(content).hexdigest() != item.content_sha256:
+                            raise IOError("delivery file content hash does not match its receipt")
+                        file_record = self.repository.artifacts.read_artifact_record(item.artifact_ref["sha256"])
+                        if not file_record or file_record["artifact_type"] != "VerifiedReportArtifact":
+                            raise ValueError("verified report artifact metadata is unavailable")
+                        attachments.append({"path": str(file_record["storage_path"]),
+                            "file_name": Path(item.repository_path).name, "mime_type": item.mime_type,
+                            "caption": f"Verified report: {item.repository_path}"})
+                    delivery_receipt = direct_receipt.patch_receipt
+                    summary = "Bunshin workflow completed. Verified reports attached."
+                else:
+                    delivery_receipt = DeliveryReceipt.model_validate(payload)
+                if delivery_receipt is not None:
+                    patch_bytes = self.service.artifacts.read_bytes(delivery_receipt.patch_ref)
+                    if (
+                        hashlib.sha256(patch_bytes).hexdigest()
+                        != delivery_receipt.patch_content_sha256
+                    ):
+                        raise IOError("delivery patch content hash does not match its receipt")
+                    patch_record = self.repository.artifacts.read_artifact_record(
+                        str(delivery_receipt.patch_ref.get("sha256") or "")
+                    )
+                    if (
+                        patch_record is None
+                        or str(patch_record.get("artifact_type") or "")
+                        != "GitFormatPatchArtifact"
+                    ):
+                        raise ValueError("delivery patch artifact metadata is unavailable")
+                    patch_path = Path(str(patch_record.get("storage_path") or ""))
+                    if not patch_path.is_file():
+                        raise FileNotFoundError("delivery patch artifact file is unavailable")
+                    friendly_name = Path(delivery_receipt.patch_path).name
+                    summary = "Bunshin workflow completed. Verified reports and Git patch attached." if attachments else "Bunshin workflow completed. Verified Git patch attached."
+                    attachments.append(
+                        {
+                            "path": str(patch_path),
+                            "file_name": friendly_name,
+                            "mime_type": "text/x-patch",
+                            "caption": (
+                                "Bunshin verified patch for commit "
+                                f"{delivery_receipt.commit_sha[:12]}"
+                            ),
+                        }
+                    )
         revision_id = str(workflow.payload.get("architecture_revision_id") or "").strip()
         resolved_interactions = (
             [
@@ -1108,6 +1123,24 @@ class BunshinOutboxProcessor:
         workflow = self._effect_snapshot(effect)
         request = workflow_request_from_snapshot(self.service, workflow)
         operation = str(request.get("operation") or "new_requirement")
+        if operation == "new_requirement" and request.get("execution_mode") == "direct":
+            from pal.bunshin.direct_execution import prepare_direct_execution
+            existing_epoch = str(workflow.payload.get("execution_epoch_id") or "")
+            if existing_epoch:
+                return {"epoch_id": existing_epoch, "node_ids": [
+                    item.aggregate_id for item in self.repository.queries.list_workflow_snapshots(workflow.workflow_id)
+                    if item.aggregate_type == AggregateType.DAG_NODE_RUN and item.payload.get("epoch_id") == existing_epoch]}
+            manifest_ref = dict(workflow.payload.get("direct_execution_ref") or {})
+            if not manifest_ref:
+                base_ref = dict(request.get("input_artifact_ref") or {})
+                base = self.service.artifacts.read_json(base_ref) if base_ref else None
+                if base is not None and base.get("execution_mode") != "direct":
+                    raise ValueError("direct restart source must be a direct execution artifact")
+                manifest_ref = prepare_direct_execution(self.service, workflow.workflow_id, request, base_artifact=base).to_dict()
+                self._link_workflow(workflow.workflow_id, "BIND_DIRECT_EXECUTION",
+                                    {"direct_execution_ref": manifest_ref}, str(effect["effect_key"]))
+            return self._compile_execution(workflow_id=workflow.workflow_id, manifest_ref=manifest_ref,
+                                           causation_key=str(effect["effect_key"]))
         if operation == "new_requirement":
             revision_id = _derived_id("arch", str(effect["effect_key"]))
             with self.repository.transaction() as connection:
@@ -1638,7 +1671,9 @@ class BunshinOutboxProcessor:
                 {
                     "task_id": task_id,
                     "workflow_id": replacement_id,
-                    "operation": "review_then_execute",
+                    "operation": str(request.get("operation") or "review_then_execute"),
+                    "execution_mode": str(request.get("execution_mode") or "planned"),
+                    "references": list(request.get("references") or []),
                     "artifact_ref": manifest_ref,
                     "requirements_ref": requirements_ref,
                     "goal": str(request.get("goal") or ""),

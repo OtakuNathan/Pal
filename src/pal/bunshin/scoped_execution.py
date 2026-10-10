@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.workspace_paths import path_scope_matches
 from pal.bunshin.review_receipts import _review_tool_evidence_ref
 
 from pal.shared.tool_protocol import ToolCallIR
@@ -1151,16 +1152,8 @@ def _guard_scoped_workspace_mutation(
     return _tool_call_with_effective_args(call, args), None
 
 
-def _workspace_scope_matches(path: str, scope: dict[str, Any]) -> bool:
-    target = str(scope.get("path") or "").replace("\\", "/").strip("/")
-    kind = str(scope.get("kind") or "").strip().lower()
-    if not target:
-        return False
-    if kind == "file":
-        return path == target
-    if kind == "directory":
-        return path == target or path.startswith(target + "/")
-    return False
+def _workspace_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
+    return path_scope_matches(path, scope)
 
 
 def _tool_call_with_effective_args(

@@ -124,6 +124,7 @@ def _role_mode_profile_payload(
     profile_payload: Mapping[str, Any],
     *,
     mode: str,
+    execution_mode: str = "planned",
 ) -> dict[str, Any]:
     """Compile one role-mode profile before it enters the immutable prompt pack."""
 
@@ -132,6 +133,24 @@ def _role_mode_profile_payload(
         dict(compiled.get("metadata") or {}).get("mode_fragments") or {}
     )
     fragment = dict(mode_fragments.get(str(mode)) or {})
+    if execution_mode == "direct":
+        metadata = dict(compiled.get("metadata") or {})
+        if not metadata.get("direct_execution"):
+            raise ValueError("pinned role profile does not support direct execution")
+        fragment = dict(metadata.get("direct_fragments") or {})
+        role = dict(compiled.get("role") or {})
+        role["truth_sources"] = [
+            {"source": "task_ledger", "authority": "normative", "note": "Complete original task and confirmed revisions."},
+            {"source": "module_work_view", "authority": "derived", "note": "Repository scope and delivery binding."},
+            {"source": "workspace_code", "authority": "evidence", "note": "Baseline and current Candidate."},
+            {"source": "checklist", "authority": "cursor", "note": "Execution progress only."},
+        ]
+        role["playbook"] = {"steps": [
+            {"key": "inspect_task", "instruction": "Read the complete task and inspect relevant source and evidence.", "done_when": "Task, constraints, outputs and focused checks are understood."},
+            {"key": "perform_work", "instruction": "Implement or independently verify the bound task; maintain evidence and findings.", "done_when": "All required work and current-Candidate checks are complete."},
+            {"key": "submit", "instruction": "Inspect final evidence and complete this checklist item before semantic submission.", "done_when": "The outcome matches the task and observed evidence."},
+        ]}
+        compiled["role"] = role
     for name in (
         "identity_fragment",
         "behavior_fragment",

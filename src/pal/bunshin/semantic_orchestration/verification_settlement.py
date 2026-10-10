@@ -186,7 +186,10 @@ class VerificationSettlement:
         *, routing_errors: list[str] | None = None,
     ) -> None:
         with self.repository.transaction() as connection:
-            if blocking_unknown or blocking_no_progress:
+            direct_requirement = (node.payload.get("execution_mode") == "direct"
+                and status == VerificationStatus.FAIL
+                and defect_kind in {DefectKind.CONTRACT, DefectKind.ARCHITECTURE, DefectKind.REQUIREMENTS})
+            if blocking_unknown or blocking_no_progress or direct_requirement:
                 coordinator.require_node_triage(
                     workflow_id=node.workflow_id,
                     node_name=node_name,

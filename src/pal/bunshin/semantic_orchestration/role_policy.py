@@ -74,6 +74,11 @@ def apply_role_capability_policy(
         }.get(activation.role)
     if allowed_authoring is None:
         return pack
+    if activation.role == OrchestrationRole.IMPLEMENTATION:
+        if dict(pack.workspace or {}).get("execution_mode") == "direct":
+            allowed_authoring.difference_update({"op_bunshin_candidate_report_architecture_defect", "op_bunshin_candidate_request_module_split"})
+        else:
+            allowed_authoring.discard("op_bunshin_candidate_report_task_blocker")
     allowed_authoring.add("op_bunshin_update_checklist")
     current.update(allowed_authoring)
     forbidden_writes = {

@@ -279,7 +279,7 @@ class BunshinProfile:
             display_name=display_name,
             profile_group=str(payload.get("profile_group") or metadata.get("profile_group") or "general").strip() or "general",
             identity_fragment=str(payload.get("identity_fragment") or ""),
-            behavior_fragment=str(payload.get("behavior_fragment") or ""),
+            behavior_fragment=_with_engineering_fragment(str(payload.get("behavior_fragment") or ""), metadata),
             output_contract_fragment=str(payload.get("output_contract_fragment") or ""),
             preferred_endpoint_id=str(payload.get("preferred_endpoint_id") or metadata.get("preferred_endpoint_id") or "").strip(),
             capability_groups=tuple(_string_list(payload.get("capability_groups"))),
@@ -842,3 +842,10 @@ def _profile_key(profile: BunshinProfile) -> tuple[str, str]:
 
 def _profile_scope(profile_group: str) -> str:
     return str(profile_group or "general").strip().replace("/", ".") or "general"
+
+
+def _with_engineering_fragment(behavior: str, metadata: Mapping[str, Any]) -> str:
+    shared = str(metadata.get("engineering_fragment") or "").strip()
+    if shared and shared not in behavior:
+        return behavior.rstrip() + "\n\n" + shared
+    return behavior

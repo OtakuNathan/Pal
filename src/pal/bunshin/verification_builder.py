@@ -374,8 +374,13 @@ def effective_verification_policy(
         if isinstance(item, Mapping)
     ]
     entrypoint_kinds = {str(item.get("kind") or "").strip() for item in entrypoints}
+    direct = work_view.get("execution_mode") == "direct"
+    if direct and delivery.get("report_only"):
+        source["require_warning_clean"] = False
+        source["lsp_policy"] = "never"
+        source["require_lsp"] = False
     require_consumer_probe = False
-    require_dogfood = sink
+    require_dogfood = sink and not direct
     require_platform_probe = sink and "platform_probe" in entrypoint_kinds
     historical_regressions = historical_repair_checklist_items(work_view)
     lsp_applicability = compile_lsp_applicability(source, workspace_preparation)
@@ -387,14 +392,14 @@ def effective_verification_policy(
         "warning_clean",
     }
     allowed_obligations.add("candidate_delta_review")
-    if (str(source.get("lsp_policy") or "") == "when_available"
-            and not lsp_applicability["required"]):
+    if ((direct and delivery.get("report_only")) or (
+            str(source.get("lsp_policy") or "") == "when_available" and not lsp_applicability["required"])):
         allowed_obligations.discard("lsp")
     if historical_regressions:
         allowed_obligations.add("historical_regressions")
     if mode == "module" or require_consumer_probe:
         allowed_obligations.add("consumer_probe")
-    if require_dogfood:
+    if require_dogfood or direct:
         allowed_obligations.add("public_surface_dogfood")
     if require_platform_probe:
         allowed_obligations.add("platform_probe")

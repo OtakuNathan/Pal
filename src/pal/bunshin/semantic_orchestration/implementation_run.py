@@ -117,6 +117,32 @@ class ImplementationRun:
             view_ref, work_view,
         )
         current = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
+        if status == "task_blocked" or (
+            node.payload.get("execution_mode") == "direct" and status in {"architecture_defect", "module_split_request"}
+        ):
+            from pal.bunshin.workflow_runtime import WorkflowCoordinator
+            from pal.bunshin.direct_contract import task_requirement_blocker
+            if node.payload.get("execution_mode") != "direct":
+                raise ValueError("task blocker requires direct mode")
+            with self.repository.transaction() as connection:
+                WorkflowCoordinator(self.repository).require_node_triage(
+                    workflow_id=node.workflow_id, node_name=str(node.payload["module_name"]),
+                    unit_of_work=connection,
+                )
+                (connection or self.repository).transitions.dispatch(
+                    ActionEnvelope(
+                        action_type="ENTER_TRIAGE", workflow_id=node.workflow_id,
+                        aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=node.aggregate_id,
+                        actor=invocation_id, expected_version=current.version,
+                        idempotency_key=f"direct-blocker:{node.aggregate_id}:{report_ref.sha256}",
+                        payload={"finding_artifact_ref": report_ref.to_dict(),
+                                 "blocker": task_requirement_blocker(self.artifacts, report_ref)},
+                    ),
+                    **self.assignment_identity.role_submission_settlement(
+                        effect, assignment_id=self.assignment_identity.terminal_role_assignment_id(terminal)),
+                )
+            self.repository.leases.release_lease(lease_resource, invocation_id, fencing_token)
+            return {"provider_request_id": invocation_id, "result_artifact_ref": report_ref.to_dict()}
         if status in {"architecture_defect", "module_split_request"}:
             self.repository.transitions.dispatch(
                 ActionEnvelope(
@@ -313,6 +339,14 @@ class ImplementationRun:
                 "micro-plan and use its next action as the work driver. Implement the current bound Module Protocol from the Accepted "
                 "Skeleton, run the minimum focused checks, and submit the Candidate. Use reference:task only as the final fallback for "
                 "exact product intent that the local contract does not resolve."
+            )
+        if work_view.get("execution_mode") == "direct":
+            references.update({name: _ref_from_mapping(ref) for name, ref in
+                               dict(work_view.get("direct_reference_refs") or {}).items()})
+            instruction = (
+                "Read reference:task and reference:module_work_view as the complete task and repository binding. "
+                "Use a compact checklist, perform the task within its scope, run focused checks and submit_candidate. "
+                "Repair every routed finding when present. Report task contradictions with report_task_blocker."
             )
         path_policy = dict(node.payload.get("path_policy") or {})
         developer_test_path = str(

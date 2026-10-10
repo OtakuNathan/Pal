@@ -46,6 +46,7 @@ class WorkspacePreparation:
         workspace = dict(workspace_override or request.get("workspace") or {})
         if not workspace:
             workspace = {"kind": "new_project", "project_name": f"workflow-{snapshot.workflow_id}"}
+        workspace["execution_mode"] = str(request.get("execution_mode") or "planned")
         # The repository source the Manager-prepared role workspace is
         # cloned or copied from; captured before preparation because the
         # prepared workspace always carries a repo_path, even when it was

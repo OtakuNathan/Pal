@@ -69,13 +69,13 @@ class SkeletonEpochCompiler:
             str(name): dict(value or {})
             for name, value in dict(submission.get("scenarios") or {}).items()
         }
-        if not scenarios:
+        if not scenarios and artifact.get("execution_mode") != "direct":
             raise ValueError("software ContractArtifact has no end-to-end verification scenarios")
         requirements = {
             str(name): dict(value or {})
             for name, value in dict(submission.get("requirements") or {}).items()
         }
-        if not requirements:
+        if not requirements and artifact.get("execution_mode") != "direct":
             raise ValueError("software ContractArtifact has no requirement mappings")
         topology_ref, module_refs = self.publish_module_contracts(manifest_ref, artifact, modules, scenarios, requirements, module_dependencies)
         self.publish_epoch(actor, artifact, epoch_id, graph, manifest_ref, topology_ref, workflow_id)
@@ -212,6 +212,8 @@ class SkeletonEpochCompiler:
             module_refs[name] = self.contracts.artifacts.put_json(
                 {
                     "module_name": name,
+                    **({"requirements_ref": artifact["requirements_ref"], "execution_mode": "direct"}
+                       if artifact.get("execution_mode") == "direct" else {}),
                     "module": semantic_module,
                     "paths": paths,
                     "contract_file_hashes": {
@@ -245,6 +247,9 @@ class SkeletonEpochCompiler:
         workspaces: dict[str, dict[str, str]],
     ) -> None:
         for name in sorted(unit_node_ids):
+            if (graph.nodes[name].satellite_data.get("execution_mode") == "direct"
+                    and self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, unit_node_ids[name]) is not None):
+                continue
             paths = dict(graph.nodes[name].workspace_policy)
             self.repository.transitions.dispatch(
                 _action(
@@ -261,6 +266,7 @@ class SkeletonEpochCompiler:
                         "unit_id": name,
                         "module_name": name,
                         "module_responsibility": module_responsibilities[name],
+                        "execution_mode": str(graph.nodes[name].satellite_data.get("execution_mode") or "planned"),
                         "node_kind": "unit",
                         "unit_contract_ref": module_refs[name].to_dict(),
                         "architecture_manifest_ref": manifest_ref.to_dict(),

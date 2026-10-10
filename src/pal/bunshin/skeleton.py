@@ -26,6 +26,7 @@ from pal.bunshin.workspace_paths import (
     module_developer_test_path,
     module_verification_corpus_path,
     repository_path_targets_control_plane,
+    path_scope_matches,
 )
 
 
@@ -173,10 +174,7 @@ class PathScope:
         return {"kind": self.kind, "path": self.path}
 
     def matches(self, candidate: str) -> bool:
-        normalized = _normalized_repo_path(candidate)
-        if self.kind == "file":
-            return normalized == self.path
-        return normalized == self.path or normalized.startswith(self.path + "/")
+        return path_scope_matches(_normalized_repo_path(candidate), self.to_dict())
 
 
 def compiled_module_write_scopes(path_policy: Mapping[str, Any]) -> tuple[dict[str, str], ...]:

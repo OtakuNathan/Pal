@@ -369,6 +369,19 @@ class WorkflowCoordinator:
             )
         return InstalledGraph(execution=execution, diff=diff)
 
+    def rebind_direct_task(self, *, workflow_id: str, graph: GraphIR,
+                           unit_of_work: BunshinUnitOfWork) -> None:
+        """Advance a clarified repository task without retaining an old verdict."""
+        previous = self.execution(workflow_id=workflow_id, unit_of_work=unit_of_work)
+        if (graph.graph_id != workflow_id or graph.generation != previous.graph.generation + 1
+                or len(graph.nodes) != 1 or set(graph.nodes) != set(previous.graph.nodes)
+                or graph.edges or any(spec.satellite_data.get("execution_mode") != "direct" for spec in graph.nodes.values())
+                or any(cycle.state != NodeCycleState.TRIAGE_REQUIRED for cycle in previous.cycles.values())):
+            raise ValueError("direct task clarification requires the current triaged repository cycle")
+        unit_of_work.cycles.store_graph_generation(workflow_id=workflow_id, graph=graph, status="running")
+        unit_of_work.cycles.store_graph_execution(workflow_id=workflow_id,
+            execution=_replanned_execution(previous, graph, diff_graphs(previous.graph, graph)))
+
     def execution(
         self,
         *,

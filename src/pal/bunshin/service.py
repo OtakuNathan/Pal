@@ -329,6 +329,11 @@ class BunshinWorkflowService:
         operation = str(data.get("operation") or "new_requirement").strip().lower()
         if operation not in ROUTER_OPERATIONS:
             raise ValueError(f"unsupported artifact router operation: {operation}")
+        execution_mode = str(data.get("execution_mode") or "planned")
+        if execution_mode not in {"planned", "direct"}:
+            raise ValueError("execution_mode must be planned or direct")
+        if execution_mode == "direct" and operation != "new_requirement":
+            raise ValueError("direct mode requires new_requirement")
         raw_goal = str(data.get("goal") or "")
         goal = raw_goal.strip()
         artifact_ref = _artifact_ref_mapping(data.get("artifact_ref"))
@@ -393,6 +398,9 @@ class BunshinWorkflowService:
         validate_family_binding_payload(
             dict(self.artifacts.read_json(family_binding_ref))
         )
+        if execution_mode == "direct":
+            from pal.bunshin.direct_contract import validate_direct_binding
+            validate_direct_binding(self.artifacts.read_json(family_binding_ref))
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
         task_spec = data.get("task_spec")
         if task_spec is not None and (not isinstance(task_spec, Mapping) or not task_spec):
@@ -452,17 +460,35 @@ class BunshinWorkflowService:
                     "software review_and_repair requires a bounded "
                     "single-module ContractArtifact"
                 )
+        if execution_mode == "direct":
+            from pal.bunshin.direct_contract import deliverable_paths
+            deliverable_paths(self.artifacts.read_json(requirements_ref)["original"])
         skill_refs = _normalize_skill_refs(data.get("skill_refs"))
         references = _normalize_references(
             [*list(task_revision.get("references") or []), *list(data.get("references") or [])]
         )
-        input_binding_ref = self._capture_input_binding(
-            workflow_id=workflow_id,
-            workspace=workspace,
-            references=references,
-            actor=actor,
-            source_channel=source_channel,
-        )
+        direct_source = self.artifacts.read_json(artifact_ref) if execution_mode == "direct" and artifact_ref else {}
+        if direct_source and direct_source.get("execution_mode") != "direct":
+            raise ValueError("direct restart requires a direct execution artifact")
+        direct_references = {}
+        if execution_mode == "direct":
+            from pal.bunshin.direct_contract import capture_direct_references
+            direct_references = (dict(direct_source.get("direct_reference_refs") or {}) if direct_source
+                                 else capture_direct_references(self.artifacts, references))
+        inherited_inputs = direct_source.get("input_binding_ref")
+        if inherited_inputs:
+            from pal.bunshin.input_binding import InputBindingManifest
+            manifest = InputBindingManifest.from_payload(self.artifacts.read_json(inherited_inputs))
+            input_binding_ref = self.artifacts.put_json(
+                {**manifest.to_payload(), "workflow_id": workflow_id},
+                artifact_type=INPUT_BINDING_MANIFEST_ARTIFACT,
+                child_refs=((inherited_inputs["sha256"], "original_inputs"),),
+            )
+        else:
+            input_binding_ref = self._capture_input_binding(
+                workflow_id=workflow_id, workspace=workspace, references=references,
+                actor=actor, source_channel=source_channel,
+            )
         request_payload = {
             "schema_version": "1",
             "workflow_id": workflow_id,
@@ -470,6 +496,7 @@ class BunshinWorkflowService:
             "task_revision_ref": task_revision_ref,
             "family_binding_ref": family_binding_ref,
             "operation": operation,
+            "execution_mode": execution_mode,
             "goal": raw_goal,
             "workflow_name": workflow_name,
             "requirements_ref": requirements_ref,
@@ -480,6 +507,7 @@ class BunshinWorkflowService:
             "references": references,
             "research_mode": research_mode.value,
             "input_artifact_ref": artifact_ref,
+            **({"direct_reference_refs": direct_references} if direct_references else {}),
             "actor": actor,
             **({"input_binding_ref": input_binding_ref.to_dict()} if input_binding_ref else {}),
         }
@@ -492,6 +520,7 @@ class BunshinWorkflowService:
                 (str(family_binding_ref["sha256"]), "family_binding"),
                 *(((str(requirements_ref["sha256"]), "requirements"),) if requirements_ref else ()),
                 *(((str(artifact_ref["sha256"]), "input"),) if artifact_ref else ()),
+                *((ref["sha256"], "reference") for ref in direct_references.values()),
                 *(((input_binding_ref.sha256, "input_binding"),) if input_binding_ref else ()),
             ),
         )
@@ -514,6 +543,7 @@ class BunshinWorkflowService:
                         "task_revision_ref": task_revision_ref,
                         "family_binding_ref": family_binding_ref,
                         "operation": operation,
+                        "execution_mode": execution_mode,
                         "research_mode": research_mode.value,
                         "owner": actor,
                         "desired_state": "ACTIVE",
@@ -1153,8 +1183,11 @@ class BunshinWorkflowService:
             raise ValueError(
                 f"workflow cannot restart execution from state {workflow.state}"
             )
-        revision = self._accepted_architecture_revision_for_restart(workflow)
-        manifest_ref = dict(revision.payload.get("architecture_manifest_ref") or {})
+        if workflow.payload.get("execution_mode") == "direct":
+            manifest_ref = dict(workflow.payload.get("direct_execution_ref") or {})
+        else:
+            revision = self._accepted_architecture_revision_for_restart(workflow)
+            manifest_ref = dict(revision.payload.get("architecture_manifest_ref") or {})
         manifest = dict(self.artifacts.read_json(manifest_ref))
         requirements_ref = dict(manifest.get("requirements_ref") or {})
         if not requirements_ref:
@@ -1171,7 +1204,9 @@ class BunshinWorkflowService:
             "research_mode": "none",
             "actor": actor,
             "reason": summary,
-            "operation": "review_then_execute",
+            "operation": "new_requirement" if request.get("execution_mode") == "direct" else "review_then_execute",
+            "execution_mode": str(request.get("execution_mode") or "planned"),
+            "references": list(request.get("references") or []),
             "reuse_candidates": False,
         }
         result = self.repository.transitions.dispatch(
@@ -1192,7 +1227,7 @@ class BunshinWorkflowService:
             "workflow_id": workflow_id,
             "state": result.snapshot.state,
             "reason": summary,
-            "architecture_review": "required",
+            "architecture_review": "skipped" if request.get("execution_mode") == "direct" else "required",
             "module_identity_reuse": False,
             "next_action": "settle current workflow and create replacement workflow",
         }
@@ -1261,6 +1296,12 @@ class BunshinWorkflowService:
         if not candidates:
             raise ValueError("workflow has no TRIAGE_REQUIRED item that can be resolved")
         selected = _select_triage_candidate(candidates, subject=subject)
+        if (selected.aggregate_type == AggregateType.DAG_NODE_RUN
+                and selected.payload.get("execution_mode") == "direct"
+                and dict(selected.payload.get("blocker") or {}).get("kind") == "task_requirement"):
+            from pal.bunshin.direct_execution import resolve_direct_task
+            return resolve_direct_task(self, selected, answer=resolution, actor=actor, source_channel=source_channel)
+
         if (
             selected.aggregate_type == AggregateType.DAG_NODE_RUN
             and str(selected.payload.get("triage_resume_state") or "") == "REVIEW_SNAPSHOTTING"

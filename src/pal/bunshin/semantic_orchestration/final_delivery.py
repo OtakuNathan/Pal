@@ -103,9 +103,14 @@ class FinalDelivery:
     ) -> ArtifactRef:
         if not repository.is_dir():
             raise ValueError("delivery requires the accepted sink module worktree")
-        commit_sha = _git_output(repository, "rev-parse", "HEAD")
         manifest_ref = _ref_from_mapping(epoch.payload.get("architecture_manifest_ref"))
         manifest = dict(self.artifacts.read_json(manifest_ref))
+        if manifest.get("execution_mode") == "direct":
+            commit_sha = str(delivery_node.payload.get("candidate_digest") or "").strip()
+            if not commit_sha:
+                raise ValueError("direct delivery requires the accepted Candidate commit")
+        else:
+            commit_sha = _git_output(repository, "rev-parse", "HEAD")
         snapshot_value = manifest.get("workspace_snapshot_ref")
         source_snapshot: dict[str, Any]
         if isinstance(snapshot_value, Mapping) and snapshot_value.get("sha256"):
@@ -132,10 +137,11 @@ class FinalDelivery:
             or request.get("objective")
             or "Bunshin delivery"
         )
-        return DeliveryService(
-            self.runtime_root,
-            self.artifacts,
-        ).publish(
+        delivery = DeliveryService(self.runtime_root, self.artifacts)
+        publish = delivery.publish_direct if manifest.get("execution_mode") == "direct" else delivery.publish
+        return publish(
+            **({"deliverable_paths": list(manifest.get("deliverable_paths") or [])}
+               if manifest.get("execution_mode") == "direct" else {}),
             workflow_id=epoch.workflow_id,
             workflow_key=workflow_key,
             task_title=task_title,

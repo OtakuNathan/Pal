@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.paths import bunshin_data_root
@@ -30,6 +30,24 @@ class DeliveryReceipt(BaseModel):
     apply_mode: Literal["git_am", "git_apply"]
     apply_hint: str
     verification_ref: dict[str, Any]
+
+
+class DeliveredFile(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    repository_path: str
+    content_sha256: str
+    artifact_ref: dict[str, Any]
+    mime_type: str
+
+
+class DirectDeliveryReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    schema_version: Literal["4"] = "4"
+    kind: Literal["direct"] = "direct"
+    commit_sha: str
+    verification_ref: dict[str, Any]
+    files: list[DeliveredFile] = Field(min_length=1)
+    patch_receipt: DeliveryReceipt | None = None
 
 
 @dataclass
@@ -113,6 +131,40 @@ class DeliveryService:
             verification_ref=verification_ref.to_dict(),
         )
         return self._store(receipt, verification_ref, patch_ref)
+
+    def publish_direct(self, *, deliverable_paths: list[str], **kwargs: Any) -> ArtifactRef:
+        """Extract requested files from the accepted Git object, never the live worktree."""
+        import mimetypes
+        from pal.bunshin.direct_contract import deliverable_paths as validate_paths, report_only_changes
+
+        paths = validate_paths({"deliverable_paths": deliverable_paths})
+        if not paths:
+            return self.publish(**kwargs)
+        repository = kwargs["repository"]
+        commit = kwargs["commit_sha"]
+        files = []
+        for path in paths:
+            listing = _git(repository, "ls-tree", commit, "--", f":(literal){path}").strip()
+            if not listing or listing.split(None, 1)[0] not in {"100644", "100755"}:
+                raise ValueError(f"deliverable is not a regular file in the verified commit: {path}")
+            content = subprocess.run(["git", "show", f"{commit}:{path}"], cwd=repository,
+                                     capture_output=True, check=True).stdout
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            ref = self.artifacts.put_bytes(content, artifact_type="VerifiedReportArtifact", media_type=mime,
+                child_refs=((kwargs["verification_ref"].sha256, "verification"),))
+            files.append(DeliveredFile(repository_path=path, content_sha256=hashlib.sha256(content).hexdigest(),
+                                       artifact_ref=ref.to_dict(), mime_type=mime))
+        # Keep the established ancestry, tree reconstruction and durable commit-pin
+        # checks, even when only reports are attached to the terminal event.
+        patch_ref = self.publish(**kwargs)
+        patch = DeliveryReceipt.model_validate(self.artifacts.read_json(patch_ref))
+        changed = _git(repository, "diff", "--name-only", "-z", patch.base_commit_sha, commit, "--").split("\0")
+        code_changed = not report_only_changes(paths, changed)
+        receipt = DirectDeliveryReceipt(commit_sha=commit, verification_ref=kwargs["verification_ref"].to_dict(),
+                                       files=files, patch_receipt=patch if code_changed else None)
+        return self.artifacts.put_json(receipt.model_dump(mode="json"), artifact_type="DeliveryReceiptArtifact",
+            schema_version="4", child_refs=((patch_ref.sha256, "verified_tree"),
+                *((item.artifact_ref["sha256"], "delivered_file") for item in files)))
 
     def _publish_patch_file(
         self,

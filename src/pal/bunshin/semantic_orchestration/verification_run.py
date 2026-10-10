@@ -90,7 +90,8 @@ class VerificationRun:
                 RoleMode.MODULE,
             ),
             instruction=_semantic_verifier_instruction(
-                graph_sink=bool(node.payload.get("graph_sink"))
+                graph_sink=bool(node.payload.get("graph_sink")),
+                direct=node.payload.get("execution_mode") == "direct",
             ),
             reference_refs=verifier_references,
             workspace_override={
@@ -212,6 +213,10 @@ class VerificationRun:
         if system_delivery_view_ref is not None:
             verifier_references["system_delivery_view"] = system_delivery_view_ref
         verifier_references.update(git_diff_refs)
+        if work_view.get("execution_mode") == "direct":
+            verifier_references["task"] = _ref_from_mapping(work_view["requirements_ref"])
+            verifier_references.update({name: _ref_from_mapping(ref) for name, ref in
+                                       dict(work_view.get("direct_reference_refs") or {}).items()})
         path_policy = dict(node.payload.get("path_policy") or {})
         developer_test_path = str(
             dict(path_policy.get("developer_tests") or {}).get("path") or ""

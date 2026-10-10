@@ -19,6 +19,12 @@ Formal models live in `spec/bunshin` and retain their established invariant name
 Historical version labels in durable SQL, profile, metadata, and wire-protocol
 identities remain unchanged; package integration does not migrate existing data.
 
+Software-engineering workflows can also select
+[`execution_mode="direct"`](bunshin_direct_mode.md): the same execution engine
+runs a single repository Coder/Verifier pair from the immutable task, without a
+planning cycle or architecture approval. The architecture rules below describe
+`planned` mode unless stated otherwise.
+
 ## Truth Sources
 
 Manager owns an immutable `TaskLedgerArtifact`, materialized to roles as
@@ -26,7 +32,7 @@ read-only `task.yaml`. Its original request is preserved verbatim. Clarification
 answers are appended mechanically as ordered revisions; newer revisions win
 only where meanings conflict.
 
-Architect is the only role that consumes the complete task as its primary
+In the default `planned` mode, Architect consumes the complete task as its primary
 input. Coder and Verifier receive a Manager-derived view of one module. Their
 authority order is:
 

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.workspace_paths import path_scope_matches
 
 from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
 
@@ -639,16 +640,7 @@ def _submission_errors(
 
 
 def _path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
-    normalized = str(path).replace("\\", "/").strip("/")
-    target = str(scope.get("path") or "").replace("\\", "/").strip("/")
-    if not target:
-        return False
-    kind = str(scope.get("kind") or "").strip().lower()
-    if kind == "file":
-        return normalized == target
-    if kind == "directory":
-        return normalized == target or normalized.startswith(target + "/")
-    return False
+    return path_scope_matches(path, scope)
 
 
 def infer_repair_target_modules(

@@ -460,6 +460,14 @@ def _node_resume_cleanup_reducer(
     updated = dict(_resume_cleanup_reducer(payload, action))
     updated.pop("failure_artifact_ref", None)
     source = str(payload.get("triage_resume_state") or "")
+    if action.payload.get("direct_task_rebound"):
+        source = "PRODUCING"
+        for field in ("candidate_ref", "candidate_digest", "unit_work_view_ref", "pending_verification_ref",
+                      "verification_artifact_ref", "producer_report_ref", "failure_history",
+                      "verification_correction_attempts", "finding_artifact_ref"):
+            updated.pop(field, None)
+        updated["candidate_cycle"] = int(payload.get("candidate_cycle") or 0) + 1
+        updated["verifier_evaluation_generation"] = int(payload.get("verifier_evaluation_generation") or 0) + 1
     retry_verification = _node_has_terminal_verification_blocker(payload)
     if retry_verification:
         # An operator resolution starts a new evaluation of the same Candidate.
@@ -521,6 +529,9 @@ def _mapped_resume_target(mapping: Mapping[str, str], field: str = "resume_state
 def _mapped_triage_resume_target(mapping: Mapping[str, str]):
     @target_resolver(*mapping.values(), name="triage_resume_target")
     def resolve(payload: Mapping[str, Any], _action: ActionEnvelope) -> str:
+        if (_action.aggregate_type == AggregateType.DAG_NODE_RUN
+                and _action.payload.get("direct_task_rebound") and payload.get("execution_mode") == "direct"):
+            return "QUEUED"
         source = str(payload.get("triage_resume_state") or "")
         target = mapping.get(source)
         if target is None:
@@ -703,6 +714,8 @@ def _workflow_transitions() -> list[TransitionSpec]:
         _spec(kind, None, "CREATE_WORKFLOW", S.CREATED, effects=_effect("submit_action", action_type="START_WORKFLOW")),
         _spec(kind, S.CREATED, "START_WORKFLOW", S.ACTIVE, effects=_effect("route_workflow")),
         _spec(kind, S.ACTIVE, "LINK_ARCHITECTURE_REVISION", S.ACTIVE, guard=_required("architecture_revision_id")),
+        *(_spec(kind, state, "BIND_DIRECT_EXECUTION", state, guard=_required("direct_execution_ref"))
+          for state in (S.ACTIVE, S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED)),
         _spec(kind, S.ACTIVE, "LINK_EXECUTION_EPOCH", S.ACTIVE, guard=_required("execution_epoch_id")),
         _spec(kind, S.ACTIVE, "LINK_STANDALONE_REVIEW", S.ACTIVE, guard=_required("standalone_review_id")),
         _spec(
@@ -1151,6 +1164,8 @@ def _execution_transitions() -> list[TransitionSpec]:
     kind = AggregateType.EXECUTION_EPOCH
     S = ExecutionEpochState
     transitions = [
+        *(_spec(kind, state, "REBIND_DIRECT_TASK", state, guard=_required("architecture_manifest_ref", "graph_generation"))
+          for state in (S.RUNNING, S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED)),
         _spec(kind, None, "CREATE_EXECUTION_EPOCH", S.NOT_STARTED, guard=_required("architecture_manifest_ref", "topology_ref")),
         _spec(kind, S.NOT_STARTED, "START_EXECUTION", S.STARTING),
         _spec(kind, S.STARTING, "NODES_COMPILED", S.RUNNING, guard=_required("node_ids"), effects=_effect("schedule_ready_nodes")),

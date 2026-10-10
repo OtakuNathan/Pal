@@ -136,6 +136,12 @@ class ReferenceBinding:
             ]
         else:
             invocation_acceptance = ["Write the exact primary JSON artifact required by the profile output contract."]
+        if workspace.get("execution_mode") == "direct":
+            invocation_acceptance = [
+                "The complete immutable task ledger and confirmed revisions are the contract. Read reference:task and the exact shared module_work_view.",
+                "Complete the bound task in the repository, preserve scope and original evidence, and submit a result backed by current checks.",
+                "Keep role write boundaries. Report task contradictions for Pal clarification; ordinary defects return to the same Coder.",
+            ]
         mandatory_inputs: list[str] = []
         evaluation_generation = 0
         if activation == RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE):
