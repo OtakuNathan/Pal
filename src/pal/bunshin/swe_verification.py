@@ -792,7 +792,7 @@ def _normalize_repair_path_owners(
             scope = dict(raw_scope or {})
             kind = str(scope.get("kind") or "").strip().lower()
             path = str(scope.get("path") or "").replace("\\", "/").strip("/")
-            if kind not in {"file", "directory"} or not path:
+            if kind not in {"file", "directory", "repository"} or not path:
                 continue
             item = {"kind": kind, "path": path}
             if item not in scopes:

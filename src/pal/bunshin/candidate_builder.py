@@ -227,6 +227,16 @@ def _submit_candidate(
                 target = repo / relative
                 if target.is_symlink() or not target.is_file() or not target.resolve().is_relative_to(repo):
                     raise ValueError(f"required deliverable is missing or unsafe: {relative}")
+                eligible = subprocess.run(
+                    ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+                     "--", f":(literal){relative}"],
+                    cwd=repo, capture_output=True, text=True, check=True,
+                ).stdout.split("\0")
+                if relative not in eligible:
+                    raise ValueError(
+                        f"required deliverable is excluded from the Git candidate: {relative}; "
+                        "update the repository ignore rules so the declared file is included"
+                    )
         if args:
             raise ToolRejectedError(
                 "submit_candidate takes no arguments",

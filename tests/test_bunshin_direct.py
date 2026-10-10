@@ -231,6 +231,40 @@ def test_direct_verifier_task_defect_returns_to_pal(tmp_path, defect):
     assert service.repository.cycles.read_plan_cycle(workflow_id=workflow_id) is None
 
 
+def test_direct_source_finding_routes_to_coder_and_reverification(tmp_path):
+    from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot
+    from pal.bunshin.graph_executor import FindingClass
+    from pal.bunshin.semantic_orchestration.verification_policy import _verification_repair_scope
+    from pal.bunshin.swe_verification import infer_repair_target_modules, verification_finding_route_errors
+    from pal.bunshin.workflow_runtime import WorkflowCoordinator
+
+    service, _, workflow_id = direct_workflow(tmp_path)
+    node = node_for(service, workflow_id)
+    scope = _verification_repair_scope(service.repository, node)
+    finding = {"finding_key": "wrong-output", "finding_kind": "module_defect",
+               "locations": [{"scope": "workspace", "file": "app.py", "line": 1}]}
+    assert infer_repair_target_modules([finding], scope["repair_path_owners"]) == ["repository"]
+    assert verification_finding_route_errors([finding], scope) == []
+    coordinator = WorkflowCoordinator(service.repository)
+    for iteration, kind in enumerate((AssignmentKind.INITIAL, AssignmentKind.REPAIR)):
+        coordinator.start_assignment(workflow_id=workflow_id, node_name="repository",
+            slot=CycleSlot.PRODUCER, kind=kind, input_fingerprint=f"task-{iteration}")
+        coordinator.producer_submitted(workflow_id=workflow_id, node_name="repository",
+            product_ref=f"candidate-{iteration}")
+        coordinator.start_assignment(workflow_id=workflow_id, node_name="repository",
+            slot=CycleSlot.CHECKER, kind=kind, input_fingerprint=f"candidate-{iteration}")
+        coordinator.checker_verdict(workflow_id=workflow_id, node_name="repository",
+            accepted=bool(iteration), finding_refs=() if iteration else ("wrong-output",),
+            finding_class=None if iteration else FindingClass.MODULE_DEFECT)
+        if not iteration:
+            assignments = coordinator.runnable_assignments(workflow_id=workflow_id)
+            assert len(assignments) == 1
+            assert assignments[0].node_name == "repository"
+            assert assignments[0].slot == CycleSlot.PRODUCER
+    assert coordinator.published_sink_ref(workflow_id=workflow_id) == "candidate-1"
+    assert service.repository.cycles.read_plan_cycle(workflow_id=workflow_id) is None
+
+
 def test_direct_restart_uses_direct_request_and_original_baseline(tmp_path):
     from pal.bunshin.direct_execution import prepare_direct_execution
     from pal.bunshin.service import workflow_request_from_snapshot

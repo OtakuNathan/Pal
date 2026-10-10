@@ -2150,6 +2150,44 @@ class BunshinV2VerificationTests(unittest.TestCase):
         finally:
             runtime.shutdown()
 
+    def test_direct_candidate_rejects_ignored_deliverable_before_submission(self) -> None:
+        from pal.bunshin.workspace_git import _git
+
+        for tracked in (False, True):
+            with self.subTest(tracked=tracked):
+                repo = self.runtime_root / f"ignored-report-{tracked}"
+                repo.mkdir()
+                (repo / "report.md").write_text("Verified evidence\n")
+                (repo / ".gitignore").write_text("report.md\n")
+                _git(repo, "init", "-q")
+                _git(repo, "add", ".gitignore")
+                if tracked:
+                    _git(repo, "add", "-f", "report.md")
+                _git(repo, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "Baseline")
+                view = self.runtime_root / f"ignored-view-{tracked}.json"
+                view.write_text(json.dumps({"execution_mode": "direct", "module_name": "repository",
+                    "deliverable_paths": ["report.md"], "contract_mode": "review_guarded",
+                    "implementation_scopes": [{"kind": "repository", "path": "."}]}))
+                stage = self.runtime_root / f"ignored-stage-{tracked}"
+                workspace = self._bind_workspace({"repo_path": str(repo),
+                    "artifact_dir": str(self.runtime_root / f"ignored-artifacts-{tracked}"),
+                    "artifact_stage_dir": str(stage),
+                    "reference_paths": [{"name": "unit_work_view", "path": str(view)}]}, role="implementation")
+                planned = self._candidate_call(workspace, "op_bunshin_update_checklist",
+                    {"plan": [{"step": "Verify report", "status": "completed"}]})
+                self.assertTrue(planned.ok, planned.llm_text)
+                result = self._candidate_call(workspace, "op_bunshin_candidate_submit")
+                if not tracked:
+                    self.assertFalse(result.ok)
+                    self.assertIn("excluded from the Git candidate", result.llm_text)
+                    self.assertFalse((stage / "coder_report.json").exists())
+                    (repo / ".gitignore").write_text("")
+                    result = self._candidate_call(workspace, "op_bunshin_candidate_submit")
+                self.assertTrue(result.ok, result.llm_text)
+                _git(repo, "add", "-A")
+                tree = _git(repo, "write-tree").strip()
+                self.assertEqual(_git(repo, "show", f"{tree}:report.md"), "Verified evidence\n")
+
     def test_candidate_submit_accepts_review_guarded_contract_as_live_git_delta(self) -> None:
         repo = self.runtime_root / "candidate-repo"
         (repo / "src/font").mkdir(parents=True)

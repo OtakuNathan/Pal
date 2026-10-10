@@ -123,7 +123,7 @@ def _verification_repair_path_owners(
         normalized = [
             scope
             for scope in scopes
-            if scope["kind"] in {"file", "directory"} and scope["path"]
+            if scope["kind"] in {"file", "directory", "repository"} and scope["path"]
         ]
         if normalized:
             owners[module_name] = list(
