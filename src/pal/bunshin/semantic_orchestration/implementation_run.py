@@ -134,7 +134,10 @@ class ImplementationRun:
                         action_type="ENTER_TRIAGE", workflow_id=node.workflow_id,
                         aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=node.aggregate_id,
                         actor=invocation_id, expected_version=current.version,
-                        idempotency_key=f"direct-blocker:{node.aggregate_id}:{report_ref.sha256}",
+                        idempotency_key=_implementation_action_idempotency_key(
+                            "direct-blocker", node.aggregate_id,
+                            int(node.payload.get("candidate_cycle") or 0), report_ref.sha256,
+                        ),
                         payload={"finding_artifact_ref": report_ref.to_dict(),
                                  "blocker": task_requirement_blocker(self.artifacts, report_ref)},
                     ),

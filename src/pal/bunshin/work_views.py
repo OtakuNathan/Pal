@@ -6,7 +6,7 @@ from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateSnapshot
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT, software_contract_projection
-from pal.bunshin.direct_contract import DIRECT_EXECUTION_ARTIFACT, report_only_changes
+from pal.bunshin.direct_contract import DIRECT_EXECUTION_ARTIFACT, report_only_candidate
 from pal.bunshin.verification import repair_bill_semantic_view
 
 
@@ -68,13 +68,11 @@ class UnitWorkViewBuilder:
         artifact = dict(self.contracts.artifacts.read_json(manifest_ref))
         adapter = str(node.payload.get("execution_adapter") or "")
         if artifact.get("execution_mode") == "direct":
-            from pal.bunshin.skeleton import _git
             from pathlib import Path
             outputs = list(artifact.get("deliverable_paths") or [])
             target = str(node.payload.get("candidate_digest") or "")
-            changed = _git(Path(str(node.payload["workspace_path"])), "diff", "--name-only", "-z",
-                           str(artifact["base_commit_sha"]), target, "--").split("\0")
-            report_only = report_only_changes(outputs, changed)
+            report_only = report_only_candidate(Path(str(node.payload["workspace_path"])),
+                                                str(artifact["base_commit_sha"]), target, outputs)
             return self.contracts.artifacts.put_json(
                 {"execution_mode": "direct", "requirements_ref": artifact["requirements_ref"],
                  "deliverable_paths": outputs, "report_only": report_only, "scenarios": {}, "entrypoints": []},

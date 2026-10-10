@@ -69,6 +69,15 @@ def report_only_changes(outputs: list[str], changed_paths: list[str]) -> bool:
     )
 
 
+def report_only_candidate(repository: Path, base_commit: str, candidate_commit: str, outputs: list[str]) -> bool:
+    """Classify both ends of renames consistently for verification and delivery."""
+    from pal.bunshin.workspace_git import _git_bytes
+
+    changed = _git_bytes(repository, "diff", "--no-renames", "--name-only", "-z",
+                         base_commit, candidate_commit, "--")
+    return report_only_changes(outputs, changed.decode("utf-8", errors="surrogateescape").split("\0"))
+
+
 def task_requirement_blocker(artifacts: ContentAddressedArtifactStore, finding_ref: ArtifactRef) -> dict[str, Any]:
     import json
 

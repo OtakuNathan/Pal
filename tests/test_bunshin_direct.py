@@ -84,6 +84,58 @@ def test_clarification_rebinds_task_preserving_workspace(tmp_path):
     assert execution.cycles["repository"].last_verdict is None
 
 
+def test_identical_blocker_after_clarification_is_a_new_round(tmp_path, monkeypatch):
+    import asyncio
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, Mock
+    from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
+    from pal.bunshin.semantic_orchestration.implementation_run import ImplementationRun
+    from pal.bunshin.storage.transitions import TransitionsStore
+
+    service, _, workflow_id = direct_workflow(tmp_path)
+    finding = service.artifacts.put_json({"status": "task_blocked", "summary": "Which log interval?"},
+                                        artifact_type="ProducerReportArtifact")
+    actions = []
+    dispatch = TransitionsStore.dispatch
+
+    def record_dispatch(store, action, **kwargs):
+        if action.action_type == "ENTER_TRIAGE":
+            actions.append(action)
+        return dispatch(store, action, **kwargs)
+
+    monkeypatch.setattr(TransitionsStore, "dispatch", record_dispatch)
+    for iteration in range(2):
+        node = node_for(service, workflow_id)
+        # The logical worker can be reused; the candidate cycle distinguishes rounds.
+        lease = service.repository.leases.claim_lease("blocker-worker", "coder", ttl_seconds=60)
+        assigned = replace(node, payload={**node.payload, "active_worker_id": "coder",
+            "lease_resource_key": "blocker-worker", "fencing_token": lease.fencing_token})
+        runner = ImplementationRun(
+            assignment_identity=Mock(role_submission_settlement=Mock(return_value={})),
+            attempt_execution=Mock(run_profile=AsyncMock(return_value=({}, None, None))),
+            effect_reads=Mock(effect_snapshot=Mock(return_value=assigned)),
+            role_leases=Mock(ensure_node_effect_lease=AsyncMock(return_value=assigned)),
+            role_reports=Mock(), workflow_facts=Mock(execution_adapter=Mock(return_value=SOFTWARE_GIT_ADAPTER)),
+            artifacts=service.artifacts, contracts=service.contracts, repository=service.repository)
+        monkeypatch.setattr(runner, "prepare_implementation_inputs",
+                            Mock(return_value=([], "Read task", {}, {}, None, {})))
+        monkeypatch.setattr(runner, "record_candidate_evidence", Mock(return_value=(finding, "task_blocked")))
+        asyncio.run(runner.run_implementation({}, repair=False))
+        triaged = node_for(service, workflow_id)
+        assert triaged.state == "TRIAGE_REQUIRED"
+        assert triaged.payload["blocker"]["finding_ref"] == finding.to_dict()
+        # Retrying the same action still deduplicates without advancing state.
+        replay = dispatch(service.repository.transitions, actions[-1])
+        assert replay.snapshot.version == triaged.version
+        assert node_for(service, workflow_id).version == triaged.version
+        if not iteration:
+            service.resolve_triage(workflow_id=workflow_id, actor="pal", source_channel="test",
+                                   resolution="Use the relevant interval.")
+    assert len(actions) == 2
+    assert actions[0].idempotency_key != actions[1].idempotency_key
+    assert service.repository.cycles.read_plan_cycle(workflow_id=workflow_id) is None
+
+
 @pytest.mark.parametrize("path,allowed", [
     ("app.py", True), ("src/deep/module.py", True), ("README.md", True),
     ("tests/test_app.py", True), ("tests/repository/developer/test_case.py", True),
@@ -138,6 +190,40 @@ def test_direct_delivery_reads_verified_commit_and_retains_code_patch(tmp_path):
     attachment = events[0]["attachments"][0]
     assert attachment["file_name"] == "report.md"
     assert Path(attachment["path"]).read_text().startswith("# Verified cause")
+
+
+@pytest.mark.parametrize("detect_renames", ["true", "false"])
+def test_rename_to_report_retains_code_verification_and_patch(tmp_path, detect_renames):
+    from dataclasses import replace
+    from pal.bunshin.delivery import DeliveryService, DirectDeliveryReceipt
+    from pal.bunshin.work_views import UnitWorkViewBuilder
+    from pal.bunshin.verification_builder import effective_verification_policy
+    from pal.bunshin.workspace_git import _git
+
+    service, _, workflow_id = direct_workflow(tmp_path)
+    node = node_for(service, workflow_id)
+    repo = Path(node.payload["workspace_path"])
+    manifest = service.artifacts.read_json(node.payload["architecture_manifest_ref"])
+    _git(repo, "config", "diff.renames", detect_renames)
+    _git(repo, "mv", "app.py", "report.md")
+    _git(repo, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "Archive script")
+    commit = _git(repo, "rev-parse", "HEAD").strip()
+    candidate = service.artifacts.put_json({"candidate_digest": commit}, artifact_type="CandidateArtifact")
+    node = replace(node, payload={**node.payload, "candidate_ref": candidate.to_dict(), "candidate_digest": commit})
+    view = service.artifacts.read_json(UnitWorkViewBuilder(service.contracts).system_delivery_view(node))
+    assert view["report_only"] is False
+    policy = effective_verification_policy(work_view={"execution_mode": "direct", "graph_sink": True},
+        verification_policy={"require_warning_clean": True}, system_delivery_view=view)
+    assert policy["require_warning_clean"] is True
+    verification = service.artifacts.put_json({"status": "pass"}, artifact_type="VerificationArtifact")
+    ref = DeliveryService(service.runtime_root, service.artifacts).publish_direct(
+        deliverable_paths=["report.md"], workflow_id=workflow_id, workflow_key="archive", task_title="Archive script",
+        repository=repo, commit_sha=commit, source_snapshot=service.artifacts.read_json(manifest["workspace_snapshot_ref"]),
+        verification_ref=verification)
+    receipt = DirectDeliveryReceipt.model_validate(service.artifacts.read_json(ref))
+    assert receipt.patch_receipt is not None
+    assert b"app.py" in service.artifacts.read_bytes(receipt.patch_receipt.patch_ref)
+    assert service.artifacts.read_bytes(receipt.files[0].artifact_ref) == b"print('hello')\n"
 
 
 def test_direct_final_delivery_pins_accepted_candidate_when_head_moves(tmp_path):

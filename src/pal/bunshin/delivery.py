@@ -135,7 +135,7 @@ class DeliveryService:
     def publish_direct(self, *, deliverable_paths: list[str], **kwargs: Any) -> ArtifactRef:
         """Extract requested files from the accepted Git object, never the live worktree."""
         import mimetypes
-        from pal.bunshin.direct_contract import deliverable_paths as validate_paths, report_only_changes
+        from pal.bunshin.direct_contract import deliverable_paths as validate_paths, report_only_candidate
 
         paths = validate_paths({"deliverable_paths": deliverable_paths})
         if not paths:
@@ -158,8 +158,7 @@ class DeliveryService:
         # checks, even when only reports are attached to the terminal event.
         patch_ref = self.publish(**kwargs)
         patch = DeliveryReceipt.model_validate(self.artifacts.read_json(patch_ref))
-        changed = _git(repository, "diff", "--name-only", "-z", patch.base_commit_sha, commit, "--").split("\0")
-        code_changed = not report_only_changes(paths, changed)
+        code_changed = not report_only_candidate(repository, patch.base_commit_sha, commit, paths)
         receipt = DirectDeliveryReceipt(commit_sha=commit, verification_ref=kwargs["verification_ref"].to_dict(),
                                        files=files, patch_receipt=patch if code_changed else None)
         return self.artifacts.put_json(receipt.model_dump(mode="json"), artifact_type="DeliveryReceiptArtifact",
