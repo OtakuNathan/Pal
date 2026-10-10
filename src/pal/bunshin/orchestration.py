@@ -366,9 +366,12 @@ class BunshinOutboxProcessor:
             return self._node_accepted(effect)
         if effect_type == "publish_accepted_memory_candidate":
             return self._publish_accepted_memory_candidate(effect)
+        if effect_type == "propagate_resume":
+            # Resuming also restores routing when pause consumed the initial
+            # start effect before any child aggregate existed.
+            return self._reconcile_workflow(effect)
         if effect_type in {
             "propagate_pause",
-            "propagate_resume",
             "propagate_cancel",
             "freeze_workflow_children",
         }:
@@ -1121,6 +1124,10 @@ class BunshinOutboxProcessor:
 
     def _route_workflow(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)
+        if workflow.state != "ACTIVE":
+            # A queued route can arrive after pause/cancel. Do not create a
+            # partial child tree; resume reconciliation restores this work.
+            return {}
         request = workflow_request_from_snapshot(self.service, workflow)
         operation = str(request.get("operation") or "new_requirement")
         if operation == "new_requirement" and request.get("execution_mode") == "direct":
@@ -1142,6 +1149,9 @@ class BunshinOutboxProcessor:
             return self._compile_execution(workflow_id=workflow.workflow_id, manifest_ref=manifest_ref,
                                            causation_key=str(effect["effect_key"]))
         if operation == "new_requirement":
+            if workflow.payload.get("architecture_revision_id"):
+                # The original route may arrive after resume restored it.
+                return {}
             revision_id = _derived_id("arch", str(effect["effect_key"]))
             with self.repository.transaction() as connection:
                 WorkflowCoordinator(self.repository).ensure_plan_cycle(

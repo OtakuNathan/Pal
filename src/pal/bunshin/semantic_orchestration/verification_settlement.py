@@ -455,23 +455,7 @@ def _publish_repair_evidence(
         for module_name in target_modules
     ]
     module_node_id = ""
-    fingerprint = hashlib.sha256(
-        json.dumps(
-            {
-                "outcome": outcome,
-                "findings": findings,
-                "changed_test_paths": changed_paths,
-                "receipt_hashes": [str(item.get("output_sha256") or "") for item in receipts],
-                "candidate_tree": _candidate_tree_fingerprint(
-                    accepted_candidate,
-                    fallback=accepted_candidate_digest,
-                ),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    fingerprint = _repair_failure_fingerprint(outcome, findings, receipts)
     repair_ref: ArtifactRef | None = None
     if status == VerificationStatus.FAIL:
         finding_targets: dict[str, list[str]] = {}
@@ -529,3 +513,36 @@ def _publish_repair_evidence(
             ),
         )
     return defect_kind, fingerprint, module_node_id, repair_node_ids, repair_ref, target_modules
+
+
+def _repair_failure_fingerprint(outcome: str, findings: Any, receipts: Any) -> str:
+    """Compare failure meaning, not fresh finding identities or receipt counts.
+
+    Candidate trees are compared separately by no_progress_detected. Full
+    receipts remain in the repair packet; successful checks and test writes
+    do not establish progress on an unchanged blocking failure.
+    """
+    def canonical(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    semantic_findings = sorted({canonical({
+        "finding_kind": item.get("finding_kind"),
+        "summary": item.get("summary"),
+        "locations": sorted({canonical(location) for location in item.get("locations") or []}),
+    }) for item in findings})
+    failures = set()
+    for item in receipts:
+        if item.get("kind") not in {"command", "lsp"}:
+            continue
+        structured = dict(item.get("structured") or {})
+        exit_code = structured.get("exit_code")
+        if item.get("ok") is True and exit_code in (None, 0):
+            continue
+        failures.add(canonical({
+            "tool_name": item.get("tool_name"),
+            "exit_code": exit_code,
+            "output": item.get("output_text") or item.get("output_sha256") or "",
+        }))
+    return hashlib.sha256(canonical({
+        "outcome": outcome, "findings": semantic_findings, "failures": sorted(failures),
+    }).encode("utf-8")).hexdigest()

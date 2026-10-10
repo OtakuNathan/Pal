@@ -1638,12 +1638,19 @@ class BunshinWorkflowService:
             )
         if str(revision.payload.get("active_worker_id") or "") != worker_id:
             raise ValueError("architect clarification worker is stale")
+        prior_clarification_id = str(
+            revision.payload.get("task_revision_clarification_id") or ""
+        )
+        observed_at = str(data.get("observed_at") or datetime.now(UTC).isoformat())
+        if prior_clarification_id == clarification_id:
+            # Delivery retries retain the identity of the first durable answer.
+            observed_at = str(dict(revision.payload.get("last_task_revision") or {})["observed_at"])
         authority = TaskRevisionAuthority.model_validate(
             {
                 "title": str(data.get("title") or "").strip(),
                 "question": str(data.get("question") or ""),
                 "answer": str(data.get("answer") or ""),
-                "observed_at": str(data.get("observed_at") or datetime.now(UTC).isoformat()),
+                "observed_at": observed_at,
                 "origin": "architect_user_clarification",
             }
         )
@@ -1655,9 +1662,6 @@ class BunshinWorkflowService:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        prior_clarification_id = str(
-            revision.payload.get("task_revision_clarification_id") or ""
-        )
         if prior_clarification_id == clarification_id:
             if str(revision.payload.get("last_task_revision_digest") or "") != revision_digest:
                 raise ValueError(
