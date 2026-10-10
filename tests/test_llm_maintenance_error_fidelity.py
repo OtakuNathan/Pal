@@ -185,7 +185,7 @@ def test_provider_resolution_exception_is_not_absent_provider():
 
 
 @pytest.mark.parametrize("mode", ["exception", "error_response", "commit"])
-def test_compaction_keeps_actual_error_in_result(mode, monkeypatch):
+def test_compaction_keeps_actual_error_in_result(mode, monkeypatch, caplog):
     policy = PalCompactionPolicy()
     engine = CompactionEngine(policy, max_attempts=1)
     snapshot = CompactionSnapshot(target_input_budget=8192, reserved_output_tokens=1024,
@@ -203,6 +203,15 @@ def test_compaction_keeps_actual_error_in_result(mode, monkeypatch):
     details = str(result)
     assert ("compaction provider diagnostic" if mode == "error_response" else "backend diagnostic: upstream disconnected") in details
     assert "hidden-secret" not in details
+    assert ("compaction provider diagnostic" if mode == "error_response" else "backend diagnostic: upstream disconnected") in caplog.text
+    assert "failed_at=" in caplog.text
+    assert result.diagnostic_reference.removeprefix("compact ") in caplog.text
+    assert "hidden-secret" not in caplog.text
+    assert "backend diagnostic" not in result.user_notice
+    assert "compaction provider diagnostic" not in result.user_notice
+    if mode != "error_response":
+        assert "Traceback (most recent call last)" in caplog.text
+        assert "direct cause" in caplog.text
 
 
 @pytest.mark.parametrize("event", ["complete", "response.failed", "error"])
@@ -272,3 +281,57 @@ def test_compaction_cleanup_error_keeps_committed_receipt():
     assert result.metadata["status"] == "committed"
     assert "backend diagnostic: upstream disconnected" in result.metadata["post_commit_detail"]
     assert "Committed summary" in memory.l1_store.turns.turns[0].messages[0].text
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_terminal_decode_failure_is_logged_as_error(streaming, monkeypatch, caplog):
+    from pal.llm.shapes.base import ShapeDecodeError
+
+    class Invoker:
+        def invoke(self, *args, **kwargs):
+            try:
+                raise ValueError("invalid tool JSON; api_key=hidden-secret")
+            except ValueError as exc:
+                raise ShapeDecodeError("tool input contained invalid JSON") from exc
+
+        def invoke_updates(self, *args, **kwargs):
+            yield LLMResponseUpdate(
+                generation_result_from_values(text="partial answer").response,
+                LLMResponseDeltaKind.TEXT, text_delta="partial answer",
+            )
+            self.invoke()
+
+    monkeypatch.setattr("pal.llm.runtime._retry_delay", lambda _: 0)
+    runtime = runtime_for(Invoker())
+    if streaming:
+        response = list(runtime._iter_stream_updates(_request()))[-1].response
+    else:
+        response = runtime.generate(_request()).response
+    assert response.finish_reason == "error"
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "failure_kind=decode_error" in errors[0].message
+    assert "failed_at=" in errors[0].message
+    assert "Traceback (most recent call last)" in errors[0].message
+    assert "direct cause" in errors[0].message
+    assert "hidden-secret" not in caplog.text
+
+
+def test_recovered_decode_failure_does_not_log_terminal_error(monkeypatch, caplog):
+    from pal.llm.shapes.base import ShapeDecodeError
+
+    class Invoker:
+        calls = 0
+
+        def invoke(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise ShapeDecodeError("invalid JSON")
+            return generation_result_from_values(text="recovered").response, ()
+
+    monkeypatch.setattr("pal.llm.runtime._retry_delay", lambda _: 0)
+    invoker = Invoker()
+    result = runtime_for(invoker).generate(_request())
+    assert result.text == "recovered"
+    assert invoker.calls == 2
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]

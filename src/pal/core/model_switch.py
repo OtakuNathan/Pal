@@ -214,10 +214,12 @@ class ModelSwitchMixin:
                     commit_guard=current,
                 )
                 if not compact_result.success:
-                    raise ValueError(
-                        f"Compact did not complete ({compact_result.status}); the model was not changed.\n"
-                        + compact_result.diagnostic_details
+                    await self._complete_action_reply_async(
+                        action,
+                        f"Model switch failed: Compact did not complete ({compact_result.status}); the model was not changed.\n"
+                        + compact_result.user_notice,
                     )
+                    return
             async with self.state.channel_turn_transition_lock:
                 if not current():
                     raise ValueError("Model selection was cancelled or its configuration changed.")
@@ -227,7 +229,7 @@ class ModelSwitchMixin:
                 scope.pending_requests.pop("model_switch", None)
         except Exception as exc:
             suffix = (
-                "\nThe completed Compact remains in effect.\n" + compact_result.diagnostic_details
+                "\nThe completed Compact remains in effect.\n" + compact_result.user_notice
                 if compact_result and compact_result.success else ""
             )
             await self._complete_action_reply_async(action, f"Model switch failed: {exception_report(exc)}{suffix}")
@@ -235,8 +237,8 @@ class ModelSwitchMixin:
             # Delivery failure cannot roll back an already committed selection.
             # Let the channel error propagate without reporting a switch failure.
             message = f"Model updated to {target_id}. Thinking level: {level}. This applies to new turns only."
-            if compact_result and compact_result.diagnostic_details:
-                message += "\nCompaction diagnostics:\n" + compact_result.diagnostic_details
+            if compact_result and compact_result.user_notice:
+                message += "\n" + compact_result.user_notice
             await self._complete_action_reply_async(action, message)
         finally:
             if request.payload.get("stage") == "executing" and scope.pending_requests.get("model_switch") is request:

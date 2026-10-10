@@ -9,6 +9,8 @@ from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from pal.control import ControlAction, ControlRoute
 from pal.core import (
     CompactionClockKind,
@@ -1188,6 +1190,45 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             return order
 
         self.assertEqual(asyncio.run(run()), ["turn_end", "deadline"])
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_manual_compaction_logs_validation_traceback_without_sending_it(monkeypatch, caplog, recovers):
+    caplog.set_level("INFO", logger="pal.core.compaction")
+    core = PalCore()
+    register_core_with_core(core)
+    service = _memory_with_turns(2)
+    register_memory_with_core(core.context, service)
+    invalid = generation_result_from_values(text='{"unexpected": "checkpoint"}')
+    llm = _ScriptedLLM(
+        [invalid, generation_result_from_values(text=_valid_pal_payload())]
+        if recovers else [invalid] * 3
+    )
+    core.context.port_registry["llm:llm"] = llm
+    replies = []
+
+    async def capture_reply(_route, text):
+        replies.append(text)
+
+    monkeypatch.setattr(core, "_reply_to_route_async", capture_reply)
+    asyncio.run(core._handle_compact_memory_async(ControlAction(
+        action_kind="compact_memory", target_scope="memory",
+        route=ControlRoute(endpoint_id="memory", channel_kind="memory"),
+    )))
+    assert len(llm.generate_requests) == (2 if recovers else 3)
+    assert "schema:checkpoint_validation_failed" in caplog.text
+    assert "failed_at=" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "ValueError" in caplog.text
+    assert replies[-1].startswith("Context compacted." if recovers else "Compaction did not complete")
+    assert "see service logs" in replies[-1]
+    assert "compact run=" in replies[-1]
+    assert "Traceback" not in replies[-1]
+    assert "ValueError" not in replies[-1]
+    assert "unexpected" not in replies[-1]
+    finished = next(r for r in caplog.records if "compact finished" in r.message)
+    assert finished.levelname == ("INFO" if recovers else "ERROR")
+    assert all(r.levelname == "WARNING" for r in caplog.records if "attempt_failed" in r.message)
 
 
 if __name__ == "__main__":

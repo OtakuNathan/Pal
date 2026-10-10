@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import json
 import logging
+from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 from functools import singledispatchmethod
 from typing import Any, Awaitable, Callable, Mapping, Sequence
@@ -354,7 +355,7 @@ class TurnExecutor:
             return EffectResult(
                 status=RuntimeStatus.ERROR,
                 text=("Memory compaction did not report success.\n"
-                      + "\n".join((*getattr(run_result, "failures", ()), *getattr(run_result, "failure_details", ())))),
+                      + run_result.user_notice),
                 payload=run_result,
             )
         compact_result = run_result.memory_result
@@ -2246,6 +2247,8 @@ class TurnExecutor:
             if continuation is None:
                 root.promote()
         except Exception as exc:
+            LOGGER.warning("compact promote_failed failed_at=%s\n%s",
+                           datetime.now(timezone.utc).isoformat(), exception_report(exc))
             return CompactionRunResult(
                 status="error",
                 failures=("promote failed: " + exception_report(exc),),
@@ -2273,6 +2276,8 @@ class TurnExecutor:
                 deadline_at=deadline_at,
             )
         except Exception as exc:
+            LOGGER.warning("compact begin_failed run=%s failed_at=%s\n%s",
+                           run_id, datetime.now(timezone.utc).isoformat(), exception_report(exc))
             # NoBeneficialCompaction (minimal seed / empty left) and
             # CompactLaneBusy are structured outcomes, not failures to
             # retry: report them without touching L or R.

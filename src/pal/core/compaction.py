@@ -12,6 +12,7 @@ import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Callable, Protocol, Sequence
 from uuid import uuid4
@@ -197,10 +198,19 @@ class CompactionRunResult:
     clock_value: int = 0
     usage: dict[str, Any] | None = None
     failure_details: tuple[str, ...] = ()
+    diagnostic_reference: str = ""
 
     @property
     def success(self) -> bool:
         return self.status == "compacted"
+
+    @property
+    def user_notice(self) -> str:
+        if not self.diagnostic_details:
+            return ""
+        return "Compaction encountered an error; see service logs" + (
+            f" ({self.diagnostic_reference})." if self.diagnostic_reference else "."
+        )
 
     @property
     def diagnostic_details(self) -> str:
@@ -268,7 +278,7 @@ class CompactionEngine:
         # user precisely that compacting history cannot fix this window.
         terminal_status = "failed"
 
-        def log_failure(reason: str) -> None:
+        def log_failure(reason: str, *, diagnostic: str = "") -> None:
             failures.append(reason)
             response = getattr(outcome, "response", None)
             details = getattr(getattr(response, "message", None), "metadata", {}) or {}
@@ -280,20 +290,35 @@ class CompactionEngine:
             )
             _LOGGER.warning(
                 "compact attempt_failed run=%s policy=%s endpoint=%s attempt=%s "
-                "elapsed_seconds=%.3f replay=%s reason=%s failure_kind=%s error_type=%s "
-                "input_tokens=%s output_tokens=%s output_limit=%s timeout_seconds=%s",
+                "failed_at=%s elapsed_seconds=%.3f replay=%s reason=%s failure_kind=%s error_type=%s "
+                "input_tokens=%s output_tokens=%s output_limit=%s timeout_seconds=%s%s",
                 run_id, self.policy.policy_id, endpoint, attempts,
+                datetime.now(timezone.utc).isoformat(),
                 time.monotonic() - attempt_started_at,
                 snapshot.replay_request is not None, _log_failure_reason(reason),
                 details.get("failure_kind", ""), details.get("error_type", ""),
                 getattr(outcome, "input_tokens", 0), getattr(outcome, "output_tokens", 0),
                 request.policy.max_output_tokens, self.timeout_seconds,
+                "\n" + diagnostic if diagnostic else "",
             )
 
         def finish(snapshot: CompactionSnapshot, **kwargs: Any) -> CompactionRunResult:
-            result = replace(self._result(snapshot, **kwargs), failure_details=tuple(failure_details))
+            result = replace(
+                self._result(snapshot, **kwargs),
+                failure_details=tuple(failure_details),
+                diagnostic_reference=f"compact run={run_id}",
+            )
+            metadata = result.memory_result.metadata if result.memory_result is not None else {}
+            if metadata.get("post_commit_detail"):
+                _LOGGER.warning(
+                    "compact post_commit_failed run=%s failed_at=%s\n%s",
+                    run_id, datetime.now(timezone.utc).isoformat(),
+                    diagnostic_text(metadata["post_commit_detail"], limit=None),
+                )
             _LOGGER.log(
-                logging.INFO if result.success else logging.WARNING,
+                logging.INFO if result.success else (
+                    logging.ERROR if result.status in {"failed", "commit_failed"} else logging.WARNING
+                ),
                 "compact finished run=%s policy=%s status=%s attempts=%s "
                 "elapsed_seconds=%.3f failure_count=%s",
                 run_id, self.policy.policy_id, result.status, result.attempts,
@@ -426,7 +451,7 @@ class CompactionEngine:
                 outcome = await self._generate(llm_runtime, request)
             except Exception as exc:
                 failure_details.append(exception_report(exc))
-                log_failure(f"endpoint:{type(exc).__name__}")
+                log_failure(f"endpoint:{type(exc).__name__}", diagnostic=failure_details[-1])
                 continue
 
             finish_reason = str(getattr(outcome, "finish_reason", "") or "")
@@ -479,7 +504,7 @@ class CompactionEngine:
                 failure_details.append(diagnostic_text(
                     str(getattr(outcome, "text", "") or "") + "\n"
                     + json.dumps(dict(details), ensure_ascii=False, default=str), limit=None))
-                log_failure("endpoint:error")
+                log_failure("endpoint:error", diagnostic=failure_details[-1])
                 continue
             # C2 (review c9cb2d2): this is the single generation-result
             # acceptance point, and a final handoff is TEXT ONLY.  A
@@ -518,7 +543,7 @@ class CompactionEngine:
             except Exception as exc:
                 failure_details.append(exception_report(exc))
                 validation_error = _validation_error(exc)
-                log_failure(f"schema:{validation_error}")
+                log_failure(f"schema:{validation_error}", diagnostic=failure_details[-1])
                 repair_output = raw_text
                 if "visible" in validation_error and "limit" in validation_error:
                     output_target = max(1, (output_target or visible_limit) // 2)
@@ -567,7 +592,7 @@ class CompactionEngine:
             )
             if isinstance(committed, Exception):
                 failure_details.append(exception_report(committed))
-                log_failure(f"commit:{type(committed).__name__}")
+                log_failure(f"commit:{type(committed).__name__}", diagnostic=failure_details[-1])
                 return finish(
                     snapshot,
                     status="commit_failed",

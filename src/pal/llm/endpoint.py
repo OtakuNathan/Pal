@@ -6,9 +6,11 @@ import logging
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from pal.foundation.diagnostics import diagnostic_text, exception_report
 from pal.llm.ir import (
     LLMRequestIR,
     LLMResponseIR,
@@ -234,14 +236,16 @@ class ShapeEndpointInvoker:
                     actual_provider=evidence.actual_provider,
                     returned_model=evidence.returned_model,
                 )
-                # Decoder messages describe structure; never log wire payloads
-                # or chained JSON exceptions (which can contain tool input).
+                # This attempt failed; the runtime decides whether generation
+                # can recover. Keep the redacted exception chain in service logs;
+                # raw response frames remain in the private capture.
                 logger.warning(
                     "LLM decode failed endpoint=%s model=%s shape=%s attempt=%s "
-                    "generation=%s frames=%s last_event=%r reason=%r capture=%s",
+                    "generation=%s frames=%s last_event=%r reason=%r capture=%s failed_at=%s\n%s",
                     endpoint.endpoint_id, endpoint.model_id, shape.value, request_id,
                     evidence.provider_generation_id, frame_count, last_event_type,
-                    str(exc)[:500], capture_path or "unavailable",
+                    diagnostic_text(exc, limit=500), capture_path or "unavailable",
+                    datetime.now(timezone.utc).isoformat(), exception_report(exc),
                 )
             # Preserve the original exception type for existing retry policy.
             with contextlib.suppress(AttributeError, TypeError):

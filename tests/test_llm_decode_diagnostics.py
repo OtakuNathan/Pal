@@ -67,3 +67,29 @@ def test_unserializable_diagnostic_does_not_interrupt_response(tmp_path, monkeyp
     data = json.loads(capture.save(ShapeDecodeError("original")).read_text())
     assert data["capture_errors"] == 1
     assert not data["complete_capture"]
+
+
+def test_endpoint_logs_full_decode_chain_at_warning(tmp_path, monkeypatch, caplog):
+    from pal.llm.endpoint import ShapeEndpointInvoker
+    from tests.test_llm_runtime_ir import _endpoint, _request
+
+    monkeypatch.setenv("PAL_LOG_ROOT", str(tmp_path))
+
+    class Transport:
+        def frames(self, endpoint, request):
+            yield _JSONFrame(0, {"choices": [{
+                "message": {"role": "assistant", "tool_calls": [{
+                    "id": "call-1", "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"range": 1,120}'},
+                }]}, "finish_reason": "tool_calls",
+            }]})
+
+    with pytest.raises(ShapeDecodeError):
+        ShapeEndpointInvoker(transport=Transport()).invoke(_endpoint(), _request())
+    record = next(r for r in caplog.records if "LLM decode failed" in r.message)
+    assert record.levelname == "WARNING"
+    assert "failed_at=" in record.message
+    assert "capture=" in record.message
+    assert "Traceback (most recent call last)" in record.message
+    assert "JSONDecodeError" in record.message
+    assert "ShapeDecodeError" in record.message

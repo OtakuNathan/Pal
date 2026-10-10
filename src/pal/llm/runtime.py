@@ -5,6 +5,7 @@ from pal.foundation.diagnostics import diagnostic_text, exception_report, except
 import asyncio
 import hashlib
 import json
+import logging
 import random
 import sqlite3
 import time
@@ -12,6 +13,7 @@ from collections.abc import AsyncGenerator, Callable, Iterator, Mapping
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -985,6 +987,7 @@ class LLMRuntime:
         self.usage_ledger.record_failed_request(
             endpoint_id=endpoints[-1].endpoint_id if endpoints else ""
         )
+        _log_decode_failure(last_error, endpoints[-1].endpoint_id if endpoints else "")
         return _failure_result(
             _public_failure_text(last_error),
             exc=last_error,
@@ -1302,6 +1305,7 @@ class LLMRuntime:
                         self.usage_ledger.record_failed_request(
                             endpoint_id=endpoint.endpoint_id
                         )
+                        _log_decode_failure(exc, endpoint.endpoint_id)
                         yield LLMResponseUpdate(error_response, delta_kind=LLMResponseDeltaKind.STATE)
                         return
                     if (
@@ -1319,6 +1323,7 @@ class LLMRuntime:
         self.usage_ledger.record_failed_request(
             endpoint_id=endpoints[-1].endpoint_id if endpoints else ""
         )
+        _log_decode_failure(last_error, endpoints[-1].endpoint_id if endpoints else "")
         response = _failure_result(
             str(last_error or "LLM stream failed"),
             exc=last_error,
@@ -2058,6 +2063,14 @@ def _response_with_failure(
         message=replace(response.message, metadata=metadata),
         finish_reason=LLMFinishReason.ERROR,
     )
+
+
+def _log_decode_failure(exc: Exception | None, endpoint_id: str) -> None:
+    if isinstance(exc, ShapeDecodeError):
+        logging.getLogger(__name__).error(
+            "LLM generation failed endpoint=%s failure_kind=decode_error failed_at=%s\n%s",
+            endpoint_id, datetime.now(timezone.utc).isoformat(), exception_report(exc),
+        )
 
 
 def _failure_metadata(exc: Exception | None) -> dict[str, Any]:

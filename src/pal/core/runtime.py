@@ -1857,8 +1857,8 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     if run_result.status == "hot_cache_unavailable"
                     else f"Compact 未完成（已尝试 {run_result.attempts} 次）。请先查看错误详情再决定是否重试。"
                 )
-            if run_result.diagnostic_details:
-                message += "\nCompaction diagnostics:\n" + run_result.diagnostic_details
+            if run_result.user_notice:
+                message += "\n" + run_result.user_notice
             await self._complete_compact_reply_async(action, message)
             return
         result = run_result.memory_result
@@ -1868,8 +1868,8 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         normalization_diagnostics = compact_normalization_diagnostics(result)
         if normalization_diagnostics:
             reply_text += f" {len(normalization_diagnostics)} optional format issues normalized or skipped."
-        if run_result.diagnostic_details:
-            reply_text += "\nCompaction diagnostics:\n" + run_result.diagnostic_details
+        if run_result.user_notice:
+            reply_text += "\n" + run_result.user_notice
         await self._complete_compact_reply_async(
             action,
             reply_text,
