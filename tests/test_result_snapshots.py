@@ -62,6 +62,47 @@ def test_atomic_summary_transfer_does_not_unlink_retained_file(tmp_path):
     assert not Path(keep.path).exists()
 
 
+@pytest.mark.parametrize("consumer_count", [1, 2])
+def test_request_leases_survive_compaction_and_turn_completion(tmp_path, consumer_count):
+    store = ResultSnapshotStore(tmp_path)
+    history = MemoryService().l1_store.turns
+    ref = store.capture("shell input", call_id="source", lifetime="s")
+    history.append(result_turn(ref))
+    store.pin_history_request(history, "origin")
+    store.finish_references((ref,))
+    leases = [store.lease_request("origin") for _ in range(consumer_count)]
+
+    later = store.capture("later input", call_id="later", lifetime="s")
+    history.append(result_turn(later, "later"))
+    store.finish_references((later,))
+    history.clear()
+    store.pin_history_request(history, "origin")
+    store.finish_turn("origin")
+    assert Path(ref.path).read_text() == "shell input"
+    assert not Path(later.path).exists()
+
+    for index, lease in enumerate(leases):
+        store.release(lease)
+        assert Path(ref.path).exists() == (index < consumer_count - 1)
+    store.release(leases[0])
+    assert not store.references()
+
+
+@pytest.mark.parametrize("turn_id", ["", "missing"])
+def test_empty_request_lease_does_not_retain_other_snapshots(tmp_path, turn_id):
+    store = ResultSnapshotStore(tmp_path)
+    history = MemoryService().l1_store.turns
+    ref = store.capture("history input", call_id="source", lifetime="s")
+    history.append(result_turn(ref))
+    store.bind_history(history)
+    store.finish_references((ref,))
+    lease = store.lease_request(turn_id)
+    history.clear()
+    assert not Path(ref.path).exists()
+    store.release(lease)
+    assert not store.references()
+
+
 def test_uncommitted_result_is_deleted_and_text_paths_are_not_owners(tmp_path):
     store = ResultSnapshotStore(tmp_path)
     memory = MemoryService()
