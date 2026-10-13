@@ -43,10 +43,12 @@ class CoreConfigurationService:
             return
         self._server = None
         server.close()
-        await server.wait_closed()
         clients = dict(self._clients)
         for writer in clients.values():
             writer.close()
+        # Some event loops wait for accepted TCP transports in wait_closed().
+        # Close idle clients first so they cannot keep server shutdown pending.
+        await server.wait_closed()
         # No await occurs inside configure: writes finish on the owner loop
         # before shutdown can enter. Idle readers are woken by closing writers.
         if clients:

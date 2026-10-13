@@ -21,7 +21,7 @@ from pal.bunshin.ipc import start_manager_server, cleanup_manager_endpoint
 from pal.bunshin.profiles import BunshinProfileRegistry
 from pal.control.configuration import CoreConfigurationService, configuration_endpoint
 from pal.foundation import PalV2Database
-from pal.foundation.sidecar import dispatch_sidecar_request, pack_sidecar_message, read_sidecar_message, SidecarRpcClient
+from pal.foundation.sidecar import dispatch_sidecar_request, open_sidecar_connection, pack_sidecar_message, read_sidecar_message, SidecarRpcClient
 from pal.llm.models import PalRuntimeSettingModel
 from pal.llm.repository import RuntimeSettingRepository
 from pal.packages.process import runtime_lease
@@ -124,7 +124,13 @@ def test_core_offline_configuration_is_atomic_and_reports_on_start(runtime_root)
     assert invoke_async(run_core_cli_async, parse(runtime_root, 'core', 'cache-reminder', 'show'))[1]['state']['lead_seconds'] == 31
 
 
-def test_core_cli_reaches_busy_owner_and_shutdown_closes_idle_clients(runtime_root):
+@pytest.mark.parametrize('force_tcp', [False, True])
+def test_core_cli_reaches_busy_owner_and_shutdown_closes_idle_clients(runtime_root, monkeypatch, force_tcp):
+    if force_tcp:
+        async def unavailable_unix_server(*args, **kwargs):
+            raise OSError('Unix socket unavailable in this fixture')
+        monkeypatch.setattr(asyncio, 'start_unix_server', unavailable_unix_server)
+
     async def run():
         from tests.test_cache_warm_deadline import _route, _snapshot
         core = PalCore()
@@ -139,6 +145,8 @@ def test_core_cli_reaches_busy_owner_and_shutdown_closes_idle_clients(runtime_ro
             await service.start_async()
             endpoint = configuration_endpoint(runtime_root)
             try:
+                if force_tcp:
+                    assert endpoint.port_path.exists()
                 process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'pal.main',
                     'core', 'cache-reminder', 'configure', '--no-enabled', '--runtime-root', str(runtime_root), '--json',
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -150,7 +158,7 @@ def test_core_cli_reaches_busy_owner_and_shutdown_closes_idle_clients(runtime_ro
                 client = SidecarRpcClient(endpoint)
                 with pytest.raises(Exception):
                     await client.request('call_tool', {'name': 'configure_core'})
-                reader, writer = await asyncio.open_unix_connection(endpoint.socket_path)
+                reader, writer = await open_sidecar_connection(endpoint)
                 await asyncio.sleep(0)
                 await asyncio.wait_for(service.stop_async(), 3)
                 assert await reader.read() == b''
