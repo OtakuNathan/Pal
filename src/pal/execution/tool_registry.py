@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from pal.execution.contracts import CapabilityDescriptor
-from pal.execution.discovery_terms import discovery_vocabulary, tool_domain, validate_search_rules
+from pal.execution.discovery_terms import discovery_vocabulary, search_domain_catalog, tool_domain, validate_search_rules
 from pal.execution.tool_presentation import compact_input_contract, native_input_contract
 from pal.execution.tool_facade import (
     EffectKind,
@@ -333,7 +333,9 @@ def compile_registry_generation(
         validate_search_rules(alias, record.guidance, vocabulary)
         search_records[alias] = {
             "alias": alias,
-            "domain": tool_domain(alias, record.module_id),
+            "domain": tool_domain(alias, record.module_id, declared_domain=record.guidance.search_domain),
+            "search_domain_aliases": record.guidance.search_domain_aliases,
+            "search_domain_description": record.guidance.search_domain_description,
             "search_objects": record.guidance.search_objects,
             "search_terms": vocabulary,
             "search_auxiliary_terms": discovery_vocabulary(record.guidance, record.input_schema, include_objects=False),
@@ -365,6 +367,7 @@ def compile_registry_generation(
                 },
             }
 
+    search_domain_catalog(search_records)  # Reject ambiguous ownership before publication.
     stable = {
         "aliases": [
             {
@@ -377,7 +380,8 @@ def compile_registry_generation(
                 "description": (direct_aliases.get(alias) or indirect_aliases[alias]).compiled_description,
                 "discovery": {key: search_records[alias][key] for key in (
                     "search_terms", "search_auxiliary_terms", "search_objects", "search_term_rules", "search_scope_terms", "search_intents",
-                    "domain", "module_id", "namespace", "family", "tags")},
+                    "domain", "search_domain_aliases", "search_domain_description",
+                    "module_id", "namespace", "family", "tags")},
             }
             for alias in sorted(alias_to_canonical)
         ]

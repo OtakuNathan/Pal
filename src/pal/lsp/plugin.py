@@ -227,6 +227,8 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="implementation",
         guidance=ToolGuidance(
+            search_terms=('implemented', 'implementation', 'concrete', 'override', 'overrides'),
+            search_intents=('find the concrete implementation of this symbol',),
             search_objects=('implementation', 'implementations'),
             purpose="Find implementations at a file position.",
             use_when='Finding concrete implementations of an interface or abstract method. A successful empty result means no implementations were returned. Diagnose readiness only on a reported error.',
@@ -250,6 +252,8 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy",
         guidance=ToolGuidance(
+            search_terms=('callgraph', 'graph', 'hierarchy', 'prepare'),
+            search_intents=('prepare the symbol call graph',),
             search_objects=('hierarchy', 'hierarchies', 'item', 'items'),
             purpose="Prepare call hierarchy items at a file position.",
             use_when='Inspecting the candidate call hierarchy symbols at a file position when those items themselves are needed. If empty, the position may not be a callable symbol.',
@@ -268,6 +272,8 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls",
         guidance=ToolGuidance(
+            search_terms=('caller', 'callers', 'calling', 'invokes', 'invoking'),
+            search_intents=('find who calls this function',),
             search_objects=('call', 'calls', 'caller', 'callers'),
             purpose="Find callers (incoming calls) for a symbol.",
             use_when='Tracing who calls a specific function or method at a known file position. Preparation is internal; no prior prepare_lsp_call_hierarchy call is needed. A successful empty result means no callers were returned. Diagnose readiness only on a reported error.',
@@ -279,6 +285,8 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls",
         guidance=ToolGuidance(
+            search_terms=('callee', 'callees', 'called', 'invoked', 'dependencies'),
+            search_intents=('find functions called by this symbol',),
             search_objects=('call', 'calls', 'callee', 'callees'),
             purpose="Find callees (outgoing calls) for a symbol.",
             use_when='Tracing what a specific function or method calls at a known file position. Preparation is internal; no prior prepare_lsp_call_hierarchy call is needed. A successful empty result means no callees were returned. Diagnose readiness only on a reported error.',
@@ -302,6 +310,8 @@ class LspManagerPluginProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="workspace_symbols",
         guidance=ToolGuidance(
+            search_terms=('lookup', 'locate', 'symbol', 'name', 'workspace'),
+            search_intents=('locate a symbol by name across the project',),
             search_objects=('symbol', 'symbols'),
             purpose="Search workspace symbols by name.",
             use_when='Finding where a symbol is defined across the entire workspace. A successful empty result means no matching symbols were returned. Refine the query or use text search if needed; diagnose readiness only on a reported error.',

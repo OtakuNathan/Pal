@@ -145,7 +145,7 @@ class MemoryIntrospectionProvider:
         InputModel=MemoryHistoryInput, aliases=("read_memory_history",),
         execution=INDIRECT_LOCAL_READ,
         examples=({"query": "prior API preference"},),
-        guidance=ToolGuidance(search_objects=('history', 'histories', 'memory', 'memories'), purpose="Explicitly read archived original memories and successor references.",
+        guidance=ToolGuidance(search_terms=('history', 'archived', 'revision', 'revisions', 'version', 'versions', 'previous', 'old', 'successor', 'superseded'), search_intents=('read previous versions of a memory',), search_objects=('history', 'histories', 'memory', 'memories'), purpose="Explicitly read archived original memories and successor references.",
             use_when="Current recall lacks historical details or a memory reference has been replaced.",
             do_not_use_when="Do not treat historical results as current facts or install them into L2 HOT.",
             failure_next_steps="Try the current successor reference or a more specific archive query."))

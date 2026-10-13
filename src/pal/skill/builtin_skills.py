@@ -382,6 +382,20 @@ resources remain owned by the existing start(scope)/cleanup lifecycle.
 Adapters with no extra Python backend can declare `python="host"`; this mode
 never installs Python dependencies. Builtin modules keep their current packaging.
 
+## Tool discovery ownership
+
+Declare `ToolGuidance.search_domain` when an operation's owner differs from its
+implementation module. Use one short lowercase domain per operation bucket,
+such as `shell` for command/session tools and `remote` for host lifecycle tools.
+`search_domain_aliases` can provide abbreviations or full names for that same
+bucket; never claim a different owner's domain. Conflicting aliases reject the
+candidate registry generation. A short `search_domain_description` explains the
+bucket in the current system tool policy. Add reviewed action words and user
+intent phrases through `search_terms` and `search_intents` on each tool; keep
+purpose, use_when and do_not_use_when accurate about targets and effects.
+Every action needs a matching capability node for its namespace and scope;
+compile the provider to verify that all intended aliases are actually published.
+
 ## Runtime Entrypoint
 
 The entrypoint module must expose `build_plugin`. Pal calls it by name-aware dependency injection. Supported argument names include:

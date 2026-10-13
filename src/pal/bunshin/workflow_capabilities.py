@@ -599,6 +599,8 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="restart_execution",
         guidance=ToolGuidance(
+            search_terms=('rerun', 'retry', 'attempt', 'coder', 'coding', 'implementation', 'discard', 'baseline'),
+            search_intents=('retry the implementation attempt from its accepted baseline',),
             search_objects=('execution', 'executions', 'attempt', 'attempts'),
             purpose="Discard the current execution attempt and restart from its accepted architecture or direct task baseline.",
             use_when="When execution policy or Coder behavior changed but the accepted architecture or direct task remains the intended baseline. Direct mode retains its pinned source snapshot and skips planning.",
@@ -722,6 +724,8 @@ class BunshinPublicProvider:
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput,
         aliases=("rebind_bunshin_task_delivery",),
         guidance=ToolGuidance(
+            search_terms=('delivery', 'destination', 'output', 'reply', 'channel', 'recipient', 'routing'),
+            search_intents=('change the reply destination for this task',),
             search_objects=('delivery', 'deliveries', 'target', 'targets'),
             purpose="Rebind one Task's Manager-owned reply target without changing its workflow.",
             use_when="Use only after the user explicitly names a Task and destination channel endpoint.",

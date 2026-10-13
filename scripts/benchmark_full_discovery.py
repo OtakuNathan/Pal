@@ -38,7 +38,9 @@ def build_catalog():
             search_term_rules=[r.model_dump() for r in tool.guidance.search_term_rules],
             search_scope_terms=tool.guidance.search_scope_terms,
             search_intents=tool.guidance.search_intents,
-            domain=tool_domain(tool.alias, tool.module_id), module_id=tool.module_id,
+            domain=tool_domain(tool.alias, tool.module_id, declared_domain=tool.guidance.search_domain),
+            search_domain_aliases=tool.guidance.search_domain_aliases,
+            search_domain_description=tool.guidance.search_domain_description, module_id=tool.module_id,
             namespace=tool.namespace, family=tool.family, tags=[])
         cases.append(dict(alias=tool.alias, source=tool.source,
                           group='role_union' if tool.role_scoped else 'resident_union',

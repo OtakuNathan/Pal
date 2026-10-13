@@ -192,6 +192,18 @@ matches complete words, including words separated by underscores in aliases; `in
 does not match `uninstall`. Broad or unmatched queries can be refined using
 the result's hit and filter guidance.
 
+Plugins can declare operation ownership with `ToolGuidance.search_domain`, a
+lowercase owner name, independently of their implementation module. Optional
+`search_domain_aliases` accept up to eight lowercase abbreviations or full names;
+aliases route to the same strict bucket and cannot claim another owner's name.
+Conflicts reject the candidate registry generation. `search_domain_description`
+provides a short explanation (up to 160 characters) for the live domain list in
+the system tool policy. Domain metadata contributes to the registry fingerprint
+but stays out of retrieved contracts. Without an explicit declaration, existing
+alias and module ownership rules apply. For example, a native execution plugin
+can declare `shell` for command/session tools and `remote` for target lifecycle
+tools while continuing to mount under the execution module.
+
 Discovery vocabulary is declared in `ToolGuidance.search_terms`: reviewed action and
 object synonyms, not arbitrary prose. Existing `search_objects` declarations remain
 supported. `search_enum_fields=("operation",)` explicitly includes string enum values

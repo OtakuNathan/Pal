@@ -154,6 +154,10 @@ class ToolGuidance(StrictToolModel):
     purpose: str
     use_when: str
     do_not_use_when: str
+    # Operation ownership can differ from the implementation module.
+    search_domain: str = ""
+    search_domain_aliases: tuple[str, ...] = ()
+    search_domain_description: str = ""
     # Legacy object forms remain supported. New declarations can also provide
     # reviewed action/object synonyms and explicitly selected operation enums.
     # These fields are internal discovery metadata, never rendered descriptions.
@@ -172,7 +176,8 @@ class ToolGuidance(StrictToolModel):
     next_tool_hints: tuple[NextToolHint, ...] = ()
 
     @field_validator("search_objects", "search_terms", "search_enum_fields",
-                     "search_term_rules", "search_scope_terms", "search_intents", mode="before")
+                     "search_term_rules", "search_scope_terms", "search_intents",
+                     "search_domain_aliases", mode="before")
     @classmethod
     def restore_search_objects(cls, value: Any) -> Any:
         # Internal capability specs cross JSON boundaries into worker registries.
@@ -184,6 +189,19 @@ class ToolGuidance(StrictToolModel):
             if not str(getattr(self, field_name)).strip():
                 raise ValueError(f"tool guidance {field_name} must be non-empty")
         names = [hint.name for hint in self.next_tool_hints]
+        if self.search_domain and not re.fullmatch(r"[a-z][a-z0-9]*", self.search_domain):
+            raise ValueError("search_domain must be one lowercase owner name")
+        if (self.search_domain_aliases or self.search_domain_description) and not self.search_domain:
+            raise ValueError("domain aliases and description require search_domain")
+        if (len(self.search_domain_aliases) > 8
+                or any(not re.fullmatch(r"[a-z][a-z0-9]*(?:[ _-][a-z0-9]+)*", word)
+                       or len(word) > 80 for word in self.search_domain_aliases)):
+            raise ValueError("domain aliases require at most eight short lowercase names")
+        if len(self.search_domain_description) > 160:
+            raise ValueError("search_domain_description must be at most 160 characters")
+        normalized_aliases = {re.sub(r"[ _-]+", " ", word) for word in self.search_domain_aliases}
+        if len(normalized_aliases) != len(self.search_domain_aliases):
+            raise ValueError("domain aliases must be unique after separator normalization")
         if any(not re.fullmatch(r"[a-z][a-z0-9]*", word) for word in self.search_objects):
             raise ValueError("search_objects must contain lowercase whole object words")
         if len(set(self.search_objects)) != len(self.search_objects):

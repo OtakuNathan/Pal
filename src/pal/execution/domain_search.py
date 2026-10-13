@@ -7,7 +7,7 @@ from typing import Any
 
 from pal.execution.discovery_terms import (
     PURPOSE_STOP_WORDS, _one_edit_apart, normalize_domain, purpose_terms,
-    search_facets, tool_domain, tool_search_terms,
+    resolve_search_domain, search_domain_catalog, search_facets, tool_domain, tool_search_terms,
 )
 from pal.shared.tool_routing import TOOL_DISCOVERY_STOP_HINT
 
@@ -15,6 +15,7 @@ from pal.shared.tool_routing import TOOL_DISCOVERY_STOP_HINT
 _INDEX_FIELDS = frozenset({
     "search_objects", "search_terms", "search_auxiliary_terms", "search_term_rules",
     "search_scope_terms", "search_intents",
+    "search_domain_aliases", "search_domain_description",
 })
 
 
@@ -72,7 +73,7 @@ def _rank(records: dict[str, Any], words: set[str], *, domain: str) -> list[dict
 
 def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
     query = str(args.get("query") or "").strip().lower()
-    domain = normalize_domain(str(args.get("domain") or ""))
+    domain = resolve_search_domain(str(args.get("domain") or ""), search_domain_catalog(generation.search_records))
     namespace = str(args.get("namespace") or "").strip().lower()
     namespace = {"inspect": "introspection", "action": "operation"}.get(namespace, namespace)
     filters = {"namespace": namespace, "family": str(args.get("family") or "").strip().lower(),

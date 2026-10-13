@@ -64,7 +64,23 @@ class PromptCompiler:
                 fragment = replace(fragment, metadata={**fragment.metadata, "source_provider": provider.provider_id})
                 indexed_fragments.append((fragment.priority, registration_order, fragment))
         indexed_fragments.sort(key=lambda item: (item[0], item[1]))
-        return [fragment for _, _, fragment in indexed_fragments]
+        fragments = [fragment for _, _, fragment in indexed_fragments]
+        if not any(fragment.section == "tool_policy" for fragment in fragments):
+            return fragments
+        runtime = self.context.execution_runtime
+        if runtime is not None:
+            from pal.execution.discovery_terms import search_domain_catalog
+            catalog = search_domain_catalog(runtime.registry_generation.search_records)
+            if catalog:
+                lines = ["Available search_tools domains in the current registry (strict owner buckets):"]
+                for domain, entry in sorted(catalog.items()):
+                    aliases = " (also: " + ", ".join(entry["aliases"][:8]) + ")" if entry["aliases"] else ""
+                    description = ": " + entry["description"][:160] if entry["description"] else ""
+                    lines.append(f"- {domain}{aliases}{description}")
+                lines.append("Use these names rather than guessing from plugin implementation names. Native contracts already exposed need no discovery.")
+                fragments = [replace(fragment, content=fragment.content + "\n" + "\n".join(lines))
+                             if fragment.section == "tool_policy" else fragment for fragment in fragments]
+        return fragments
 
     def build_prompt_ir(self, assembly_context: PromptAssemblyContext) -> PromptIR:
         if assembly_context.turn_kind == "failure":

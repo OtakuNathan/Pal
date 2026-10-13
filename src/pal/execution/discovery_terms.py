@@ -42,8 +42,10 @@ def normalize_domain(value: str) -> str:
     return DOMAIN_ALIASES.get(key, key)
 
 
-def tool_domain(alias: str, module_id: str = "") -> str:
+def tool_domain(alias: str, module_id: str = "", *, declared_domain: str = "") -> str:
     """Operation ownership, not arbitrary target names mentioned in guidance."""
+    if declared_domain:
+        return normalize_domain(declared_domain)
     if alias in ALIAS_DOMAINS:
         return ALIAS_DOMAINS[alias]
     owner = module_id.split(".", 1)[0]
@@ -56,6 +58,42 @@ def tool_domain(alias: str, module_id: str = "") -> str:
     if len(domains) == 1:
         return next(iter(domains))
     return normalize_domain(module_id) if module_id else ""
+
+
+def search_domain_catalog(records: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Visible owner buckets and authored aliases; collisions reject publication."""
+    catalog: dict[str, dict[str, Any]] = {}
+    for alias, record in sorted(records.items()):
+        domain = record.get("domain") or tool_domain(alias, str(record.get("module_id") or ""))
+        if not domain:
+            continue
+        entry = catalog.setdefault(domain, {"aliases": set(), "descriptions": set(), "tool_count": 0})
+        entry["tool_count"] += 1
+        entry["aliases"].update(record.get("search_domain_aliases", ()))
+        description = str(record.get("search_domain_description") or "").strip()
+        if description:
+            entry["descriptions"].add(description)
+    owners = {**DOMAIN_ALIASES, **{domain: domain for domain in catalog}}
+    for domain, entry in catalog.items():
+        normalized = set()
+        for alias in sorted(entry["aliases"]):
+            key = normalize_domain(alias)
+            if key in owners and owners[key] != domain:
+                raise ValueError(f"Search domain alias {alias!r} conflicts with owner {owners[key]!r}")
+            owners[key] = domain
+            if key != domain:
+                normalized.add(key)
+        entry["aliases"] = sorted(normalized)
+        entry["description"] = "; ".join(sorted(entry.pop("descriptions")))
+    return catalog
+
+
+def resolve_search_domain(value: str, catalog: Mapping[str, Any]) -> str:
+    domain = normalize_domain(value)
+    for owner, entry in catalog.items():
+        if domain in entry["aliases"]:
+            return owner
+    return domain
 
 # These are recovery alternatives, never unconditional strict-match vocabulary.
 FUZZY_WORD_GROUPS = (

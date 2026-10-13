@@ -46,7 +46,8 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "For diagnosis, inspect the hub itself or one named internal object. Object inspection returns "
                     "its lifecycle, health and related diagnostics together; directories provide discovery summaries. "
                     "Respect diagnostics.partial and unavailable sections rather than inferring health from missing data. "
-                    "Optional plugins can expose additional domains through their tool names and guidance."
+                    "Optional plugins declare their operation domains and aliases in tool guidance. "
+                    "The tool policy lists the domains currently available; use that list for search_tools.domain."
                 ),
                 priority=80,
                 metadata={"prompt_target": "system"},

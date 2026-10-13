@@ -132,10 +132,12 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(("alias", "source", "line", "role_scoped", "generated_spec_key", "purpose", "search_objects", "search_terms",
+        writer.writerow(("alias", "source", "line", "role_scoped", "generated_spec_key", "search_domain", "search_domain_aliases", "search_domain_description", "purpose", "search_objects", "search_terms",
                          "search_enum_fields", "effective_vocabulary", "search_term_rules", "search_scope_terms"))
         for row in rows:
-            writer.writerow((row.alias, row.source, row.line, row.role_scoped, row.generated_spec_key, row.guidance.purpose,
+            writer.writerow((row.alias, row.source, row.line, row.role_scoped, row.generated_spec_key,
+                             row.guidance.search_domain, " | ".join(row.guidance.search_domain_aliases),
+                             row.guidance.search_domain_description, row.guidance.purpose,
                              " ".join(row.guidance.search_objects), " ".join(row.guidance.search_terms),
                              " ".join(row.guidance.search_enum_fields), " ".join(row.vocabulary),
                              json.dumps([rule.model_dump(mode="json") for rule in row.guidance.search_term_rules]),

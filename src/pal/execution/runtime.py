@@ -1251,7 +1251,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             if not filters_match:
                 continue
             # This vocabulary belongs to the harness, not the model contract.
-            hit = {key: value for key, value in item.items() if key not in {"search_objects", "search_terms", "search_auxiliary_terms", "search_term_rules", "search_scope_terms", "search_intents"}}
+            hit = {key: value for key, value in item.items() if key not in {"search_objects", "search_terms", "search_auxiliary_terms", "search_term_rules", "search_scope_terms", "search_intents", "search_domain_aliases", "search_domain_description"}}
             # Preserve structural specificity as a ranking boost.
             rank = (max(0, tier - 4), coverage, tier, scope_match)
             score = 0
@@ -1323,7 +1323,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 for suggestion in result["suggestions"]:
                     suggestion['contract'] = {
                         key: value for key, value in filtered_records[suggestion['alias']].items()
-                        if key not in {"search_objects", "search_terms", "search_auxiliary_terms", "search_term_rules", "search_scope_terms", "search_intents"}
+                        if key not in {"search_objects", "search_terms", "search_auxiliary_terms", "search_term_rules", "search_scope_terms", "search_intents", "search_domain_aliases", "search_domain_description"}
                     }
                     suggestion['contract']['score'] = suggestion['score']
             result["usage_hint"] = (

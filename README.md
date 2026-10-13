@@ -296,14 +296,11 @@ and the guardrail that `build_plugin` must never start background work, touch
 hardware, mutate secrets, or do irreversible I/O. Pal consults it every time
 it writes or repairs a plugin.
 
-**OLED is the living example.** Pal's emotional display — `oled_emotion`, a
-community plugin Pal wrote itself — lives in `~/.pal/plugins/community/oled_emotion/`:
-a `plugin.toml` subscribing to `turn.start` / `turn.tool_call_before` /
-`turn.tool_call_after` / `turn.end`, an `introspection.py` that registers the
-`show_oled_emotion` tool as a resident affordance, 12 hand-made emotion GIFs,
-and a `sidecar.py` + `ssd1306.py` driver that talk to the OLED over a Unix
-socket — the hardware runs in a sidecar process, exactly the boundary the
-development manual demands.
+**OLED is a living example.** The community `oled_status` plugin displays
+runtime activity, a clock and weather on a small hardware status board. It reads
+structured runtime ports and turn events; its sidecar owns rendering and I2C.
+The model can inspect the board's status, while ordinary display updates need
+no model call. The earlier `oled_emotion` plugin has been retired and removed.
 
 Built-in plugins include artifact, behavior, checklist, proactive, skill,
 Bunshin, LSP, MCP, SQLite-vec L3 memory, web search (Brave + DuckDuckGo), and
