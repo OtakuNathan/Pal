@@ -1,4 +1,4 @@
-"""Purpose retrieval within an explicitly selected, visible domain bucket."""
+"""Purpose retrieval over filtered visibility, narrowed by an explicit owner."""
 from __future__ import annotations
 
 from collections import Counter
@@ -61,6 +61,10 @@ def _rank(records: dict[str, Any], words: set[str], *, domain: str) -> list[dict
         matched = normalized & document
         if not matched:
             continue
+        if not domain and len(matched) < 2:
+            # Across owners, a single common verb/context word is too weak to
+            # return a callable contract. No full-query coverage is required.
+            continue
         score = sum(log(1 + (count - frequencies[word] + .5) / (frequencies[word] + .5))
                     * 2.2 / (1 + 1.2 * (.25 + .75 * len(document) / average))
                     for word in sorted(matched))
@@ -72,6 +76,7 @@ def _rank(records: dict[str, Any], words: set[str], *, domain: str) -> list[dict
 
 
 def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """An empty owner supports broad purpose fallback, without global browsing."""
     query = str(args.get("query") or "").strip().lower()
     domain = resolve_search_domain(str(args.get("domain") or ""), search_domain_catalog(generation.search_records))
     namespace = str(args.get("namespace") or "").strip().lower()
@@ -88,7 +93,7 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
     for alias, record in generation.search_records.items():
         owner = record.get("domain") or tool_domain(alias, str(record.get("module_id") or ""))
         domains.add(owner)
-        if owner == domain and all(not value or str(record.get(key) or "").lower() == value
+        if (not domain or owner == domain) and all(not value or str(record.get(key) or "").lower() == value
                                    for key, value in filters.items()) and tags.issubset(str(tag).lower() for tag in record.get("tags", ())):
             records[alias] = record
     applied = {key: value for key, value in {"query": query, "domain": domain, **filters,
@@ -112,12 +117,13 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
         result.update(hits=[contract(row) for row in ranked[:limit]], total_count=len(ranked),
                       returned_count=min(len(ranked), limit), truncated=len(ranked) > limit)
         result["usage_hint"] = (
-            "Candidates are ranked by positive purpose and tool-authored search terms within this domain. "
+            "Candidates are ranked by positive purpose and tool-authored search terms "
+            + ("within this domain. " if domain else "across visible tools and the supplied filters. ") +
             "Lexical overlap is not proof that every requested feature exists. Compare the full contract "
             "with the original task, including unmatched terms; invoke only if it supports the task. "
             "No extra read_tool is needed when the contract is complete."
         )
-    elif not browse and not excluded_alias and records:
+    elif domain and not browse and not excluded_alias and records:
         # Spelling-only recovery after lexical retrieval misses. No central
         # action/object synonym list or cross-domain correction is applied.
         known = set().union(*(_document(record, words) for record in records.values()))
@@ -143,10 +149,10 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
             result["usage_hint"] = "Spelling-recovery candidates include full contracts. Verify the original request before invoking; unmatched words do not establish supported features."
     if args.get("facets"):
         result["facets"] = search_facets(records[row["alias"]] for row in ranked)
-    if domain not in domains:
+    if domain and domain not in domains:
         result["available_domains"] = sorted(domains - {""})
         result["usage_hint"] = "Unknown or unavailable domain. No other bucket was searched; choose available_domains or explicitly omit domain for broad discovery."
-    elif not result["hits"] and not result.get("suggestions") and records:
+    elif domain and not result["hits"] and not result.get("suggestions") and records:
         offset = max(0, int(args.get("directory_offset") or 0))
         page = []
         for alias in sorted(records)[offset:offset + 16]:

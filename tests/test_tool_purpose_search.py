@@ -67,7 +67,7 @@ def test_limitation_suffix_preserves_operation_but_not_excluded_capability():
     assert not aliases(lookup('reload provider code', domain='channel', records=records))
 
 
-def test_compound_actions_need_main_operation_and_preserve_conditions():
+def test_compound_actions_disclose_unsupported_operations_on_purpose_fallback():
     records = {
         'enable_plugin': dict(alias='enable_plugin', domain='plugin',
                               purpose='Enable and attach a disabled plugin in one step.'),
@@ -77,7 +77,10 @@ def test_compound_actions_need_main_operation_and_preserve_conditions():
     assert aliases(lookup('enable attach disabled plugin', domain='plugin', records=records)) == ['enable_plugin']
     assert aliases(lookup('observe fetch XHR traffic', domain='browser', records=records)) == ['manage_browser_network_capture']
     assert not aliases(lookup('browser fetch', records=records))
-    assert not aliases(lookup('disable attach plugin', records=records))
+    result = lookup('disable attach plugin', records=records)
+    assert aliases(result) == ['enable_plugin']
+    assert result['hits'][0]['unmatched_terms'] == ['disable']
+    assert 'not proof' in result['usage_hint']
 
 
 def test_uppercase_state_identifiers_survive_but_alias_references_do_not():
@@ -119,8 +122,12 @@ def test_partial_candidates_disclose_constraints_and_unsupported_actions(query):
 
 def test_domain_and_generic_context_alone_do_not_supply_object_evidence():
     record = dict(alias='inspect_llm_model', domain='llm', purpose='Inspect model state.')
-    for query in ('inspect runtime configuration', 'inspect llm configuration', 'git inspect model'):
+    for query in ('inspect runtime configuration', 'inspect llm configuration'):
         assert not aliases(lookup(query, records={record['alias']: record}))
+    result = lookup('git inspect model', records={record['alias']: record})
+    assert aliases(result) == [record['alias']]
+    assert result['hits'][0]['unmatched_terms'] == ['git']
+    assert 'not proof' in result['usage_hint']
 
 
 def test_positive_purpose_can_retrieve_without_structured_object_conditions():

@@ -1127,6 +1127,18 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if normalize_domain(str(args.get("domain") or "")):
             from pal.execution.domain_search import search_domain
             return search_domain(generation, args)
+        result = ExecutionRuntime._search_keywords(generation, args)
+        if (not result["hits"] and str(args.get("query") or "").strip()
+                and args.get("directory_offset") is None):
+            from pal.execution.domain_search import search_domain
+            purpose_result = search_domain(generation, args)
+            if purpose_result["hits"]:
+                return purpose_result
+        return result
+
+    @staticmethod
+    def _search_keywords(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
+        """Conservative keyword stage; the caller adds purpose recall on a miss."""
         raw_query = str(args.get("query") or "").strip()
         query = raw_query.lower()
         domain = normalize_domain(str(args.get("domain") or ""))

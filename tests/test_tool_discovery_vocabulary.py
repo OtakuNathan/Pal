@@ -29,13 +29,14 @@ def generation(catalog):
     })
 
 
-def aliases(generation, query, top_k=None):
+def aliases(generation, query, top_k=None, *, keyword_only=False):
     from pal.execution.runtime import ExecutionRuntime
 
     args = {"query": query}
     if top_k is not None:
         args["top_k"] = top_k
-    return [hit["alias"] for hit in ExecutionRuntime._search_generation(generation, args)["hits"]]
+    search = ExecutionRuntime._search_keywords if keyword_only else ExecutionRuntime._search_generation
+    return [hit["alias"] for hit in search(generation, args)["hits"]]
 
 
 def test_catalog_preserves_every_exact_alias_and_provider_declaration(catalog, generation):
@@ -201,8 +202,8 @@ def test_synonyms_preserve_distinct_operations(generation, query, expected, excl
     "llm switch endpoint", "read file from web", "browser_re", "install_pack",
     "lsp finds reference", "lsp find symbols", "proactive execute task immediately",
 ])
-def test_unsupported_domains_operations_and_prefixes_remain_unmatched(generation, query):
-    assert aliases(generation, query) == []
+def test_keyword_stage_keeps_unsupported_domains_operations_and_prefixes_unmatched(generation, query):
+    assert aliases(generation, query, keyword_only=True) == []
 
 
 @pytest.mark.parametrize('domain,query,expected', [
@@ -295,8 +296,10 @@ def test_diagnostic_context_and_owned_object_names_recall_real_tools(generation,
     ("git status", set()),
     ("show identity persona", set()),
 ])
-def test_precision_rejects_every_unexpected_candidate(generation, query, allowed, top_k):
-    assert set(aliases(generation, query, top_k)) == allowed
+def test_keyword_precision_and_existing_matches_survive_purpose_fallback(generation, query, allowed, top_k):
+    assert set(aliases(generation, query, top_k, keyword_only=True)) == allowed
+    if allowed:
+        assert set(aliases(generation, query, top_k)) == allowed
 
 
 def test_catalog_memory_scope_prefers_public_facade(generation):

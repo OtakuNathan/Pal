@@ -59,9 +59,13 @@ def test_real_tools_recall_declared_object_forms(runtime, query, expected):
     'lsps find reference', 'lsp finds reference', 'lsp searches symbol',
     'lsp readys diagnostic', 'browser_re',
 ])
-def test_object_vocabulary_does_not_expand_action_or_domain(runtime, query):
+def test_keyword_object_vocabulary_does_not_expand_action_or_domain(runtime, query):
+    keyword = runtime._search_keywords(runtime.registry_generation, {'query': query, 'top_k': 5})
+    assert keyword['hits'] == []
     result = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': query, 'top_k': 5}))
-    assert result.structured['hits'] == []
+    if result.structured['hits']:
+        assert 'not proof' in result.structured['usage_hint']
+        assert all(hit['matched_terms'] for hit in result.structured['hits'])
 
 
 def test_private_vocabulary_survives_worker_specs_but_not_model_surfaces(runtime):
@@ -191,7 +195,7 @@ def test_object_variants_rank_like_alias_words_over_incidental_purpose_words(que
     ('execution/file_capabilities.py', 'delete_path', 'delete link target', []),
     ('artifact/capabilities.py', 'inspect_artifact_info', 'artifact inspect representations', ['inspect_artifact_info']),
 ])
-def test_actual_objects_are_searchable_but_negative_purpose_clauses_are_not(path, alias, query, expected):
+def test_keyword_objects_are_searchable_but_negative_purpose_clauses_are_not(path, alias, query, expected):
     source = Path(__file__).resolve().parents[1] / 'src' / 'pal' / path
     for node in ast.walk(ast.parse(source.read_text())):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -203,7 +207,7 @@ def test_actual_objects_are_searchable_but_negative_purpose_clauses_are_not(path
         guidance = {key.arg: ast.literal_eval(key.value) for key in fields['guidance'].keywords
                     if key.arg in {'purpose', 'search_objects'}}
         generation = SimpleNamespace(search_records={alias: {'alias': alias, **guidance}})
-        hits = ExecutionRuntime._search_generation(generation, {'query': query})['hits']
+        hits = ExecutionRuntime._search_keywords(generation, {'query': query})['hits']
         assert [hit['alias'] for hit in hits] == expected
         exact = ExecutionRuntime._search_generation(generation, {'query': alias})['hits'][0]
         assert exact['purpose'] == guidance['purpose']

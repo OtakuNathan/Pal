@@ -295,8 +295,14 @@ An explicit domain limits both complete hits and fuzzy suggestions, including
 exact aliases. Unknown/unavailable domains return no hits and list the current
 generation's `available_domains`; they never silently select another bucket.
 Other filters still intersect the domain, including BM25 corpus statistics. Query-only
-search remains backward compatible and does not infer a hard bucket from target
-names (e.g. `lsp` in a plugin-management request).
+search does not infer a hard bucket from target names (e.g. `lsp` in a
+plugin-management request). Existing exact and conservative keyword hits retain
+their priority and order. If they return no hits, purpose retrieval searches all
+visible tools intersected with the supplied filters. This fallback requires at
+least two distinct positive term matches; it does not require full query coverage
+or gate admission on action/object words. It returns at most the same three full
+contracts by default, without padding existing keyword hits. Unknown or incorrect
+explicit domains never use this cross-domain fallback.
 
 When query words are uncertain, `search_tools(domain=owner)` returns
 a directory before keyword matching. It contains at most 16 visible aliases and
@@ -325,8 +331,10 @@ original task and invoke directly when suitable; do not reread a complete contra
 Requested actions, negation and qualifiers can remain unmatched; lexical
 retrieval does not establish that they are supported. Full contracts and the
 original task govern final selection. Conditional auxiliary words activate only
-from the original query. Query-only broad discovery keeps its conservative gates
-and reciprocal rank fusion. `search_intents` are internal declaration metadata, bounded to
+from the original query. Query-only broad discovery preserves the conservative
+keyword and reciprocal rank fusion stage. Purpose fallback may replace suggestions
+when that stage has no hits; otherwise spelling recovery remains available.
+`search_intents` are internal declaration metadata, bounded to
 eight unique phrases of 160 characters per tool, frozen with the registry and
 included in its fingerprint. They do not enter native tool descriptions or public
 search results. No embeddings, remote
