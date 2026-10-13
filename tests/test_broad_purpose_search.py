@@ -1,6 +1,8 @@
 """Broad purpose fallback keeps keyword priority, visibility and review evidence."""
 from types import SimpleNamespace
 
+import pytest
+
 from pal.core import PalCore
 from pal.execution.runtime import ExecutionRuntime
 
@@ -29,6 +31,24 @@ def test_one_shared_verb_does_not_return_an_unrelated_callable():
         "alias": "inspect_port", "domain": "core", "purpose": "Inspect a connection.",
     }})
     assert not ExecutionRuntime._search_generation(runtime, {"query": "inspect imaginary widget"})["hits"]
+
+
+@pytest.mark.parametrize('singular,plural', [('dependency', 'dependencies'), ('cache', 'caches')])
+def test_purpose_fallback_recalls_noun_number_without_changing_tokenization(singular, plural):
+    from pal.execution.discovery_terms import tool_search_terms
+
+    assert tool_search_terms(f'get {plural}') == ('get', plural)
+    alias = f'get_{singular}'
+    runtime = generation({alias: {'alias': alias, 'purpose': f'Get a {singular}.'}})
+    args = {'query': f'get {plural}'}
+    assert not ExecutionRuntime._search_keywords(runtime, args)['hits']
+    result = ExecutionRuntime._search_generation(runtime, args)
+    assert [hit['alias'] for hit in result['hits']] == [alias]
+
+
+def test_noun_variants_do_not_count_as_two_distinct_positive_matches():
+    runtime = generation({'report_defect': {'alias': 'report_defect', 'purpose': 'Persist a report.'}})
+    assert not ExecutionRuntime._search_generation(runtime, {'query': 'submit report reports'})['hits']
 
 
 def test_existing_keyword_matches_and_exact_aliases_are_not_padded():

@@ -124,8 +124,16 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             self.assertEqual(active.structured["active_endpoint_id"], "alpha")
             for query in ("git status", "llm switch endpoint", "llm send attachment"):
                 with self.subTest(query=query):
+                    self.assertEqual(execution._search_keywords(execution.registry_generation, {"query": query})["hits"], [])
                     search = execution.execute(CapabilityCall(name="op_tool_search", args={"query": query}))
-                    self.assertEqual(search.structured["hits"], [])
+                    if query == "llm switch endpoint":
+                        self.assertTrue(search.structured["hits"])
+                        self.assertTrue(all("switch" in hit["unmatched_terms"] for hit in search.structured["hits"]))
+                        self.assertTrue(all(hit["execution"]["effect_kind"] == "local_read" for hit in search.structured["hits"]))
+                        self.assertIn("not proof", search.structured["usage_hint"])
+                    else:
+                        self.assertEqual(search.structured["hits"], [])
+            self.assertEqual(runtime.active_endpoint_id, "alpha")
         finally:
             execution.shutdown()
 

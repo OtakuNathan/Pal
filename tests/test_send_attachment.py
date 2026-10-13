@@ -358,7 +358,16 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual([hit["alias"] for hit in result.structured["hits"]],
                                      ["send_channel_attachment"])
                     self.assertIn("path", result.structured["hits"][0]["input_contract"]["properties"])
-            for query in ("git upload file", "llm send attachment", "read image", "write document"):
+            for query, owner in (("git upload file", "git"), ("llm send attachment", "llm")):
+                with self.subTest(query=query):
+                    self.assertEqual(runtime._search_keywords(runtime.registry_generation, {"query": query})["hits"], [])
+                    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
+                    self.assertEqual([hit["alias"] for hit in result.structured["hits"]], ["send_channel_attachment"])
+                    self.assertIn(owner, result.structured["hits"][0]["unmatched_terms"])
+                    self.assertIn("not proof", result.structured["usage_hint"])
+                    scoped = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query, "domain": owner}))
+                    self.assertEqual(scoped.structured["hits"], [])
+            for query in ("read image", "write document"):
                 with self.subTest(query=query):
                     result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
                     self.assertEqual(result.structured["hits"], [])

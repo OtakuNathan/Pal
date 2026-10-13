@@ -126,7 +126,13 @@ def test_explicit_synonyms_and_selected_enums_without_arbitrary_values(runtime):
     for query in ('browser close tabs', 'browser list tab', 'switch tabs'):
         assert search(runtime, query)[0]['alias'] == 'manage_browser_tabs'
     assert search(runtime, 'browser json tabs') == []
-    assert search(runtime, 'browser closes tabs') == []
+    args = {'query': 'browser closes tabs'}
+    assert runtime._search_keywords(runtime.registry_generation, args)['hits'] == []
+    result = runtime._search_generation(runtime.registry_generation, args)
+    assert [hit['alias'] for hit in result['hits']] == ['manage_browser_tabs']
+    assert result['hits'][0]['input_contract']['properties']['operation']['enum'] == ['list', 'close', 'select']
+    assert 'closes' in result['hits'][0]['matched_terms']
+    assert 'not proof' in result['usage_hint']
     assert 'search_terms' not in json.dumps(search(runtime, 'browser tabs'))
     assert 'search_terms' not in json.dumps(runtime.list_tool_specs())
 

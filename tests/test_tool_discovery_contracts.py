@@ -208,7 +208,11 @@ def test_task_words_preserve_forms_without_promoting_next_tool_hints(runtime):
                           InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
                           guidance=ToolGuidance(purpose="Find a control", use_when="Locating controls",
                                                 do_not_use_when="No controls needed"))
-    assert runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "find controls"})).structured["hits"] == []
+    args = {"query": "find controls"}
+    assert runtime._search_keywords(runtime.registry_generation, args)["hits"] == []
+    result = runtime.execute_tool(new_tool_call(name="search_tools", args=args))
+    assert [hit["alias"] for hit in result.structured["hits"]] == ["find_control"]
+    assert result.structured["hits"][0]["unmatched_terms"] == []
 
 
 def test_specific_task_words_rank_above_partial_matches(runtime):
@@ -370,26 +374,31 @@ def test_builtin_tool_navigation_references_declared_public_aliases():
 
 
 @pytest.mark.parametrize("top_k", [None, 5])
-def test_partial_task_does_not_hide_missing_domain(runtime, top_k):
+def test_partial_purpose_candidate_discloses_missing_web_capability(runtime, top_k):
     args = {"query": "read file from web"}
     if top_k is not None:
         args["top_k"] = top_k
     result = runtime.execute_tool(new_tool_call(name="search_tools", args=args))
-    assert result.structured["hits"] == []
-    assert "No matching tools" in result.llm_text
+    assert runtime._search_keywords(runtime.registry_generation, args)["hits"] == []
+    assert [hit["alias"] for hit in result.structured["hits"]] == ["read_file"]
+    assert "web" in result.structured["hits"][0]["unmatched_terms"]
+    assert result.structured["hits"][0]["domain"] == "file"
+    assert "file_path" in result.structured["hits"][0]["input_contract"]["properties"]
+    assert "not proof" in result.structured["usage_hint"]
+    scoped = runtime.execute_tool(new_tool_call(name="search_tools", args={**args, "domain": "web"}))
+    assert scoped.structured["hits"] == []
 
 
 @pytest.mark.parametrize("singular,plural", [
     ("cookie", "cookies"), ("dependency", "dependencies"),
     ("cache", "caches"), ("class", "classes"), ("movie", "movies"),
 ])
-def test_search_does_not_infer_plural_forms(runtime, singular, plural):
+def test_keyword_stage_does_not_infer_plural_forms(runtime, singular, plural):
     alias = f"get_{singular}"
     mount_test_capability(runtime, alias=alias, canonical_path=f"op_test_{alias}",
         InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
         guidance=ToolGuidance(purpose=f"Get a {singular}", use_when="Requested", do_not_use_when="Other tasks"))
-    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": f"get {plural}"}))
-    assert result.structured["hits"] == []
+    assert runtime._search_keywords(runtime.registry_generation, {"query": f"get {plural}"})["hits"] == []
     exact = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": f"get {singular}"}))
     assert [hit["alias"] for hit in exact.structured["hits"]] == [alias]
 
@@ -402,7 +411,7 @@ def test_search_does_not_infer_plural_forms(runtime, singular, plural):
     ("install_pack", "install_package", "Install dependencies"),
 ])
 @pytest.mark.parametrize("top_k", [None, 5])
-def test_search_rejects_prefixes_and_missing_query_words(query, alias, purpose, top_k):
+def test_keyword_rejection_and_purpose_partial_evidence(query, alias, purpose, top_k):
     from types import SimpleNamespace
     from pal.execution.runtime import ExecutionRuntime
 
@@ -410,4 +419,12 @@ def test_search_rejects_prefixes_and_missing_query_words(query, alias, purpose, 
     args = {"query": query}
     if top_k is not None:
         args["top_k"] = top_k
-    assert ExecutionRuntime._search_generation(generation, args)["hits"] == []
+    assert ExecutionRuntime._search_keywords(generation, args)["hits"] == []
+    result = ExecutionRuntime._search_generation(generation, args)
+    if query == "read browser cookie":
+        assert [hit["alias"] for hit in result["hits"]] == [alias]
+        assert result["hits"][0]["unmatched_terms"] == ["read"]
+        assert result["hits"][0]["purpose"] == purpose
+        assert "not proof" in result["usage_hint"]
+    else:
+        assert result["hits"] == []
