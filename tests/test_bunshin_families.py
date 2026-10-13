@@ -1042,7 +1042,8 @@ workspace_policy: {}
         self.assertIn("verifier-corpus", module_repair)
 
         diff_risk = str(providers["run_verification_diff_risk"]["description"])
-        self.assertIn("candidate delta review verification case", diff_risk)
+        self.assertIn("diff risk case", diff_risk)
+        self.assertIn("candidate delta review", diff_risk)
         self.assertIn("changed Git review range", diff_risk)
 
         lsp = str(providers["run_verification_lsp_check"]["description"])
