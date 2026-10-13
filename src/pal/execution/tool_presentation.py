@@ -39,6 +39,45 @@ def compact_input_contract(schema: Any) -> Any:
     return result
 
 
+def native_input_contract(schema: dict[str, Any]) -> dict[str, Any]:
+    """Inline local object references for native functions without changing rules.
+
+    Keep definitions for recursive references and leave opaque enum/default data
+    untouched. Some model endpoints misread a referenced object as a string.
+    """
+    maps = {"properties", "patternProperties", "dependentSchemas"}
+    singles = {"items", "additionalItems", "additionalProperties", "unevaluatedProperties",
+               "unevaluatedItems", "contains", "propertyNames", "not", "if", "then", "else", "contentSchema"}
+    arrays = {"allOf", "anyOf", "oneOf", "prefixItems"}
+
+    def visit(node: Any, seen: frozenset[str] = frozenset()) -> Any:
+        if not isinstance(node, dict):
+            return node
+        reference = node.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/") and reference not in seen:
+            target: Any = schema
+            for part in reference[2:].split("/"):
+                part = part.replace("~1", "/").replace("~0", "~")
+                target = target.get(part) if isinstance(target, dict) else None
+            if isinstance(target, dict):
+                node = {**target, **{key: value for key, value in node.items() if key != "$ref"}}
+                seen = seen | {reference}
+        result = {}
+        for key, value in node.items():
+            if key in maps and isinstance(value, dict):
+                value = {name: visit(child, seen) for name, child in value.items()}
+            elif key in singles:
+                value = ([visit(child, seen) for child in value] if isinstance(value, list) else visit(value, seen))
+            elif key in arrays and isinstance(value, list):
+                value = [visit(child, seen) for child in value]
+            elif key == "dependencies" and isinstance(value, dict):
+                value = {name: visit(child, seen) for name, child in value.items()}
+            result[key] = value
+        return result
+
+    return visit(schema)
+
+
 def render_tool_definition(payload: dict[str, Any], *, view: str = "input") -> str:
     excluded = (set() if view == "full" else
                 {"input_schema", "example"} if view == "output" else
@@ -62,6 +101,14 @@ def render_tool_search(generation: Any, payload: dict[str, Any]) -> str:
     """Deliver callable contracts without repeating the index or field list."""
     _ = generation
     hits = [{key: value for key, value in hit.items()
-             if key not in {"search_text", "input_shape", "search_objects", "search_terms", "search_enum_fields"}}
+             if key not in {"score", "search_text", "input_shape", "search_objects", "search_terms", "search_auxiliary_terms", "search_enum_fields", "search_term_rules", "search_scope_terms", "search_intents"}}
             for hit in payload.get("hits", ())]
-    return render_structured_for_llm({**payload, "hits": hits})
+    suggestions = [{**{key: value for key, value in suggestion.items() if key not in {'score', 'retrieval_sources'}}, **({'contract': {
+        key: value for key, value in suggestion['contract'].items()
+        if key not in {'score', 'search_text', 'input_shape', 'search_auxiliary_terms'}
+    }} if suggestion.get('contract') is not None else {})}
+        for suggestion in payload.get('suggestions', ())]
+    result = {**payload, 'hits': hits}
+    if 'suggestions' in payload:
+        result['suggestions'] = suggestions
+    return render_structured_for_llm(result)

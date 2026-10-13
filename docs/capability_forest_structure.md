@@ -150,7 +150,7 @@ The canonical path is the stable execution key, such as:
 - `${1}_list`
 - `${1}_provider_show::mock_l3`
 - `tool_search`
-- `rescan_channel_providers`
+- `rescan_plugins`
 
 It should be:
 

@@ -27,7 +27,7 @@ class RuntimeActivation:
         # Validation belongs before this boundary. Withdraw public entries before
         # waiting for admitted calls; resources remain owned until write admission.
         check_cancelled()
-        captured = self.host.withdraw_tool_entries(name) if kind == "plugin" else ()
+        captured = self.host.withdraw_tool_entries(name) if kind == "plugin" or name in getattr(self.host, "generations", {}) else ()
         entered = False
         try:
             with self.gate():
@@ -50,11 +50,15 @@ class RuntimeActivation:
         return self.host.context.require_port("channel:provider_manager")
 
     def before(self, kind: str, name: str) -> dict:
+        if kind == "provider" and getattr(self._channel(), "plugin_host", None) is self.host:
+            state = self.before("plugin", name)
+            state["plugin_owned"] = True
+            return state
         if kind == "plugin":
             record = self.host._record(name)
             state = {"existed": record is not None, "attached": bool(record and record.attached),
                      "enabled": bool(record and record.enabled)}
-            owned = name in self.host.generations or name in self.host._pending_rollbacks
+            owned = name in getattr(self.host, "generations", {}) or name in self.host._pending_rollbacks
             if (state["attached"] or owned) and self.host.detach(name)["status"] != RuntimeStatus.OK:
                 raise PackageError("Previous plugin could not be detached; installation was not switched")
             return state
@@ -72,10 +76,12 @@ class RuntimeActivation:
         return state
 
     def after(self, kind: str, name: str, state: dict) -> str:
+        if kind == "provider" and getattr(self._channel(), "plugin_host", None) is self.host:
+            return self.after("plugin", name, state)
         if kind == "plugin":
             scan = self.host.rescan()
             relevant_errors = [error for error in scan.get("scan_errors", [])
-                               if f"/{name}/plugin.toml" in error]
+                               if f"/{name}/plugin.toml" in error or f"/{name}/provider.toml" in error]
             if relevant_errors:
                 raise PackageError(f"Plugin discovery failed: {relevant_errors}")
             record = self.host._record(name)

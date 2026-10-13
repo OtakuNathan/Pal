@@ -125,6 +125,29 @@ class NextToolHint(StrictToolModel):
         return self
 
 
+class SearchTermRule(StrictToolModel):
+    """Additional words available only with an explicitly named query object."""
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+    terms: tuple[str, ...]
+    requires_any: tuple[str, ...]
+
+    @field_validator("terms", "requires_any", mode="before")
+    @classmethod
+    def restore_words(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_words(self) -> "SearchTermRule":
+        for words in (self.terms, self.requires_any):
+            if (not words or len(set(words)) != len(words)
+                    or any(not re.fullmatch(r"[a-z][a-z0-9]*", word) for word in words)):
+                raise ValueError("search rule fields require unique lowercase whole words")
+        if set(self.terms) & set(self.requires_any):
+            raise ValueError("search rule terms cannot trigger themselves")
+        return self
+
+
 class ToolGuidance(StrictToolModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
@@ -137,13 +160,19 @@ class ToolGuidance(StrictToolModel):
     search_objects: tuple[str, ...] = ()
     search_terms: tuple[str, ...] = ()
     search_enum_fields: tuple[str, ...] = ()
+    search_term_rules: tuple[SearchTermRule, ...] = ()
+    search_scope_terms: tuple[str, ...] = ()
+    # Reviewed user intent phrases, kept separate from the public capability
+    # contract. Retrieval may suggest a contract; phrases never grant execution.
+    search_intents: tuple[str, ...] = ()
     # Host-side failure fallback declaration. It intentionally does not enter
     # the default model description; execution offers it only when a real
     # failure result carries no more specific handler guidance.
     failure_next_steps: str = ""
     next_tool_hints: tuple[NextToolHint, ...] = ()
 
-    @field_validator("search_objects", "search_terms", "search_enum_fields", mode="before")
+    @field_validator("search_objects", "search_terms", "search_enum_fields",
+                     "search_term_rules", "search_scope_terms", "search_intents", mode="before")
     @classmethod
     def restore_search_objects(cls, value: Any) -> Any:
         # Internal capability specs cross JSON boundaries into worker registries.
@@ -162,9 +191,18 @@ class ToolGuidance(StrictToolModel):
         if any(not re.fullmatch(r"[a-z][a-z0-9]*", word) for word in self.search_terms):
             raise ValueError("search_terms must contain lowercase whole words")
         for field_name, values in (("search_terms", self.search_terms),
-                                   ("search_enum_fields", self.search_enum_fields)):
+                                   ("search_enum_fields", self.search_enum_fields),
+                                   ("search_scope_terms", self.search_scope_terms)):
             if len(set(values)) != len(values) or any(not word for word in values):
                 raise ValueError(f"{field_name} must contain unique nonempty values")
+        if any(not re.fullmatch(r"[a-z][a-z0-9]*", word) for word in self.search_scope_terms):
+            raise ValueError("search_scope_terms must contain lowercase whole words")
+        if (len(self.search_intents) > 8 or len(set(self.search_intents)) != len(self.search_intents)
+                or any(not phrase.strip() or len(phrase) > 160 for phrase in self.search_intents)):
+            raise ValueError("search_intents require at most eight unique nonempty phrases of up to 160 characters")
+        unconditional = set(self.search_objects) | set(self.search_terms)
+        if any(unconditional.intersection(rule.terms) for rule in self.search_term_rules):
+            raise ValueError("conditional search terms must not be unconditional")
         if len(names) != len(set(names)):
             raise ValueError("next tool names must be unique within one guidance contract")
         return self

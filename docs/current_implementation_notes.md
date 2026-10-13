@@ -117,7 +117,7 @@ Channel providers are managed through `ChannelEndpointProviderManager`. Builtin 
 <runtime_root>/channel/providers/<provider_id>/provider.toml
 ```
 
-The provider entrypoint exports `build_channel_provider(context)`. The manager supplies a build context and exposes the unified capability surface for provider listing, endpoint inspection, auth/backlog/health introspection, attach/detach, endpoint restart, provider reload, and provider rescan.
+The provider entrypoint exports `build_channel_provider(context)`. The manager supplies a build context and exposes the unified capability surface for provider listing, endpoint inspection, auth/backlog/health introspection, attach/detach, endpoint restart. PluginHost supplies code reload and discovery.
 
 The important boundary is:
 
@@ -125,7 +125,7 @@ The important boundary is:
 - provider owns endpoint lifecycle, attach/detach mechanics, platform SDK usage, provider-specific introspection, interaction rendering, and interaction result normalization
 - `channel_kind` remains the endpoint row discriminator for persistence and deserialization; core should not infer platform behavior from it
 
-`rescan_channel_providers` computes a physical manifest diff. Added providers are validated, receive internal endpoint hubs immediately, and auto-attach eligible rows; existing providers are not source-fingerprinted or reloaded; removed/disabled providers withdraw LLM capabilities first, stop their transports, unload code, and delete their hubs. `reload_channel_provider` explicitly performs detach/unload/load/attach, while `restart_channel_endpoint` refreshes one transport without reloading modules. Stable endpoint hubs retain and drain output across lifecycle gaps; physical removal reroutes backlog to the recovery socket, and expected gaps do not enter Safe Mode.
+Channel provider code is owned by PluginHost generations; ChannelRuntime and endpoint hubs remain resident. Native plugins return `ModuleHandle.channel_extension` and declare `[channel] endpoint_types`; legacy `provider.toml` packages are adapted in place. `rescan_plugins` discovers metadata, `attach_plugin` loads providers, and `reload_plugin` replaces code and restores eligible transports. Disabling or detaching preserves hubs; physical removal transfers backlog to the recovery socket. Endpoint detach keeps the owning plugin loaded. `restart_channel_endpoint` refreshes one transport without reloading code. Cleanup failures retain generation ownership for retry.
 
 Automatic compaction failure is a terminal result for the current turn, not a Safe Mode trigger. Pal preserves memory/tool RPC state, reports the failure directly, and asks the user to run `/compact` manually and resend the request.
 

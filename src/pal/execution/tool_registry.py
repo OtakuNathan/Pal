@@ -12,8 +12,8 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from pal.execution.contracts import CapabilityDescriptor
-from pal.execution.discovery_terms import discovery_vocabulary
-from pal.execution.tool_presentation import compact_input_contract
+from pal.execution.discovery_terms import discovery_vocabulary, tool_domain, validate_search_rules
+from pal.execution.tool_presentation import compact_input_contract, native_input_contract
 from pal.execution.tool_facade import (
     EffectKind,
     InvocationMode,
@@ -78,6 +78,11 @@ class CompiledToolRecord:
     binding: BoundCapabilityAction
     is_mcp: bool = False
     requires_effect_receipt: bool = False
+
+    @property
+    def native_function(self) -> bool:
+        """Explicit owner opt-in to a native schema, independent of routing."""
+        return self.binding.descriptor.metadata.get("native_function") is True
 
     def compact_input_shape(self) -> dict[str, Any]:
         properties = self.input_schema.get("properties")
@@ -324,10 +329,17 @@ def compile_registry_generation(
     provider_specs.clear()
     for alias in sorted(alias_to_canonical):
         record = direct_aliases.get(alias) or indirect_aliases[alias]
+        vocabulary = discovery_vocabulary(record.guidance, record.input_schema)
+        validate_search_rules(alias, record.guidance, vocabulary)
         search_records[alias] = {
             "alias": alias,
+            "domain": tool_domain(alias, record.module_id),
             "search_objects": record.guidance.search_objects,
-            "search_terms": discovery_vocabulary(record.guidance, record.input_schema),
+            "search_terms": vocabulary,
+            "search_auxiliary_terms": discovery_vocabulary(record.guidance, record.input_schema, include_objects=False),
+            "search_term_rules": [rule.model_dump(mode="json") for rule in record.guidance.search_term_rules],
+            "search_scope_terms": record.guidance.search_scope_terms,
+            "search_intents": record.guidance.search_intents,
             "search_text": record.search_document,
             "invocation_mode": record.execution.invocation_mode.value,
             "input_shape": record.compact_input_shape(),
@@ -343,13 +355,13 @@ def compile_registry_generation(
             "module_id": record.module_id,
             "tags": list(record.tags),
         }
-        if record.execution.invocation_mode is InvocationMode.DIRECT:
+        if record.execution.invocation_mode is InvocationMode.DIRECT or record.native_function:
             provider_specs[alias] = {
                 "type": "function",
                 "function": {
                     "name": alias,
                     "description": record.compiled_description,
-                    "input_schema": record.input_schema,
+                    "input_schema": native_input_contract(record.input_schema) if record.native_function else record.input_schema,
                 },
             }
 
@@ -359,11 +371,13 @@ def compile_registry_generation(
                 "alias": alias,
                 "canonical_path": alias_to_canonical[alias],
                 "mode": (direct_aliases.get(alias) or indirect_aliases[alias]).execution.invocation_mode.value,
+                "native_function": (direct_aliases.get(alias) or indirect_aliases[alias]).native_function,
                 "input": (direct_aliases.get(alias) or indirect_aliases[alias]).input_schema,
                 "output": (direct_aliases.get(alias) or indirect_aliases[alias]).output_schema,
                 "description": (direct_aliases.get(alias) or indirect_aliases[alias]).compiled_description,
                 "discovery": {key: search_records[alias][key] for key in (
-                    "search_terms", "module_id", "namespace", "family", "tags")},
+                    "search_terms", "search_auxiliary_terms", "search_objects", "search_term_rules", "search_scope_terms", "search_intents",
+                    "domain", "module_id", "namespace", "family", "tags")},
             }
             for alias in sorted(alias_to_canonical)
         ]
@@ -533,7 +547,7 @@ def _compile_next_tool_lines(
         if hint.name in direct_aliases:
             route = "direct"
         elif hint.name in indirect_aliases:
-            route = "indirect"
+            route = "native function" if indirect_aliases[hint.name].native_function else "indirect"
         elif (
             not record.is_mcp
             and not record.binding.descriptor.detachable

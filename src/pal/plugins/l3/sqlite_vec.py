@@ -2,18 +2,13 @@ from __future__ import annotations
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
-    INDIRECT_EXTERNAL_WRITE,
     INDIRECT_LOCAL_WRITE,
 )
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import ToolGuidance, ToolAffordance, EffectReceipt, EffectOutcome
 
 from pal.execution.generated_tool_models import (
-    PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
-    PluginsL3SqliteVecSQLiteVecL3PluginRecallInput,
     PluginsL3SqliteVecSQLiteVecL3PluginRefreshIndexesInput,
-    PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
-    PluginsL3SqliteVecSQLiteVecL3PluginWriteInput,
 )
 
 import math
@@ -71,7 +66,7 @@ def _provider_recovery(handler):
     def invoke(self, call):
         target = call.meta.get("resolved_target_id")
         provider_name = target if target and target != SINGLETON_TARGET else self.provider_id
-        args = {"name": provider_name}
+        args = {"provider_id": provider_name}
         if call.args.get("mem_ref"):
             args["mem_ref"] = call.args["mem_ref"]
         else:
@@ -96,13 +91,13 @@ def _provider_recovery(handler):
         if result.status != RuntimeStatus.OK and (result.structured or {}).get("mem_ref"):
             args.pop("queries", None)
             args["mem_ref"] = result.structured["mem_ref"]
-        hint = (f"Reconcile with recall_provider_memory using {args!r} before retrying. "
+        hint = (f"Reconcile with recall_memory using {args!r} before retrying. "
                 "Keep this provider and record identity even if the active provider changes; do not blindly repeat the write.")
         if result.status != RuntimeStatus.OK:
             return CapabilityResult(status=result.status, text=result.text, llm_text=result.llm_text,
                 structured=result.structured, effect_receipt=result.effect_receipt if isinstance(result, CapabilityResult) else None,
                 recovery_hint=hint, affordances=(ToolAffordance(
-                tool="call_tool", arguments={"name": "recall_provider_memory", "args": args},
+                tool="recall_memory", arguments=args,
                 reason="Inspect the original mutation target before retrying.",
             ),))
         return result
@@ -233,14 +228,6 @@ class SQLiteVecL3Plugin:
         )
         return inventory
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show",
-        guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            purpose="Show sqlite-vec memory provider state.",
-            use_when='Diagnosing the sqlite memory backend — record count, index status, embedding model. If unmounted, use attach_memory_provider. Missing embeddings are an indexing observation; inspect provider inventory and embedding availability before rebuilding indexes.',
-            do_not_use_when="Checking which provider is active (use inspect_active_memory_provider). Recalling memories (use recall_memory).",
-            failure_next_steps="Read-only. If not mounted, use attach_memory_provider.",
-        ), aliases=("inspect_memory_provider_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
@@ -254,14 +241,19 @@ class SQLiteVecL3Plugin:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory",
         guidance=ToolGuidance(
             search_objects=('inventory', 'inventories'),
-            purpose="Inspect sqlite-vec memory inventory and index status.",
+            search_terms=('index', 'indexes', 'indices', 'status', 'show', 'state', 'health', 'backend', 'embedding', 'counts', 'records'),
+            purpose="Inspect one sqlite-vec memory provider's lifecycle, inventory, indexes and embedding health together.",
             use_when='Checking memory record counts, embedding coverage, or index health. Missing embeddings do not mean records are absent. Inspect the embedding provider and use refresh_memory_provider_indexes after correcting availability.',
-            do_not_use_when="Recalling specific memories (use recall_memory). Provider state (use inspect_memory_provider_state).",
+            do_not_use_when="Recalling specific memories (use recall_memory). Memory hub state (use inspect_memory_state).",
             failure_next_steps="Read-only. If embeddings missing, run refresh_memory_provider_indexes.",
         ), aliases=("inspect_memory_provider_inventory",))
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        payload = self.inspect()
+        from pal.shared.inspection import inspection_snapshot
+        payload = inspection_snapshot({"provider_id": self.provider_id, "mounted": self.mounted},
+                                      sections={"inventory": self.inspect}, source="memory_provider")
+        if not payload["diagnostics"]["partial"]:
+            payload.update(payload.pop("inventory"))
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="sqlite vec memory inventory",
@@ -269,23 +261,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("SQLite vec memory inventory", payload),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="recall",
-        action_name="recall",
-        guidance=ToolGuidance(
-            search_objects=('memory', 'memories', 'record', 'records'),
-            purpose="Recall durable memory records by searching against the source-of-truth text.",
-            use_when="Diagnosing the sqlite provider directly. For errors, regressions, failed repairs, repeated pitfalls, or unfamiliar debugging, prefer kind='case' with concrete error, symptom, and fix terms.",
-            do_not_use_when="Normal Pal memory recall (use recall_memory, which routes to the active provider).",
-            failure_next_steps="Correct invalid queries, kind, view, or limit. If retrieval fails or appears stale, inspect provider state and inventory through search_tools, then refresh indexes if indicated.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRecallInput,
-        aliases=("recall_provider_memory",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Internal backend adapter; model calls use the memory facade.
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
         task_id = _read_task_id(call.args)
         query = MemoryQuery(
@@ -318,23 +294,7 @@ class SQLiteVecL3Plugin:
             ),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="commit",
-        action_name="write",
-        guidance=ToolGuidance(
-            search_objects=('memory', 'memories', 'record', 'records'),
-            purpose="Commit a durable memory record.",
-            use_when="Testing or operating the sqlite provider directly. summary is prompt-ready text; search_text is retrieval source text. For kind=case, provide STAR situation, task, action, and result fields.",
-            do_not_use_when="Normal Pal memory writes (use remember_memory, which routes to the active provider).",
-            failure_next_steps="Correct invalid kind, summary, search_text, or STAR fields. If the write outcome is uncertain, reconcile with recall_provider_memory using the original provider name and candidate text before retrying so a duplicate record is not created.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3SqliteVecSQLiteVecL3PluginWriteInput,
-        aliases=("write_provider_memory",),
-        execution=INDIRECT_EXTERNAL_WRITE,
-    )
+    # Backend test/maintenance adapter; normal model writes use remember_memory.
     @_provider_recovery
     def commit_write(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         kind = str(call.args.get("kind") or "").strip()
@@ -383,23 +343,7 @@ class SQLiteVecL3Plugin:
         )
         return _provider_mutation_result("commit", result)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="correct",
-        action_name="update",
-        guidance=ToolGuidance(
-            search_objects=('memory', 'memories', 'record', 'records'),
-            purpose="Update a memory record in the sqlite backend.",
-            use_when="Correcting or superseding a stored memory record at the provider level.",
-            do_not_use_when="High-level memory updates (use update_memory — it routes to the active provider).",
-            failure_next_steps="If the record is not found, copy the exact mem_ref from recall_provider_memory using the original provider name. If the update outcome is uncertain, use recall_provider_memory with the original provider name and that exact mem_ref and reconcile its current content before retrying.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
-        aliases=("update_provider_memory",),
-        execution=INDIRECT_EXTERNAL_WRITE,
-    )
+    # Internal backend adapter; model calls use the memory facade.
     @_provider_recovery
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         mem_ref = _read_mem_ref(call.args)
@@ -431,23 +375,7 @@ class SQLiteVecL3Plugin:
         )
         return _provider_mutation_result("update", result)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="delete",
-        action_name="delete",
-        guidance=ToolGuidance(
-            search_objects=('memory', 'memories', 'record', 'records'),
-            purpose="Delete one durable memory record by exact mem_ref.",
-            use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
-            do_not_use_when="Normal Pal memory deletion (use forget_memory, which routes to the active provider).",
-            failure_next_steps="Copy the exact mem_ref from recall_provider_memory using the original provider name. If deletion outcome is uncertain, reconcile by recalling that mem_ref before retrying; do not issue a blind duplicate delete.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
-        aliases=("delete_provider_memory",),
-        execution=INDIRECT_EXTERNAL_WRITE,
-    )
+    # Internal backend adapter; model calls use the memory facade.
     @_provider_recovery
     def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         mem_ref = _read_mem_ref(call.args)
@@ -461,10 +389,11 @@ class SQLiteVecL3Plugin:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
+            search_objects=('provider', 'providers', 'backend', 'backends', 'store', 'stores'),
+            search_terms=('connect', 'reconnect', 'mount', 'sqlite', 'vec', 'l3'),
             purpose="Attach the sqlite-vec memory provider.",
-            use_when="Reconnecting a detached memory backend.",
-            do_not_use_when="Detaching (use detach_memory_provider). Switching providers (use set_active_memory_provider).",
+            use_when="Reopening a detached memory backend's storage resources after its plugin is already loaded. Copy the provider name from memory provider inspection.",
+            do_not_use_when="Loading plugin code (use attach_plugin). Reloading changed code (use reload_plugin). Detaching (use detach_memory_provider). Switching providers (use set_active_memory_provider).",
             failure_next_steps="If attach fails, check database file and sqlite-vec extension availability.",
         ), aliases=("attach_memory_provider",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -510,7 +439,7 @@ class SQLiteVecL3Plugin:
             search_objects=('index', 'indexes', 'indices'),
             purpose="Refresh sqlite-vec indexes and embedding state.",
             use_when="After bulk data changes or when search results seem stale.",
-            do_not_use_when="Normal operation — indexes update incrementally. Provider state (use inspect_memory_provider_state).",
+            do_not_use_when="Normal operation — indexes update incrementally. Provider state (use inspect_memory_provider_inventory).",
             failure_next_steps="If refresh fails, check embedding model configuration.",
         ),
         metadata={"omit_family_in_canonical": True},

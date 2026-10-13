@@ -45,6 +45,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 from pal.skill.contracts import SkillDescriptor
 
 
@@ -132,6 +133,7 @@ class McpManagerPluginProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             search_objects=('state', 'states'),
+            search_terms=('status', 'show', 'get',),
             purpose="Show MCP manager status.",
             use_when="Diagnosing MCP system health — manager process, projection, server count.",
             do_not_use_when="Listing servers (use list_mcp_servers). Checking one server (use read_mcp_server).",
@@ -139,7 +141,7 @@ class McpManagerPluginProvider:
         ), aliases=("inspect_mcp_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        payload = self._status_payload()
+        payload = inspection_snapshot(self._status_payload(), source="resident_mcp_host")
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="mcp manager status",
@@ -166,6 +168,7 @@ class McpManagerPluginProvider:
         action_name="read",
         guidance=ToolGuidance(
             search_objects=('server', 'servers'),
+            search_terms=('inspect', 'show', 'info', 'metadata',),
             purpose="Read one MCP server's metadata and tool discovery snapshot.",
             use_when="Inspecting what tools a specific MCP server exposes.",
             do_not_use_when="Listing all servers (use list_mcp_servers). Manager health (use inspect_mcp_state).",
@@ -175,7 +178,10 @@ class McpManagerPluginProvider:
         aliases=("read_mcp_server",),
     )
     def read_server(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self._request_or_error("read_server", {"server_id": str(call.args.get("name") or "")})
+        result = self._request_or_error("read_server", {"server_id": str(call.args.get("name") or "")}, start_manager=False)
+        result = inspection_snapshot(result, source="mcp_manager")
+        if result.get("status") == RuntimeStatus.ERROR:
+            result["diagnostics"].update(partial=True, unavailable_sections={"server": result.get("error")})
         return _introspection_from_rpc("MCP server", result)
 
     def start_manager(self) -> None:
@@ -204,6 +210,7 @@ class McpManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan",
         guidance=ToolGuidance(
             search_objects=('server', 'servers'),
+            search_terms=('discover', 'scan', 'refresh',),
             purpose="Rescan MCP server configs and refresh the tool projection.",
             use_when="After adding or modifying MCP server configuration files.",
             do_not_use_when="Restarting the manager (use reload_plugin with name='mcp'). Attaching one server (use attach_mcp_server).",
@@ -227,6 +234,7 @@ class McpManagerPluginProvider:
         action_name="attach",
         guidance=ToolGuidance(
             search_objects=('server', 'servers'),
+            search_terms=('connect',),
             purpose="Attach one configured MCP server inside the manager.",
             use_when="Enabling a specific MCP server's tools without affecting others.",
             do_not_use_when="Attaching the whole MCP plugin (use attach_plugin). Detaching a server (use detach_mcp_server).",
@@ -253,6 +261,7 @@ class McpManagerPluginProvider:
         action_name="detach",
         guidance=ToolGuidance(
             search_objects=('server', 'servers'),
+            search_terms=('disconnect',),
             purpose="Detach one MCP server inside the manager.",
             use_when="Temporarily disabling one MCP server's tools.",
             do_not_use_when="Detaching the whole MCP plugin (use detach_plugin). Attaching a server (use attach_mcp_server).",
@@ -278,6 +287,7 @@ class McpManagerPluginProvider:
         action_name="image_prepare",
         guidance=ToolGuidance(
             search_objects=('image', 'images'),
+            search_terms=('convert', 'encode', 'base64',),
             purpose="Convert an image artifact or local file into the path, base64, or data-URL representation required by an external MCP tool.",
             use_when="An MCP tool requires an image representation that differs from the artifact, local path, or URL already available.",
             do_not_use_when="Reading artifact text content (use read_artifact). The MCP tool already accepts the available URL or path directly. The active model can inspect an inline image itself.",
@@ -463,9 +473,10 @@ class McpManagerPluginProvider:
         if self.refresh_capabilities is not None:
             self.refresh_capabilities()
 
-    def _request_or_error(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request_or_error(self, method: str, params: dict[str, Any] | None = None, *, start_manager: bool = True) -> dict[str, Any]:
         try:
-            self._ensure_manager_started()
+            if start_manager:
+                self._ensure_manager_started()
             return self.client.request_sync(method, params)
         except Exception as exc:
             self.last_error = exception_report(exc)
@@ -484,7 +495,9 @@ class McpManagerPluginProvider:
             "projected_capability_count": len(self.projection.mounted_subtree.descriptors) if self.projection else 0,
             "projected_skill_count": len(self.projection.skills) if self.projection else 0,
         }
-        payload["cached_snapshot"] = dict(self.last_health or {})
+        payload["cached_snapshot"] = {key: value for key, value in dict(self.last_health or {}).items()
+                                      if key in {"ok", "health_source", "manager_pid", "started_at", "last_rescan_at", "last_error",
+                                                 "server_count", "attached_count", "tool_count", "quarantined_count", "shutdown_requested", "config_root"}}
         return payload
 
     def _prepare_image_payload(

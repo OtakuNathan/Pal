@@ -2,17 +2,12 @@ from __future__ import annotations
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
-    INDIRECT_EXTERNAL_WRITE,
     INDIRECT_LOCAL_WRITE,
 )
 from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
-    PluginsL3StubsL3ProviderCapabilityMixinDeleteInput,
-    PluginsL3StubsL3ProviderCapabilityMixinRecallInput,
     PluginsL3StubsL3ProviderCapabilityMixinRefreshIndexesInput,
-    PluginsL3StubsL3ProviderCapabilityMixinUpdateInput,
-    PluginsL3StubsL3ProviderCapabilityMixinWriteInput,
 )
 
 from dataclasses import dataclass, field
@@ -99,19 +94,6 @@ class _L3ProviderCapabilityMixin:
     def resolve_provider_label(self, provider: "_L3ProviderCapabilityMixin") -> str:
         return provider.provider_id
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="provider",
-        action_name="show",
-        guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            purpose="Show stub memory provider runtime state.",
-            use_when="Diagnosing the stub memory backend.",
-            do_not_use_when="Checking a real provider (use search_tools to discover its bound provider-state alias). Recalling memories (use recall_memory).",
-            failure_next_steps="Read-only. This is a stub provider for testing.",
-        ),
-        aliases=("inspect_memory_provider_state",),
-    )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
@@ -128,7 +110,8 @@ class _L3ProviderCapabilityMixin:
         action_name="inventory",
         guidance=ToolGuidance(
             search_objects=('inventory', 'inventories'),
-            purpose="Inspect stub memory inventory.",
+            search_terms=('index', 'indexes', 'indices', 'status', 'show', 'state', 'health', 'backend', 'embedding', 'counts', 'records'),
+            purpose="Inspect one stub memory provider's lifecycle and inventory together.",
             use_when="Checking stub memory record counts.",
             do_not_use_when="Real provider inventory (use search_tools to discover the selected provider's bound inventory alias).",
             failure_next_steps="Read-only. This is a stub provider.",
@@ -137,8 +120,11 @@ class _L3ProviderCapabilityMixin:
     )
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        snapshot = self.inspect()
-        snapshot.setdefault("provider_id", self.provider_id)
+        from pal.shared.inspection import inspection_snapshot
+        snapshot = inspection_snapshot({"provider_id": self.provider_id, "mounted": self.mounted},
+                                       sections={"inventory": self.inspect}, source="memory_provider")
+        if not snapshot["diagnostics"]["partial"]:
+            snapshot.update(snapshot.pop("inventory"))
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="memory provider inventory",
@@ -146,23 +132,7 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_titled_structured_for_llm("Memory provider inventory", snapshot),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="recall",
-        action_name="recall",
-        guidance=ToolGuidance(
-            search_objects=('memory', 'memories', 'record', 'records'),
-            purpose="Recall durable memory records.",
-            use_when="Testing provider-level recall behavior with the stub backend, including case queries with concrete error, symptom, and fix terms.",
-            do_not_use_when="Normal Pal memory recall (use recall_memory).",
-            failure_next_steps="Correct invalid queries, view, kind, or limit. The stub has no external retrieval backend to recover.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3StubsL3ProviderCapabilityMixinRecallInput,
-        aliases=("recall_provider_memory",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Internal backend adapter; model calls use the memory facade.
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
         task_id = _read_task_id(call.args)
         query = MemoryQuery(
@@ -194,23 +164,7 @@ class _L3ProviderCapabilityMixin:
             ),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="commit",
-        action_name="write",
-        guidance=ToolGuidance(
-            search_objects=('memory', 'memories', 'record', 'records'),
-            purpose="Commit a memory record to the stub backend.",
-            use_when="Testing memory write paths with the stub provider.",
-            do_not_use_when="Real memory writes (use remember_memory — it routes to the active provider).",
-            failure_next_steps="This is a stub — data is not persisted to a real backend.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3StubsL3ProviderCapabilityMixinWriteInput,
-        aliases=("write_provider_memory",),
-        execution=INDIRECT_EXTERNAL_WRITE,
-    )
+    # Backend test adapter; normal model writes use remember_memory.
     def commit_write(self, call: IntrospectionCall) -> IntrospectionResult:
         kind = str(call.args.get("kind") or "").strip()
         summary = str(call.args.get("summary") or "").strip()
@@ -260,23 +214,7 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_mutation_result_for_llm("commit", result),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="correct",
-        action_name="update",
-        guidance=ToolGuidance(
-            search_objects=('memory', 'memories', 'record', 'records'),
-            purpose="Update a memory record in the stub backend.",
-            use_when="Testing memory update paths with the stub provider.",
-            do_not_use_when="Real memory updates (use update_memory).",
-            failure_next_steps="This is a stub — data is not persisted to a real backend.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3StubsL3ProviderCapabilityMixinUpdateInput,
-        aliases=("update_provider_memory",),
-        execution=INDIRECT_EXTERNAL_WRITE,
-    )
+    # Internal backend adapter; model calls use the memory facade.
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
         if not mem_ref:
@@ -312,23 +250,7 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_mutation_result_for_llm("update", result),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="delete",
-        action_name="delete",
-        guidance=ToolGuidance(
-            search_objects=('memory', 'memories', 'record', 'records'),
-            purpose="Delete one durable memory record by exact mem_ref.",
-            use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
-            do_not_use_when="Normal Pal memory deletion (use forget_memory).",
-            failure_next_steps="Provide an exact mem_ref and reason. The stub does not persist external data, so reconcile only against the returned stub result.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3StubsL3ProviderCapabilityMixinDeleteInput,
-        aliases=("delete_provider_memory",),
-        execution=INDIRECT_EXTERNAL_WRITE,
-    )
+    # Internal backend adapter; model calls use the memory facade.
     def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.delete(
             L3DeleteRequest(
@@ -346,7 +268,8 @@ class _L3ProviderCapabilityMixin:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
         guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
+            search_objects=('provider', 'providers', 'backend', 'backends', 'store', 'stores'),
+            search_terms=('connect', 'reconnect', 'mount'),
             purpose="Attach the stub memory provider.",
             use_when="Testing with the stub memory backend.",
             do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound attach alias).",

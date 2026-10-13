@@ -1166,14 +1166,13 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         }
 
         self.assertNotIn("list_artifacts", contracts)
-        search = await core.context.execution_runtime.execute_tool_async(
-            new_tool_call(name="search_tools", args={"query": "artifact", "module_name": "artifact", "top_k": 100}),
-            turn_id=self.turn_id,
-        )
-        self.assertTrue(search.ok, search.text)
-        hit_names = {hit["alias"] for hit in search.structured["hits"]}
-        self.assertIn("search_artifacts", hit_names)
-        self.assertIn("read_artifact", hit_names)
+        for query, expected in (("search artifact", "search_artifacts"), ("read artifact", "read_artifact")):
+            search = await core.context.execution_runtime.execute_tool_async(
+                new_tool_call(name="search_tools", args={"query": query, "module_name": "artifact", "top_k": 5}),
+                turn_id=self.turn_id,
+            )
+            self.assertTrue(search.ok, search.text)
+            self.assertIn(expected, {hit["alias"] for hit in search.structured["hits"]})
 
         read_tool = await core.context.execution_runtime.execute_tool_async(
             new_tool_call(name="read_tool", args={"name": "read_artifact"}),

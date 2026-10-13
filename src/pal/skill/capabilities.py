@@ -40,6 +40,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 from pal.skill.builtin_skills import (
     PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,
     PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID,
@@ -91,6 +92,7 @@ class SkillIntrospectionProvider:
         action_name="show",
         guidance=ToolGuidance(
             search_objects=('state', 'states'),
+            search_terms=('status', 'show', 'get',),
             purpose="Show skill management state and pending assimilation candidates.",
             use_when='Diagnosing skill system health, or recovering a candidate_id after an uncertain prepare_skill_candidate result. If no applicable skill is present, use search_skills to discover active references.',
             do_not_use_when="Searching for a specific skill (use search_skills). Checking memory state (use inspect_memory_state).",
@@ -116,12 +118,11 @@ class SkillIntrospectionProvider:
                     "name": candidate.skill.skill_id,
                     "title": candidate.skill.title,
                 }
-                for candidate in sorted(
-                    self.service.pending_candidates.values(),
-                    key=lambda item: item.candidate_id,
-                )
+                for candidate in list(self.service.pending_candidates.values())[-16:]
             ],
+            "pending_candidates_truncated": len(self.service.pending_candidates) > 16,
         }
+        structured = inspection_snapshot(structured)
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="skill snapshot",
@@ -136,6 +137,7 @@ class SkillIntrospectionProvider:
         action_name="assimilate",
         guidance=ToolGuidance(
             search_objects=('candidate', 'candidates'),
+            search_terms=('create', 'import', 'assimilate', 'manual', 'procedure', 'playbook',),
             purpose="Create a sanitized skill candidate from plain text or SKILL.md content without committing.",
             use_when="The user provides a reusable procedure, playbook, or domain manual that should become a normalized skill.",
             do_not_use_when="Recording a durable fact or preference (use remember_memory). The content is a one-off procedure not worth normalizing.",
@@ -162,6 +164,7 @@ class SkillIntrospectionProvider:
         action_name="commit",
         guidance=ToolGuidance(
             search_objects=('candidate', 'candidates'),
+            search_terms=('save', 'persist', 'manual',),
             purpose="Commit a sanitized skill candidate to the searchable manual library.",
             use_when="After prepare_skill_candidate produced a candidate you've reviewed and want to persist as a normalized skill.",
             do_not_use_when="Committing unreviewed candidates. Writing a durable fact (use remember_memory).",
@@ -182,6 +185,7 @@ class SkillIntrospectionProvider:
         action_name="update",
         guidance=ToolGuidance(
             search_objects=('skill', 'skills'),
+            search_terms=('edit', 'modify', 'manual',),
             purpose="Update a normalized skill's metadata or manual text.",
             use_when="Editing an existing skill's content, activation terms, or metadata.",
             do_not_use_when="Updating a durable fact (use update_memory). Creating a new skill (use prepare_skill_candidate + commit_skill_candidate).",
@@ -222,6 +226,7 @@ class SkillIntrospectionProvider:
         action_name="search",
         guidance=ToolGuidance(
             search_objects=('skill', 'skills'),
+            search_terms=('find', 'lookup', 'manual', 'manuals', 'procedure', 'procedures', 'playbook', 'playbooks',),
             purpose="Search normalized skills by scenario or name. Returns metadata only — does not inject manuals into context.",
             use_when='Looking for a reusable procedure or domain manual that may help the current task. Checking if a skill exists before creating one. An empty result means no matching skill was found; broaden the query before concluding none exists.',
             do_not_use_when="Recalling durable facts (use recall_memory). You already know the skill name and want its manual (use read_skill or inject_skill).",
@@ -244,6 +249,7 @@ class SkillIntrospectionProvider:
         action_name="read",
         guidance=ToolGuidance(
             search_objects=('skill', 'skills'),
+            search_terms=('show', 'get', 'inspect', 'manual', 'manuals',),
             purpose="Read one skill's metadata and optionally its full manual text.",
             use_when="Inspecting a skill's metadata, resolving uncertainty about its applicability, or examining its manual for review or maintenance.",
             do_not_use_when="The skill is already known to apply and its manual is needed for execution (use inject_skill directly). The needed content is already in context. Searching for skills by scenario (use search_skills). Reading a durable fact (use recall_memory).",
@@ -264,6 +270,7 @@ class SkillIntrospectionProvider:
         action_name="inject",
         guidance=ToolGuidance(
             search_objects=('skill', 'skills'),
+            search_terms=('load', 'manual', 'manuals',),
             purpose="Inject a skill's manual text into the current context as a reference observation.",
             use_when="A known skill matches the current task and its procedure or manual is missing from context. Inject it directly; a prior read_skill is unnecessary when applicability is already established.",
             do_not_use_when="Just browsing skill metadata (use read_skill). Searching for skills (use search_skills). The same manual is already available in the current conversation context.",

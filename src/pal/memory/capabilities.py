@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.memory.contracts import MEMORY
+from pal.execution.contracts import CapabilityResult
 
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_READ,
@@ -35,6 +36,7 @@ from pal.memory.rendering import (
     build_recall_structured_payload,
     normalize_recall_view,
     render_mutation_result_for_llm,
+    render_batch_result_for_llm,
     render_recall_result_for_llm,
 )
 from pal.memory.service import MemoryService
@@ -48,6 +50,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -105,7 +108,7 @@ class MemoryIntrospectionProvider:
         InputModel=DreamingInput, execution=INDIRECT_LOCAL_WRITE, aliases=("manage_memory_dreaming",),
         async_handler_name="dreaming_async",
         examples=({"operation": "status"}, {"operation": "start", "dry_run": True}),
-        guidance=ToolGuidance(search_enum_fields=("operation",), search_objects=('consolidation', 'duplicate', 'duplicates'), purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
+        guidance=ToolGuidance(search_enum_fields=("operation",), search_objects=('consolidation', 'duplicate', 'duplicates'), search_terms=('deduplicate', 'dedup', 'merge',), purpose="Inspect, configure, enable automatic scheduling, start or resume memory duplicate consolidation.",
             use_when="The user requests dreaming, a dry run, its status/report, or changes to automatic scheduling and configuration.",
             do_not_use_when="For immediate memory corrections, use update_memory.",
             failure_next_steps="Read the run report; failed runs preserve the published generation."))
@@ -166,7 +169,7 @@ class MemoryIntrospectionProvider:
             use_when="Retrying a previously authorized memory candidate batch.",
             do_not_use_when="Candidates have not received the user's final batch approval. Use the review UI.",
             failure_next_steps="Open /memory_review with the batch ID. An unavailable provider leaves the draft intact."))
-    def commit_candidates(self, call: IntrospectionCall) -> IntrospectionResult:
+    def commit_candidates(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         try:
             manager = self.context.port_registry.get("bunshin:bunshin")
             result = self.service.reviews.commit(str(call.args.get("batch_id") or ""),
@@ -174,8 +177,8 @@ class MemoryIntrospectionProvider:
         except ValueError as exc:
             error = exception_report(exc)
             return IntrospectionResult(status="invalid", text=error, llm_text=error)
-        return IntrospectionResult(status=result["status"], text="Memory review batch commit", structured=result,
-            llm_text=render_titled_structured_for_llm("Memory review batch commit", result))
+        return CapabilityResult(status=result["status"], text="Memory review batch commit", structured=result,
+            llm_text=render_batch_result_for_llm(result), llm_failure_details={})
 
     async def handle_memory_review_open_async(self, action: ControlAction):
         try:
@@ -221,8 +224,9 @@ class MemoryIntrospectionProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            purpose="Show memory runtime state.",
+            search_objects=('state', 'states', 'hub', 'module', 'manager', 'backend', 'backends'),
+            search_terms=('status', 'show', 'get', 'check', 'active', 'current', 'selected', 'provider', 'health'),
+            purpose="Inspect memory hub state, L1/L2 counts and active provider availability together.",
             use_when='Diagnosing memory system health — provider count, active provider, record counts. If there is no active backend, inspect list_memory_providers for installed and mounted providers.',
             do_not_use_when="Recalling specific memories (use recall_memory).",
             failure_next_steps="Read-only diagnostic. If no active provider, check list_memory_providers.",
@@ -230,11 +234,14 @@ class MemoryIntrospectionProvider:
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_memory(self)
+        payload = inspection_snapshot(snapshot.__dict__, sections={
+            "active_provider": lambda: self.active_provider(call).structured,
+        })
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="memory snapshot",
-            structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("Memory snapshot", snapshot.__dict__),
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Memory hub", payload),
         )
 
     @capability_action(
@@ -245,7 +252,7 @@ class MemoryIntrospectionProvider:
             search_objects=('provider', 'providers'),
             purpose="List registered L3 memory providers.",
             use_when='Checking which memory backends are installed and mounted. An empty list means no L3 providers are registered; inspect list_plugins for their installation and attachment state.',
-            do_not_use_when="Checking the active provider (use inspect_active_memory_provider). Recalling memories (use recall_memory).",
+            do_not_use_when="Checking the active provider (use inspect_memory_state). Recalling memories (use recall_memory).",
             failure_next_steps="Read-only. If empty, no L3 plugins are installed.",
         ),
         aliases=("list_memory_providers",),
@@ -270,19 +277,6 @@ class MemoryIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Memory L3 providers", {"items": items}),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="active_provider",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Show the current active memory provider.",
-            use_when='Checking which backend handles recall/remember/update/forget operations. L3 storage and recall require an active mounted provider. If none is available, inspect list_memory_providers before selecting one.',
-            do_not_use_when="Listing all providers (use list_memory_providers). Switching providers (use set_active_memory_provider).",
-            failure_next_steps="Read-only. If none active, memories cannot be stored or recalled.",
-        ),
-        aliases=("inspect_active_memory_provider",),
-    )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         provider_id = self.service.l3_selector.active_provider_id
@@ -312,18 +306,23 @@ class MemoryIntrospectionProvider:
         action_name="recall",
         guidance=ToolGuidance(
             search_objects=('memory', 'memories', 'record', 'records'),
+            search_terms=('search', 'find', 'retrieve', 'lookup', 'read',),
             purpose="Read durable memory by semantic search or exact mem_ref from the active provider; recalled entries are marked as recently used.",
             use_when=(
                 "The task depends on durable facts or past experience missing from the current context. "
                 "For recurring failures or past repair decisions, use kind='case' with concrete error, symptom or fix terms."
+                " Omit provider_id for the active provider; supply the original provider_id when reconciling a mutation after switching providers."
             ),
             do_not_use_when=(
                 "Current context already provides sufficient evidence, including a first error with a clear recovery. "
                 "Current runtime state needs live introspection; current external facts need external verification."
+                " For backend record counts or index health, search for provider inventory/health inspection. "
+                "Semantic recall may refresh indexes and does not enumerate the whole store."
             ),
             failure_next_steps=(
                 "Use targeted queries with limit 3-5. "
                 "mem_ref is opaque; copy exactly including prefixes like fact: or case:."
+                " Keep the original provider_id for reconciliation. Unknown providers do not fall back to the active provider."
             ),
             next_tool_hints=(
                 NextToolHint(
@@ -346,7 +345,8 @@ class MemoryIntrospectionProvider:
         aliases=("recall_memory",),
     )
     def recall(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider = self.service.l3_selector.resolve()
+        provider_id = str(call.args.get("provider_id") or self.service.l3_selector.active_provider_id).strip()
+        provider = self.service.l3_selector.resolver(provider_id)
         task_id = _read_task_id(call.args)
         query = MemoryQuery(
             mem_ref=str(call.args.get("mem_ref") or "").strip() or None,
@@ -360,7 +360,6 @@ class MemoryIntrospectionProvider:
             view=normalize_recall_view(call.args.get("view")),
         )
         result = provider.recall(query)
-        provider_id = str(getattr(provider, "provider_id", self.service.l3_selector.active_provider_id) or "")
         payload = build_recall_structured_payload(provider_id=provider_id, query=query, result=result, view=query.view)
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -376,6 +375,7 @@ class MemoryIntrospectionProvider:
         action_name="write",
         guidance=ToolGuidance(
             search_objects=('memory', 'memories', 'record', 'records'),
+            search_terms=('save', 'store', 'write', 'add',),
             purpose="Remember a new durable memory record.",
             use_when=(
                 "Only when the user explicitly asks to remember/save, or states a clear durable fact/preference. "
@@ -395,12 +395,12 @@ class MemoryIntrospectionProvider:
                 "text before retrying so a duplicate record is not created."
             ),
         ),
-        metadata={"omit_family_in_canonical": True},
+        metadata={"omit_family_in_canonical": True, "native_function": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
         execution=INDIRECT_EXTERNAL_WRITE,
         aliases=("remember_memory",),
     )
-    def write(self, call: IntrospectionCall) -> IntrospectionResult:
+    def write(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         kind = str(call.args.get("kind") or "").strip()
         summary = str(call.args.get("summary") or "").strip()
         search_text = str(call.args.get("search_text") or "").strip()
@@ -454,11 +454,12 @@ class MemoryIntrospectionProvider:
             )
         )
         payload = build_mutation_structured_payload(result)
-        return IntrospectionResult(
+        return CapabilityResult(
             status=result.status,
             text="memory commit result",
             structured=payload,
-            llm_text=render_mutation_result_for_llm("commit", result),
+            llm_text=render_mutation_result_for_llm("commit", result, provider_id=provider.provider_id),
+            llm_failure_details={},
         )
 
     @capability_action(
@@ -468,11 +469,13 @@ class MemoryIntrospectionProvider:
         action_name="update",
         guidance=ToolGuidance(
             search_objects=('memory', 'memories', 'record', 'records'),
+            search_terms=('edit', 'modify', 'correct',),
             purpose="Update an existing durable memory record.",
             use_when=(
                 "Instead of remember_memory when a corresponding recalled record needs additional, corrected or superseding information. "
                 "If it already contains all the candidate information, no write is needed; recalling alone does not require an update. "
                 "Copy mem_ref exactly from recall_memory results, including prefixes like fact: or case:."
+                " Supply content with the complete replacement memory; the backend updates both its current summary and retrieval/origin text together."
             ),
             do_not_use_when=(
                 "Not for new memories (use remember_memory). "
@@ -480,15 +483,18 @@ class MemoryIntrospectionProvider:
             ),
             failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If the update outcome is uncertain, use recall_memory with that exact mem_ref and reconcile its current content before following any retry affordance.",
         ),
-        metadata={"omit_family_in_canonical": True},
+        metadata={"omit_family_in_canonical": True, "native_function": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
         execution=INDIRECT_EXTERNAL_WRITE,
         aliases=("update_memory",),
     )
-    def update(self, call: IntrospectionCall) -> IntrospectionResult:
+    def update(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         mem_ref = _read_mem_ref(call.args)
         if not mem_ref:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="mem_ref is required", llm_text="mem_ref is required")
+        content = str(call.args.get("content") or "").strip()
+        if not content:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="content is required", llm_text="content is required")
         star, star_error = memory_star_from_args(call.args)
         if star_error:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text=star_error, llm_text=star_error)
@@ -507,8 +513,8 @@ class MemoryIntrospectionProvider:
             L3CorrectRequest(
                 mutation_id=mutation_id_from_call(call),
                 document_id=mem_ref,
-                summary=str(call.args.get("summary")) if call.args.get("summary") is not None else None,
-                search_text=str(call.args.get("search_text")) if call.args.get("search_text") is not None else None,
+                summary=content,
+                search_text=content,
                 payload_patch=payload_patch,
                 topics=[str(value) for value in list(call.args.get("topics") or [])] if call.args.get("topics") is not None else None,
                 situation_text=star_fields.get("situation_text") if star else None,
@@ -518,11 +524,12 @@ class MemoryIntrospectionProvider:
             )
         )
         payload = build_mutation_structured_payload(result)
-        return IntrospectionResult(
+        return CapabilityResult(
             status=result.status,
             text="memory update result",
             structured=payload,
-            llm_text=render_mutation_result_for_llm("update", result),
+            llm_text=render_mutation_result_for_llm("update", result, provider_id=provider.provider_id),
+            llm_failure_details={},
         )
 
     @capability_action(
@@ -532,6 +539,7 @@ class MemoryIntrospectionProvider:
         action_name="delete",
         guidance=ToolGuidance(
             search_objects=('memory', 'memories', 'record', 'records'),
+            search_terms=('delete', 'remove', 'erase',),
             purpose="Forget an existing durable memory record.",
             use_when=(
                 "Only when the user explicitly asks to forget/delete a specific memory, or approves deleting a clearly invalid record. "
@@ -542,21 +550,22 @@ class MemoryIntrospectionProvider:
             ),
             failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If deletion may have succeeded, reconcile with recall_memory(mem_ref=<exact returned ref>) before following any retry affordance; do not issue a blind duplicate delete.",
         ),
-        metadata={"omit_family_in_canonical": True},
+        metadata={"omit_family_in_canonical": True, "native_function": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
         execution=INDIRECT_EXTERNAL_WRITE,
         aliases=("forget_memory",),
     )
-    def delete(self, call: IntrospectionCall) -> IntrospectionResult:
+    def delete(self, call: IntrospectionCall) -> CapabilityResult:
         mem_ref = _read_mem_ref(call.args)
         provider = self.service.l3_selector.resolve()
         result = provider.delete(L3DeleteRequest(document_id=mem_ref, reason=str(call.args.get("reason") or "")))
         payload = build_mutation_structured_payload(result)
-        return IntrospectionResult(
+        return CapabilityResult(
             status=result.status,
             text="memory delete result",
             structured=payload,
-            llm_text=render_mutation_result_for_llm("delete", result),
+            llm_text=render_mutation_result_for_llm("delete", result, provider_id=provider.provider_id),
+            llm_failure_details={},
         )
 
     @capability_action(
@@ -566,9 +575,10 @@ class MemoryIntrospectionProvider:
         action_name="set_active_provider",
         guidance=ToolGuidance(
             search_objects=('provider', 'providers'),
+            search_terms=('switch', 'select',),
             purpose="Switch the active L3 memory provider.",
             use_when="Changing which memory backend handles recall/remember/update/forget.",
-            do_not_use_when="Checking the active provider (use inspect_active_memory_provider). Listing providers (use list_memory_providers).",
+            do_not_use_when="Checking the active provider (use inspect_memory_state). Listing providers (use list_memory_providers).",
             failure_next_steps="If the provider name is not found, verify it with list_memory_providers.",
         ),
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,

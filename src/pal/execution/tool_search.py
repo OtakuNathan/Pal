@@ -36,10 +36,11 @@ class ExecutionToolSearchMixin:
         action_name="tools",
         guidance=ToolGuidance(
             search_objects=('tool', 'tools', 'capability', 'capabilities'),
+            search_terms=('inventory', 'registry', 'available',),
             purpose="List a compact directory of registered tool aliases, purposes, modules, and invocation modes.",
             use_when="Browsing all available tools when you don't know what to search for. Checking tool inventory completeness.",
             do_not_use_when="Searching for a specific capability (use search_tools). Reading one tool's contract (use read_tool).",
-            failure_next_steps="Read-only. If expected tools are missing, check inspect_execution_state for capability/tool counts.",
+            failure_next_steps="Read-only. Reuse unchanged inventory. If expected tools are missing, check inspect_execution_state for capability/tool counts. If reasonable checks still reveal no suitable callable, it may be unavailable; explain that possibility rather than repeating discovery indefinitely.",
         ),
         aliases=("list_tools",),
     )
@@ -92,10 +93,10 @@ class ExecutionDiscoveryCapabilityMixin:
         action_name="search",
         guidance=ToolGuidance(
             search_objects=('tool', 'tools', 'capability', 'capabilities', 'alias', 'aliases'),
-            purpose="Find callable tools using short English domain, action, and object keywords or an alias.",
-            use_when="When the callable alias is unknown. Search whole words in [domain] [action] [object] form; word order is flexible. All query words must match alias words or declared discovery terms, including selected operation enums; use short keywords rather than a task sentence. If empty, shorten to the object/domain and inspect the returned tool schema.",
-            do_not_use_when="When you already know a callable alias and its arguments, invoke it directly or via call_tool according to its invocation mode.",
-            failure_next_steps="For empty results, remove unnecessary query words or try another exact action/object word. If filters were supplied, use filter_suggestions or remove guessed filters. Use facets=true only when classification discovery is needed; family is not a business-domain taxonomy.",
+            purpose="Find callable tools by task purpose within a strict domain bucket, or by exact alias; broad keyword discovery is available when the owner is unknown.",
+            use_when="When the callable alias is unknown. With a known operation owner, pass domain and use a short affirmative English task description in query, matching the primary language of tool purposes. Keep excluded alternatives and all constraints in the original request for full-contract review. Purpose and tool-authored auxiliary terms/intents rank full contracts within that bucket; action/object words are not hard gates. Candidates may miss requested features, so compare unmatched_terms and the complete contract with the original task. When query words are uncertain, pass domain alone for up to 16 names and brief purposes, then read a plausible contract. Follow next_offset for more. Domains are strict; target instance names belong in invocation arguments. Omit domain when uncertain to retain broad keyword discovery. Partial hits expose unmatched_terms for diagnostic context words; compare these with the whole request and contract before execution. Unmatched words do not establish supported features. On a domain-search miss, spelling recovery can return up to three suggestions with full contracts. Query-only broad discovery retains conservative keyword and lexical fusion. Review the included contracts and invoke directly when suitable; extra read_tool is unnecessary when the contract is complete. Do not search indefinitely. If a reasonable change of query, owner/filter or relevant inventory check still reveals no suitable callable, it may be unavailable; explain that possibility and any uncertainty. Reuse unchanged inventory and complete contracts.",
+            do_not_use_when="When you already know a callable alias and its arguments, invoke it directly or via call_tool according to its invocation mode. Avoid repeated discovery that provides no new evidence; the requested capability may be unavailable.",
+            failure_next_steps="On a miss, review suggestions and their included contracts first. If unresolved, inspect directory.tools when present: these are available tools in the selected domain, not query matches. Compare their purposes with the original request and use read_tool for a plausible alias before invoking it. Follow directory.next_offset with the same domain/filters and directory_offset to browse more. Without a directory, choose from available_domains and set directory_offset=0. Suggestions remain candidates requiring review against the original task; unmatched words never establish supported features. If filters were guessed, correct or remove them. Try a reasonable change of strategy when useful, but do not continue discovery indefinitely. If relevant checks still reveal no suitable callable, it may be unavailable; report what was checked and any uncertainty rather than substituting an unrelated capability. Use facets=true only when classification discovery is needed; family is not a business-domain taxonomy.",
             next_tool_hints=(
                 NextToolHint(
                     name="read_tool",
@@ -129,6 +130,7 @@ class ExecutionDiscoveryCapabilityMixin:
         action_name="read",
         guidance=ToolGuidance(
             search_objects=('tool', 'tools', 'contract', 'contracts', 'capability', 'capabilities'),
+            search_terms=('schema', 'definition', 'inspect',),
             purpose="Read the full capability contract for an execution capability by exact alias.",
             use_when="When the capability contract is absent, changed, or insufficient for correct arguments and execution semantics. Reuse a valid contract already in context; do not read it before every call.",
             do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use list_tools).",
@@ -186,4 +188,8 @@ def _invocation_capability_result(runtime: object, name: str, result: ToolInvoca
         context_delivery=canonical.context_delivery,
         snapshot_refs=canonical.snapshot_refs,
         context_messages=canonical.context_messages,
+        # The nested invocation already rendered its failure diagnostics. Raw
+        # receipts stay structured; wrapping must not expand them into model
+        # text again and undo an owner's deliberate projection.
+        llm_failure_details={},
     )

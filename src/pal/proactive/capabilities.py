@@ -42,6 +42,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -164,6 +165,7 @@ class ProactiveIntrospectionProvider:
         action_name="show",
         guidance=ToolGuidance(
             search_objects=('status',),
+            search_terms=('state', 'show', 'get',),
             purpose="Show proactive module status.",
             use_when="Diagnosing proactive system health — how many tasks registered, pending triggers, triggered runs.",
             do_not_use_when="Listing specific tasks (use list_proactive_tasks). Checking one task's details (use read_proactive_task).",
@@ -174,11 +176,17 @@ class ProactiveIntrospectionProvider:
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_proactive(self)
+        payload = inspection_snapshot({**snapshot.__dict__,
+            "runner_available": self.runner is not None,
+            "recent_failures": [{key: result.get(key) for key in ("proactive_id", "turn_id", "error_text")}
+                                for result in (self.runner.results if self.runner is not None else ())
+                                if result.get("error_text")][-4:],
+        })
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive snapshot",
-            structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("Proactive snapshot", snapshot.__dict__),
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Proactive hub", payload),
         )
 
     @capability_action(
@@ -187,7 +195,8 @@ class ProactiveIntrospectionProvider:
         action_name="list",
         guidance=ToolGuidance(
             search_objects=('task', 'tasks'),
-            purpose="List configured proactive tasks with their names, goals, schedules, next due time, and enabled status.",
+            search_terms=('scheduled', 'schedule', 'automation', 'automations', 'reminder', 'reminders',),
+            purpose="List proactive task names, brief goals, schedule summaries, next due time and enabled status.",
             use_when='Checking what scheduled, recurring, reminder, or push tasks exist. The authoritative source for proactive task inventory. An empty list means no proactive tasks are registered.',
             do_not_use_when="Checking module-level health (use inspect_proactive_status). Checking one task's run history (use list_proactive_runs).",
             failure_next_steps="Read-only. If empty, no proactive tasks are configured. Use upsert_proactive_task to add one.",
@@ -203,15 +212,12 @@ class ProactiveIntrospectionProvider:
                 {
                     "name": definition.proactive_id,
                     "proactive_id": definition.proactive_id,
-                    "goal": definition.goal,
-                    "method": definition.method,
-                    "skill_refs": list(definition.skill_refs),
-                    "out_channel_id": definition.out_channel_id,
+                    "goal": definition.goal[:240],
+                    "goal_truncated": len(definition.goal) > 240,
                     "enabled": definition.enabled,
-                    "out_reply_target": dict(definition.out_reply_target),
-                    "schedule": dict(definition.schedule),
+                    "schedule": {key: value for key, value in definition.schedule.items()
+                                 if key in {"cadence", "cron", "run_at_utc", "timezone"}},
                     "next_due_at": self.manager.schedule_engine.next_due_at(definition.proactive_id),
-                    "last_run_at": self._last_run_at_for(definition.proactive_id),
                 }
             )
         payload = {"items": items}
@@ -227,18 +233,19 @@ class ProactiveIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
-            search_objects=('task', 'tasks'),
-            purpose="Show one proactive task's full configuration — goal, schedule, output channel, skill refs.",
-            use_when="Inspecting a specific task's details before modifying or debugging it.",
-            do_not_use_when="Listing all tasks (use list_proactive_tasks). Checking run history (use read_latest_proactive_run or list_proactive_runs).",
+            search_objects=('task', 'tasks', 'job', 'jobs'),
+            search_terms=('inspect', 'show', 'get', 'reminder', 'status', 'health', 'latest', 'result', 'results', 'run', 'scheduled', 'automation'),
+            purpose="Inspect one proactive task's configuration, schedule, destination and latest execution outcome together.",
+            use_when="Inspecting a specific task before modifying or debugging it. No recorded run can mean it never executed or is newly created; completed means the turn finished, not that channel delivery was confirmed.",
+            do_not_use_when="Finding task names (use list_proactive_tasks). Browsing multiple executions (use list_proactive_runs).",
             failure_next_steps="If unknown_target, verify the task name with list_proactive_tasks.",
         ),
         aliases=("read_proactive_task",),
         InputModel=ProactiveTaskReadInput,
         metadata={"canonical_path": "intro_proactive_show"},
     )
-    def show_task(self, call: IntrospectionCall) -> IntrospectionResult:
-        target = self._require_proactive_target(call)
+    def show_task(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
+        target = self._require_proactive_target(call, include_history=False)
         payload = {
             "name": target.proactive_id,
             "proactive_id": target.proactive_id,
@@ -252,28 +259,23 @@ class ProactiveIntrospectionProvider:
             "next_due_at": target.next_due_at,
             "last_run_at": target.last_run_at,
         }
+        latest = self.last_run(call)
+        payload.update(dict(latest.structured or {}))
+        if isinstance(payload.get("run"), dict):
+            payload["last_run_at"] = payload["run"].get("completed_at") or payload["run"].get("started_at")
+        payload = inspection_snapshot(payload)
+        if latest.status != RuntimeStatus.OK:
+            payload["diagnostics"].update(partial=True, unavailable_sections={"latest_run": payload.get("error") or payload.get("reason")})
+            return CapabilityResult(status=latest.status, text=latest.text, structured=payload,
+                                    llm_text=render_titled_structured_for_llm("Proactive task", payload),
+                                    effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE))
         return IntrospectionResult(
-            status=RuntimeStatus.OK,
+            status=latest.status,
             text="proactive task snapshot",
             structured=payload,
             llm_text=render_titled_structured_for_llm("Proactive task snapshot", payload),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="last_run",
-        guidance=ToolGuidance(
-            search_objects=('run', 'runs'),
-            purpose="Show the most recent run result for one proactive task.",
-            use_when='Checking if a recurring/scheduled task ran successfully or what it produced. Completed means the turn finished; it does not confirm channel delivery. No recorded run can mean the task has never executed or was newly created; inspect its schedule and enabled state before treating it as a failure.',
-            do_not_use_when="Browsing all runs (use list_proactive_runs). Checking task config (use read_proactive_task).",
-            failure_next_steps="If unknown_target, verify the task name with list_proactive_tasks. If no run yet, the task may be newly created.",
-        ),
-        aliases=("read_latest_proactive_run",),
-        InputModel=ProactiveTaskReadInput,
-        metadata={"canonical_path": "intro_proactive_last_run"},
-    )
     def last_run(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         target = self._require_proactive_target(call, include_history=False)
         repository = self.manager.repository
@@ -310,11 +312,12 @@ class ProactiveIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list_runs",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('list scheduled task execution history', 'list task schedule execution history'),
             search_objects=('run', 'runs'),
+            search_terms=('history', 'scheduled', 'automation',),
             purpose="List recent run history for one proactive task.",
             use_when="Debugging a task that keeps failing or checking patterns across multiple runs.",
-            do_not_use_when="Just the latest run (use read_latest_proactive_run). Task configuration (use read_proactive_task).",
+            do_not_use_when="Just the latest run (use read_proactive_task). Task configuration (use read_proactive_task).",
             failure_next_steps="If unknown_target, verify the task name with list_proactive_tasks.",
         ),
         InputModel=ProactiveTaskRunsInput,
@@ -353,9 +356,10 @@ class ProactiveIntrospectionProvider:
         action_name="create",
         guidance=ToolGuidance(
             search_objects=('task', 'tasks'),
+            search_terms=('create', 'add', 'update', 'edit', 'schedule', 'scheduled', 'cron', 'automation', 'reminder', 'reminders',),
             purpose="Create or replace a proactive task for future work. New tasks default to this conversation; replacing a task preserves its destination unless specified. An explicit channel uses its unique default destination when no target is supplied.",
             use_when="For one-time reminders, scheduled jobs, recurring reports, periodic checks, or push notifications. Internal proactive turns without a channel binding can create tasks without output.",
-            do_not_use_when="Not for one-shot immediate tasks (handle directly).",
+            do_not_use_when="Not for one-shot immediate tasks (handle directly). Changing only the timing of an existing task (use update_proactive_schedule); replacing a whole task definition requires its full goal and configuration.",
             failure_next_steps="Correct invalid schedule/cron syntax; use list_channel_endpoints to verify an output channel name.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
@@ -435,6 +439,7 @@ class ProactiveIntrospectionProvider:
         action_name="delete",
         guidance=ToolGuidance(
             search_objects=('task', 'tasks'),
+            search_terms=('remove', 'scheduled', 'automation', 'reminder',),
             purpose="Permanently delete a proactive task and its definition.",
             use_when="A scheduled/recurring task is no longer needed and should be fully removed.",
             do_not_use_when="Temporarily stopping a task (use disable_proactive_task).",
@@ -475,6 +480,7 @@ class ProactiveIntrospectionProvider:
         action_name="enable",
         guidance=ToolGuidance(
             search_objects=('task', 'tasks'),
+            search_terms=('resume', 'scheduled', 'automation', 'reminder',),
             purpose="Enable a proactive task so it resumes firing on schedule.",
             use_when="Re-enabling a previously disabled task.",
             do_not_use_when="Disabling a task (use disable_proactive_task). Creating a new task (use upsert_proactive_task).",
@@ -492,8 +498,9 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="disable",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('pause scheduled task', 'suspend task schedule'),
             search_objects=('task', 'tasks'),
+            search_terms=('pause', 'stop', 'scheduled', 'automation', 'reminder',),
             purpose="Disable a proactive task so it stops firing without deleting it.",
             use_when='Temporarily pausing a task (e.g. debugging, vacation, maintenance). Use enable_proactive_task to resume future scheduling; disabling does not erase the task or its run history.',
             do_not_use_when="Permanently removing a task (use delete_proactive_task).",
@@ -513,6 +520,7 @@ class ProactiveIntrospectionProvider:
         action_name="set_output_channel",
         guidance=ToolGuidance(
             search_objects=('channel', 'channels', 'destination', 'destinations'),
+            search_terms=('delivery', 'destination',),
             purpose="Set a proactive task's channel and destination together, or clear output. Without an explicit target, use the current conversation on that channel or its unique default destination; never carry a target across channels.",
             use_when="Routing a task's output to a different channel (e.g. Telegram, socket) or clearing it.",
             do_not_use_when="Setting a specific reply target within a channel (use set_proactive_output_target).",
@@ -575,6 +583,7 @@ class ProactiveIntrospectionProvider:
         action_name="set_output_target",
         guidance=ToolGuidance(
             search_objects=('target', 'targets'),
+            search_terms=('delivery', 'destination', 'chat', 'thread',),
             purpose="Set or clear the specific reply target (e.g. chat ID, thread) within a channel for a proactive task.",
             use_when="Fine-tuning where within a channel the task output goes (e.g. specific chat thread).",
             do_not_use_when="Switching the channel itself (use set_proactive_output_channel).",
@@ -618,8 +627,9 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="update_schedule",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('update scheduled task execution time', 'change recurring task timetable'),
             search_objects=('schedule', 'schedules'),
+            search_terms=('reschedule', 'cron', 'once', 'recurrence', 'timing', 'task', 'tasks', 'scheduled'),
             purpose="Update the schedule (cron, once, manual) for a proactive task.",
             use_when="Changing when a task fires — switching from manual to cron, updating cron expression, or setting a one-time trigger.",
             do_not_use_when="Changing output destination (use set_proactive_output_channel). Creating a new task (use upsert_proactive_task).",

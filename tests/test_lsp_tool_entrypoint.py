@@ -118,7 +118,8 @@ def test_failed_request_does_not_replay_cached_success(tmp_path, monkeypatch):
     assert "startup failed" in result.llm_text
     shown = provider.show(CapabilityCall(name="inspect_lsp_provider", args={}))
     assert shown.structured["manager_running"] is False
-    assert shown.structured["cached_snapshot"]["result"]["value"] == "OLD_HOVER"
+    assert "result" not in shown.structured["cached_snapshot"]
+    assert provider.last_health["result"]["value"] == "OLD_HOVER"
     assert "startup failed" in shown.structured["last_error"]
 
 

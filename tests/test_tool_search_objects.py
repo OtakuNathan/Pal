@@ -60,7 +60,7 @@ def test_real_tools_recall_declared_object_forms(runtime, query, expected):
     'lsp readys diagnostic', 'browser_re',
 ])
 def test_object_vocabulary_does_not_expand_action_or_domain(runtime, query):
-    result = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': query, 'top_k': 100}))
+    result = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': query, 'top_k': 5}))
     assert result.structured['hits'] == []
 
 
@@ -169,7 +169,7 @@ def test_object_variants_rank_like_alias_words_over_incidental_purpose_words(que
         'list_runs': {'alias': 'list_runs', 'purpose': 'List run history for one task',
                       'search_objects': ('run', 'runs')},
     })
-    result = ExecutionRuntime._search_generation(generation, {'query': query, 'top_k': 100})
+    result = ExecutionRuntime._search_generation(generation, {'query': query, 'top_k': 5})
     assert result['hits'][0]['alias'] == 'list_tasks'
 
 
@@ -184,8 +184,8 @@ def test_object_variants_rank_like_alias_words_over_incidental_purpose_words(que
     ('artifact/capabilities.py', 'read_artifact', 'artifact read representations', ['read_artifact']),
     ('artifact/capabilities.py', 'import_artifact', 'artifact import image', ['import_artifact']),
     ('artifact/capabilities.py', 'import_artifact', 'artifact import images', ['import_artifact']),
-    ('llm/capabilities.py', 'inspect_llm_usage', 'llm inspect token', ['inspect_llm_usage']),
-    ('llm/capabilities.py', 'inspect_llm_usage', 'llm inspect tokens', ['inspect_llm_usage']),
+    ('llm/capabilities.py', 'inspect_active_llm', 'llm inspect token', ['inspect_active_llm']),
+    ('llm/capabilities.py', 'inspect_active_llm', 'llm inspect tokens', ['inspect_active_llm']),
     ('web_fetch/capabilities.py', 'clear_browser_cache', 'browser clear cookies', []),
     ('artifact/capabilities.py', 'read_artifact', 'read image pixels', []),
     ('execution/file_capabilities.py', 'delete_path', 'delete link target', []),
@@ -220,7 +220,7 @@ def test_purpose_changes_neither_recall_nor_ranking():
     for purpose in ('Read widgets', 'Do not read cookies', 'Completely unrelated description'):
         generation = SimpleNamespace(search_records={alias: {**item, 'purpose': purpose}
                                                       for alias, item in records.items()})
-        result = ExecutionRuntime._search_generation(generation, {'query': 'read widgets', 'top_k': 100})
+        result = ExecutionRuntime._search_generation(generation, {'query': 'read widgets', 'top_k': 5})
         outputs.append([(hit['alias'], hit['score']) for hit in result['hits']])
         assert ExecutionRuntime._search_generation(generation, {'query': 'read cookies'})['hits'] == []
     assert outputs[0] == outputs[1] == outputs[2]

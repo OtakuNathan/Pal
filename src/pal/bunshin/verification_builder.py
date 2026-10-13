@@ -250,7 +250,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "alias": "run_verification_" + name.removeprefix("op_bunshin_verification_run_"),
             "guidance": {
                 "search_objects": ('case', 'cases'),
-                "purpose": f"Run and durably register one {tag.replace('_', ' ')} verification case; rerun the same name to replace it before submission.",
+                "purpose": f"Run and durably register one {kind.replace('_', ' ')} case as {tag.replace('_', ' ')} verification evidence; rerun the same name to replace it before submission.",
                 "use_when": " ".join(
                     [
                         str(_VERIFICATION_ACTION_TEMPLATES[tag]["when"]),
@@ -271,7 +271,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             },
             "InputModel": BunshinV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput,
         }
-        for name, (_, tag) in _RUN_TO_KIND_TAG.items()
+        for name, (kind, tag) in _RUN_TO_KIND_TAG.items()
     },
     "op_bunshin_verification_run_lsp_check": {
         "alias": "run_verification_lsp_check",
@@ -298,10 +298,10 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "guidance": {
             "search_objects": ('obligation', 'obligations'),
             "purpose": "Record one required verification obligation as unavailable in the bound environment.",
-            "use_when": "Use only for an applicable required obligation that genuinely cannot be exercised.",
+            "use_when": "Record an applicable required obligation that genuinely cannot be exercised while building the verification draft; this does not submit a final verifier outcome.",
             "do_not_use_when": (
                 "Do not use for a failed check, a non-applicable obligation, or to manufacture "
-                "PASS evidence."
+                "PASS evidence. For the final UNKNOWN verifier outcome, use submit_verification_unknown."
             ),
             "failure_next_steps": "Correct the obligation kind or concrete environmental reason before retrying.",
         },

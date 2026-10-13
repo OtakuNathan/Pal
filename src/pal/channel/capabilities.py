@@ -12,9 +12,7 @@ from pal.execution.generated_tool_models import (
     ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
     ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
     ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
-    ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
     ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput,
-    ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
     ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
     ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput,
     ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput,
@@ -55,6 +53,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -190,6 +189,32 @@ class ChannelIntrospectionProvider:
         return endpoint.endpoint_id
 
     @capability_action(
+        namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
+        guidance=ToolGuidance(
+            search_objects=('state', 'status', 'health', 'hub'),
+            purpose="Inspect the channel hub's inventory, publication and routing state without expanding endpoint diagnostics.",
+            use_when="Checking channel-wide availability or why endpoints are missing from discovery.",
+            do_not_use_when="If endpoints exist, use inspect_channel_endpoint for one endpoint's complete diagnostics. Finding endpoint names; use list_channel_endpoints.",
+            failure_next_steps="Inspect the affected provider plugin with inspect_plugin; inspect a known endpoint for its connection, authentication and backlog.",
+        ), aliases=("inspect_channel_state",),
+    )
+    def show(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        targets = self._targets_from_hubs(published_only=False)
+        errors = {item.endpoint_id: item.state_error for item in targets if item.state_error}
+        payload = inspection_snapshot({
+            "endpoint_count": len(targets),
+            "published_endpoint_count": len(self.iter_endpoints()),
+            "attached_count": sum(item.attached for item in targets),
+            "enabled_count": sum(item.enabled for item in targets),
+            "state_errors": errors,
+            "health": {"status": "degraded" if errors else "unknown",
+                       "reason": "inventory_read_failed" if errors else "endpoint_health_requires_object_inspection"},
+        })
+        return IntrospectionResult(status=RuntimeStatus.OK, text="channel hub state", structured=payload,
+                                   llm_text=render_titled_structured_for_llm("Channel hub", payload))
+
+    @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list",
@@ -240,8 +265,11 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="channel",
         action_name="send_attachment",
-        guidance=ToolGuidance(
-            search_objects=('attachment', 'attachments', 'file', 'files'),
+        guidance=ToolGuidance(search_intents=('send attachment file to current conversation', 'return generated image to user', '发送文件附件给当前会话'),
+            search_objects=('attachment', 'attachments', 'file', 'files', 'image', 'images',
+                            'document', 'documents', 'photo', 'photos', 'picture', 'pictures',
+                            'audio', 'video', 'pdf', 'artifact', 'artifacts'),
+            search_terms=('upload', 'deliver', 'share', 'return'),
             purpose="Send a local file attachment back to the channel that started the current turn.",
             use_when="The user asked for a generated file (image, document, code) to be sent back through the channel.",
             do_not_use_when="For an ordinary text reply to the current turn, respond normally without a sending tool. Use send_channel_message only for a separate initiated text delivery. Writing a local file (use write_file).",
@@ -274,6 +302,7 @@ class ChannelIntrospectionProvider:
         OutputModel=ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput,
         guidance=ToolGuidance(
             search_objects=('message', 'messages'),
+            search_terms=('text', 'notify', 'notification', 'deliver', 'post',),
             purpose="Send an ordinary text message through a configured channel endpoint.",
             use_when=(
                 "Use when you need to initiate a message on an attached, enabled endpoint; "
@@ -451,16 +480,17 @@ class ChannelIntrospectionProvider:
         action_name="attach",
         guidance=ToolGuidance(
             search_objects=('endpoint', 'endpoints'),
-            purpose="Attach a channel endpoint — connect its runtime instance so it can send and receive.",
-            use_when="Reconnecting a detached endpoint's runtime. After rescan_channel_providers discovered a new endpoint. An already attached endpoint is an idempotent no-op; attachment alone does not reload provider code.",
-            do_not_use_when="Just toggling message acceptance (use enable_channel_endpoint). The endpoint is already attached.",
-            failure_next_steps="If provider not found, run rescan_channel_providers first. If already attached, no-op.",
+            search_terms=('connect',),
+            purpose="Attach a detached channel endpoint; preserve an already attached transport.",
+            use_when="The endpoint was explicitly detached or has no runtime instance. An already attached endpoint is an idempotent no-op. A dropped network connection does not imply that the endpoint was detached; inspect attachment state when unknown.",
+            do_not_use_when="An already attached endpoint has a broken or stuck connection (use restart_channel_endpoint for a fresh transport session). Just toggling message acceptance (use enable_channel_endpoint).",
+            failure_next_steps="If provider not found, run rescan_plugins first. If already attached, no-op.",
         ),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
         aliases=("attach_channel_endpoint",),
         execution=INDIRECT_CONTROL,
     )
-    def attach(self, call: IntrospectionCall) -> IntrospectionResult:
+    def attach(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._attach_endpoint_provider(str(call.args.get("name") or "").strip())
 
     @capability_action(
@@ -470,6 +500,7 @@ class ChannelIntrospectionProvider:
         action_name="detach",
         guidance=ToolGuidance(
             search_objects=('endpoint', 'endpoints'),
+            search_terms=('disconnect',),
             purpose="Detach a channel endpoint — disconnect its runtime instance without removing configuration.",
             use_when="Temporarily disconnecting an endpoint's runtime (e.g. maintenance, restart). Use attach_channel_endpoint when the disconnected endpoint should resume delivery.",
             do_not_use_when="Just stopping message acceptance (use disable_channel_endpoint — keeps runtime alive).",
@@ -482,22 +513,7 @@ class ChannelIntrospectionProvider:
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_attached(call, attached=False)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="provider",
-        action_name="rescan",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Discover physical provider additions and removals in the runtime root.",
-            use_when="A provider was installed, removed, enabled, or disabled.",
-            do_not_use_when="Provider source changed in place (use reload_channel_provider) or one transport is stuck (use restart_channel_endpoint).",
-            failure_next_steps="A malformed manifest is reported without treating an already-known provider as physically removed. Fix it and rescan.",
-        ),
-        aliases=("rescan_channel_providers",),
-        InputModel=ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
-        execution=INDIRECT_CONTROL,
-    )
+    # Python compatibility entry points; model-facing lifecycle lives in plugin tools.
     def rescan_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self._manager().rescan_providers()
@@ -515,22 +531,6 @@ class ChannelIntrospectionProvider:
             llm_text=render_titled_structured_for_llm(text, payload),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="reload_provider",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Explicitly detach, unload, load, and reattach one runtime-root provider.",
-            use_when="A known provider's source, manifest, or provider-wide resources changed in place.",
-            do_not_use_when="Only one endpoint connection is stuck (use restart_channel_endpoint). Discovering provider additions/removals or enabled/disabled state (use rescan_channel_providers).",
-            failure_next_steps="The endpoint hubs retain queued delivery while code stays unloaded and capabilities remain withdrawn. Fix the provider and retry.",
-        ),
-        aliases=("reload_channel_provider",),
-        InputModel=ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
-        execution=INDIRECT_CONTROL,
-    )
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:
@@ -548,12 +548,13 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="management",
         action_name="restart_endpoint",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('reconnect channel endpoint transport', 'restart disconnected endpoint connection', '重新连接掉线的通道端点'),
             search_objects=('endpoint', 'endpoints'),
-            purpose="Restart one channel endpoint runtime instance without reloading provider code.",
-            use_when="One endpoint connection is stuck, misbehaving, or needs a fresh transport session.",
-            do_not_use_when="Provider source or provider-wide resources changed (use reload_channel_provider or rescan_channel_providers).",
-            failure_next_steps="If the endpoint is missing, verify it with list_channel_endpoints. If restart fails, use inspect_channel_endpoint_health.",
+            search_terms=('reconnect', 'connection', 'session', 'transport'),
+            purpose="Rebuild a channel endpoint's transport session without reloading provider code.",
+            use_when="An endpoint is still attached but its network connection dropped, is stuck, or needs a fresh transport session. Unlike attach, restart replaces an existing transport.",
+            do_not_use_when="Restoring an explicitly detached endpoint (use attach_channel_endpoint). Provider source or provider-wide resources changed (use reload_plugin).",
+            failure_next_steps="If the endpoint is missing, verify it with list_channel_endpoints. If restart fails, use inspect_channel_endpoint.",
         ),
         aliases=("restart_channel_endpoint",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput,
@@ -566,11 +567,12 @@ class ChannelIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="endpoint",
         action_name="inspect",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('check endpoint connection health and pending messages', 'inspect channel endpoint authentication'),
             search_objects=('endpoint', 'endpoints'),
-            purpose="Inspect full state of one channel endpoint.",
-            use_when="Need detailed status of a specific endpoint (enabled, attached, paired, provider info).",
-            do_not_use_when="Just need a list of all endpoints (use list_channel_endpoints). Checking auth (use inspect_channel_endpoint_auth).",
+            search_terms=('status', 'state', 'show', 'get', 'check', 'health', 'auth', 'authentication', 'authorization', 'credential', 'credentials', 'backlog', 'queue', 'queued', 'message', 'messages', 'pending', 'undelivered', 'connectivity', 'connection', 'network'),
+            purpose="Inspect one channel endpoint's lifecycle, authentication, connection health and message backlog together.",
+            use_when="Diagnosing a specific endpoint, including delivery, authentication or queued-message failures. Successful inspection does not imply a healthy connection.",
+            do_not_use_when="Finding endpoint names (use list_channel_endpoints). Channel-wide inventory state (use inspect_channel_state).",
             failure_next_steps="If endpoint not found, verify its name with list_channel_endpoints.",
         ),
         aliases=("inspect_channel_endpoint",),
@@ -583,21 +585,31 @@ class ChannelIntrospectionProvider:
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
             )
-        return self._manager().inspect_endpoint(target.endpoint_id)
+        manager = self._manager()
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="endpoint",
-        action_name="auth_state",
-        guidance=ToolGuidance(
-            search_objects=('auth', 'authorization', 'credential', 'credentials'),
-            purpose="Inspect whether an endpoint is authenticated and authorized.",
-            use_when="Diagnosing auth failures or checking if credentials are still valid.",
-            do_not_use_when="Applying credentials (use set_channel_endpoint_auth_material). General endpoint state (use inspect_channel_endpoint).",
-            failure_next_steps="If endpoint not found, verify its name with list_channel_endpoints. If not authenticated, apply credentials with set_channel_endpoint_auth_material.",
-        ),
-        aliases=("inspect_channel_endpoint_auth",),
-    )
+        def section(reader):
+            value = reader(target.endpoint_id)
+            return {**dict(value.structured or {}), "inspection_status": value.status}
+
+        payload = inspection_snapshot({
+            "endpoint_id": target.endpoint_id, "enabled": target.enabled, "attached": target.attached,
+            "runtime_endpoint_present": target.runtime_endpoint is not None,
+        }, sections={
+            "state": lambda: section(manager.inspect_endpoint),
+            "auth": lambda: section(manager.inspect_auth_state),
+            "health": lambda: section(manager.inspect_health),
+            "backlog": lambda: section(manager.inspect_backlog),
+        })
+        if payload["state"].get("inspection_status") == RuntimeStatus.OK:
+            state = payload.pop("state")
+            payload.update({key: value for key, value in state.items() if key != "diagnostics"})
+        if target.state_error:
+            payload["state_error"] = target.state_error
+            payload["diagnostics"]["partial"] = True
+            payload["diagnostics"]["unavailable_sections"]["durable_config"] = "durable_config_read_failed"
+        return IntrospectionResult(status=RuntimeStatus.OK, text="channel endpoint state", structured=payload,
+                                   llm_text=render_titled_structured_for_llm("Channel endpoint", payload))
+
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
@@ -615,9 +627,10 @@ class ChannelIntrospectionProvider:
         action_name="set_auth_material",
         guidance=ToolGuidance(
             search_objects=('material', 'materials', 'credential', 'credentials', 'token', 'tokens'),
+            search_terms=('authentication',),
             purpose="Apply endpoint authorization material (tokens, credentials) without exposing secrets in output.",
             use_when="An endpoint needs credentials to authenticate (e.g. Telegram bot token, API key).",
-            do_not_use_when="Reading current auth state (use inspect_channel_endpoint_auth).",
+            do_not_use_when="Reading current auth state (use inspect_channel_endpoint).",
             failure_next_steps="If endpoint not found, verify its name with list_channel_endpoints. If material format invalid, check provider documentation for required fields.",
         ),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSetAuthMaterialInput,
@@ -641,19 +654,6 @@ class ChannelIntrospectionProvider:
             )
         return self._manager().set_auth_material(target.endpoint_id, dict(material))
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="endpoint",
-        action_name="backlog",
-        guidance=ToolGuidance(
-            search_objects=('backlog', 'backlogs', 'message', 'messages'),
-            purpose="Inspect undelivered message backlog for one endpoint.",
-            use_when='Checking if messages are queued but not yet delivered (endpoint was detached or slow). A large backlog is an observation, not proof of its cause; inspect endpoint health and attachment before reconnecting.',
-            do_not_use_when="General endpoint health (use inspect_channel_endpoint_health). Listing endpoints (use list_channel_endpoints).",
-            failure_next_steps="If endpoint not found, verify its name with list_channel_endpoints. Large backlog may indicate the endpoint needs re-attachment.",
-        ),
-        aliases=("inspect_channel_endpoint_backlog",),
-    )
     def backlog(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
@@ -664,19 +664,6 @@ class ChannelIntrospectionProvider:
             )
         return self._manager().inspect_backlog(target.endpoint_id)
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="endpoint",
-        action_name="health",
-        guidance=ToolGuidance(
-            search_objects=('health',),
-            purpose="Inspect network connectivity and delivery health for one endpoint.",
-            use_when='Diagnosing message delivery failures or connection issues. A successful inspection can report an unhealthy endpoint. Inspect authentication and connection state; restart_channel_endpoint rebuilds its connection when appropriate.',
-            do_not_use_when="Checking auth (use inspect_channel_endpoint_auth). Checking message queue (use inspect_channel_endpoint_backlog).",
-            failure_next_steps="If endpoint not found, verify its name with list_channel_endpoints. If unhealthy, try restart_channel_endpoint to refresh its runtime instance.",
-        ),
-        aliases=("inspect_channel_endpoint_health",),
-    )
     def health(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
@@ -707,10 +694,18 @@ class ChannelIntrospectionProvider:
         if not endpoint_id:
             return lifecycle_owner_not_found(module_id, self.owner_id)
         result = self._attach_endpoint_provider(endpoint_id)
-        return self._owner_result(module_id, endpoint_id, result, fresh_instance=result.status == RuntimeStatus.OK)
+        return self._owner_result(module_id, endpoint_id, result,
+                                  fresh_instance=(result.status == RuntimeStatus.OK
+                                                  and (result.structured or {}).get('changed') is not False))
 
     def reload_module(self, module_id: str) -> ModuleLifecycleOwnerResult:
-        return self.attach_module(module_id)
+        endpoint_id = self._endpoint_id_from_lifecycle_module(module_id)
+        if not endpoint_id:
+            return lifecycle_owner_not_found(module_id, self.owner_id)
+        if self.runtime.get_endpoint(endpoint_id) is None:
+            return self.attach_module(module_id)
+        result = self._restart_endpoint(endpoint_id)
+        return self._owner_result(module_id, endpoint_id, result, fresh_instance=result.status == RuntimeStatus.OK)
 
     def _require_target(self, call: IntrospectionCall) -> ChannelEndpointTarget | None:
         target = call.meta.get("resolved_target")
@@ -789,7 +784,7 @@ class ChannelIntrospectionProvider:
         endpoint_id = str(call.args.get("name") or "").strip()
         return self._set_endpoint_attached(endpoint_id, attached=attached)
 
-    def _set_endpoint_attached(self, endpoint_id: str, *, attached: bool) -> IntrospectionResult:
+    def _set_endpoint_attached(self, endpoint_id: str, *, attached: bool) -> IntrospectionResult | CapabilityResult:
         if not endpoint_id:
             return _precondition_failure(
                 status=RuntimeStatus.INVALID,
@@ -800,7 +795,7 @@ class ChannelIntrospectionProvider:
             return self._manager().attach_endpoint(endpoint_id)
         return self._manager().detach_endpoint(endpoint_id)
 
-    def _attach_endpoint_provider(self, endpoint_id: str) -> IntrospectionResult:
+    def _attach_endpoint_provider(self, endpoint_id: str) -> IntrospectionResult | CapabilityResult:
         return self._set_endpoint_attached(endpoint_id, attached=True)
 
     def _restart_endpoint(self, endpoint_id: str) -> IntrospectionResult:
@@ -823,7 +818,7 @@ class ChannelIntrospectionProvider:
         self,
         module_id: str,
         endpoint_id: str,
-        result: IntrospectionResult,
+        result: IntrospectionResult | CapabilityResult,
         *,
         fresh_instance: bool,
     ) -> ModuleLifecycleOwnerResult:

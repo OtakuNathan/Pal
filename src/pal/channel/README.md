@@ -6,7 +6,7 @@ Owns:
 - normalize, reply routing, and response handles
 - active text delivery resolved by configured endpoint id
 - adapter registry for legacy/transport compatibility
-- provider manager for runtime-root channel providers
+- resident provider registry and endpoint management; PluginHost owns provider code generations
 - stable per-endpoint hubs across transport attach/detach
 - delivery diagnostics for queued replies and hub-buffer pressure
 - channel-neutral interaction status and callback mapping
@@ -70,14 +70,14 @@ Interaction rule:
   - it registers channel providers
   - maps persisted endpoint type keys (`channel_kind`) to providers
   - dispatches attach/detach/endpoint restart and introspection by `endpoint_id`
-  - explicitly unloads and reloads one runtime-root provider by `provider_id`
-  - rescans physical provider additions/removals without touching unchanged
-    source, plugins, or unrelated channel providers
+  - accepts channel extensions installed by PluginHost
+  - keeps endpoint identity and buffers when a plugin generation is detached
 - runtime-root channel providers live under:
   - `runtime_root/channel/providers/<provider_id>/provider.toml`
   - the manifest points at provider-owned Python code, usually `entrypoint = "runtime.py"`
-  - discovery validates the entrypoint and endpoint contract, then creates the
-    physical endpoint hubs immediately
+  - PluginHost adapts this legacy manifest in place; attach validates the provider
+    contract and establishes endpoint hubs. New plugins declare endpoint types
+    in plugin.toml so discovery can establish hubs without loading code.
   - build code may register reverse-order cleanup callbacks; optional provider
     `attach`/`detach` hooks share the loaded-code RAII lifetime
 - provider-owned mutable state lives under:
@@ -100,9 +100,15 @@ Interaction rule:
 - channel root and the recovery socket endpoint are core runtime components and
   cannot be detached
 - `restart_channel_endpoint` refreshes one endpoint connection without evicting
-  provider modules; `reload_channel_provider` explicitly performs provider
-  detach/unload/load/attach; `rescan_channel_providers` discovers only physical
-  additions/removals
+  provider modules; `reload_plugin` replaces the provider generation and restores
+  eligible endpoints; `rescan_plugins` discovers metadata and physical removals.
+  Use `attach_plugin` after discovering a newly installed inactive plugin.
+- `attach_channel_endpoint` restores an explicitly detached endpoint. Repeating
+  attach on a stable attached transport preserves that instance and reports
+  `changed=false` and `transport_restarted=false`; it does not prove connection
+  health. Conditional health/restart affordances guide connection repair.
+  `restart_channel_endpoint` replaces the transport when an attached connection
+  has failed. Core endpoint reload uses restart, while core attach preserves it.
 - EndpointHub is the internal registry and comes early/leaves late. It owns
   endpoint identity and ordered backpressure while transports and code are
   absent. The LLM execution registry comes late/leaves early: detach withdraws
@@ -120,3 +126,23 @@ Interaction rule:
 - only channel-neutral operations are exposed to `Pal/LLM`; provider-specific
   target addressing stays private to the endpoint
 - secrets/tokens are write-only; introspection never returns them
+
+Channel plugin contract:
+- New packages use a normal `plugin.toml` with `lifecycle_protocol = "raii.v1"`,
+  `requires_ports = ["channel:provider_manager"]`, and a `[channel]` table with
+  `endpoint_types = ["my_protocol"]`.
+- `start(scope)` returns a `ModuleHandle` with
+  `channel_extension=ChannelExtension(provider=provider)` from `pal.channel.plugin`.
+  The provider id equals the owning plugin id. Its endpoint types must match the
+  manifest. PluginHost installs the contribution and registers generation cleanup.
+- The provider implements the existing ChannelProvider contract. Optional
+  attach/detach hooks and build cleanup retain their retryable ownership.
+- Endpoint detach does not unload a plugin. Plugin detach stops its transports
+  while retaining hubs and endpoint binding/attach intent; plugin attach restores
+  eligible endpoints. Disabling the plugin cannot be bypassed by endpoint attach.
+- A removed package is detached before hub removal and recovery rerouting.
+- Legacy `provider.toml` enabled state initializes plugin settings; later
+  enable/disable operations use PluginHost. No runtime files are moved.
+- Python compatibility methods `reload_provider` and `rescan_providers` delegate
+  to PluginHost when composed; separate model-facing provider lifecycle tools
+  are no longer published.

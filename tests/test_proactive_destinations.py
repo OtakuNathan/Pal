@@ -42,7 +42,7 @@ def invoke(runtime, alias, args, turn_id="turn"):
     return runtime.execute_tool(new_tool_call(name="call_tool", args={"name": alias, "args": args}), turn_id=turn_id)
 
 
-@pytest.mark.parametrize("alias", ["read_proactive_task", "list_proactive_runs", "read_latest_proactive_run"])
+@pytest.mark.parametrize("alias", ["read_proactive_task", "list_proactive_runs", "read_proactive_task"])
 def test_task_read_tools_exist_before_creation_and_after_deletion(env, alias):
     runtime, manager, _ = env
     assert not manager.registered
@@ -209,7 +209,7 @@ def test_invalid_schedule_update_preserves_existing_task(env):
     assert manager.registered["reminder"] == before
 
 
-@pytest.mark.parametrize("alias", ["read_latest_proactive_run", "list_proactive_runs"])
+@pytest.mark.parametrize("alias", ["read_proactive_task", "list_proactive_runs"])
 def test_history_unavailable_is_distinct_from_empty(env, alias):
     runtime, manager, _ = env
     assert invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"}).ok

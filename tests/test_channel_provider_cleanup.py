@@ -304,7 +304,7 @@ def test_runtime_shutdown_keeps_database_until_children_finish(failure):
         blocked = True
         plugin = SimpleNamespace(shutdown_errors=[])
         manager = SimpleNamespace(shutdown_errors=[])
-        def stop_plugin():
+        async def stop_plugin():
             events.append("plugin")
             plugin.shutdown_errors = ["pending plugin"] if blocked and failure == "plugin" else []
         async def stop_channel():
@@ -314,9 +314,10 @@ def test_runtime_shutdown_keeps_database_until_children_finish(failure):
             events.append("resident")
             if blocked and failure == "resident":
                 raise RuntimeError("pending resident")
-        plugin.shutdown, manager.stop_async = stop_plugin, stop_channel
+        plugin.shutdown_async, manager.stop_async = stop_plugin, stop_channel
         resident = SimpleNamespace(shutdown_async=stop_resident, shutdown_sync=None)
         runtime = SimpleNamespace(
+            configuration_service=None,
             plugin_host=plugin, channel_provider_manager=manager,
             database=SimpleNamespace(close=lambda: events.append("database")),
             core=SimpleNamespace(context=SimpleNamespace(port_registry={},

@@ -73,10 +73,14 @@ def test_search_tool_preserves_all_failures_even_when_fallback_succeeds(core, fa
     assert result.ok is fallback
     assert_diagnostic(result.llm_text)
     assert "first provider failed" in result.llm_text
+    assert "Traceback" not in result.llm_text
     if fallback:
         assert result.structured["items"] == []
         assert result.structured["fallback_used"] is True
         assert result.structured["provider_errors"][0]["provider_id"] == "provider-0"
+        assert "Traceback" not in result.llm_text
+        assert 'File "' not in result.llm_text
+        assert "Traceback" in result.structured["provider_errors"][0]["error"]
     else:
         assert "second provider failed" in result.llm_text
         assert metadata(result)["error_code"] == "web_search_failed"

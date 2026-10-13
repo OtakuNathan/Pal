@@ -347,7 +347,9 @@ def _project_skill_payload(service: SkillService, value: Any) -> Any:
     if isinstance(result.get("skill"), dict):
         result["skill"] = _project_skill_payload(service, result["skill"])
     if isinstance(result.get("hits"), list):
-        result["hits"] = [_project_skill_payload(service, hit) for hit in result["hits"]]
+        result["hits"] = [_project_skill_payload(service, {
+            key: item for key, item in hit.items() if key not in {"score", "match_reason"}
+        }) for hit in result["hits"]]
     return result
 
 

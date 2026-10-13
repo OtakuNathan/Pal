@@ -158,13 +158,10 @@ class LspManager:
         }
 
     def status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = {
-            **self.health(),
-            "servers": [self._server_summary(state) for state in sorted(self.states.values(), key=lambda item: item.server_id)],
-        }
+        payload = self.health()
         raw_workspace = str(dict(params or {}).get("workspace_root") or "").strip()
         if not raw_workspace:
-            return payload
+            return {**payload, "servers": [self._server_summary(state) for state in sorted(self.states.values(), key=lambda item: item.server_id)]}
         workspace_root = Path(raw_workspace).expanduser().resolve()
         prepared = self._workspace_environment(workspace_root)
         readiness = dict(prepared.get("readiness") or {})
@@ -203,6 +200,7 @@ class LspManager:
         }
         return {
             **payload,
+            "servers": list(readiness.get("servers") or []),
             "status": workspace_status["status"],
             "workspace": workspace_status,
         }

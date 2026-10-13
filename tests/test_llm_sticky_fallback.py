@@ -83,6 +83,52 @@ class _MemorySettingsRepository:
 
 
 class PalLLMNoFallbackTests(unittest.TestCase):
+    def test_llm_discovery_covers_status_and_current_endpoint_queries(self) -> None:
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(_fake_endpoint("alpha", "alpha-model"),)),
+            settings_repository=_MemorySettingsRepository("alpha"),
+            endpoint_invoker=_FailoverInvoker(),
+        )
+        core = PalCore()
+        register_execution_with_core(core.context)
+        register_llm_with_core(core.context, runtime)
+        for module in ("execution", "llm"):
+            core.publish_module_capabilities(module)
+        execution = core.context.execution_runtime
+        try:
+            queries = {
+                "llm_status": "inspect_active_llm",
+                "llm status": "inspect_active_llm",
+                "show llm status": "inspect_active_llm",
+                "current llm endpoint": "inspect_active_llm",
+                "active llm endpoint": "inspect_active_llm",
+                "check llm model": "inspect_active_llm",
+                "inspect_active_llm": "inspect_active_llm",
+                "list llm models": "list_llm_endpoints",
+                "show llm endpoint": "inspect_llm_endpoint",
+                "llm endpoint details": "inspect_llm_endpoint",
+            }
+            for query, expected in queries.items():
+                with self.subTest(query=query):
+                    search = execution.execute(CapabilityCall(name="op_tool_search", args={"query": query}))
+                    self.assertEqual(search.status, "ok")
+                    hits = {hit["alias"]: hit for hit in search.structured["hits"]}
+                    self.assertIn(expected, hits)
+                    if query in ("llm_status", "llm status", "current llm endpoint", "inspect_active_llm"):
+                        self.assertEqual(list(hits), [expected])
+                    self.assertTrue(hits[expected]["input_contract"])
+            active = execution.execute(CapabilityCall(name="op_tool_call", args={
+                "name": "inspect_active_llm", "args": {},
+            }))
+            self.assertEqual(active.status, "ok")
+            self.assertEqual(active.structured["active_endpoint_id"], "alpha")
+            for query in ("git status", "llm switch endpoint", "llm send attachment"):
+                with self.subTest(query=query):
+                    search = execution.execute(CapabilityCall(name="op_tool_search", args={"query": query}))
+                    self.assertEqual(search.structured["hits"], [])
+        finally:
+            execution.shutdown()
+
     def test_legacy_fallback_setting_cannot_change_selected_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             handle = open_runtime(Path(tmpdir))
@@ -470,7 +516,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
                 core.publish_module_capabilities("llm")
 
                 search = core.context.execution_runtime.execute(
-                    CapabilityCall(name="op_tool_search", args={"query": "active llm endpoint", "top_k": 10})
+                    CapabilityCall(name="op_tool_search", args={"query": "active llm endpoint", "top_k": 5})
                 )
                 self.assertEqual(search.status, "ok")
                 hit_names = [item["alias"] for item in search.structured["hits"]]

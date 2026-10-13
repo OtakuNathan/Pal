@@ -106,6 +106,9 @@ class CapabilityResult:
     context_delivery: dict[str, Any] | None = None
     snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
     context_messages: tuple[ToolContextMessageIR, ...] = ()
+    # Owner-selected failure diagnostics for model delivery. None preserves the
+    # default complete failure rendering; structured remains the raw receipt.
+    llm_failure_details: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or ""):

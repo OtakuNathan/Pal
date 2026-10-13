@@ -2,7 +2,7 @@
 
 `ToolSurface` projects registered capabilities into the LLM tool window and selects the reduced tool surface for failure-recovery turns.
 
-Pal may register many capabilities, but only the direct set enters the LLM tool window. Everything else remains in the execution inventory and is discoverable through capability search.
+Pal may register many capabilities, but only the direct set and explicit native-function opt-ins enter the LLM tool window. Everything else remains in the execution inventory and is discoverable through capability search.
 
 ## Source Of Truth
 
@@ -10,9 +10,170 @@ The resident surface is fully determined by capability descriptors at registry c
 
 - Every `CapabilityDescriptor` declares `invocation_mode`: `DIRECT` or `INDIRECT`.
 - `DIRECT` descriptors are compiled into the registry generation's `provider_specs` and exposed to the LLM as function-calling tools.
-- `INDIRECT` descriptors stay out of the tool window. They remain discoverable through `search_tools` and invocable through `call_tool`. Use `read_tool` only when the search hit or context lacks contract details needed for a correct call.
+- Owners can opt an `INDIRECT` descriptor into the native tool window with `metadata.native_function=True`. Its original routing, effects, retry policy, admission and permission checks remain in force; model execution dispatches the published function to that record. Low-level direct invocation remains strict. Native schemas inline local nested references so object types are explicit; validation keeps the original schema. Invalid native arguments return the complete input contract, without coercing JSON strings into objects.
+- Other `INDIRECT` descriptors stay out of the tool window. They remain discoverable through `search_tools` and invocable through `call_tool`. Use `read_tool` only when the search hit or context lacks contract details needed for a correct call.
 
 There is no tool-surface config file and no runtime refresh command. Changing direct exposure is a descriptor change in the owning module (applied on the next Pal start), not a TOML edit.
+
+Model memory CRUD uses `recall_memory`, `remember_memory`, `update_memory`, and
+`forget_memory`, with all four complete schemas visible in the stable tool window.
+`update_memory(mem_ref, content)` replaces the current summary and retrieval/origin
+text together, retaining revision history. Optional topics and full case STAR
+remain available; backend adapters still support internal partial corrections.
+Provider recall/write/update/delete adapters remain internal;
+their duplicate `*_provider_memory` aliases are not published for discovery or
+model invocation. Provider health, inventory, lifecycle, and index recovery remain
+available. Normal recall uses the active provider. For mutation reconciliation,
+`recall_memory(provider_id=<original provider>, mem_ref=<exact ref>)` preserves the
+original store without switching the active provider or falling back to another.
+
+`scripts/benchmark_memory_tasks.py` evaluates twelve fixed Chinese memory tasks
+with repeated real-model calls and disposable SQLite stores. Its reports separate
+tool decisions, schema validity, accepted execution, expected provider failures,
+no-op requests, stored outcomes, and preservation of other records. The six held-out
+tasks are curated examples, not a representative traffic sample. Tool discovery
+uses the authored resident union; only fixture memory handlers execute. The broader
+`scripts/benchmark_full_discovery_flow.py` still sweeps every authored alias and
+invocation mode, including negative tasks and discovery recovery probes.
+
+The final GLM 5.3 `low` evaluation selected the correct tool and declared mode
+for 193/193 aliases in its then-exported catalog, rejected substitution in 10/10 negative tasks,
+and recovered in 4/4 probes. First-search recall was 157/193 (81.3%); the first
+two searches covered 168/193 (87.0%). The nine selected operation-boundary and
+negative cases also passed three repeats (27/27). Full-catalog selection does
+not execute business handlers or reconstruct a live role's permissions.
+
+The 2026-10-13 inventory audit found that this historical catalog omitted nine
+comprehension-generated verifier aliases. Those role-only tools have now been
+added to the exporter and flow catalog. The historical model report remains
+unchanged: its 193 successful selections do not establish results for the full
+202-alias source union. The nine added aliases have not been model-evaluated in
+this audit.
+
+Two consecutive memory evaluations (12 Chinese tasks × 3 repetitions) achieved
+36/36 verified outcomes. The final run had one corrected provider-inventory
+argument rejection, compared with 18 on the preceding indirect surface; factual
+corrections improved from 4/6 to 6/6. A first native-schema pass regressed on
+nested STAR objects; inline local references and full input-contract feedback
+resolved those fixture cases. Final memory tool windows remained stable and
+reported cache hits. These curated cases were inspected during optimization,
+so the results do not establish independent production reliability.
+
+Evaluation records: `test-logs/tool-discovery-native-final-evaluation.json` and
+`test-logs/memory-native-schema-evaluation.json`. Frozen query replay found no
+ordering or domain-visibility violations over 496 registry permutations.
+Production Pal was not activated.
+
+Configuration writes for web search backends, core cache reminders and Bunshin
+profile/family overrides are available through `pal web-search`,
+`pal core cache-reminder`, and `pal bunshin catalog/profile/family`, guided by
+`pal.self.maintenance`. Their eleven former write aliases are not published.
+Health/auth inspection, cache deadline observation and catalog discovery remain
+model tools; plugin reload and channel reconnect remain live owner operations.
+Core's configuration CLI uses a narrow resident request endpoint outside the
+conversation queue. Online owner failure never falls back to an offline write.
+
+## Object-Scoped Inspection And Unified Source Inventory
+
+Inspection is organized by object, not by individual fields. A hub inspection
+returns the hub's own lifecycle, selection, workload and availability information.
+Directories return discovery summaries. A named object inspection returns that
+object's configuration/lifecycle, health, latest errors and related diagnostics
+in one call; it does not recursively expand other objects.
+
+Independent diagnostic sections preserve known information if another source
+fails. `diagnostics` records the observation time, owner/source, partial coverage
+and unavailable sections. Read success is separate from object health. Unknown
+or unavailable information is explicit; absence of an error does not prove a
+healthy service. Large histories and content remain separate business queries.
+
+The consolidation retires 17 existing aliases and adds two: `inspect_channel_state`
+and `inspect_plugin`. The retained entrypoints are:
+
+| Owner | Hub/runtime inspection | Named object inspection |
+| --- | --- | --- |
+| Channel | `inspect_channel_state` | `inspect_channel_endpoint(name)` combines lifecycle/auth/health/backlog. |
+| Web search | `inspect_web_search_state` includes configured/effective selection. | `inspect_web_search_provider(name)` includes public metadata/auth/last-request health. |
+| Memory | `inspect_memory_state` includes L1/L2 and active provider availability. | `inspect_memory_provider_inventory(name)` includes lifecycle/inventory/index/embedding diagnostics. |
+| LLM | `inspect_active_llm` includes current thinking and aggregate resident-process usage. | `inspect_llm_endpoint(name)` includes capabilities/limits and that endpoint's process usage. |
+| Plugins | `inspect_plugin_host` inspects the host; `list_plugins` contains summaries. | `inspect_plugin(name)` includes generation/dependencies/cleanup/installation and errors. |
+| LSP | `inspect_lsp_provider` inspects the host. | `inspect_lsp_status(workspace_root)` requires a workspace and reports only its readiness/server observations. |
+| MCP | `inspect_mcp_state` inspects the host. | `read_mcp_server(name)` inspects one server and its discovery snapshot. |
+| Proactive | `inspect_proactive_status` inspects the scheduler/runner. | `read_proactive_task(name)` includes configuration and latest execution outcome; `list_proactive_runs` retains history. |
+| Artifact | `inspect_artifact_state` includes policy and caller-scoped resource counts. | `inspect_artifact_info` includes representations and hot/hard expiry information. |
+
+Core workload and cache deadlines share `observe_core`; the mode-label setter is
+internal. `read_checklist` is the single checklist snapshot. File-cache diagnostics
+are internal; file edit failures retain the read-before-edit recovery path.
+Failure inspection includes bounded recent diagnostic summaries; detailed reports
+remain available. Skill hub inspection bounds recent pending candidate summaries.
+Browser status remains separate from page/layout/extension/network business work.
+
+LSP workspace and MCP server inspection do not start a sidecar. Host inspections
+retain passive process/errors/cached summaries when the RPC owner is unavailable.
+Active LSP diagnosis remains an explicit operation. Inspection may still perform
+its established bookkeeping (artifact hot-state refresh); this consolidation does
+not widen write authority or change artifact retention rules.
+
+Control and identity expose no LLM tools. `pal control status` reads the live human
+control registry. `pal identity show` reads the resident projection online, or
+persisted identity offline. `pal identity refresh` explicitly refreshes the live
+projection without sending a conversation. Owner failure never falls back to
+storage writes. Language/tone/preferences apply to subsequent prompt assembly;
+system identity name and core policy retain their existing startup-pinned behavior,
+which the CLI reports as `startup_pinned_fields`.
+
+Count public aliases once and separate the main Pal source union from role-only
+tools. After consolidation, 191 declarations produce **187 distinct aliases**:
+
+- **151** belong to the main Pal authored union: **21 native** (18 direct plus
+  three indirect native opt-ins) and **130 search-only**. The preceding main
+  source union was 166, so the net reduction is 15.
+- **36** belong to the separate Bunshin role union. Each live role receives its
+  allowed subset; these tools do not increase the main Pal count.
+- Four provider aliases have both SQLite and mock declarations and count once.
+  Unpublished backend adapters, external MCP tools and installed third-party
+  contributions are excluded.
+
+| Owning module | Main aliases | Native | Search-only |
+| --- | ---: | ---: | ---: |
+| Artifact | 8 | 0 | 8 |
+| Browser | 26 | 1 | 25 |
+| Bunshin | 13 | 2 | 11 |
+| Channel | 11 | 0 | 11 |
+| Checklist | 4 | 3 | 1 |
+| Control | 0 | 0 | 0 |
+| Core | 1 | 0 | 1 |
+| Execution | 10 | 7 | 3 |
+| Failure | 2 | 0 | 2 |
+| Identity | 0 | 0 | 0 |
+| LLM | 3 | 0 | 3 |
+| LSP | 15 | 1 | 14 |
+| MCP | 7 | 0 | 7 |
+| Memory, including L3 | 14 | 4 | 10 |
+| Plugins, including packages | 14 | 1 | 13 |
+| Proactive | 11 | 1 | 10 |
+| Skill | 8 | 0 | 8 |
+| Web search | 4 | 1 | 3 |
+| **Main Pal union** | **151** | **21** | **130** |
+
+This inventory imports definitions without constructing a runtime or executing
+tools. Actual visibility depends on mounted owners, targets, permissions, dynamic
+MCP tools and external packages. It is not the installed or running registry.
+Failure turns use a smaller surface. This inventory audit does not run model
+evaluations; later sections report discovery trials on the consolidated catalog.
+Production activation requires separate handling of resident code and plugins.
+
+`docs/tool_surface_review.json` records current decisions and retired-alias
+replacements. Export one row per current alias, with sources and visibility:
+
+```sh
+python scripts/audit_tool_surface.py --output test-logs/tool-surface-consolidated-audit.json --csv test-logs/tool-surface-consolidated-audit.csv
+```
+
+Counts are recalculated from current source. Generated-role source locations
+point to the assembled worker catalog; `generated_spec_key` identifies the
+evaluated spec rather than a nonexistent literal alias declaration.
 
 ## Failure Surface
 
@@ -20,7 +181,8 @@ There is no tool-surface config file and no runtime refresh command. Changing di
 
 ## Discovery Schema
 
-`search_tools` is the resident discovery entry point. Its primary argument is
+`search_tools` is the resident discovery entry point. Use `domain` alone to browse
+a bounded directory, or `query` to rank contracts. Exact alias queries use
 `query`, not `name`.
 
 Search with English alias words in `[domain] [action] [object]` form, such as
@@ -34,11 +196,214 @@ Discovery vocabulary is declared in `ToolGuidance.search_terms`: reviewed action
 object synonyms, not arbitrary prose. Existing `search_objects` declarations remain
 supported. `search_enum_fields=("operation",)` explicitly includes string enum values
 from the selected input property, including local schema references. Unselected enums
-(such as output format) do not contribute. All query words must match alias words or
-this vocabulary. No fuzzy stemming, global action equivalence or negative-use prose is
-indexed. For an empty result, shorten to the domain/object and inspect the tool's schema.
+(such as output format) do not contribute. Positive `purpose` clauses also contribute
+lexical recall and binary-term BM25 relevance. Alias/action/object coverage strengthens ranking; exact aliases remain
+first. Existing purpose recall keeps its two-word and 60% coverage checks. An
+additional partial-match path accepts supported action/object anchors even when
+structured vocabulary already supplies all the useful evidence. Diagnostic
+context such as manager, runtime, backend and configuration may remain unmatched;
+it lowers rank rather than excluding an anchored candidate. Without an explicit
+domain, declared object evidence or two purpose object words are still required.
+Unknown substantive objects, unsupported actions, inactive conditional synonyms
+and negation continue to block partial admission. Operational constraints such as
+encrypted, remote and authentication are not generic context modifiers.
+Complete structured matches retain priority. Partial hits expose `matched_terms`
+and `unmatched_terms`; the latter never establishes feature support. Review the
+whole request against the contract before execution. This uses lexical evidence
+and bounded vocabulary, with no vector service.
+A `without ...` suffix is excluded while the preceding affirmative operation stays
+indexed. Uppercase state constants (such as `TRIAGE_REQUIRED`) contribute words;
+lowercase tool-alias references do not. Compound purpose actions contribute only
+when the query also names the main operation, so `enable attach plugin` can match
+an enable-and-attach tool while `browser fetch` does not imply network observation.
+Negative clauses, use/avoid examples and recovery prose are not indexed. No vector index or embedding service is used. An empty result does not
+establish that a capability is unavailable.
+Shorten to the domain/object and remove guessed filters. If it still misses,
+check `list_tools` when available before falling back; use `read_tool` for a known alias.
 Discovery terms are hidden from normal model surfaces and included in the registry
 fingerprint. They survive scoped worker contract serialization.
+
+Review common task queries against each tool's actual operation before adding
+synonyms to its owning guidance. Keep lifecycle operations distinct: rescan does
+not reload code, reconnect does not reload a provider, and pausing a scheduled
+task does not delete it. Run `tests/test_tool_discovery_vocabulary.py` to check
+conventional queries, exact aliases, and operation boundaries across the source catalog.
+Check the entire returned alias set, including explicit `top_k=5`, rather than
+only asserting that the expected alias appears. Inspection words such as `check`
+must not route general state queries to completion or checkbox setters.
+
+Bind ambiguous synonyms to explicit query objects using `search_term_rules`:
+`terms=("check",)` with `requires_any=("checkbox", "checkboxes", "radio")` enables
+checking controls without matching general browser-state inspection. Override reset
+accepts `remove`/`clear`/`delete` only with `override`/`overrides`. Conditions are
+whole words from the original query, must already be indexed, and never recursively
+activate other rules. Conditional terms cannot also be indexed unconditionally
+through alias words, ordinary vocabulary, or selected enums.
+
+For query-only broad discovery, `search_scope_terms` declares a narrower scope such as `provider`. Among otherwise
+equal matches, a tool whose extra scope was not requested ranks below a general
+entry point. Exact aliases remain first; explicit `top_k` can include weaker matches.
+Scope terms influence ranking only and do not add searchable words.
+
+The system Tool Policy explains public action-first aliases and recommends an
+operation-owner `domain` plus a task description in `query`. Domain searches do
+not require action/object naming conventions. The System Map names
+search domains alongside subsystem responsibilities; these keywords are not
+`module_name` or `family` filters and do not promise that a capability is mounted.
+Public lifecycle names matter: internal plugin `reattach` is exposed as
+`reload_plugin`; reload, restart, attach and rescan have distinct contracts.
+
+For query-only broad discovery, when no complete query match exists, `suggestions` can contain up to three fuzzy
+matches (bounded by a smaller `top_k`). Each must match at least two query words,
+including a declared object, and miss exactly one word. The query must contain a
+recognized public domain, and every requested domain must occur in the candidate
+alias. Domains are never silently spell-corrected or discarded. The unmatched word
+must have a listed recovery equivalent in the candidate vocabulary, be a browser
+page qualifier, or be an unknown word within one edit of a candidate word (minimum
+four characters, adjacent transpositions included). Known words cannot be treated
+as spelling errors. Arbitrary unknown constraints are never simply dropped.
+These recovery alternatives are not added to strict vocabulary. Conditions and
+explicit filters still apply; filtered complete matches
+retain `filter_suggestions` instead. Suggestions expose alias, purpose, matched and
+unmatched query words, not invocation arguments, and do not enter hit counts.
+Use `read_tool` to verify the original request, including the unmatched word, before
+selecting a suggestion. Unknown words may carry essential constraints.
+
+`search_tools.domain` optionally selects a strict operation-owner bucket.
+File read/edit/write/delete tools belong to `file`, even though their implementation lives
+in the execution module. Declared
+abbreviations/full names normalize identically (`llm` / `large language model`,
+`lsp` / `language server protocol`, `mcp` / `model context protocol`). Hits expose
+their canonical `domain`. Existing module ownership assigns the bucket, with
+explicit file/shell exceptions for tools hosted by execution. The assignment is
+compiled into the immutable registry and included in its fingerprint. Provider
+fallbacks use unambiguous alias domains or the provider's module name.
+
+An explicit domain limits both complete hits and fuzzy suggestions, including
+exact aliases. Unknown/unavailable domains return no hits and list the current
+generation's `available_domains`; they never silently select another bucket.
+Other filters still intersect the domain, including BM25 corpus statistics. Query-only
+search remains backward compatible and does not infer a hard bucket from target
+names (e.g. `lsp` in a plugin-management request).
+
+When query words are uncertain, `search_tools(domain=owner)` returns
+a directory before keyword matching. It contains at most 16 visible aliases and
+purposes capped at 160 characters, with `purpose_truncated=true` when shortened.
+No per-tool input schema or full usage guidance is included in directory entries.
+Read a plausible full contract; an exposed native schema already provides it.
+With an explicit domain and query, BM25 ranks positive `purpose`, tool-owned
+`search_terms`, selected operation enum words and `search_intents` together.
+`search_objects`, alias action/object words and scope metadata do not gate or boost
+these candidates. Compiled `search_auxiliary_terms` separates authored terms/enums
+from object-only vocabulary. Exact aliases retain direct lookup under all filters;
+a known alias excluded by filters is not replaced by a lexical neighbour.
+The default result budget is three full contracts; explicit `top_k`/`limit` allow
+one through five. Positive lexical overlap can admit a partial candidate;
+unmatched query words are disclosed instead of blocking admission. Zero positive
+evidence returns no hits. Noun number is normalized without business synonyms.
+Queries should describe the desired operation briefly in English, matching the
+primary language of tool purposes. Excluded alternatives and original constraints
+remain part of contract review rather than being mixed into lexical query terms.
+Only after a lexical miss, bounded one-edit spelling recovery can return up to
+three `suggestions` (or fewer with a smaller `top_k`). Each
+suggestion includes its full `contract`, internal retrieval score/source,
+`matched_terms` and `unmatched_terms`. These are candidates, not confirmed matches
+or probabilities of capability support. Compare the included contract with the
+original task and invoke directly when suitable; do not reread a complete contract.
+Requested actions, negation and qualifiers can remain unmatched; lexical
+retrieval does not establish that they are supported. Full contracts and the
+original task govern final selection. Conditional auxiliary words activate only
+from the original query. Query-only broad discovery keeps its conservative gates
+and reciprocal rank fusion. `search_intents` are internal declaration metadata, bounded to
+eight unique phrases of 160 characters per tool, frozen with the registry and
+included in its fingerprint. They do not enter native tool descriptions or public
+search results. No embeddings, remote
+retrieval service or additional LLM inference is involved.
+
+When neither hits nor suggestions are available, keyword misses return the compact
+directory in the selected, available domain. Explicit directory browsing always
+returns the directory without running retrieval. Retrieval and model selection
+are evaluated separately: first full-contract Recall@k/MRR includes both hits and
+contract-bearing suggestions; strict-hit recall and directory visibility retain
+their distinct meanings. See `scripts/benchmark_fused_discovery.py` for paired
+selection, round-count and token evaluation against a frozen source/catalog/prompt.
+`scripts/benchmark_domain_purpose.py` compares explicit-domain purpose retrieval
+with a frozen matcher using the same current catalog, schema and task-description
+prompt, then reports frozen-query recall separately from fresh model selection.
+
+The domain-purpose baseline replayed 191 positive samples covering all 187
+authored aliases plus probes: first full-contract top-3 recall rose from 164/191
+to 174/191. Four of ten negative first queries gained candidates. All 187 exact
+aliases remained top-1; 247 registry permutations preserved output with zero
+domain violations. In a paired GLM 5.3 trial of 51 distinct positive and ten
+negative Chinese tasks, both matchers selected all positive aliases/modes and
+refused all negative tasks. With the same **new task-description prompt/schema**,
+first-contract recall was 9/51 for the frozen matcher and 40/51 for this baseline;
+positive mean rounds fell from 2.88 to 2.18, while negative rounds rose from 3.0
+to 3.4. Total reported input tokens fell 14.1%; search response characters rose
+47.3%. The shared new prompt isolates the matcher but differs from the old
+production prompt; frozen-query recall is the unchanged-query comparison.
+An earlier pilot did misselect a plugin uninstaller for absent endpoint deletion;
+final negative success is a small-sample outcome, not a guarantee. No business
+execution or runtime activation occurred. Reproducible records, source hashes
+and limitations are in `test-logs/discovery-domain-purpose/analysis.json`.
+
+Discovery guidance asks the model not to search indefinitely. An unresolved
+search can try a reasonable rephrasing, correct a guessed domain/filter or inspect
+relevant inventory. If those checks still reveal no suitable callable, the
+capability may be unavailable; explain that possibility, the checked scope and
+any uncertainty. Reuse unchanged inventory and complete contracts, and use a
+suitable contract once found. This guidance appears in the system tool policy,
+tool-window guidance, search schema/guidance and result hints. There is no fixed
+search-round budget or reset mechanism. Earlier three-round trials remain in
+test logs as superseded experiments.
+
+The paired GLM 5.3 lexical-fusion trial used 70 positive runs (51 distinct cases)
+and 12 negative runs per variant. Both variants selected all positive tools;
+first-search full-contract recall improved from 35/70 to 47/70. Mean rounds across
+all cases fell from 2.66 to 2.54 and reported input tokens fell 2.4%. Correct
+negative refusals improved from 11/12 to 12/12, but negative cases took more rounds
+(3.33 to 3.58). This is a limited alias/mode selection experiment, not business
+execution or a production reliability estimate. Records and source snapshots are
+in `test-logs/discovery-fused-glm53/`.
+
+Known action/object words use keyword search by default. A paired GLM 5.3 trial
+used 38 repeated original positive requests and 16 independent positive requests,
+plus eight negative requests per variant. Both variants selected all 54 positive
+tools correctly, while directory-first discovery increased mean rounds from
+2.39 to 2.50 and reported input tokens per positive case from 9943 to 10917.
+Consequently bounded domain browsing remains an option rather than the default
+first step for every unfamiliar capability. Input-token counts are not billing
+costs; this isolated evaluation validates alias/mode selection, not business
+execution. Records are in `test-logs/discovery-domain-directory-glm53/`.
+All namespace/module/family/tag filters still apply. This is navigation, not
+query recall: entries are not added to hits or suggestions and do not imply that
+the original request is supported. Read a plausible tool's contract before
+selecting it; retain the original task's constraints.
+
+Use `directory_offset=0` with an explicit domain to browse directly, or follow
+`directory.next_offset` using the same domain and filters. Query words are ignored
+for explicit directory pages. Ordering is by alias and belongs to the selected
+visible registry generation. Without a valid domain, misses return
+`available_domains` so the caller can select a bucket explicitly. Directory pages
+do not silently cross domains or expose tools outside the visible generation.
+
+Keep network observation indexed by `network`/`api`/`traffic` rather than the
+page-fetch action `fetch`.
+
+Export the authored catalog, including selected operation enums, with:
+
+```sh
+python scripts/audit_tool_discovery.py --output test-logs/tool-discovery-catalog.csv
+```
+
+This imports definition modules without starting Pal or invoking tools. The CSV
+keeps unconditional words in `effective_vocabulary`, query-dependent rules in
+`search_term_rules`, and ranking scope words in `search_scope_terms`. It
+keeps separate provider declarations and marks Bunshin role-only tools; those
+tools do not share the resident tool surface. It describes source contracts, not
+the running registry. External MCP tools are discovered dynamically and are
+outside this catalog; review their configured guidance overrides separately.
 
 Important arguments:
 
@@ -48,11 +413,16 @@ Important arguments:
 - `family`: optional family filter
 - `module_name`: optional module filter
 - `tags`: optional tag filters
-- `top_k` / `limit`: hit count, default up to 3 strongest matches; an exact alias
+- `top_k` / `limit`: hit count from 1 to 5, default up to 3 strongest matches; an exact alias
   normally returns one match. `top_k` takes precedence when both are supplied.
-  An explicit limit permits broader results.
+  An explicit limit permits broader results within the five-hit maximum.
+  The public schema rejects larger values; the backend also clamps internal
+  callers to five hits. Suggestions remain capped at three. Candidate scoring
+  may inspect the visible bucket internally without returning it to the model.
 - `facets`: defaults to false; when true, include namespace/module/family counts
   for broad-search narrowing
+- `directory_offset`: browse a compact page in an explicit domain; use 0 to
+  begin, then `directory.next_offset` to continue. Separate from hit limits.
 
 Each hit includes purpose, use/avoid conditions, invocation and effect semantics,
 and a title-stripped input JSON Schema that retains validation constraints.

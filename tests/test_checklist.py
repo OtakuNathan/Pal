@@ -563,6 +563,33 @@ def test_duplicate_steps_rejected_without_replacing_current_plan():
     assert service.show() == before
 
 
+@pytest.mark.parametrize("query", ["check checklist", "check plan", "check checklist step"])
+def test_inspection_search_and_invocation_preserve_unfinished_steps(query):
+    from pal.shared.tool_protocol import new_tool_call
+
+    core = PalCore()
+    register_execution_with_core(core.context)
+    service = ChecklistService()
+    register_checklist_with_core(core.context, service)
+    for module in ("execution", "checklist"):
+        core.publish_module_capabilities(module)
+    before = service.upsert([{"step": "inspect"}, {"step": "implement"}])
+    runtime = core.context.execution_runtime
+    try:
+        found = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query, "top_k": 5}))
+        assert found.ok
+        assert [hit["alias"] for hit in found.structured["hits"]] == ["read_checklist"]
+        result = runtime.execute_tool(new_tool_call(name="call_tool", args={
+            "name": found.structured["hits"][0]["alias"], "args": {},
+        }))
+        assert result.ok
+        assert result.structured["done"] == 0
+        assert service.show() == before
+    finally:
+        runtime.shutdown()
+        core.close()
+
+
 def test_unknown_step_large_plan_is_recoverable_from_snapshot():
     import json
     from pathlib import Path

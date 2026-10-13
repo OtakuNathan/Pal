@@ -6,7 +6,8 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_READ,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import EffectOutcome, EffectReceipt, NextToolHint, ToolGuidance
+from pal.execution.tool_facade import EffectOutcome, EffectReceipt, NextToolHint, StrictToolModel, ToolGuidance
+from pydantic import Field
 from pal.packages.jobs import PackageJobs
 from pal.packages.notifications import PackageCompletionSource
 from pal.packages.tool_models import PackageInstallInput, PackagePrepareInput, PackageStatusInput, PluginUninstallInput
@@ -33,10 +34,15 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 from pal.shared.diagnostics import exception_report
 
 if TYPE_CHECKING:
     from pal.plugins.host import PluginHost
+
+
+class PluginInspectionInput(StrictToolModel):
+    name: str = Field(min_length=1, description="Exact plugin name from list_plugins.")
 
 
 @dataclass(frozen=True)
@@ -110,7 +116,7 @@ class PluginsIntrospectionProvider:
         return self._start_package_job(call, "install", path=Path(call.args["path"]))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="package", action_name="prepare",
-        guidance=ToolGuidance(search_objects=('package', 'packages', 'dependency', 'dependencies'), purpose="Prepare or repair an installed package's dependencies without modifying Pal's Python environment.",
+        guidance=ToolGuidance(search_objects=('package', 'packages', 'dependency', 'dependencies'), search_terms=('repair',), purpose="Prepare or repair an installed package's dependencies without modifying Pal's Python environment.",
             use_when="An installed plugin, channel provider, or builtin such as web_fetch has missing runtime dependencies; select its package kind. Briefly waits for completion; if a completion notice is scheduled, do not poll.",
             do_not_use_when="Installing a new artifact; use install_package.",
             failure_next_steps="Use inspect_package_status for the stage and cause. Missing system privileges or configuration must be resolved before retrying.",
@@ -131,7 +137,7 @@ class PluginsIntrospectionProvider:
                                     purge_data=bool(call.args.get("purge_data", False)))
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", family="package", action_name="status",
-        guidance=ToolGuidance(search_objects=('status',), purpose="Inspect package installation stages, failures, private environments and activation results.",
+        guidance=ToolGuidance(search_objects=('status',), search_terms=('state', 'show', 'get', 'installation',), purpose="Inspect package installation stages, failures, private environments and activation results.",
             use_when="Inspecting progress or diagnosing dependencies; use job_id and bounded wait_ms when no completion notification is available.", do_not_use_when="Repeated polling when a completion notice is scheduled. Reading a plugin's application data.",
             failure_next_steps="Unknown jobs may belong to another runtime root; verify the selected runtime."),
         InputModel=PackageStatusInput, aliases=("inspect_package_status",), execution=INDIRECT_LOCAL_READ)
@@ -142,8 +148,9 @@ class PluginsIntrospectionProvider:
         return result
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('inspect plugin host inventory and health', 'check plugin hub state'),
             search_objects=('host', 'hosts'),
+            search_terms=('status', 'state', 'show', 'get',),
             purpose="Show plugin host summary.",
             use_when='Diagnosing plugin system health — how many plugins are loaded, enabled, attached. If an expected plugin is missing, inspect list_plugins and its manifest; rescan_plugins discovers metadata changes.',
             do_not_use_when="Listing specific plugins with details (use list_plugins). Checking one module's capabilities (use search_tools).",
@@ -151,7 +158,7 @@ class PluginsIntrospectionProvider:
         ), aliases=("inspect_plugin_host",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        summary = self.host.show_summary()
+        summary = inspection_snapshot(self.host.show_summary())
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="plugin host summary",
@@ -176,7 +183,7 @@ class PluginsIntrospectionProvider:
         _ = call
         items = [
             {**dict(item), "name": str(item.get("plugin_id") or item.get("module_id") or "")}
-            for item in self.host.list_plugins()
+            for item in self.host.list_plugin_summaries()
         ]
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -186,15 +193,35 @@ class PluginsIntrospectionProvider:
         )
 
     @capability_action(
+        namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="inspect",
+        guidance=ToolGuidance(search_intents=('inspect plugin loading failure and dependencies', 'check plugin generation and recent errors'),
+            search_objects=('plugin', 'plugins'),
+            search_terms=('state', 'status', 'health', 'details', 'generation', 'dependency', 'dependencies', 'cleanup', 'error', 'errors', 'installation'),
+            purpose="Inspect one plugin's complete lifecycle, generation, dependencies, cleanup, installation and last error state.",
+            use_when="Diagnosing a named plugin or checking whether its load, reload or cleanup completed. Dependencies are references, not recursively expanded plugin states.",
+            do_not_use_when="Plugin hub state (use inspect_plugin_host). Discovering plugin names (use list_plugins). Specific asynchronous package jobs (use inspect_package_status).",
+            failure_next_steps="Follow blocked_by, cleanup errors and installation diagnostics; missing names can be discovered with list_plugins or rescan_plugins.",
+        ), InputModel=PluginInspectionInput, aliases=("inspect_plugin",),
+    )
+    def inspect(self, call: IntrospectionCall) -> IntrospectionResult:
+        payload = self.host.inspect_plugin(str(call.args.get("name") or "").strip())
+        if payload is None:
+            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="plugin not found",
+                                       structured={"reason": "unknown_plugin"}, llm_text="Find the plugin name with list_plugins.")
+        return IntrospectionResult(status=RuntimeStatus.OK, text="plugin state", structured=payload,
+                                   llm_text=render_titled_structured_for_llm("Plugin", payload))
+
+    @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="management",
         action_name="attach",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('attach plugin runtime instance', 'load enabled plugin mount', '挂载已启用插件'),
             search_objects=('plugin', 'plugins'),
+            search_terms=('load',),
             purpose="Load an enabled plugin into the current runtime; an already attached instance is preserved.",
             use_when="Reconnecting a detached plugin that is already enabled.",
-            do_not_use_when="Reloading changed plugin code (use reload_plugin). Attaching a disabled plugin (use enable_plugin — it enables and attaches in one step). Detaching (use detach_plugin).",
+            do_not_use_when="Reopening storage resources of an already loaded memory provider (search_tools domain=memory, query=attach provider). Reloading changed plugin code (use reload_plugin). Attaching a disabled plugin (use enable_plugin — it enables and attaches in one step). Detaching (use detach_plugin).",
             failure_next_steps="If disabled, use enable_plugin, which also attaches it. If cleanup is pending, fix the reported cause and use reload_plugin. If the plugin name is unknown, check list_plugins.",
         ),
         aliases=("attach_plugin",),
@@ -217,11 +244,12 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="reattach",
-        guidance=ToolGuidance(
-            search_objects=('plugin', 'plugins'),
-            purpose="Reload an enabled plugin's code and runtime instance in one operation, restoring affected dependents.",
-            use_when="Plugin implementation changed or its runtime needs restarting. A detached enabled plugin is loaded. No prior detach is needed.",
-            do_not_use_when="Loading a detached plugin without replacing a live instance (use attach_plugin). Enabling a disabled plugin (use enable_plugin). Resident core changes require a host restart; channel provider code uses reload_channel_provider.",
+        guidance=ToolGuidance(search_intents=('reload loaded plugin implementation', 'replace plugin code and provider resources', '重新加载插件代码'),
+            search_objects=('plugin', 'plugins', 'provider'),
+            search_terms=('restart', 'code', 'channel'),
+            purpose="Replace an enabled plugin's loaded implementation and provider-wide resources, restoring affected dependents.",
+            use_when="Plugin code changed, or the entire plugin instance and its owned resources must be replaced. For a channel provider this affects the provider generation and its endpoints. A detached enabled plugin is loaded. No prior detach is needed.",
+            do_not_use_when="Reconnecting one stuck or disconnected channel endpoint without provider-code changes (use restart_channel_endpoint in domain='channel'). An endpoint name identifies a connection, not a plugin. Loading a detached plugin without replacing a live instance (use attach_plugin). Enabling a disabled plugin (use enable_plugin). Resident core changes require a host restart.",
             failure_next_steps="Inspect list_plugins for load or cleanup errors and affected dependents. Correct the reported cause before retrying; reload can interrupt dependent plugins and does not promise rollback.",
         ),
         aliases=("reload_plugin",),
@@ -246,6 +274,7 @@ class PluginsIntrospectionProvider:
         action_name="detach",
         guidance=ToolGuidance(
             search_objects=('plugin', 'plugins'),
+            search_terms=('unload',),
             purpose="Detach a plugin's runtime instance without disabling it.",
             use_when="Temporarily removing a plugin's capabilities from the runtime (e.g. isolating a misbehaving plugin). Use attach_plugin to restore an enabled detached instance, or reload_plugin when its implementation changed.",
             do_not_use_when="Uninstalling plugin files (use uninstall_plugin) or persistently disabling startup (use disable_plugin). Detaching a channel endpoint (use detach_channel_endpoint).",
@@ -271,7 +300,7 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="enable",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('enable disabled plugin and load instance', 'activate disabled plugin'),
             search_objects=('plugin', 'plugins'),
             purpose="Enable and attach a disabled plugin in one step, including disabled first-party plugins such as mcp.",
             use_when="A plugin is disabled and needs to be fully activated. This is the primary way to turn on a plugin.",
@@ -323,9 +352,10 @@ class PluginsIntrospectionProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan",
         guidance=ToolGuidance(
             search_objects=('plugin', 'plugins'),
-            purpose="Rescan plugin directories to discover newly installed or updated plugins.",
+            search_terms=('discover', 'scan',),
+            purpose="Rescan plugin directories, including legacy channel provider packages, to discover metadata changes.",
             use_when='New plugins were installed or plugin configuration files changed. Inspect scan_errors and attachment diagnostics in the payload independently of the wrapper status; rescan alone does not reload existing code.',
-            do_not_use_when="Reloading or restarting one specific plugin (use reload_plugin). Rescanning channel providers (use rescan_channel_providers).",
+            do_not_use_when="Reloading or restarting one specific plugin (use reload_plugin).",
             failure_next_steps="If scan_errors occur, check plugin manifest files. Previous plugin generation is preserved on error.",
         ), aliases=("rescan_plugins",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:

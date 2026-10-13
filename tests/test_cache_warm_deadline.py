@@ -364,16 +364,16 @@ def test_core_capabilities_inspect_and_persist_deadline_configuration() -> None:
             },
         )
     )
-    observed = provider.cache_warm_deadline(
-        IntrospectionCall(name="inspect_core_cache_warm_deadline")
+    observed = provider.observe(
+        IntrospectionCall(name="observe_core")
     )
 
     assert configured.status == RuntimeStatus.OK
     assert observed.status == RuntimeStatus.OK
     assert observed.structured is not None
-    assert observed.structured["enabled"] is True
-    assert observed.structured["lead_seconds"] == 180
-    assert observed.structured["min_prefix_tokens"] == 48_000
+    assert observed.structured["cache_reminder"]["enabled"] is True
+    assert observed.structured["cache_reminder"]["lead_seconds"] == 180
+    assert observed.structured["cache_reminder"]["min_prefix_tokens"] == 48_000
     core.close()
 
 

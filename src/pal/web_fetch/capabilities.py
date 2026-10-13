@@ -55,6 +55,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 from pal.shared.diagnostics import exception_report
 from pal.web_fetch.browser_service import BrowserServiceError, browser_session_key
 from pal.web_fetch.service import WebFetchService
@@ -157,6 +158,7 @@ class WebFetchIntrospectionProvider:
         action_name="show",
         guidance=ToolGuidance(
             search_objects=('status',),
+            search_terms=('state', 'health', 'show', 'check', 'session',),
             purpose="Show Playwright CLI, sidecar, profile, and browser-session health.",
             use_when="Diagnosing browser startup, dependency installation, or session failures.",
             do_not_use_when="Reading or interacting with a page.",
@@ -169,6 +171,7 @@ class WebFetchIntrospectionProvider:
         _ = call
         payload = self.service.health()
         payload.update({"mounted": self.mounted, "degraded": self.degraded})
+        payload = inspection_snapshot(payload, source="browser_host")
         return _result(RuntimeStatus.OK, "Browser status", payload)
 
     @capability_action(
@@ -177,6 +180,9 @@ class WebFetchIntrospectionProvider:
         action_name="navigate",
         guidance=ToolGuidance(
             search_objects=('page', 'pages', 'url', 'urls'),
+            search_terms=('open', 'visit', 'web', 'fetch', 'get', 'webpage', 'webpages', 'website', 'websites'),
+            search_term_rules=({'terms': ('read', 'rendered', 'text', 'metadata', 'links'),
+                'requires_any': ('url', 'urls', 'webpage', 'webpages', 'website', 'websites')},),
             purpose="Open and read a webpage URL in this conversation's Chromium browser, returning rendered text, metadata and links. Supports interactive pages and local Manifest V3 extensions.",
             use_when="Reading a new webpage or starting an interactive browser workflow. Reuse the returned document and text_file snapshot; use rg/read_file for text beyond the preview. A separate browser read is unnecessary unless content changed or extraction failed.",
             do_not_use_when="Only raw HTTP/API content is needed.",
@@ -205,6 +211,7 @@ class WebFetchIntrospectionProvider:
         action_name="read",
         guidance=ToolGuidance(
             search_objects=('page', 'pages', 'text', 'link', 'links'),
+            search_terms=('show', 'get', 'fetch', 'web', 'content', 'webpage', 'webpages'),
             purpose="Read rendered text, metadata, and links from the current conversation's browser page.",
             use_when="Rereading the current page after content changed or navigation returned content_status=unavailable; omit url to reuse the page. A url is also accepted for tool surfaces without navigate_browser.",
             do_not_use_when="Reading beyond a preview: use rg/read_file on the returned text_file. Reading a new URL when navigate_browser is available: it opens the page and returns content directly. Searching the web (use search_web), reading local files, or calling an API that curl can handle directly.",
@@ -226,8 +233,9 @@ class WebFetchIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         action_name="snapshot",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('inspect accessibility tree and element references', 'capture page controls snapshot'),
             search_objects=('snapshot', 'snapshots', 'element', 'elements'),
+            search_terms=('accessibility', 'tree', 'inspect',),
             purpose="Capture a bounded accessibility snapshot containing current element refs.",
             use_when="Locating interactive controls before acting or verifying a changed page.",
             do_not_use_when="Pixel-level evidence is required (use capture_browser_screenshot).",
@@ -248,6 +256,7 @@ class WebFetchIntrospectionProvider:
         action_name="find",
         guidance=ToolGuidance(
             search_objects=('text', 'expression', 'expressions'),
+            search_terms=('search', 'regex', 'regexp',),
             purpose="Find text or a regular expression in the current browser snapshot.",
             use_when="A full snapshot would be too large or a particular control needs locating.",
             do_not_use_when="Both text and regex are available; provide exactly one.",
@@ -266,31 +275,31 @@ class WebFetchIntrospectionProvider:
     def _write_action(self, call: IntrospectionCall, action: str) -> IntrospectionResult:
         return self._action(call, action, f"Browser {action} completed")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="click", guidance=ToolGuidance(search_objects=('target', 'targets', 'locator', 'locators'), purpose="Click a current snapshot ref or unique locator.", use_when="The requested UI action is authorized and its target was inspected.", do_not_use_when="The target is guessed or the prior result is uncertain.", failure_next_steps="Do not retry automatically. Inspect the current page and use manage_browser_tabs list if a popup opened or the page appears unchanged; select the intended tab before reading it.", next_tool_hints=(NextToolHint(name="manage_browser_tabs", use_when="Inspect or select a popup or new tab after clicking."),)), InputModel=BrowserClickInput, OutputModel=BrowserActionOutput, aliases=("click_browser_target",), metadata={"canonical_path": "op_browser_click", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="click", guidance=ToolGuidance(search_objects=('target', 'targets', 'locator', 'locators'), search_terms=('element', 'elements', 'button', 'buttons', 'link', 'links',), purpose="Click a current snapshot ref or unique locator.", use_when="The requested UI action is authorized and its target was inspected.", do_not_use_when="The target is guessed or the prior result is uncertain.", failure_next_steps="Do not retry automatically. Inspect the current page and use manage_browser_tabs list if a popup opened or the page appears unchanged; select the intended tab before reading it.", next_tool_hints=(NextToolHint(name="manage_browser_tabs", use_when="Inspect or select a popup or new tab after clicking."),)), InputModel=BrowserClickInput, OutputModel=BrowserActionOutput, aliases=("click_browser_target",), metadata={"canonical_path": "op_browser_click", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def click(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "click")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="fill", guidance=ToolGuidance(search_objects=('field', 'fields'), purpose="Replace the value of an editable target, optionally submitting it.", use_when="Filling a known form control.", do_not_use_when="The target has not been inspected.", failure_next_steps="Do not retry automatically; inspect the current page first."), InputModel=BrowserFillInput, OutputModel=BrowserActionOutput, aliases=("fill_browser_field",), metadata={"canonical_path": "op_browser_fill", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="fill", guidance=ToolGuidance(search_intents=('set input field value', 'replace text in browser form field', '替换网页输入框内容'), search_objects=('field', 'fields'), search_terms=('input', 'form', 'forms', 'submit'), purpose="Replace the value of an editable target, optionally submitting it.", use_when="Filling a known form control.", do_not_use_when="The target has not been inspected.", failure_next_steps="Do not retry automatically; inspect the current page first."), InputModel=BrowserFillInput, OutputModel=BrowserActionOutput, aliases=("fill_browser_field",), metadata={"canonical_path": "op_browser_fill", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def fill(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "fill")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="type", guidance=ToolGuidance(search_objects=('text', 'element', 'elements'), purpose="Type into the currently focused editable element.", use_when="Focus is already established and keystroke-like entry matters.", do_not_use_when="A target can be filled directly.", failure_next_steps="Inspect the page before deciding whether to repeat."), InputModel=BrowserTypeInput, OutputModel=BrowserActionOutput, aliases=("type_browser_text",), metadata={"canonical_path": "op_browser_type", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="type", guidance=ToolGuidance(search_intents=('type text with keyboard into input', 'append text by typing keystrokes', '逐键输入文字'), search_objects=('text', 'element', 'elements'), search_terms=('keyboard',), purpose="Type into the currently focused editable element.", use_when="Focus is already established and keystroke-like entry matters.", do_not_use_when="A target can be filled directly.", failure_next_steps="Inspect the page before deciding whether to repeat."), InputModel=BrowserTypeInput, OutputModel=BrowserActionOutput, aliases=("type_browser_text",), metadata={"canonical_path": "op_browser_type", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def type_text(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "type")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="press", guidance=ToolGuidance(search_objects=('key', 'keys'), purpose="Press one keyboard key in the current page.", use_when="Keyboard interaction is required.", do_not_use_when="The focused target is unknown.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserPressInput, OutputModel=BrowserActionOutput, aliases=("press_browser_key",), metadata={"canonical_path": "op_browser_press", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="press", guidance=ToolGuidance(search_objects=('key', 'keys'), search_terms=('keyboard',), purpose="Press one keyboard key in the current page.", use_when="Keyboard interaction is required.", do_not_use_when="The focused target is unknown.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserPressInput, OutputModel=BrowserActionOutput, aliases=("press_browser_key",), metadata={"canonical_path": "op_browser_press", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def press(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "press")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="hover", guidance=ToolGuidance(search_objects=('target', 'targets', 'locator', 'locators'), purpose="Hover a current snapshot ref or unique locator.", use_when='Revealing hover-only UI. Capture a fresh browser snapshot when interaction changes visible content or makes existing refs stale.', do_not_use_when="No target has been inspected.", failure_next_steps="Capture a new snapshot after the hover."), InputModel=BrowserTargetInput, OutputModel=BrowserActionOutput, aliases=("hover_browser_target",), metadata={"canonical_path": "op_browser_hover", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="hover", guidance=ToolGuidance(search_objects=('target', 'targets', 'locator', 'locators'), search_terms=('element', 'elements',), purpose="Hover a current snapshot ref or unique locator.", use_when='Revealing hover-only UI. Capture a fresh browser snapshot when interaction changes visible content or makes existing refs stale.', do_not_use_when="No target has been inspected.", failure_next_steps="Capture a new snapshot after the hover."), InputModel=BrowserTargetInput, OutputModel=BrowserActionOutput, aliases=("hover_browser_target",), metadata={"canonical_path": "op_browser_hover", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def hover(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "hover")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="select", guidance=ToolGuidance(search_objects=('option', 'options', 'value', 'values', 'dropdown', 'dropdowns'), purpose="Select a value in a known dropdown.", use_when="A snapshot identifies a select control and desired value.", do_not_use_when="The option value is unknown.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserSelectInput, OutputModel=BrowserActionOutput, aliases=("select_browser_option",), metadata={"canonical_path": "op_browser_select", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="select", guidance=ToolGuidance(search_intents=('select dropdown option value', 'choose browser select menu item'), search_objects=('option', 'options', 'value', 'values', 'dropdown', 'dropdowns'), purpose="Select a value in a known dropdown.", use_when="A snapshot identifies a select control and desired value.", do_not_use_when="The option value is unknown.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserSelectInput, OutputModel=BrowserActionOutput, aliases=("select_browser_option",), metadata={"canonical_path": "op_browser_select", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def select(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "select")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="check", guidance=ToolGuidance(search_objects=('checkbox', 'checkboxes', 'radio', 'state', 'states'), purpose="Set a checkbox or radio target's checked state.", use_when="A known checkable control must change.", do_not_use_when="The target state is unknown.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserCheckInput, OutputModel=BrowserActionOutput, aliases=("set_browser_checked_state",), metadata={"canonical_path": "op_browser_check", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="check", guidance=ToolGuidance(search_objects=('checkbox', 'checkboxes', 'radio', 'state', 'states'), search_terms=('uncheck', 'toggle'), search_term_rules=({'terms': ('check',), 'requires_any': ('checkbox', 'checkboxes', 'radio')},), purpose="Set a checkbox or radio target's checked state.", use_when="Ensure a known checkbox or radio control is checked or unchecked. Set checked to the desired value; its current checked value may be unknown. A current ref or known unique locator is sufficient; no preliminary state read is needed solely to learn whether it is already checked.", do_not_use_when="The desired checked value is unspecified, or the target is not a checkable control. Blindly toggling an unknown current value; this tool sets a desired value rather than inverting it.", failure_next_steps="Inspect the page before retrying."), InputModel=BrowserCheckInput, OutputModel=BrowserActionOutput, aliases=("set_browser_checked_state",), metadata={"canonical_path": "op_browser_check", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def check(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "check")
 
@@ -310,23 +319,23 @@ class WebFetchIntrospectionProvider:
     def tabs(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "tabs")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="dialog", guidance=ToolGuidance(search_enum_fields=("operation",), search_objects=('dialog', 'dialogs'), purpose="Accept or dismiss the currently open browser dialog.", use_when="A known page dialog blocks the authorized workflow.", do_not_use_when="No dialog was observed.", failure_next_steps="Inspect the page rather than retrying blindly."), InputModel=BrowserDialogInput, OutputModel=BrowserActionOutput, aliases=("handle_browser_dialog",), metadata={"canonical_path": "op_browser_dialog", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="dialog", guidance=ToolGuidance(search_enum_fields=("operation",), search_objects=('dialog', 'dialogs'), search_terms=('alert', 'confirm', 'prompt',), purpose="Accept or dismiss the currently open browser dialog.", use_when="A known page dialog blocks the authorized workflow.", do_not_use_when="No dialog was observed.", failure_next_steps="Inspect the page rather than retrying blindly."), InputModel=BrowserDialogInput, OutputModel=BrowserActionOutput, aliases=("handle_browser_dialog",), metadata={"canonical_path": "op_browser_dialog", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def dialog(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._write_action(call, "dialog")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="inspect_layout", guidance=ToolGuidance(search_objects=('layout', 'layouts', 'geometry'), purpose="Inspect computed layout and geometry for a bounded selector on the current page.", use_when="Diagnosing CSS or rendered geometry without relying on pixels. For layout problems, compare relevant computed styles, bounding geometry and gaps before and after the change; include nested or edge-case content when the affected behavior requires it.", do_not_use_when="Only text content is needed.", failure_next_steps="Verify the selector using capture_browser_snapshot, then retry."), InputModel=BrowserInspectLayoutInput, OutputModel=BrowserActionOutput, aliases=("inspect_browser_layout",), metadata={"canonical_path": "op_browser_inspect_layout", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="inspect_layout", guidance=ToolGuidance(search_objects=('layout', 'layouts', 'geometry'), search_terms=('css', 'style', 'styles', 'bounds', 'bounding', 'box', 'element', 'elements'), purpose="Inspect computed layout and geometry for a bounded selector on the current page.", use_when="Diagnosing CSS or rendered geometry without relying on pixels. For layout problems, compare relevant computed styles, bounding geometry and gaps before and after the change; include nested or edge-case content when the affected behavior requires it.", do_not_use_when="Only text content is needed.", failure_next_steps="Verify the selector using capture_browser_snapshot, then retry."), InputModel=BrowserInspectLayoutInput, OutputModel=BrowserActionOutput, aliases=("inspect_browser_layout",), metadata={"canonical_path": "op_browser_inspect_layout", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
     def inspect_layout(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "inspect_layout", "Browser layout inspection")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="evaluate", guidance=ToolGuidance(search_objects=('script', 'scripts', 'function', 'functions'), purpose="Evaluate a JavaScript function in the current page and return its result.", use_when="Reading page-internal state such as localStorage, sessionStorage, or JS globals that snapshots cannot expose.", do_not_use_when="The value is available via read_browser_page, capture_browser_snapshot, or inspect_browser_layout.", failure_next_steps="Check that func is a function expression such as () => document.title; navigation resets page state."), InputModel=BrowserEvaluateInput, OutputModel=BrowserActionOutput, aliases=("evaluate_browser_script",), metadata={"canonical_path": "op_browser_evaluate", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="evaluate", guidance=ToolGuidance(search_objects=('script', 'scripts', 'function', 'functions'), search_terms=('execute', 'run', 'javascript', 'js',), purpose="Evaluate a JavaScript function in the current page and return its result.", use_when="Reading page-internal state such as localStorage, sessionStorage, or JS globals that snapshots cannot expose.", do_not_use_when="The value is available via read_browser_page, capture_browser_snapshot, or inspect_browser_layout.", failure_next_steps="Check that func is a function expression such as () => document.title; navigation resets page state."), InputModel=BrowserEvaluateInput, OutputModel=BrowserActionOutput, aliases=("evaluate_browser_script",), metadata={"canonical_path": "op_browser_evaluate", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def evaluate(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._action(call, "evaluate", "Browser evaluation")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="network", guidance=ToolGuidance(search_enum_fields=("operation",), search_objects=('capture', 'captures', 'request', 'requests', 'response', 'responses'), purpose="Observe fetch/XHR API traffic of the current page through an injected JavaScript hook.", use_when='Capturing API requests, headers, or tokens the page sends; start after navigating, interact, then read entries. Navigation retires the capture hook; after navigation run operation=start and confirm installed=true before capturing more traffic.', do_not_use_when="Raw HTTP via curl is sufficient, or no page interaction is expected.", failure_next_steps="Navigation removes the hook; run operation=start again and confirm installed=true."), InputModel=BrowserNetworkInput, OutputModel=BrowserActionOutput, aliases=("manage_browser_network_capture",), metadata={"canonical_path": "op_browser_network", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="network", guidance=ToolGuidance(search_enum_fields=("operation",), search_objects=('capture', 'captures', 'request', 'requests', 'response', 'responses'), search_terms=('api', 'traffic', 'xhr'), purpose="Observe fetch/XHR API traffic of the current page through an injected JavaScript hook.", use_when='Capturing API requests, headers, or tokens the page sends; start after navigating, interact, then read entries. Navigation retires the capture hook; after navigation run operation=start and confirm installed=true before capturing more traffic.', do_not_use_when="Raw HTTP via curl is sufficient, or no page interaction is expected.", failure_next_steps="Navigation removes the hook; run operation=start again and confirm installed=true."), InputModel=BrowserNetworkInput, OutputModel=BrowserActionOutput, aliases=("manage_browser_network_capture",), metadata={"canonical_path": "op_browser_network", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
     def network(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "network", "Browser network")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(search_objects=('screenshot', 'screenshots'), purpose="Capture the current page or target as a PNG and register its artifact for automatic core delivery. Vision-capable models receive pixels within image budgets; other models receive the artifact reference.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check inspect_browser_status and page state; failed calls return no screenshot.", next_tool_hints=(NextToolHint(name="import_artifact", use_when="Automatic artifact registration was unavailable and the artifact owner has recovered; pass artifact.local_cached_path as path. Do not reimport an already registered screenshot."),)), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("capture_browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(search_objects=('screenshot', 'screenshots'), search_terms=('image', 'picture', 'png',), purpose="Capture the current page or target as a PNG and register its artifact for automatic core delivery. Vision-capable models receive pixels within image budgets; other models receive the artifact reference.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check inspect_browser_status and page state; failed calls return no screenshot.", next_tool_hints=(NextToolHint(name="import_artifact", use_when="Automatic artifact registration was unavailable and the artifact owner has recovered; pass artifact.local_cached_path as path. Do not reimport an already registered screenshot."),)), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("capture_browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     async def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
             key, persistent = self._scope(call)
@@ -374,8 +383,9 @@ class WebFetchIntrospectionProvider:
 
     @capability_action(
         namespace=OPERATION_NAMESPACE, scope="module", action_name="clear_cache",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('clear browser http cache', 'remove cached network responses'),
             search_objects=('cache', 'caches'),
+            search_terms=('http',),
             purpose="Clear the current conversation browser's HTTP cache, retaining cookies and site storage.",
             use_when='The user requests browser cache cleanup or stale cached resources need to be discarded. Reload only if the task needs fresh page content; cache cleanup does not itself navigate.',
             do_not_use_when="Logging out, deleting cookies, removing service-worker CacheStorage, or resetting the profile. Cache clearing does not fix an unreachable URL.",
@@ -388,7 +398,7 @@ class WebFetchIntrospectionProvider:
     def clear_cache(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "clear_cache", "Browser HTTP cache cleared")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="close", guidance=ToolGuidance(search_objects=('session', 'sessions'), purpose="Close the current conversation's live browser while retaining its profile.", use_when='The live browser is no longer needed but login state should remain. Closing an already closed browser is an idempotent no-op.', do_not_use_when="The profile must also be removed (use reset_browser).", failure_next_steps="Closing an already closed session is harmless."), OutputModel=BrowserActionOutput, aliases=("close_browser",), metadata={"canonical_path": "op_browser_close", "omit_family_in_canonical": True}, execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="close", guidance=ToolGuidance(search_intents=('close live browser instance', 'release browser process and session'), search_objects=('session', 'sessions'), search_terms=('session', 'shutdown',), purpose="Close the current conversation's live browser while retaining its profile.", use_when='The live browser is no longer needed but login state should remain. Closing an already closed browser is an idempotent no-op.', do_not_use_when="The profile must also be removed (use reset_browser).", failure_next_steps="Closing an already closed session is harmless."), OutputModel=BrowserActionOutput, aliases=("close_browser",), metadata={"canonical_path": "op_browser_close", "omit_family_in_canonical": True}, execution=INDIRECT_CONTROL)
     def close(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "close", "Browser closed")
 

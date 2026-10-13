@@ -39,6 +39,8 @@ class PluginManifest:
     requires_plugins: tuple[str, ...] = ()
     requires_ports: tuple[str, ...] = ()
     data_paths: tuple[str, ...] | None = None
+    channel_endpoint_types: tuple[str, ...] = ()
+    legacy_channel: bool = False
 
 
 @dataclass

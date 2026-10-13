@@ -12,11 +12,9 @@ from pal.shared import (
 class ToolSurface:
     """Project registry generations into LLM tool contracts and failure surfaces.
 
-    Direct LLM tool exposure is fully determined by capability descriptor
-    ``invocation_mode`` at registry compile time: DIRECT descriptors are
-    compiled into ``provider_specs`` and exposed as function-calling tools,
-    INDIRECT descriptors stay discoverable via tool search. There is no
-    config file and no runtime refresh path for the normal-turn surface.
+    DIRECT descriptors and explicit owner ``native_function`` opt-ins expose
+    full schemas. Opt-ins retain their declared invocation/effect semantics;
+    model execution routes them through the same validated runtime path.
     """
 
     def __init__(self, context) -> None:
@@ -80,7 +78,6 @@ class ToolSurface:
         if signal.subsystem == "memory":
             include("intro_module_memory_show")
             include("intro_module_memory_list_providers")
-            include("intro_module_memory_active_provider")
             include("op_memory_mgmt_set_active_provider")
             try:
                 memory_service = self.context.require_port(MEMORY)
@@ -88,15 +85,16 @@ class ToolSurface:
             except KeyError:
                 active_provider_id = ""
             if active_provider_id:
-                include("intro_provider_memory_show", target_id=active_provider_id)
                 include("intro_provider_memory_inventory", target_id=active_provider_id)
         elif signal.subsystem in {"plugin", "plugins"}:
             include("intro_module_plugins_show")
             include("intro_module_plugins_list")
+            include("intro_module_plugins_inspect")
             include("op_plugin_mgmt_rescan")
             include("op_plugin_mgmt_enable")
             include("op_plugin_mgmt_disable")
         elif signal.subsystem == "channel":
+            include("intro_module_channel_show")
             include("intro_module_channel_list")
             include("op_channel_mgmt_enable")
             include("op_channel_mgmt_attach")
@@ -107,24 +105,19 @@ class ToolSurface:
             )
             if endpoint_id:
                 include("intro_endpoint_channel_inspect", target_id=endpoint_id)
-                include("intro_endpoint_channel_auth_state", target_id=endpoint_id)
-                include("intro_endpoint_channel_backlog", target_id=endpoint_id)
-                include("intro_endpoint_channel_health", target_id=endpoint_id)
         elif signal.subsystem == "llm":
             include("intro_module_llm_list")
             include("intro_module_llm_active")
-            include("intro_module_llm_think_level")
+            include("intro_module_llm_show")
         elif signal.subsystem == "execution":
             include("intro_module_exec_show")
             include("intro_module_exec_tools")
         elif signal.subsystem == "web_search":
             include("intro_module_web_search_show")
-            include("intro_module_web_search_active_provider")
             include("intro_module_web_search_list_providers")
             active_web_search_provider_id = self._get_setting("active_web_search_provider_id")
             if active_web_search_provider_id:
-                include("intro_provider_web_search_health", target_id=active_web_search_provider_id)
-                include("op_web_search_mgmt_set_active_provider")
+                include("intro_provider_web_search_show", target_id=active_web_search_provider_id)
         elif signal.subsystem == "web_fetch":
             include("intro_module_web_fetch_show")
         else:

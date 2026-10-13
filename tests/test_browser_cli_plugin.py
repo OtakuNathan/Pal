@@ -66,11 +66,13 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
     assert descriptors["read_browser_page"].InputModel.__module__ == "pal.web_fetch.tool_models"
     assert not any(name.startswith("web_fetch_provider_") for name in descriptors)
     assert not {"read_web", "inspect_web_layout", "screenshot_web"} & set(descriptors)
-    for query, expected in (("navigate browser", "navigate_browser"), ("find browser text", "find_browser_text")):
+    for query, expected in (("navigate browser", "navigate_browser"),
+                            ("find browser text", "find_browser_text"),
+                            ("check browser state", "inspect_browser_status")):
         found = core.context.execution_runtime.execute_tool(
             new_tool_call(name="search_tools", args={"query": query})
         )
-        assert found.structured["hits"][0]["alias"] == expected
+        assert [hit["alias"] for hit in found.structured["hits"]] == [expected]
     assert descriptors["click_browser_target"].execution.invocation_mode == InvocationMode.INDIRECT
     assert descriptors["click_browser_target"].execution.effect_kind == EffectKind.EXTERNAL_WRITE
     assert descriptors["click_browser_target"].execution.retry_policy == RetryPolicy.RECONCILE_FIRST
@@ -293,9 +295,11 @@ def test_profile_pruning_enforces_lru_byte_cap(tmp_path: Path) -> None:
     oldest_size = sum(
         item.stat().st_size for item in oldest.rglob("*") if item.is_file()
     )
-    with patch(
-        "pal.web_fetch.browser_service.PROFILE_MAX_BYTES",
-        total - oldest_size,
+    # Runtime lifecycle tests may replace this plugin module after collection.
+    # Patch the globals used by this worker, not a newly imported generation.
+    with patch.dict(
+        worker._prune_profiles.__func__.__globals__,
+        {"PROFILE_MAX_BYTES": total - oldest_size},
     ):
         worker._prune_profiles()
 

@@ -121,6 +121,9 @@ class PalRuntimeApp:
         if callable(publish_catalog):
             await publish_catalog()
         try:
+            configuration_service = self.handle.configuration_service
+            if configuration_service is not None:
+                await configuration_service.start_async()
             while not stop_event.is_set():
                 self._mark_loop_tick()
                 processed = await self.handle.core.run_until_idle_async(max_iterations=128)

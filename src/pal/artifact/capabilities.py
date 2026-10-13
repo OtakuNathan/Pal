@@ -35,6 +35,7 @@ from pal.artifact.tools import (
     ArtifactReadTool,
     ArtifactSearchTool,
     ArtifactSelectTool,
+    _scope_from_runtime,
 )
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
@@ -48,6 +49,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -84,6 +86,7 @@ class ArtifactIntrospectionProvider:
         action_name="import",
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts', 'image', 'images'),
+            search_terms=('file', 'files', 'screenshot', 'screenshots', 'pdf', 'document', 'documents', 'audio', 'attach', 'load',),
             purpose="Import a local file or screenshot into the current conversation and attach its artifact reference for model input.",
             use_when='A local image or screenshot path must become visible to Pal, or a local PDF/audio/document needs artifact processing. Extracted OCR or transcript text is not proof of visual inspection; pixels are inspected only when actually attached to a vision-capable model.',
             do_not_use_when="The same image is already inline. A PDF artifact_id does not mean its page images are inline; import an image_file_path from its page index when pixels are needed. Reading ordinary source text (use read_file).",
@@ -104,8 +107,9 @@ class ArtifactIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            purpose="Show artifact manager state.",
+            search_objects=('state', 'states', 'attachment', 'attachments'),
+            search_terms=('status', 'show', 'get', 'health', 'lifecycle', 'limits', 'count'),
+            purpose="Inspect artifact manager policy and conversation-scoped resource and lifecycle counts.",
             use_when="Diagnosing artifact lifecycle issues — checking hot TTL, hard cap, or max size limits.",
             do_not_use_when="Looking for specific artifacts (use list_artifacts or search_artifacts). Reading artifact content (use read_artifact).",
             failure_next_steps="Read-only diagnostic tool. If limits look wrong, check ArtifactPolicy configuration in the runtime.",
@@ -119,6 +123,10 @@ class ArtifactIntrospectionProvider:
             "hard_cap_seconds": self.service.policy.lifecycle.hard_cap_seconds,
             "max_original_bytes": self.service.policy.limits.max_original_bytes,
         }
+        structured = inspection_snapshot(structured, sections={
+            "inventory": lambda: self.service.repository.inspect_counts(
+                scope_key=_scope_from_runtime(self.execution_runtime, str(call.meta.get("turn_id") or "") or None)),
+        })
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="artifact snapshot",
@@ -156,6 +164,7 @@ class ArtifactIntrospectionProvider:
         action_name="info",
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts', 'metadata', 'representation', 'representations'),
+            search_terms=('show', 'get', 'details',),
             purpose="Inspect metadata and available representations for one artifact id.",
             use_when="Inspecting artifact metadata, choosing a specific representation, or diagnosing a representation_unavailable result.",
             do_not_use_when="Ordinary text reading with a known artifact_id: call read_artifact directly; its auto mode selects a representation. Importing local images/documents (use import_artifact).",
@@ -179,6 +188,7 @@ class ArtifactIntrospectionProvider:
         action_name="read",
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts', 'text', 'representation', 'representations'),
+            search_terms=('content', 'transcript',),
             purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
             use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). With a known artifact_id, call directly: representation defaults to auto, so inspect_artifact_info is unnecessary. Supports page/chunk selection and max_chars. The result supplies text_file for complete rg/read_file access.",
             do_not_use_when="A text_file.file_path is already supplied: use rg/read_file directly. Reading local source text (use read_file); importing local images/documents (use import_artifact). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without a transcript: use the supplied local file with a separately discovered transcription tool.",
@@ -202,6 +212,7 @@ class ArtifactIntrospectionProvider:
         action_name="search",
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts'),
+            search_terms=('find', 'lookup', 'filename', 'caption',),
             purpose="Search currently available conversation artifacts by filename, kind, caption, or summary. Results use relevance and recency ranking, not a date filter.",
             use_when='You know roughly what file the user means by name, type, or content but lack the exact artifact_id. An empty result is not proof of expiry. Broaden the query or use list_artifacts to inspect current references before asking for a resend.',
             do_not_use_when="Searching local filesystem or codebase (use run_shell rg or read_file). You already have the artifact_id.",
@@ -225,6 +236,7 @@ class ArtifactIntrospectionProvider:
         action_name="select",
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts'),
+            search_terms=('activate',),
             purpose="Select an artifact search result and refresh its short-lived hot state when the runtime has write authority.",
             use_when="You want to keep a specific artifact's hot state alive across multiple tool calls. Use after search_artifacts when you've identified the right artifact.",
             do_not_use_when="You just need to read an artifact once (read_artifact already refreshes hot state).",
@@ -246,8 +258,9 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="grep",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('search attachment content snippets', 'find text inside artifact representation'),
             search_objects=('artifact', 'artifacts'),
+            search_terms=('search', 'find', 'content', 'text', 'transcript',),
             purpose="Search inside existing text representations of a known artifact.",
             use_when="For text files, PDF page text/chunks, or existing transcripts.",
             do_not_use_when="Does not inspect image pixels or create transcripts from audio.",

@@ -394,7 +394,7 @@ ExecutionShellExecShellExecCapabilityMixinShellOutput = _strict_model(
 ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput',
     {
-        'name': (str, Field(..., description='Exact indirect alias.')),
+        'name': (str, Field(..., min_length=1, pattern=r'\S', description='Exact nonempty indirect alias. If no suitable tool exists, report the capability gap instead of calling an empty name.')),
         'args': (dict[str, Any], Field(None, description="Arguments for the capability. Arguments must match the selected alias's input schema.")),
     },
 )
@@ -402,14 +402,16 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput = _stric
 ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput',
     {
-        'query': (str, Field(None, description="Search short English keywords: [domain] [action] [object], e.g. 'remember memory', 'lsp prepare workspace', 'browser screenshot'. All query words must match whole indexed words; spaces/underscores and reordered words work. No fuzzy matching.")),
+        'query': (str, Field(None, description="Use a short affirmative English description of the desired operation within the selected domain (tool purposes are primarily English), or supply an exact alias. Keep excluded alternatives and constraints in the original task for contract review. Domain searches rank affirmative purpose and tool-authored auxiliary terms/intents; action/object naming and complete word coverage are not required. Candidates are not proof that every requested feature is supported: compare the complete contract and unmatched_terms with the original task. Spelling recovery runs only after a lexical miss. Without domain, conservative broad keyword discovery remains available. Do not search indefinitely. If reasonable query or inventory checks still reveal no suitable callable, the capability may be unavailable; explain that possibility and any uncertainty.")),
+        'domain': (str, Field(None, description="Optional strict operation-owner bucket, e.g. browser, llm, plugin, channel, file, shell, lsp. With domain alone, return a compact directory: up to 16 names and brief purposes; read the selected contract. Add query to rank full contracts or directory_offset to browse another page. Declared full names such as 'large language model' normalize to llm. Reloading an lsp plugin belongs to plugin, not lsp. Unknown or wrong domains do not fall back across buckets; omit if unsure. Distinct from module_name/family.")),
         'namespace': (Literal['inspect', 'action', 'introspection', 'operation'], Field(None, description='Optional registry namespace from hits/facets. inspect aliases introspection; action aliases operation. Omit when unknown; read-only tools can also be registered under operation.')),
         'family': (str, Field(None, description='Exact explicitly declared family copied from hits/facets. Empty family in a hit means undeclared, not its namespace or module. Omit on initial search; use module_name for channel/skill/etc.')),
         'module_name': (str, Field(None, description='Optional semantic module name filter such as llm, memory, channel, artifact, bunshin, or web_search.')),
         'tags': (list[str], Field(None, description='Optional tags that every result must include.')),
-        'top_k': (int, Field(None, description='Maximum callable hits; default up to 3 strongest matches, or one exact match. Set explicitly to include lower-ranked relevant matches.', ge=1)),
-        'limit': (int, Field(None, description='Alias for top_k; top_k takes precedence when both are supplied.', ge=1)),
+        'top_k': (int, Field(None, description='Maximum callable hits, from 1 to 5; default up to 3 strongest matches, or one exact match. Set explicitly to include lower-ranked relevant matches.', ge=1, le=5)),
+        'limit': (int, Field(None, description='Alias for top_k, from 1 to 5; top_k takes precedence when both are supplied.', ge=1, le=5)),
         'facets': (bool, Field(None, description='Default false. Set true to include namespace/module/family counts for broad-search narrowing.')),
+        'directory_offset': (int, Field(None, ge=0, description='Browse a compact directory page in an explicit domain. Use 0 for the first page or directory.next_offset for the next. Query words are ignored; all other filters still apply. Read a plausible contract before selecting it. Reuse checked pages; if reasonable directory checks reveal no suitable callable, it may be unavailable. Explain that possibility instead of browsing indefinitely.')),
     },
 )
 
@@ -417,6 +419,7 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem = _stri
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem',
     {
         'alias': (str, Field(...)),
+        'domain': (str, Field(None, description='Operation-owner search bucket.')),
         'search_text': (str, Field(...)),
         'invocation_mode': (Literal['direct', 'indirect'], Field(...)),
         'input_shape': (dict[str, Any], Field(...)),
@@ -430,12 +433,49 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem = _stri
         'module_id': (str, Field(...)),
         'tags': (list[str], Field(...)),
         'score': (int, Field(...)),
+        'matched_terms': (list[str], Field(None, description='Matched lexical evidence for partial hits.')),
+        'unmatched_terms': (list[str], Field(None, description='Uncovered diagnostic context; these words do not establish supported features.')),
     },
 )
+
+ExecutionToolSearchSuggestion = _strict_model(
+    'ExecutionToolSearchSuggestion',
+    {
+        'alias': (str, Field(...)),
+        'purpose': (str, Field(...)),
+        'matched_terms': (list[str], Field(...)),
+        'unmatched_terms': (list[str], Field(...)),
+        'contract': (ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem, Field(None, description='Full callable contract for reviewing the original request. Invoke directly if suitable; no extra read_tool is required.')),
+        'retrieval_sources': (list[Literal['structured', 'purpose', 'intent', 'fuzzy']], Field(None)),
+        'score': (int, Field(None, description='Reciprocal rank fusion score; not a probability of support.')),
+    },
+)
+
+ExecutionToolSearchDirectoryItem = _strict_model(
+    'ExecutionToolSearchDirectoryItem',
+    {'alias': (str, Field(...)), 'purpose': (str, Field(...)),
+     'purpose_truncated': (bool, Field(None, description='True when this navigation summary was shortened. Read the full contract before deciding support.'))},
+)
+
+ExecutionToolSearchDirectory = _strict_model(
+    'ExecutionToolSearchDirectory',
+    {
+        'domain': (str, Field(...)),
+        'tools': (list[ExecutionToolSearchDirectoryItem], Field(...)),
+        'total_count': (int, Field(...)),
+        'offset': (int, Field(...)),
+        'page_size': (int, Field(...)),
+        'next_offset': (int | None, Field(None)),
+    },
+)
+
 
 ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput',
     {
+        'available_domains': (list[str], Field(None, description='Domains in this visible tool generation, returned on misses without a valid explicit domain. Choose one to browse with directory_offset=0; no automatic substitution.')),
+        'suggestions': (list[ExecutionToolSearchSuggestion], Field(None, description='Lexical retrieval candidates with full callable contracts; unmatched words may be essential requirements. Review against the original task and invoke directly if suitable. Separate from hits and their counts.')),
+        'directory': (ExecutionToolSearchDirectory, Field(None, description='Compact navigation page of visible tools in the explicitly selected domain and filters. Independent of query relevance; entries are not hits or proof that the requested operation exists. Use read_tool to inspect a plausible contract.')),
         'hits': (list[ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem], Field(None)),
         'total_count': (int, Field(None)),
         'returned_count': (int, Field(None)),
@@ -494,7 +534,7 @@ LspPluginLspManagerPluginProviderPrepareWorkspaceInput = _strict_model(
 LspPluginLspManagerPluginProviderStatusInput = _strict_model(
     'LspPluginLspManagerPluginProviderStatusInput',
     {
-        'workspace_root': (str, Field(None, description='Bound project/worktree root whose persisted LSP readiness should be reported.')),
+        'workspace_root': (str, Field(..., min_length=1, description='Exact project/worktree root to inspect. Module health is available through inspect_lsp_provider.')),
     },
 )
 
@@ -647,6 +687,7 @@ McpPluginMcpManagerPluginProviderImagePrepareInput = _strict_model(
 MemoryCapabilitiesMemoryIntrospectionProviderRecallInput = _strict_model(
     'MemoryCapabilitiesMemoryIntrospectionProviderRecallInput',
     {
+        'provider_id': (str | None, Field(None, min_length=1, pattern=r'\S', description='Optional exact provider id returned by a prior memory result or list_memory_providers. Omit for normal recall from the active provider. Supply the original provider when reconciling a mutation after a provider switch; this does not switch the active provider. Unknown providers fail without fallback.')),
         'mem_ref': (str | None, Field(None, pattern=r'^(fact|case):.+$', description='Exact durable reference. When supplied, reads the record directly without semantic search or index refresh; queries/topic_scope/limit are not used. kind/task_id still constrain visibility.')),
         'queries': (list[str], Field(None, description='One to three focused natural-language search strings for the remembered fact, preference, project context, prior decision, repair lesson, failure case, or candidate memory. Include concrete names, modules, error text, symptoms, failed fixes, or user terms when known. Do not paste large raw context; summarize the lookup target.')),
         'topic_scope': (list[str], Field(None, description='Optional short topic keywords that narrow retrieval, such as a project, subsystem, user preference area, or failure domain. This is semantic narrowing, not the storage scope; do not use system/task here.')),
@@ -676,7 +717,7 @@ MemoryCapabilitiesMemoryIntrospectionProviderWriteInput = _strict_model(
         'search_text': (str, Field(..., description='Retrieval/source text with concrete names, symptoms, decisions, or wording. This can be longer than summary but should not be raw unrelated context.')),
         'topics': (list[str], Field(None, description='Optional short semantic topic tags such as project, subsystem, preference area, or failure domain.')),
         'task_id': (str, Field(None, description='Optional exact task, work order, run, or bunshin task id from current context. Providing it binds this memory to that task scope. Do not invent task ids.')),
-        'star': (MemoryCapabilitiesMemoryIntrospectionProviderWriteInputStar, Field(None, description="Required when kind='case'; omit for fact memories. STAR case detail for reusable failures, repairs, or task lessons.")),
+        'star': (MemoryCapabilitiesMemoryIntrospectionProviderWriteInputStar, Field(None, description="Required when kind='case'; omit for fact memories. Pass a JSON object with situation, task, action and result, never a JSON string. STAR case detail for reusable failures, repairs, or task lessons.")),
     },
 )
 
@@ -694,12 +735,12 @@ MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput = _strict_model(
     'MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput',
     {
         'mem_ref': (str, Field(..., description='Opaque memory ref returned by recall_memory. Copy the complete value, including prefixes such as fact: or case:.')),
-        'summary': (str, Field(None)),
-        'search_text': (str, Field(None)),
+        'content': (str, Field(..., min_length=1, pattern=r'\S', description='Complete replacement memory content, including still-valid details. Updates the current summary and retrieval/origin text together; prior revisions remain archived.')),
         'topics': (list[str], Field(None, description='Optional replacement topic tags for retrieval narrowing.')),
         'star': (MemoryCapabilitiesMemoryIntrospectionProviderUpdateInputStar, Field(None, description='Optional full STAR replacement for a case memory. If provided, all four fields are required. Do not use star for fact memories.')),
     },
 )
+
 
 MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput = _strict_model(
     'MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput',

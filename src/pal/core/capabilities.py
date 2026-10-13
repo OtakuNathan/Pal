@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.core.runtime import PalCore
 from pal.execution.generated_tool_models import (
-    CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput,
     CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
 )
 from pal.execution.tool_facade import ToolGuidance
@@ -21,6 +20,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 
 
 @dataclass(frozen=True)
@@ -52,10 +52,11 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="observe",
         guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            purpose="Observe core runtime state — queued events, active turns, mode, detached modules.",
+            search_objects=('state', 'states', 'task', 'tasks', 'turn', 'turns'),
+            search_terms=('status', 'inspect', 'show', 'get', 'check', 'summary', 'cache', 'deadline', 'reminder', 'queue', 'backlog'),
+            purpose="Inspect core runtime state, queued events, active turns, detached modules and the prompt-cache reminder deadline together.",
             use_when='Diagnosing core health: event backlog, stuck turns, or checking which modules are detached. Queue backlog and active turns are current workload observations. The mode label alone does not prove maintenance or draining; defer activation while Pal is busy.',
-            do_not_use_when="Checking control plane status (use inspect_control_state). Checking execution tool count (use inspect_execution_state).",
+            do_not_use_when="Checking control plane status (use pal control status). Checking execution tool count (use inspect_execution_state).",
             failure_next_steps="Read-only diagnostic. If event queue is backed up, turns may be stuck. If modules are unexpectedly detached, investigate lifecycle.",
         ),
         aliases=("observe_core",),
@@ -63,28 +64,16 @@ class CoreIntrospectionProvider:
     def observe(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_core(self)
+        payload = inspection_snapshot(snapshot.__dict__, sections={
+            "cache_reminder": lambda: self.core.cache_warm_deadline.inspect(),
+        })
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="core snapshot",
-            structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("Core snapshot", snapshot.__dict__),
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Core snapshot", payload),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        action_name="configure",
-        guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            purpose="Set the core state mode label.",
-            use_when="Changing the mode label exposed by observe_core; this does not pause, drain, restart, or enter maintenance.",
-            do_not_use_when="Reading core state (use observe_core). Configuring a specific module (use that module's capabilities).",
-            failure_next_steps="If mode change fails, check observe_core for current state and module health.",
-        ),
-        InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
-        aliases=("configure_core",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
     def configure(self, call: IntrospectionCall) -> IntrospectionResult:
         mode = call.args.get("mode")
         if mode is not None:
@@ -96,19 +85,6 @@ class CoreIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Core mode label", {"mode": self.core.state.mode}),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="cache_warm_deadline",
-        guidance=ToolGuidance(
-            search_objects=('deadline', 'deadlines', 'reminder', 'reminders'),
-            purpose="Inspect the hot prompt-cache compact reminder configuration and current in-memory deadline.",
-            use_when="Checking whether Pal will suggest compacting before the confirmed A cache expires.",
-            do_not_use_when="Checking general token usage (use inspect_llm_usage). Triggering compaction now (use the compact control action).",
-            failure_next_steps="If no timer is scheduled, inspect whether A is confirmed, the provider exposes an A TTL, and the prefix exceeds the configured minimum.",
-        ),
-        aliases=("inspect_core_cache_warm_deadline",),
-    )
     def cache_warm_deadline(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = self.core.cache_warm_deadline.inspect()
@@ -122,22 +98,7 @@ class CoreIntrospectionProvider:
             ),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="configure_cache_warm_deadline",
-        guidance=ToolGuidance(
-            search_objects=('deadline', 'deadlines', 'reminder', 'reminders'),
-            purpose="Enable, disable, or tune Pal's compact reminder before the confirmed A prompt cache expires.",
-            use_when="The user asks to change hot-cache compact reminders, their lead time, or their minimum prompt size.",
-            do_not_use_when="Triggering compaction immediately. Inspect first when the requested setting is ambiguous.",
-            failure_next_steps="Use inspect_core_cache_warm_deadline to inspect valid current values; lead_seconds must be at least 30 and min_prefix_tokens at least 1024.",
-        ),
-        InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput,
-        aliases=("configure_core_cache_warm_deadline",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def configure_cache_warm_deadline(
         self,
         call: IntrospectionCall,

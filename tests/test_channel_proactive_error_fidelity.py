@@ -84,7 +84,7 @@ def test_provider_attach_preserves_original_failed_result(channel_env, monkeypat
     original = CapabilityResult(status=RuntimeStatus.ERROR, text="provider summary",
         llm_text="provider full diagnostic", structured={"error_code": "auth_denied", "detail": "remote reason"})
     monkeypatch.setattr(manager, "_provider_id_for_endpoint", lambda _: "test-provider")
-    monkeypatch.setattr(manager.repository, "get", lambda _: SimpleNamespace())
+    monkeypatch.setattr(manager.repository, "get", lambda _: SimpleNamespace(detached_at=object()))
     monkeypatch.setattr(manager, "_ensure_hub", lambda *a: None)
     monkeypatch.setattr(manager, "_ensure_provider_loaded", lambda _: SimpleNamespace(attach_endpoint=lambda *a: original))
     result = manager.attach_endpoint("channel-main")
@@ -113,7 +113,7 @@ def test_proactive_failure_retains_cause_in_read_latest_run(env):
         fail_with_cause("proactive execution failed")
     core.run_turn_continuation_async = run
     assert asyncio.run(handler._run_trigger_guarded_async(core, trigger, continuation)) == "failed"
-    result = proactive_invoke(runtime, "read_latest_proactive_run", {"name": "job"})
+    result = proactive_invoke(runtime, "read_proactive_task", {"name": "job"})
     assert result.ok
     assert "transport root cause" in result.llm_text
     assert "private-value" not in result.llm_text
@@ -150,7 +150,7 @@ def test_completed_proactive_run_does_not_imply_delivery(env):
     manager.create_task(proactive_id="job", goal="check")
     run_id = manager.repository.begin_run(ProactiveTriggerEvent(proactive_id="job", trigger_kind="manual"))
     manager.repository.complete_run(run_id, turn_id="job-turn", final_reply="done")
-    result = proactive_invoke(runtime, "read_latest_proactive_run", {"name": "job"})
+    result = proactive_invoke(runtime, "read_proactive_task", {"name": "job"})
     assert result.structured["run"]["completion_scope"] == "turn_execution"
     assert result.structured["run"]["delivery_confirmation"] == "not_recorded"
 
@@ -173,7 +173,7 @@ def test_unresolved_proactive_output_is_recorded_as_failure(destination):
     assert "Proactive output channel 'out'" in repository.fail_run.call_args.kwargs["error_text"]
 
 
-@pytest.mark.parametrize("alias", ["read_latest_proactive_run", "list_proactive_runs"])
+@pytest.mark.parametrize("alias", ["read_proactive_task", "list_proactive_runs"])
 @pytest.mark.parametrize("history_read_fails", [False, True])
 def test_history_inspection_exposes_failure_when_begin_run_cannot_be_saved(env, monkeypatch, alias, history_read_fails):
     runtime, manager, _ = env

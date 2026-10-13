@@ -93,6 +93,8 @@ def register_bunshin_subparser(subparsers: argparse._SubParsersAction) -> argpar
         help=RUNTIME_ROOT_HELP,
     )
     efficiency_parser.set_defaults(command="bunshin", bunshin_command="efficiency")
+    from pal.bunshin.config_cli import configure_bunshin_config_parsers
+    configure_bunshin_config_parsers(bunshin_subparsers)
     return bunshin_parser
 
 

@@ -43,6 +43,7 @@ from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResu
 
 FILE_READ_GUIDANCE = ToolGuidance(
     search_objects=('file', 'files'),
+    search_terms=('local', 'text', 'source', 'code', 'config', 'configuration', 'show',),
     purpose=(
         "Read selected lines from one UTF-8 text file. "
         "ranges=[{offset, limit}, ...] delivers multiple blocks in one call (sed -n style). "
@@ -80,6 +81,7 @@ FILE_READ_GUIDANCE = ToolGuidance(
 
 FILE_EDIT_GUIDANCE = ToolGuidance(
     search_objects=('file', 'files'),
+    search_terms=('local', 'text', 'source', 'code', 'replace', 'patch', 'modify', 'update',),
     purpose="Apply valid exact replacements to one local UTF-8 file and report any failed items.",
     use_when=(
         "Making a focused change to an existing text file whose affected lines were delivered by read_file and remain in the current logical "
@@ -100,6 +102,7 @@ FILE_EDIT_GUIDANCE = ToolGuidance(
 
 FILE_WRITE_GUIDANCE = ToolGuidance(
     search_objects=('file', 'files'),
+    search_terms=('local', 'text', 'source', 'code', 'create', 'save',),
     purpose="Write complete UTF-8 text content to a local file on the Pal host, creating it or replacing all of its contents.",
     use_when=(
         "Creating a text file, or intentionally replacing an existing file's complete contents after its complete "
@@ -371,7 +374,7 @@ class FileCapabilityMixin:
         action_name="delete",
         guidance=ToolGuidance(
             search_objects=('path', 'paths', 'file', 'files', 'directory', 'directories', 'link', 'links'),
-            search_terms=('folder', 'folders'),
+            search_terms=('folder', 'folders', 'remove', 'unlink',),
             purpose="Delete the file, directory, or symbolic link at the given path; deleting a link preserves its target.",
             use_when="Removing unwanted filesystem entries. Symbolic links, including links to directories and dangling links, are unlinked without following their targets; recursive=true is required only for real directories.",
             do_not_use_when="Moving or renaming files (use run_shell mv).",
@@ -391,24 +394,6 @@ class FileCapabilityMixin:
                 recovery_hint="Let snapshot retention retire these files; verify the intended source path if the task requires deleting a source.")
         return _reject_pre_effect_failure(_tool_capability_result(PathDeleteTool(), call.args), _DELETE_RECOVERY_HINTS)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="file",
-        action_name="state",
-        guidance=ToolGuidance(
-            search_objects=('cache', 'caches'),
-            purpose="Inspect the read-before-edit file cache.",
-            use_when="Checking whether a file has a current cached read snapshot before edit_file, or debugging stale-edit detection.",
-            do_not_use_when="Reading file content (use read_file). Editing a file (use edit_file).",
-            failure_next_steps="Read-only diagnostic. If cache is stale, re-read the file with read_file before editing.",
-        ),
-        aliases=("inspect_file_cache",),
-        InputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateInput,
-        OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateOutput,
-        execution=INDIRECT_LOCAL_READ,
-        metadata={"canonical_path": "op_file_state"},
-    )
     def file_state(self, call: IntrospectionCall) -> IntrospectionResult:
         state, _, _, _ = _session_file_tools(self, call)
         return _tool_capability_result(FileStateTool(cache=state), call.args)

@@ -1,17 +1,10 @@
 from __future__ import annotations
 
-from pal.execution.tool_semantics import (
-    INDIRECT_CONTROL,
-    INDIRECT_LOCAL_WRITE,
-)
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolGuidance
 
 from pal.execution.generated_tool_models import (
     WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
-    WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
-    WebSearchCapabilitiesWebSearchIntrospectionProviderSetAuthMaterialInput,
-    WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput,
 )
 from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 
@@ -29,10 +22,11 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 from pal.web_search.contracts import WebSearchQuery
 from pal.web_search.models import WebSearchProviderModel
 from pal.web_search.service import WebSearchService
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import diagnostic_summary, diagnostic_text, exception_report, exception_summary
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -101,15 +95,16 @@ class WebSearchIntrospectionProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            purpose="Show web search module state.",
+            search_objects=('state', 'states', 'hub', 'module', 'manager', 'backend', 'backends'),
+            search_terms=('status', 'show', 'get', 'check', 'active', 'current', 'selected', 'provider', 'health'),
+            purpose="Inspect web search hub state, configured and effective provider selection, and availability counts.",
             use_when='Diagnosing web search health — provider count, active provider, mounted status. If no provider is active, inspect list_web_search_providers before selecting an enabled backend.',
             do_not_use_when="Searching the web (use search_web). Listing providers (use list_web_search_providers).",
             failure_next_steps="Read-only. If no active provider, check list_web_search_providers.",
         ), aliases=("inspect_web_search_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        payload = inspect_web_search(self).__dict__
+        payload = inspection_snapshot(inspect_web_search(self).__dict__)
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web search module snapshot",
@@ -125,14 +120,16 @@ class WebSearchIntrospectionProvider:
             search_objects=('provider', 'providers'),
             purpose="List configured web search providers.",
             use_when='Discovering available search backends and their enabled status. An empty list means no providers are configured.',
-            do_not_use_when="Checking the active provider (use inspect_active_web_search_provider). Searching (use search_web).",
+            do_not_use_when="Checking the active provider (use inspect_web_search_state). Searching (use search_web).",
             failure_next_steps="Read-only. If empty, no providers are configured.",
         ),
         aliases=("list_web_search_providers",),
     )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        items = [self._provider_payload(item) for item in self.iter_providers()]
+        items = [{"name": item.provider_id, "provider_id": item.provider_id,
+                  "provider_kind": item.provider_kind, "enabled": item.enabled}
+                 for item in self.iter_providers()]
         payload = {"items": items}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -141,19 +138,6 @@ class WebSearchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web search providers", payload),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="active_provider",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Show the active web search provider.",
-            use_when='Checking which search backend handles queries. If no effective provider is reported, inspect list_web_search_providers and select an enabled provider with set_active_web_search_provider.',
-            do_not_use_when="Listing all providers (use list_web_search_providers). Switching (use set_active_web_search_provider).",
-            failure_next_steps="If no active provider is reported, use list_web_search_providers to find an enabled provider, then select it with set_active_web_search_provider.",
-        ),
-        aliases=("inspect_active_web_search_provider",),
-    )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = {
@@ -172,11 +156,12 @@ class WebSearchIntrospectionProvider:
         scope="provider",
         action_name="show",
         guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Show one web search provider's metadata.",
-            use_when="Inspecting a specific provider's kind, settings, auth keys.",
-            do_not_use_when="Module health (use inspect_web_search_state). Auth state (use inspect_web_search_provider_auth).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers.",
+            search_objects=('provider', 'providers', 'backend', 'backends'),
+            search_terms=('health', 'auth', 'authentication', 'authorization', 'credential', 'credentials', 'status', 'metadata', 'settings'),
+            purpose="Inspect one web search provider's public configuration, authentication and last-request health together.",
+            use_when="Diagnosing search failures, missing credentials or provider settings. Last-request health is an observation, not a fresh connectivity probe.",
+            do_not_use_when="Hub selection and availability (use inspect_web_search_state). Searching the web (use search_web).",
+            failure_next_steps="Inspect the last request error and authentication; verify unknown names with list_web_search_providers. Use the official web-search CLI for authorized configuration repairs.",
         ),
         aliases=("inspect_web_search_provider",),
     )
@@ -184,7 +169,10 @@ class WebSearchIntrospectionProvider:
         provider = self._require_provider(call)
         if provider is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web search provider not found", llm_text="web search provider not found")
-        payload = self._provider_payload(provider)
+        payload = inspection_snapshot(self._provider_payload(provider), sections={
+            "auth": lambda: self.service.provider_auth_state(provider),
+            "health": lambda: self.service.provider_health(provider),
+        })
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web search provider metadata",
@@ -192,19 +180,6 @@ class WebSearchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web search provider metadata", payload),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="provider",
-        action_name="auth_state",
-        guidance=ToolGuidance(
-            search_objects=('auth', 'authorization', 'credential', 'credentials'),
-            purpose="Show one web search provider's authorization state.",
-            use_when='Diagnosing auth failures or checking if API keys are configured. A successful inspection can report unauthorized or unknown authorization; inspect the returned state and apply credentials only when needed.',
-            do_not_use_when="Applying credentials (use set_web_search_provider_auth_material). Provider metadata (use inspect_web_search_provider).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers. If not authorized, apply credentials.",
-        ),
-        aliases=("inspect_web_search_provider_auth",),
-    )
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
         if provider is None:
@@ -218,19 +193,6 @@ class WebSearchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web search provider authorization state", payload),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="provider",
-        action_name="health",
-        guidance=ToolGuidance(
-            search_objects=('health',),
-            purpose="Show one web search provider's health.",
-            use_when='Diagnosing search failures or connectivity issues. A successful inspection can report an unhealthy backend. Inspect authorization and the reported cause; choose a healthy enabled provider with set_active_web_search_provider if needed.',
-            do_not_use_when="Auth state (use inspect_web_search_provider_auth). Module health (use inspect_web_search_state).",
-            failure_next_steps="If unhealthy, try switching providers with set_active_web_search_provider.",
-        ),
-        aliases=("inspect_web_search_provider_health",),
-    )
     def health(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
         if provider is None:
@@ -244,22 +206,7 @@ class WebSearchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web search provider health", payload),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="set_active_provider",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Set the active web search provider.",
-            use_when="Switching to a different enabled search backend.",
-            do_not_use_when="Checking the active provider (use inspect_active_web_search_provider). The target provider is disabled (enable it first).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers. If disabled, enable the provider before selecting it.",
-        ),
-        InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
-        aliases=("set_active_web_search_provider",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:
@@ -292,10 +239,11 @@ class WebSearchIntrospectionProvider:
         action_name="query",
         guidance=ToolGuidance(
             search_objects=('page', 'pages', 'result', 'results'),
+            search_terms=('find', 'lookup', 'internet', 'online',),
             purpose="Search the web with the configured provider and internal fallback.",
             use_when="Looking up current external facts, documentation, or comparing sources.",
             do_not_use_when="Reading a new webpage at a known URL (use navigate_browser, which also returns content). Rereading the current page (use read_browser_page). Reading local files (use read_file).",
-            failure_next_steps="A failed call has already exhausted the configured fallback providers. Inspect provider health and authorization, then enable, repair, or select a healthy provider before retrying.",
+            failure_next_steps="A failed call has already exhausted configured fallback providers. Inspect provider health and authorization. For authorized backend configuration repairs, use pal.self.maintenance and the web-search CLI before retrying; do not repeat an unchanged failed search.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
         execution=DIRECT_EXTERNAL_READ,
@@ -320,11 +268,13 @@ class WebSearchIntrospectionProvider:
             )
         except Exception as exc:
             diagnostic = exception_report(exc)
+            brief = diagnostic_text(exception_summary(exc), limit=1200)
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
                 text="web search failed",
                 structured={"query": query_text, "error_code": "web_search_failed", "error": diagnostic},
-                llm_text=f"web search failed: {diagnostic}",
+                llm_text="web search failed: " + brief,
+                llm_failure_details={"query": query_text, "error_code": "web_search_failed", "error": brief},
                 effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE),
             )
         payload = {
@@ -334,65 +284,35 @@ class WebSearchIntrospectionProvider:
             "fallback_used": result.fallback_used,
             "provider_errors": result.provider_errors,
         }
+        visible = {
+            "items": [{"title": item.title, "url": item.url, "snippet": item.snippet} for item in result.items],
+            "effective_provider_id": result.effective_provider_id,
+            "fallback_used": result.fallback_used,
+        }
+        if result.provider_errors:
+            visible["provider_errors"] = [
+                {"provider_id": error.get("provider_id"),
+                 "error": diagnostic_text(diagnostic_summary(str(error.get("error") or "")), limit=240)}
+                for error in result.provider_errors[:5]
+            ]
+            if len(result.provider_errors) > 5:
+                visible["additional_provider_errors"] = len(result.provider_errors) - 5
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web search results",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Web search results", payload),
+            llm_text=render_titled_structured_for_llm("Web search results", visible),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="management",
-        action_name="enable",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Enable a web search provider.",
-            use_when="Re-enabling a disabled search provider.",
-            do_not_use_when="Disabling (use disable_web_search_provider). Setting active (use set_active_web_search_provider).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers.",
-        ),
-        aliases=("enable_web_search_provider",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="management",
-        action_name="disable",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Disable a web search provider.",
-            use_when="Temporarily removing a provider from the active pool.",
-            do_not_use_when="Enabling (use enable_web_search_provider).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers.",
-        ),
-        aliases=("disable_web_search_provider",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="management",
-        action_name="set_auth_material",
-        guidance=ToolGuidance(
-            search_objects=('material', 'materials', 'credential', 'credentials', 'token', 'tokens'),
-            purpose="Apply auth material to a web search provider without exposing secrets.",
-            use_when="A provider needs API keys or credentials to function.",
-            do_not_use_when="Reading auth state (use inspect_web_search_provider_auth).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers. Check provider docs for required auth fields.",
-        ),
-        InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetAuthMaterialInput,
-        aliases=("set_web_search_provider_auth_material",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
         if provider is None:
@@ -413,22 +333,7 @@ class WebSearchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web search provider auth material updated", payload),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="management",
-        action_name="set_config",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Merge config into a web search provider's settings blob.",
-            use_when="Tuning provider-specific settings (e.g. result count, safe search defaults).",
-            do_not_use_when="Setting auth material (use set_web_search_provider_auth_material).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with list_web_search_providers.",
-        ),
-        InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput,
-        aliases=("configure_web_search_provider",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def set_config(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
         if provider is None:

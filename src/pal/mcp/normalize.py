@@ -107,14 +107,17 @@ def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: 
     status = RuntimeStatus.ERROR if is_error else RuntimeStatus.OK
     title = "MCP tool execution failed" if is_error else "MCP tool result"
     # Preserve the protocol payload internally for output-schema validation.
-    # The model sees it once, without the additional extracted tool_text copy.
-    visible = {key: value for key, value in structured.items() if key != "tool_text"}
+    # Strip protocol metadata only at protocol positions. structuredContent and
+    # text/resource bodies belong to the server's business data and stay intact.
+    visible = {key: value for key, value in structured.items() if key not in {"tool_text", "raw_result"}}
+    visible["result"] = _protocol_payload_for_llm(raw)
     llm_text = render_titled_structured_for_llm(title, visible)
     return CapabilityResult(
         status=status,
         text=text,
         structured=structured,
         llm_text=llm_text,
+        llm_failure_details=visible if is_error else None,
     )
 
 
@@ -160,10 +163,35 @@ def normalize_prompt_result(result: dict[str, Any], *, server_id: str, prompt_na
         text=f"Rendered MCP prompt: {prompt_name}",
         structured=structured,
         llm_text=render_titled_structured_for_llm("Rendered MCP prompt", {
-            key: value for key, value in structured.items() if key not in {"messages", "description"}
+            **{key: value for key, value in structured.items() if key not in {"messages", "description", "raw_result"}},
+            "result": _protocol_payload_for_llm(raw),
         }),
         effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE, receipt={"mcp_prompt_response": True}),
     )
+
+
+def _protocol_payload_for_llm(raw: dict[str, Any]) -> dict[str, Any]:
+    def content_block(block: Any) -> Any:
+        if not isinstance(block, dict):
+            return block
+        visible = {key: value for key, value in block.items() if key != "_meta"}
+        if isinstance(visible.get("resource"), dict):
+            visible["resource"] = {key: value for key, value in visible["resource"].items() if key != "_meta"}
+        return visible
+
+    def content(value: Any) -> Any:
+        return [content_block(block) for block in value] if isinstance(value, list) else content_block(value)
+
+    visible = {key: value for key, value in raw.items() if key != "_meta"}
+    if "content" in visible:
+        visible["content"] = content(visible["content"])
+    if "messages" in visible:
+        visible["messages"] = [
+            {**{key: value for key, value in message.items() if key not in {"_meta", "content"}},
+             "content": content(message.get("content"))}
+            for message in visible["messages"]
+        ]
+    return visible
 
 
 def _content_text(content: Any) -> str:

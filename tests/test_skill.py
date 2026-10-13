@@ -556,7 +556,17 @@ Run the workflow.
                 with self.subTest(command=line):
                     argv = shlex.split(line)
                     self.assertEqual(argv[0], "pal")
+                    redirects_stdin = "<" in argv
+                    if redirects_stdin:
+                        redirect = argv.index("<")
+                        self.assertEqual(len(argv), redirect + 2)
+                        self.assertEqual(argv[-1], "/path/to/authorized-credentials.json")
+                        argv = argv[:redirect]
                     parsed = parser.parse_args(argv[1:])
+                    if redirects_stdin:
+                        self.assertEqual(parsed.command, "web-search")
+                        self.assertEqual(parsed.web_search_command, "auth")
+                        self.assertTrue(parsed.stdin)
                     if hasattr(parsed, "runtime_root"):
                         self.assertEqual(parsed.runtime_root, Path("/path/to/runtime"))
 
@@ -604,9 +614,10 @@ Run the workflow.
         self.assertIn("<runtime_root>/channel/providers/<provider_id>/", skill.manual_text)
         self.assertIn("provider.toml", skill.manual_text)
         self.assertIn("build_channel_provider", skill.manual_text)
-        self.assertIn("rescan does not detect or reload in-place source changes", skill.manual_text)
+        self.assertIn("ChannelExtension", skill.manual_text)
+        self.assertIn("PluginHost", skill.manual_text)
         self.assertIn("do not restart the Pal service", skill.manual_text)
-        self.assertIn("rescan_channel_providers", skill.capability_refs)
+        self.assertIn("rescan_plugins", skill.capability_refs)
 
         search = SkillSearchTool(service=self.service).invoke({"query": "add channel provider provider.toml slash command", "top_k": 3})
         self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.channel.provider.development")

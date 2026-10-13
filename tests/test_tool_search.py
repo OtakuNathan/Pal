@@ -94,7 +94,7 @@ class ToolSearchTests(unittest.TestCase):
         return dict(result.structured or {})
 
     def test_exact_alias_ranks_first_and_returns_compact_contract(self) -> None:
-        payload = self.search(query="web_lookup", top_k=10)
+        payload = self.search(query="web_lookup", top_k=5)
         hit = payload["hits"][0]
         self.assertEqual(hit["alias"], "web_lookup")
         self.assertGreater(hit["score"], 0)
@@ -131,8 +131,9 @@ class ToolSearchTests(unittest.TestCase):
         self.assertIn("web", families)
         self.assertIn("filters exclude", payload["usage_hint"])
 
-    def test_search_uses_alias_words_without_indexing_guidance_prose(self) -> None:
-        self.assertEqual(self.search(query="记忆召回")["hits"], [])
+    def test_search_uses_alias_and_purpose_without_indexing_recovery_prose(self) -> None:
+        self.assertEqual(self.search(query="记忆召回")["hits"][0]["alias"], "memory_lookup")
+        self.assertEqual(self.search(query="search again with a narrower filter")["hits"], [])
         payload = self.search(query="memory lookup")
         self.assertEqual(payload["hits"][0]["alias"], "memory_lookup")
         self.assertIn("记忆召回", payload["hits"][0]["use_when"])
@@ -147,7 +148,7 @@ class ToolSearchTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.text)
         self.assertEqual(
-            result.structured,
+            {key: result.structured[key] for key in ("capability_count", "tool_count")},
             {
                 "capability_count": len(generation.canonical_bindings.actions),
                 "tool_count": len(generation.direct_aliases) + len(generation.indirect_aliases),

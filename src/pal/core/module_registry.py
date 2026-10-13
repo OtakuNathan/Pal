@@ -37,6 +37,7 @@ class ModuleHandle:
     shutdown_sync: Callable[[], None] | None = None
     shutdown_async: Callable[[], Awaitable[None]] | None = None
     execution_extension: Any | None = None
+    channel_extension: Any | None = None
     runtime_state_port: "RuntimeStatePort | None" = None
 
 @dataclass

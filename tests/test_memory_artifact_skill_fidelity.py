@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import builtins
 from dataclasses import replace
 from types import SimpleNamespace
@@ -68,7 +69,8 @@ def test_recall_retains_provider_diagnostics_even_without_degraded_flag(runtime)
     raw = CapabilityResult(status="ok", text="Recall", structured=build_recall_structured_payload(**args),
                            llm_text=render_recall_result_for_llm(**args))
     final = deliver(runtime, lambda: raw)
-    assert "vector shard unavailable" in final.llm_text
+    assert "Recall incomplete:" in final.llm_text
+    assert "vector shard unavailable" not in final.llm_text
     assert raw.structured["metadata"] == result.metadata
     assert "No matching memories found." not in final.llm_text
 
@@ -253,7 +255,9 @@ def test_recall_keeps_embedding_error_after_other_stage_succeeds(setup_review, m
     args = dict(provider_id=provider.provider_id, query=query, result=result, view="summary")
     final = deliver(runtime, lambda: CapabilityResult(status="ok",
         structured=build_recall_structured_payload(**args), llm_text=render_recall_result_for_llm(**args)))
-    assert "backend detail: storage unavailable" in final.llm_text
+    assert "Recall incomplete:" in final.llm_text
+    assert "backend detail: storage unavailable" not in final.llm_text
+    assert "backend detail: storage unavailable" in json.dumps(final.structured["metadata"])
     assert result.metadata["degraded"] is True
 
 
@@ -324,9 +328,9 @@ def test_provider_mutation_recovery_keeps_original_provider_after_write(monkeypa
     assert len(committed) == 1
     assert result.status == 'error'
     recovery = result.affordances[0].arguments
-    assert recovery['name'] == 'recall_provider_memory'
-    assert recovery['args']['name'] == 'provider-a'
-    assert recovery['args']['mem_ref'] == 'case:original'
+    assert result.affordances[0].tool == 'recall_memory'
+    assert recovery['provider_id'] == 'provider-a'
+    assert recovery['mem_ref'] == 'case:original'
     assert result.effect_receipt.outcome.value == 'applied'
     assert 'storage unavailable' in result.llm_text
     assert 'provider-a' in result.recovery_hint

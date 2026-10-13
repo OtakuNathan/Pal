@@ -1,0 +1,101 @@
+{
+  "date": "2026-10-13",
+  "modules": {
+    "artifact": {
+      "reason": "保留接收文件的发现、导入、读取、内容搜索和元信息；附件不是普通本地文件，不能全部改用 read_file/rg。"
+    },
+    "browser": {
+      "reason": "26 项均有网页操作或网页排障用途；fill/type、click/set_checked、close/reset/cache 等效果不同。layout、network、extension 是浏览器业务能力，不是 Pal 后端测试。"
+    },
+    "bunshin": {
+      "reason": "13 项面向主 Pal 的任务账本、提交和工作流控制；restart/resume/triage、用户决策和 Architect 问答改变不同状态，保留。"
+    },
+    "bunshin_roles": {
+      "reason": "36 项只在获授权的 worker 角色中挂载；涉及 Manager 账本、冻结合同、证据和提交，不能用主 Pal 的文件或记忆工具直接替代。减少此目录不会减少主 Pal 的 151 项。"
+    },
+    "channel": {
+      "reason": "hub 库存/发布状态与指定 endpoint 的生命周期/auth/health/backlog 分层，目录保留摘要。"
+    },
+    "checklist": {
+      "reason": "read_checklist 为唯一清单快照；upsert/complete/close 保留。"
+    },
+    "control": {
+      "reason": "人类 control registry 通过 CLI 查询；LLM inspection 已撤。"
+    },
+    "core": {
+      "reason": "一个 core 检查同时返回 workload 和 cache deadline；配置由 CLI 维护，label setter 不再公开。"
+    },
+    "execution": {
+      "reason": "模块状态含 registry/native/search-only 数量；文件缓存诊断已撤出工具表面。"
+    },
+    "failure": {
+      "reason": "保留近期回复投递故障的结构化信息；汇总与最近 16 条并不相同，可在单一接口中保留两个 view。日志不是完整替代。"
+    },
+    "identity": {
+      "reason": "人类维护入口；LLM 工具已撤，CLI 支持在线 projection 刷新。"
+    },
+    "llm": {
+      "reason": "运行态检查 active/think/process usage；单 endpoint 检查能力、限制和 scoped usage。"
+    },
+    "lsp": {
+      "reason": "保留代码导航、诊断、workspace 准备和 server 恢复。host 进程状态与 workspace/server 状态不同，合并需保留 sidecar 失联时的被动诊断。"
+    },
+    "mcp": {
+      "reason": "保留 server 管理、动态工具投影和图像转码；host 被动状态与 server RPC 清单不同，sidecar 失联时仍需可诊断。prepare_mcp_image 是外部工具输入准备能力。"
+    },
+    "memory": {
+      "reason": "hub 检查选择和 L1/L2；单 provider 检查库存、挂载、索引与 embedding；四组 SQLite/mock 同名声明去重。"
+    },
+    "plugins": {
+      "reason": "hub 状态、摘要目录、单 plugin 完整诊断分层；异步 package job 检查保留。"
+    },
+    "proactive": {
+      "reason": "hub 状态与单 task 配置/latest outcome 分层；多次运行历史继续独立查询。"
+    },
+    "skill": {
+      "reason": "保留搜索/读取/上下文注入、候选准备/提交及更新/停用；read 与 inject 的上下文效果不同。pending 候选状态用于提交前检查和不确定结果恢复。"
+    },
+    "web_search": {
+      "reason": "hub 选择与指定 provider 的配置/auth/health 各一个入口；保留 search_web，健康能力合并到 provider 检查。"
+    }
+  },
+  "tools": {
+    "inspect_artifact_state": {
+      "disposition": "keep",
+      "reason": "管理器策略与当前对话资源计数一起返回；没有 scope 时明确表示 inventory 不可取得。",
+      "replacement": "",
+      "prerequisite": ""
+    },
+    "set_proactive_output_target": {
+      "disposition": "consolidate_after_contract_change",
+      "reason": "目的地可归一为一次原子更新，但 target-only 目前保留当前 channel，channel setter 会重新解析缺省目标。",
+      "replacement": "统一 destination setter，明确 unchanged/set/clear。",
+      "prerequisite": "保留局部目标更新及跨 channel 不继承语义；不要用先读取再全量覆盖引入并发竞态。"
+    },
+    "rescan_and_attach_first_party_plugins": {
+      "disposition": "consolidate_after_contract_change",
+      "reason": "可变成 rescan 的显式 attach_new 选项，而非两个 alias。",
+      "replacement": "rescan_plugins(attach_new=true)，默认 false。",
+      "prerequisite": "保持默认只更新 metadata；显式附带 attach 才加载新 first-party 实例，不能伪装成 reload。"
+    }
+  },
+  "retired_tools": {
+    "inspect_channel_endpoint_auth": "inspect_channel_endpoint",
+    "inspect_channel_endpoint_health": "inspect_channel_endpoint",
+    "inspect_channel_endpoint_backlog": "inspect_channel_endpoint",
+    "inspect_active_web_search_provider": "inspect_web_search_state",
+    "inspect_web_search_provider_auth": "inspect_web_search_provider",
+    "inspect_web_search_provider_health": "inspect_web_search_provider",
+    "inspect_active_memory_provider": "inspect_memory_state",
+    "inspect_memory_provider_state": "inspect_memory_provider_inventory",
+    "inspect_llm_thinking_level": "inspect_active_llm",
+    "inspect_llm_usage": "inspect_active_llm / inspect_llm_endpoint",
+    "inspect_core_cache_warm_deadline": "observe_core",
+    "inspect_checklist_state": "read_checklist",
+    "read_latest_proactive_run": "read_proactive_task",
+    "inspect_control_state": "pal control status",
+    "refresh_identity": "pal identity show/refresh",
+    "configure_core": "internal label only",
+    "inspect_file_cache": "read_file recovery / internal diagnostics"
+  }
+}

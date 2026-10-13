@@ -153,6 +153,21 @@ class PluginHost:
         self._management_handle = handle
         return handle
 
+    async def shutdown_async(self) -> None:
+        # Channel transports and provider hooks may belong to the calling loop.
+        # Keep that loop running while the synchronous lifecycle owner drains.
+        task = asyncio.create_task(asyncio.to_thread(self.shutdown))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            task.result()
+            raise
+
     def shutdown(self) -> None:
         self.shutdown_errors = []
         try:
@@ -180,6 +195,8 @@ class PluginHost:
         self.scan_errors = []
         first_party = self._scan_first_party_manifests()
         third_party = self._scan_third_party_manifests()
+        from pal.channel.plugin import scan_channel_plugins
+        scan_channel_plugins(self)
         try:
             self._topological_order()
         except ValueError as exc:
@@ -225,7 +242,7 @@ class PluginHost:
         return result
 
     def show_summary(self) -> dict[str, Any]:
-        records = self.list_plugins()
+        records = self.list_plugin_summaries()
         return {
             "first_party_count": len([item for item in records if item["source"] == PLUGIN_SOURCE_FIRST_PARTY]),
             "third_party_count": len([item for item in records if item["source"] == PLUGIN_SOURCE_THIRD_PARTY]),
@@ -235,7 +252,56 @@ class PluginHost:
             "scan_errors": list(self.scan_errors),
             "builtin_root": str(self.builtin_root),
             "third_party_root": str(self.third_party_root()),
+            "generation_count": len(self.generations),
+            "cleanup_pending_count": sum(item["cleanup_pending"] for item in records),
         }
+
+    def list_plugin_summaries(self) -> list[dict[str, Any]]:
+        records = list(self.first_party_records.values())
+        records.extend(record for row in self.third_party_repository.list_all()
+                       if (record := self._record(row.plugin_id)) is not None)
+        items = []
+        for record in records:
+            generation = self.generations.get(record.plugin_id)
+            items.append({
+                "plugin_id": record.plugin_id, "name": record.plugin_id,
+                "module_id": record.module_id, "source": record.source,
+                "version": record.version, "enabled": record.enabled, "attached": record.attached,
+                "lifecycle_state": record.last_load_status,
+                "generation": generation.number if generation is not None else 0,
+                "cleanup_pending": bool(generation and (generation.cleanup_started or generation.cleanup_errors))
+                                   or record.plugin_id in self._pending_rollbacks,
+            })
+        return sorted(items, key=lambda item: (item["source"], item["plugin_id"]))
+
+    def inspect_plugin(self, plugin_id: str) -> dict[str, Any] | None:
+        record = self._record(plugin_id)
+        if record is None:
+            return None
+        from pal.shared.inspection import inspection_snapshot
+        from pal.packages.service import PackageService
+        generation = self.generations.get(plugin_id)
+        manifest = self.manifests.get(plugin_id)
+        payload = {key: value for key, value in record.__dict__.items() if key != "config"}
+        payload.update({
+            "name": plugin_id, "config_keys": sorted(record.config),
+            "generation": generation.number if generation is not None else 0,
+            "lifecycle_protocol": manifest.lifecycle_protocol if manifest else record.lifecycle_protocol,
+            "requires_plugins": list(manifest.requires_plugins if manifest else record.requires_plugins),
+            "requires_ports": list(manifest.requires_ports if manifest else record.requires_ports),
+            "blocked_by": list(self._blocked_by(plugin_id)),
+            "suspended_by": list(record.config.get("suspended_by", [])),
+            "lifecycle_state": record.last_load_status,
+            "logical_unload_committed": bool(generation and generation.cleanup_started),
+            "cleanup_pending": bool(generation and (generation.cleanup_started or generation.cleanup_errors))
+                               or plugin_id in self._pending_rollbacks,
+            "cleanup_errors": list(generation.cleanup_errors) if generation is not None else [],
+        })
+        legacy_channel = manifest.legacy_channel if manifest is not None else record.config.get("legacy_channel", False)
+        kind = "provider" if legacy_channel else ("builtin" if record.source == PLUGIN_SOURCE_FIRST_PARTY else "plugin")
+        return inspection_snapshot(payload, sections={
+            "installation": lambda: PackageService(self.runtime_root).status(name=plugin_id, kind=kind),
+        })
 
     def list_plugins(self) -> list[dict[str, Any]]:
         items = [record.__dict__.copy() for record in self.first_party_records.values()]
@@ -282,6 +348,10 @@ class PluginHost:
     def forget_uninstalled(self, plugin_id: str) -> None:
         if plugin_id in self.generations or plugin_id in self._pending_rollbacks:
             raise RuntimeError("Cannot forget a plugin with a remaining generation")
+        manager = self.context.port_registry.get("channel:provider_manager")
+        if manager is not None and plugin_id in manager.plugin_provider_ids:
+            manager._remove_discovered_provider(plugin_id, reason="plugin_uninstalled")
+            manager.plugin_provider_ids.discard(plugin_id)
         self.manifests.pop(plugin_id, None)
         self.third_party_handles.pop(plugin_id, None)
         self.module_to_plugin = {key: owner for key, owner in self.module_to_plugin.items() if owner != plugin_id}
@@ -594,7 +664,20 @@ class PluginHost:
         module_id = str(payload.get("module_id") or payload.get("plugin_id") or "").strip()
         if not module_id:
             raise ValueError("module_id is required")
+        channel = payload.get("channel", {})
+        if not isinstance(channel, dict):
+            raise ValueError("channel must be a table")
+        endpoint_types = channel.get("endpoint_types", [])
+        if (not isinstance(endpoint_types, list)
+                or any(not isinstance(t, str) or not t.strip() for t in endpoint_types)
+                or len(set(endpoint_types)) != len(endpoint_types)):
+            raise ValueError("channel.endpoint_types must be unique nonempty strings")
+        if endpoint_types:
+            existing = self.context.module_registry.get(module_id)
+            if existing is not None and self.module_to_plugin.get(module_id) != str(payload["plugin_id"]):
+                raise ValueError("channel plugin module_id is already owned")
         return PluginManifest(
+            channel_endpoint_types=tuple(endpoint_types),
             plugin_id=str(payload["plugin_id"]),
             entrypoint=str(payload["entrypoint"]),
             version=str(payload["version"]),
@@ -823,9 +906,13 @@ class PluginHost:
                 extra_prefixes=_record_reload_prefixes(record),
                 plugin_dir=plugin_dir if record.source == PLUGIN_SOURCE_THIRD_PARTY else None,
             )
-            module = importlib.import_module(record.entrypoint)
-            factory = getattr(module, "build_plugin")
-            instance = self._call_plugin_factory(factory, plugin_dir=plugin_dir)
+            if manifest.legacy_channel:
+                from pal.channel.plugin import LegacyChannelPlugin
+                instance = LegacyChannelPlugin(manifest)
+            else:
+                module = importlib.import_module(record.entrypoint)
+                factory = getattr(module, "build_plugin")
+                instance = self._call_plugin_factory(factory, plugin_dir=plugin_dir)
             start = getattr(instance, "start", None)
             if not callable(start) or callable(getattr(instance, "register_with_core", None)):
                 raise TypeError("plugin must implement raii.v1 start(scope) and must not expose register_with_core")
@@ -844,6 +931,13 @@ class PluginHost:
             handle.mounted = True
             handle.degraded = False
             self.context.register_module(handle)
+            if handle.channel_extension is not None:
+                manager = self.context.require_port("channel:provider_manager")
+                manager.plugin_host = self
+                scope.defer(handle.channel_extension.close)
+                handle.channel_extension.install(manager, plugin_id, manifest)
+            elif manifest.channel_endpoint_types or manifest.legacy_channel:
+                raise ValueError("channel plugin must return a channel_extension")
             if handle.execution_extension is not None:
                 scope.defer(lambda: self.context.execution_runtime.uninstall(self.context, handle))
                 self.context.execution_runtime.install(handle.execution_extension, self.context, handle)

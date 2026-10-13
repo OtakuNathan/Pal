@@ -14,6 +14,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 
 
 @capability_node(
@@ -31,14 +32,20 @@ class FailureIntrospectionProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             search_objects=('state', 'states'),
+            search_terms=('status', 'show', 'get', 'summary', 'error', 'errors',),
             purpose="Show failure runtime summary.",
             use_when='Diagnosing reply delivery failures or checking failure tracking health. Use list_failure_reports when individual recent failures are needed; the summary is not the complete failure history.',
-            do_not_use_when="Checking LLM token or cost metrics (use inspect_llm_usage; it does not diagnose transport errors). Checking proactive task failures (use list_proactive_runs). LLM transport errors require the relevant service logs when no structured failure report exists.",
+            do_not_use_when="Checking LLM token or cost metrics (use inspect_active_llm; it does not diagnose transport errors). Checking proactive task failures (use list_proactive_runs). LLM transport errors require the relevant service logs when no structured failure report exists.",
             failure_next_steps="Read-only diagnostic. Use list_failure_reports for specific failure details.",
         ), aliases=("inspect_failure_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         summary = self.runtime.show_summary()
+        reports = [report.__dict__ for report in self.runtime.recent_reports[-4:]]
+        summary = inspection_snapshot({**summary, "recent_diagnostics": [{
+            key: report.get(key) for key in ("report_id", "subsystem", "component", "severity", "failure_kind",
+                                           "current_blocker", "impact", "safe_to_retry", "recommended_next_step")
+        } for report in reports]})
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="failure runtime summary",
@@ -52,6 +59,7 @@ class FailureIntrospectionProvider:
         action_name="recent_reports",
         guidance=ToolGuidance(
             search_objects=('report', 'reports'),
+            search_terms=('error', 'errors', 'history',),
             purpose="List the last 16 structured failure reports; this is a bounded recent window, not a complete history.",
             use_when="Investigating why replies or deliveries failed recently.",
             do_not_use_when="Module-level health (use inspect_failure_state).",

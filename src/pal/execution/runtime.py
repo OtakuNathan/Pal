@@ -61,7 +61,7 @@ from pal.execution.tool_facade import (
     validation_error_details,
 )
 from pal.shared.diagnostics import diagnostic_text, diagnostic_value, diagnostic_summary, exception_report, exception_summary
-from pal.execution.tool_presentation import render_tool_definition, render_tool_search
+from pal.execution.tool_presentation import native_input_contract, render_tool_definition, render_tool_search
 from pal.shared.result_rendering import render_structured_for_llm
 from pal.execution.tool_registry import (
     CompiledToolRecord,
@@ -91,7 +91,8 @@ from pal.shared import (
     RuntimeStatus,
     SINGLETON_TARGET,
 )
-from pal.execution.discovery_terms import tool_search_terms
+from pal.execution.discovery_terms import search_facets as _search_facets
+from pal.execution.discovery_terms import ACTION_WORDS, PURPOSE_STOP_WORDS, fuzzy_query_matches, normalize_domain, partial_query_match, purpose_action_evidence, purpose_relevance, query_vocabulary, retrieval_candidates, tool_domain, tool_search_terms
 
 if TYPE_CHECKING:
     from pal.core.module_registry import ModuleHandle
@@ -704,6 +705,36 @@ class ExecutionRuntime(ExecutionRuntimePort):
             turn_id=turn_id,
         )
 
+    def invoke_model_tool(
+        self, call: ToolCallIR, *, allow_tools: bool = True,
+        budget: ToolCallBudget | None = None, turn_id: str | None = None,
+        generation: ToolRegistryGeneration | None = None,
+    ) -> ToolInvocationResult:
+        captured = generation or self._registry_generation
+        return self._invoke_tool_record_sync(
+            captured, call, invocation_mode=self._model_invocation_mode(captured, call),
+            allow_tools=allow_tools, budget=budget, turn_id=turn_id,
+        )
+
+    async def invoke_model_tool_async(
+        self, call: ToolCallIR, *, allow_tools: bool = True,
+        budget: ToolCallBudget | None = None, turn_id: str | None = None,
+        generation: ToolRegistryGeneration | None = None,
+    ) -> ToolInvocationResult:
+        captured = generation or self._registry_generation
+        return await self._invoke_tool_record_async(
+            captured, call, invocation_mode=self._model_invocation_mode(captured, call),
+            allow_tools=allow_tools, budget=budget, turn_id=turn_id,
+        )
+
+    @staticmethod
+    def _model_invocation_mode(generation: ToolRegistryGeneration, call: ToolCallIR) -> InvocationMode:
+        # Only published native functions may route an indirect record without
+        # call_tool. Guessed, unexposed indirect aliases still reject as before.
+        if call.name in generation.provider_specs and call.name in generation.indirect_aliases:
+            return InvocationMode.INDIRECT
+        return InvocationMode.DIRECT
+
     def _invoke_tool_record_sync(
         self,
         generation: ToolRegistryGeneration,
@@ -948,9 +979,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 if isinstance(exc, ValidationError)
                 else {"validation_error": str(exc)}
             )
+            error = render_invalid_arguments(record.alias, exc, record.input_schema)
+            if record.native_function:
+                contract = native_input_contract(record.input_schema)
+                details["input_schema"] = contract
+                error += "\nInput contract (JSON objects must not be stringified): " + json.dumps(contract, ensure_ascii=False)
             return rejection(
                 "invalid_arguments",
-                render_invalid_arguments(record.alias, exc, record.input_schema),
+                error,
                 retry=RetryDirective.CORRECT_INPUT,
                 details=details,
             )
@@ -1088,8 +1124,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     @staticmethod
     def _search_generation(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
+        if normalize_domain(str(args.get("domain") or "")):
+            from pal.execution.domain_search import search_domain
+            return search_domain(generation, args)
         raw_query = str(args.get("query") or "").strip()
         query = raw_query.lower()
+        domain = normalize_domain(str(args.get("domain") or ""))
         namespace = str(args.get("namespace") or "").strip().lower()
         namespace = {"inspect": "introspection", "action": "operation"}.get(namespace, namespace)
         family = str(args.get("family") or "").strip().lower()
@@ -1100,29 +1140,45 @@ class ExecutionRuntime(ExecutionRuntimePort):
             if str(item).strip()
         }
         include_facets = bool(args.get("facets", False))
+        browse_directory = args.get("directory_offset") is not None or bool(domain and not raw_query)
+        directory_records = []
         explicit_limit = args.get("top_k") is not None or args.get("limit") is not None
         try:
-            limit = max(1, int(args.get("top_k") or args.get("limit") or 3))
+            limit = min(5, max(1, int(args.get("top_k") or args.get("limit") or 3)))
         except (TypeError, ValueError):
             limit = 3
         terms = set(tool_search_terms(query))
         score_base = max(6, len(terms) + 1)
         scored = []
+        near_matches = []
+        filtered_records = {}
+        known_words = set()
+        available_domains = set()
+        for alias, item in generation.search_records.items():
+            available_domains.add(item.get("domain") or tool_domain(alias, str(item.get("module_id") or "")))
+            known_words.update(tool_search_terms(alias))
+            known_words.update(item.get("search_terms", item.get("search_objects", ())))
+            for rule in item.get("search_term_rules", ()):
+                known_words.update(rule["terms"])
+        purpose_scores = {} if browse_directory else purpose_relevance({
+            alias: item for alias, item in generation.search_records.items()
+            if not domain or (item.get("domain") or tool_domain(alias, str(item.get("module_id") or ""))) == domain
+        }, terms)
         query_matches: list[dict[str, Any]] = []
         for alias, item in generation.search_records.items():
             item_namespace = str(item.get("namespace") or "").lower()
             item_family = str(item.get("family") or "").lower()
             item_module = str(item.get("module_id") or "").lower()
+            item_domain = item.get("domain") or tool_domain(alias, item_module)
             item_tags = {str(tag).lower() for tag in item.get("tags", ())}
             alias_text = alias.lower()
             alias_terms = set(tool_search_terms(alias_text))
-            object_terms = set(item.get("search_terms", item.get("search_objects", ())))
+            object_terms = query_vocabulary(item, terms)
             object_matches = terms & object_terms
             alias_matches = terms & alias_terms
             matched_terms = alias_matches | object_matches
             coverage = len(matched_terms)
-            # Only aliases and declared discovery vocabulary are positive evidence.
-            # Prose can contain negations or mention unrelated tools.
+            # Preserve exact and complete structured matches before purpose retrieval.
             if raw_query and alias == raw_query:
                 tier = 6
             elif query and alias_text == query:
@@ -1135,32 +1191,91 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 tier = 3
             else:
                 tier = 0
-            if query and not terms and alias_text != query:
-                continue
-            if terms and not tier:
-                continue
-            query_matches.append(item)
-            if ((namespace and item_namespace != namespace)
+            filters_match = not ((domain and item_domain != domain)
+                    or (namespace and item_namespace != namespace)
                     or (family and item_family != family)
                     or (module_id and item_module != module_id)
-                    or (tags and not tags.issubset(item_tags))):
+                    or (tags and not tags.issubset(item_tags)))
+            if filters_match:
+                filtered_records[alias] = item
+            if filters_match and domain:
+                directory_records.append({"alias": alias, "purpose": item.get("purpose", "")})
+            if browse_directory or (query and not terms and alias_text != query):
+                continue
+            scope_terms = set(item.get("search_scope_terms", ()))
+            scope_match = int(not scope_terms or bool(terms & scope_terms))
+            purpose_score, purpose_matches = purpose_scores.get(alias, (0.0, set()))
+            meaningful = terms - PURPOSE_STOP_WORDS
+            evidence = matched_terms | purpose_matches
+            # Purpose can establish relevance even when incidental words miss.
+            # Known actions and conditional aliases cannot be silently discarded.
+            blocked_conditions = {word for rule in item.get("search_term_rules", ())
+                                  if not terms.intersection(rule["requires_any"])
+                                  for word in rule["terms"]}
+            action_evidence = (
+                (matched_terms & ACTION_WORDS)
+                | (terms & set(tool_search_terms(alias.split('_', 1)[0])))
+                | purpose_action_evidence(alias, str(item.get("purpose") or ""), terms)
+            )
+            purpose_candidate = (
+                bool(purpose_matches - matched_terms)
+                and len(evidence & meaningful) >= 2
+                and (domain or (matched_terms - ACTION_WORDS - {item_domain})
+                     or len(purpose_matches - ACTION_WORDS) >= 2)
+                and len(evidence & meaningful) / max(1, len(meaningful)) >= .6
+                and not ((terms & ACTION_WORDS) - action_evidence)
+                and not (meaningful - evidence - {"current", "local", "exact", "valid", "requested", "specific"})
+                and not (terms & blocked_conditions)
+                and not terms.intersection({"not", "never", "without"})
+            )
+            anchored_partial = (
+                bool(domain) or bool(matched_terms - ACTION_WORDS - {item_domain})
+                or len(purpose_matches - ACTION_WORDS) >= 2
+            ) and partial_query_match(
+                terms, evidence, action_evidence, domain=domain,
+                owner=item_domain, blocked=blocked_conditions,
+            )
+            if not tier and (purpose_candidate or anchored_partial):
+                tier = 2
+            if terms and not tier:
+                missing = terms - matched_terms
+                if (filters_match and coverage + bool(domain) >= 2
+                        and fuzzy_query_matches(alias, terms, alias_terms | object_terms, missing, known_words, domain=domain)
+                        and matched_terms.intersection(item.get("search_objects", ()))):
+                    near_matches.append(((coverage, scope_match), alias, {
+                        "alias": alias, "purpose": item.get("purpose", ""),
+                        "matched_terms": sorted(matched_terms), "unmatched_terms": sorted(missing),
+                    }))
+                continue
+            query_matches.append(item)
+            if not filters_match:
                 continue
             # This vocabulary belongs to the harness, not the model contract.
-            hit = {key: value for key, value in item.items() if key not in {"search_objects", "search_terms"}}
-            # All query words must match. Prefer exact aliases, then equivalent
-            # object forms, then aliases containing additional words.
-            rank = (max(0, tier - 4), coverage, tier)
+            hit = {key: value for key, value in item.items() if key not in {"search_objects", "search_terms", "search_auxiliary_terms", "search_term_rules", "search_scope_terms", "search_intents"}}
+            # Preserve structural specificity as a ranking boost.
+            rank = (max(0, tier - 4), coverage, tier, scope_match)
             score = 0
             for component in rank:
                 score = score * score_base + component
+            # Exact aliases retain absolute priority. For lexical candidates,
+            # purpose relevance is primary and structured coverage adds a boost.
+            if tier == 2:
+                unmatched = meaningful - evidence
+                score = max(0, round(1000 * purpose_score) + coverage * 250
+                            + scope_match * 50 - len(unmatched) * 150)
+                if unmatched:
+                    hit['matched_terms'] = sorted(evidence & meaningful)
+                    hit['unmatched_terms'] = sorted(unmatched)
+            elif tier >= 3:
+                score += 10000000 * max(1, tier - 3)
             hit["score"] = score
             scored.append((rank, alias, hit))
         scored.sort(key=lambda row: (-row[-1]["score"], row[1]))
         candidates = scored
-        if not explicit_limit and scored and scored[0][0][2] >= 2:
+        if not explicit_limit and scored and scored[0][0][2] >= 3:
             # A precise match should not be padded with weaker neighbours.
             # An explicit limit allows broader discovery when requested.
-            candidates = [row for row in scored if row[0][:3] == scored[0][0][:3]]
+            candidates = [row for row in scored if row[-1]["score"] == scored[0][-1]["score"]]
         hits = [row[-1] for row in candidates[:limit]]
         result: dict[str, Any] = {
             "hits": hits,
@@ -1173,6 +1288,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 key: value
                 for key, value in {
                     "query": query,
+                    "domain": domain,
                     "namespace": namespace,
                     "family": family,
                     "module_id": module_id,
@@ -1185,14 +1301,82 @@ class ExecutionRuntime(ExecutionRuntimePort):
             result["facets"] = _search_facets(row[-1] for row in scored)
             if result["truncated"]:
                 result["usage_hint"] = "Narrow with namespace, module_name, family, or tags."
-        if not scored and query_matches:
+        if domain and domain not in available_domains:
+            result["available_domains"] = sorted(available_domains - {""})
+            result["usage_hint"] = (
+                "Unknown or unavailable domain. No other bucket was searched. "
+                "Choose an operation-owner domain from available_domains, or explicitly omit domain "
+                "for broad discovery. Target instance names are invocation arguments, not domains."
+            )
+        elif not scored and query_matches:
             result["filter_suggestions"] = _search_facets(query_matches)
             result["usage_hint"] = (
                 "The query matches tools, but the supplied filters exclude them. "
                 "Remove or correct filters using filter_suggestions; family is not module_name."
             )
         elif not scored:
-            result["usage_hint"] = "No matching tools. All query words must match an alias or declared discovery terms, including selected operation enums. Shorten to the object/domain (e.g. 'browser tabs'), omit unknown filters, then use read_tool to inspect available operations."
+            near_matches.sort(key=lambda row: (-row[0][0], -row[0][1], row[1]))
+            suggestions = [] if browse_directory else retrieval_candidates(
+                filtered_records, terms, domain=domain, fuzzy_matches=[row[2] for row in near_matches])
+            if suggestions:
+                result["suggestions"] = suggestions[:min(3, limit)]
+                for suggestion in result["suggestions"]:
+                    suggestion['contract'] = {
+                        key: value for key, value in filtered_records[suggestion['alias']].items()
+                        if key not in {"search_objects", "search_terms", "search_auxiliary_terms", "search_term_rules", "search_scope_terms", "search_intents"}
+                    }
+                    suggestion['contract']['score'] = suggestion['score']
+            result["usage_hint"] = (
+                "No matching tools for these query words and filters; this does not prove a capability is unavailable. "
+                "Search uses positive purpose text plus aliases and declared discovery terms. "
+                "Shorten to the object/domain (e.g. 'browser tabs') and omit unknown filters. "
+                "Suggestions fuse lexical intent, purpose and bounded fuzzy retrieval, not proof that the requested capability exists. "
+                "Each includes its full callable contract. Compare it with the original request, including unmatched terms; "
+                "invoke directly if it supports that request. Do not silently discard requirements. "
+                "Use read_tool only if contract information is missing or changed. "
+                "If still unresolved, check list_tools when available before falling back; use read_tool only for a known alias."
+            )
+        if not hits and not result.get('suggestions') and domain and domain in available_domains and directory_records:
+            # Navigation is independent of query matching. Only the visible,
+            # explicitly selected bucket and all supplied filters are listed.
+            # Directory entries do not establish support for the original task.
+            offset = max(0, int(args.get("directory_offset") or 0))
+            page_size = 16
+            directory_records.sort(key=lambda item: item["alias"])
+            page = []
+            for item in directory_records[offset:offset + page_size]:
+                purpose = str(item['purpose'])
+                compact = {'alias': item['alias'], 'purpose': purpose}
+                if len(purpose) > 160:
+                    compact['purpose'] = purpose[:159].rstrip() + '…'
+                    compact['purpose_truncated'] = True
+                page.append(compact)
+            next_offset = offset + len(page)
+            result["directory"] = {
+                "domain": domain, "tools": page, "total_count": len(directory_records),
+                "offset": offset, "page_size": page_size,
+                "next_offset": next_offset if next_offset < len(directory_records) else None,
+            }
+            result["usage_hint"] = (
+                ("Domain directory requested. " if browse_directory else "No query match was returned. ") +
+                "The directory lists up to 16 available tool names and brief purposes in this domain, "
+                "not matches for the requested task. Compare their purposes with the whole original request. "
+                "Purposes may be shortened; full contracts remain available through read_tool. "
+                "Use read_tool on a plausible alias to check its contract, then invoke only if it supports the task. "
+                "If next_offset is present, request the next page with the same domain and filters and "
+                "directory_offset=next_offset, or omit directory_offset and supply short query words to rank full contracts. "
+                "Query words are ignored for explicit directory pages. "
+                "If this domain has no suitable tool, choose another domain explicitly or report it unresolved."
+            )
+        elif not hits and (not domain or domain not in available_domains):
+            result["available_domains"] = sorted(available_domains - {""})
+            result["usage_hint"] = (
+                result.get("usage_hint", "") +
+                " Choose a domain from available_domains and set directory_offset=0 to browse its compact directory."
+            ).strip()
+        if result.get("usage_hint"):
+            from pal.shared.tool_routing import TOOL_DISCOVERY_STOP_HINT
+            result["usage_hint"] += " " + TOOL_DISCOVERY_STOP_HINT
         return result
 
     @staticmethod
@@ -1719,7 +1903,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     error=error,
                     effect=outcome,
                     retry=retry,
-                    llm_text=_with_failure_diagnostics(llm_text or raw_text, dict(raw_structured or {}), error=raw_text),
+                    llm_text=_with_failure_diagnostics(llm_text or raw_text,
+                        dict(raw_structured or {}) if raw.llm_failure_details is None
+                        else raw.llm_failure_details, error=raw_text),
                     affordances=owner_affordances,
                     recovery_hint=recovery_hint,
                     details=dict(raw_structured or {}),
@@ -1967,7 +2153,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         turn_id: str | None = None,
     ) -> ToolExecutionResult:
         captured = self._registry_generation
-        invocation = self.invoke_direct_tool(
+        invocation = self.invoke_model_tool(
             call,
             allow_tools=allow_tools,
             budget=budget,
@@ -2001,7 +2187,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         turn_id: str | None = None,
     ) -> ToolExecutionResult:
         captured = self._registry_generation
-        invocation = await self.invoke_direct_tool_async(
+        invocation = await self.invoke_model_tool_async(
             call,
             allow_tools=allow_tools,
             budget=budget,
@@ -2321,38 +2507,6 @@ def _target_name_required_result(
             f"Retry with args.{argument} set to one of these names."
         ),
     )
-
-
-def _search_facets(records: Any) -> dict[str, Any]:
-    counts: dict[str, dict[str, int]] = {
-        "namespaces": {},
-        "modules": {},
-        "families": {},
-    }
-    for record in records:
-        for bucket, key, field_name in (
-            ("namespaces", "namespace", "namespace"),
-            ("modules", "module_id", "module_id"),
-            ("families", "family", "family"),
-        ):
-            value = str(record.get(field_name) or "")
-            if not value:
-                continue
-            counts[bucket][value] = counts[bucket].get(value, 0) + 1
-    return {
-        "namespaces": [
-            {"namespace": key, "count": count}
-            for key, count in sorted(counts["namespaces"].items())
-        ],
-        "modules": [
-            {"module_id": key, "count": count}
-            for key, count in sorted(counts["modules"].items())
-        ],
-        "families": [
-            {"family": key, "count": count}
-            for key, count in sorted(counts["families"].items())
-        ],
-    }
 
 
 def _target_discovery_alias(descriptor: CapabilityDescriptor) -> str:

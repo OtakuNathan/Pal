@@ -480,9 +480,14 @@ class ArtifactManager:
         record = self._require_visible_record(artifact_id, scope_key)
         self._refresh_hot(record.artifact_id, scope_key)
         representations = self.repository.list_representations(record.artifact_id)
+        state = self.repository.get_hot_state(_hot_id(scope_key, record.artifact_id))
         return {
             "artifact": self._record_dict(record),
             "representations": [self._representation_dict(item) for item in representations],
+            "lifecycle": {"hot": state is not None and _parse_dt(state.expires_at) > _utc_now_dt(),
+                          "expires_at": state.expires_at if state is not None else None,
+                          "hard_expires_at": state.hard_expires_at if state is not None else None,
+                          "write_authority": self.writable},
         }
 
     def read(

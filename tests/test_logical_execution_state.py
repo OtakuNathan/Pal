@@ -20,7 +20,7 @@ from pal.core.turns import ToolCallEffect
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import ToolCallBudget
 from pal.execution.file_edit import FileEditTool
-from pal.execution.file_state import SessionFileStateCache, read_utf8_text_exact
+from pal.execution.file_state import FileStateTool, SessionFileStateCache, read_utf8_text_exact
 from pal.execution.session_state import (
     FileDeliveryManifest,
     FileDeliverySpan,
@@ -802,17 +802,12 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 )
             )
 
-            state_result = runtime.invoke_indirect_tool(
-                new_tool_call(
-                    name="inspect_file_cache",
-                    args={"file_path": str(path)},
-                    call_id="state-after-l1",
-                ),
-                turn_id=turn_id,
-            )
-            self.assertTrue(state_result.output["cached"])
-            self.assertTrue(state_result.output["valid"])
-            self.assertTrue(state_result.output["full_view"])
+            state_result = FileStateTool(cache=SessionFileStateCache(
+                backend=runtime.logical_state, context=runtime.logical_context_for_turn(turn_id),
+            )).invoke({"file_path": str(path)})
+            self.assertTrue(state_result.structured["cached"])
+            self.assertTrue(state_result.structured["valid"])
+            self.assertTrue(state_result.structured["full_view"])
 
             runtime.prepare_model_context(memory, SimpleNamespace(turn_id=turn_id),
                 context_view=memory.l1_context_view(turn_id, ()))
@@ -1057,15 +1052,10 @@ class LogicalExecutionStateTests(unittest.TestCase):
 
             active = memory.active_l1_turn(turn_id)
             self.assertEqual(active.pending_call_ids, {"read-atomic"})
-            state_result = runtime.invoke_indirect_tool(
-                new_tool_call(
-                    name="inspect_file_cache",
-                    args={"file_path": str(path)},
-                    call_id="state-after-failed-delivery",
-                ),
-                turn_id=turn_id,
-            )
-            self.assertFalse(state_result.output["cached"])
+            state_result = FileStateTool(cache=SessionFileStateCache(
+                backend=runtime.logical_state, context=runtime.logical_context_for_turn(turn_id),
+            )).invoke({"file_path": str(path)})
+            self.assertFalse(state_result.structured["cached"])
 
     def test_historical_read_delivery_cannot_roll_back_self_mutation_snapshot(
         self,

@@ -17,6 +17,14 @@ from pal.foundation.persistence import utc_now
 
 @dataclass
 class ArtifactRepository:
+    def inspect_counts(self, *, scope_key: str) -> dict:
+        """Passive counts within the caller's conversation scope."""
+        rows = (ArtifactRecordModel.select(ArtifactRecordModel.status, fn.COUNT(ArtifactRecordModel.artifact_id).alias("total"))
+                .where(ArtifactRecordModel.scope_key == scope_key).group_by(ArtifactRecordModel.status).dicts())
+        counts = {row["status"]: int(row["total"]) for row in rows}
+        return {"scope_key": scope_key, "record_count": sum(counts.values()), "status_counts": counts,
+                "hot_state_count": ArtifactHotStateModel.select().where(ArtifactHotStateModel.scope_key == scope_key).count()}
+
     def upsert_record(self, record: ArtifactRecord) -> ArtifactRecord:
         now = utc_now()
         existing = ArtifactRecordModel.get_or_none(ArtifactRecordModel.artifact_id == record.artifact_id)

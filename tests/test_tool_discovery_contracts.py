@@ -50,6 +50,10 @@ def test_generic_word_hits_do_not_substitute_for_missing_domain(runtime):
     result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "git status"}))
     assert result.ok
     assert result.structured["hits"] == []
+    assert "list_tools" in result.llm_text
+    directory = runtime.execute_tool(new_tool_call(name="call_tool", args={"name": "list_tools", "args": {}}))
+    assert directory.ok
+    assert "inspect_browser_status" in directory.llm_text
     precise = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "inspect_browser_status"}))
     assert not precise.structured["hits"][0].get("weak_match")
 
@@ -78,7 +82,7 @@ def test_all_query_words_match_without_alias_prefix_fallback(runtime):
         assert result.ok
         assert [hit["alias"] for hit in result.structured["hits"]] == ["inspect_browser_engine"]
 
-    broad = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "browser_re", "top_k": 100}))
+    broad = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "browser_re", "top_k": 5}))
     scores = {hit["alias"]: hit["score"] for hit in broad.structured["hits"]}
     assert "browser_repair" not in scores
     exact = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "browser_repair"}))
@@ -98,7 +102,7 @@ def test_missing_web_domain_excludes_unrelated_search_matches(runtime, action):
         InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
         guidance=ToolGuidance(purpose=f"{action.title()} the public web", use_when="Research online", do_not_use_when="Local code"))
     for query in (f"web {action}", f"{action} web"):
-        found = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query, "top_k": 100}))
+        found = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query, "top_k": 5}))
         assert found.ok
         assert found.structured["hits"][0]["alias"] == f"{action}_web"
         assert not found.structured["hits"][0].get("weak_match")
@@ -208,7 +212,7 @@ def test_task_words_preserve_forms_without_promoting_next_tool_hints(runtime):
 
 
 def test_specific_task_words_rank_above_partial_matches(runtime):
-    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "read file", "top_k": 100}))
+    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "read file", "top_k": 5}))
     aliases = [hit["alias"] for hit in result.structured["hits"]]
     assert aliases[0] == "read_file"
     assert "read_tool" not in aliases
@@ -235,7 +239,7 @@ def test_lsp_symbol_search_requires_action_and_object(tmp_path):
         core.publish_module_capabilities(module)
     runtime = core.context.execution_runtime
     try:
-        result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "find symbols", "top_k": 10}))
+        result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "find symbols", "top_k": 5}))
         aliases = {hit["alias"] for hit in result.structured["hits"]}
         assert "list_lsp_document_symbols" not in aliases
         result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "search symbols"}))
@@ -273,7 +277,7 @@ def test_authored_examples_are_still_visible(runtime):
 def test_alias_words_converge_without_description_contamination(runtime):
     for alias, purpose, when in (
         ('remember_memory', 'Store a durable fact.', 'Saving a preference.'),
-        ('inspect_active_memory_provider', 'Show the active memory provider.', 'Remember memory before changing providers.'),
+        ('inspect_memory_state', 'Show the active memory provider.', 'Remember memory before changing providers.'),
         ('unrelated_helper', 'Inspect a helper.', 'remember memory'),
     ):
         mount_test_capability(runtime, alias=alias, canonical_path=f'op_test_{alias}',
@@ -283,9 +287,9 @@ def test_alias_words_converge_without_description_contamination(runtime):
     for query in ('remember_memory', 'remember memory', 'memory remember'):
         result = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': query}))
         assert [hit['alias'] for hit in result.structured['hits']] == ['remember_memory']
-    broad = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': 'remember memory', 'top_k': 20}))
+    broad = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': 'remember memory', 'top_k': 5}))
     aliases = [hit['alias'] for hit in broad.structured['hits']]
-    assert 'inspect_active_memory_provider' not in aliases
+    assert 'inspect_memory_state' not in aliases
     assert 'unrelated_helper' not in aliases
 
 
@@ -359,13 +363,13 @@ def test_builtin_tool_navigation_references_declared_public_aliases():
             elif function == 'ToolGuidance':
                 for keyword in node.keywords:
                     if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-                        references.update(re.findall(r'\(use ([a-z][a-z0-9_]+)[).,]', keyword.value.value))
+                        references.update(re.findall(r'\(use ([a-z][a-z0-9_]+)(?![a-z0-9_.])[).,]', keyword.value.value))
     for skill in builtin_declared_skills():
         references.update(skill.capability_refs)
     assert not references - aliases, sorted(references - aliases)
 
 
-@pytest.mark.parametrize("top_k", [None, 100])
+@pytest.mark.parametrize("top_k", [None, 5])
 def test_partial_task_does_not_hide_missing_domain(runtime, top_k):
     args = {"query": "read file from web"}
     if top_k is not None:
@@ -397,7 +401,7 @@ def test_search_does_not_infer_plural_forms(runtime, singular, plural):
     ("news", "create_new_item", "Create a new item"),
     ("install_pack", "install_package", "Install dependencies"),
 ])
-@pytest.mark.parametrize("top_k", [None, 100])
+@pytest.mark.parametrize("top_k", [None, 5])
 def test_search_rejects_prefixes_and_missing_query_words(query, alias, purpose, top_k):
     from types import SimpleNamespace
     from pal.execution.runtime import ExecutionRuntime

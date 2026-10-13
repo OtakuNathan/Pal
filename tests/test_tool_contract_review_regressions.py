@@ -255,10 +255,13 @@ def test_core_configuration_is_mounted_and_callable():
     runtime = core.context.execution_runtime
     try:
         result = runtime.invoke_indirect_tool(new_tool_call(name='configure_core', args={'mode': 'audit'}))
-        assert result.__class__.__name__ == 'CompleteResult'
-        assert core.state.mode == 'audit'
+        assert result.__class__.__name__ == 'RejectedResult'
+        assert result.error_code == 'unknown_tool'
+        assert core.state.mode != 'audit'
         result = runtime.invoke_indirect_tool(new_tool_call(name='configure_core_cache_warm_deadline', args={'enabled': False}))
-        assert result.__class__.__name__ == 'CompleteResult'
+        assert result.__class__.__name__ == 'RejectedResult'
+        assert result.error_code == 'unknown_tool'
+        assert settings.values['cache_warm_deadline_enabled'] == 'true'
     finally:
         runtime.shutdown()
 
@@ -284,7 +287,9 @@ def test_real_browser_multiplex_actions_are_discoverable():
 def test_mcp_local_guidance_override_survives_projection(runtime):
     snapshot = McpDiscoverySnapshot(server_id='audit', transport='stdio', server_info={
         'pal_tool_guidance': {'lookup': {'search_terms': ['file', 'files', 'read'],
-            'search_enum_fields': ['operation'], 'use_when': 'Read reviewed audit records.'}}},
+            'search_enum_fields': ['operation'], 'use_when': 'Read reviewed audit records.',
+            'search_term_rules': [{'terms': ['peek'], 'requires_any': ['file', 'files']}],
+            'search_scope_terms': ['provider']}}},
         tools=(McpToolSpec(name='lookup', input_schema={'type': 'object', 'properties': {
             'operation': {'type': 'string', 'enum': ['inspect']}}}),))
     projection = McpCompiler().compile(module_id='mcp', snapshots=(snapshot,), invoker=SimpleNamespace())
@@ -292,6 +297,8 @@ def test_mcp_local_guidance_override_survives_projection(runtime):
     hit = search(runtime, 'inspect files')[0]
     assert hit['alias'] == 'call_mcp_audit_lookup'
     assert hit['use_when'] == 'Read reviewed audit records.'
+    assert search(runtime, 'peek files')[0]['alias'] == hit['alias']
+    assert search(runtime, 'peek audit') == []
 
 
 def test_rescan_partial_failure_and_cleanup_failure_keep_original_diagnostics(tmp_path, monkeypatch):

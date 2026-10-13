@@ -2915,10 +2915,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/memory/capabilities.py:MemoryIntrospectionProvider.recall:getattr(provider, 'provider_id', self.service.l3_selector.active_provider_id)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/memory/compact.py:compact_normalization_diagnostics:getattr(entry, 'payload', {})": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3718,5 +3714,21 @@
   "src/pal/web_fetch/browser_service.py:_PlaywrightCliWorker._close_workspace_sessions:getattr(exc, 'stdout', None)": {
     "count": 1,
     "reason": "Subprocess exception boundary: TimeoutExpired can carry captured stdout/stderr; ordinary launch exceptions do not. Preserve streams when supplied."
+  },
+  "src/pal/packages/integration.py:RuntimeActivation.after:getattr(self._channel(), 'plugin_host', None)": {
+    "count": 1,
+    "reason": "Legacy provider ownership boundary: support both provider-manager-owned instances and PluginHost-owned channel adapters during package activation."
+  },
+  "src/pal/packages/integration.py:RuntimeActivation.before:getattr(self._channel(), 'plugin_host', None)": {
+    "count": 1,
+    "reason": "Legacy provider ownership boundary: support both provider-manager-owned instances and PluginHost-owned channel adapters during package activation."
+  },
+  "src/pal/packages/integration.py:RuntimeActivation.before:getattr(self.host, 'generations', {})": {
+    "count": 1,
+    "reason": "Legacy provider ownership boundary: support both provider-manager-owned instances and PluginHost-owned channel adapters during package activation."
+  },
+  "src/pal/packages/integration.py:RuntimeActivation.switch_gate:getattr(self.host, 'generations', {})": {
+    "count": 1,
+    "reason": "Legacy provider ownership boundary: support both provider-manager-owned instances and PluginHost-owned channel adapters during package activation."
   }
 }

@@ -18,7 +18,8 @@ def test_mcp_body_is_displayed_once_and_raw_protocol_is_preserved(is_error):
     assert result.llm_text.count("unique tool body") == 1
     assert result.structured["raw_result"] == raw
     visible = json.loads(result.llm_text.split("\n", 1)[1])
-    assert visible["raw_result"] == raw
+    assert visible["result"] == {key: value for key, value in raw.items() if key != "_meta"}
+    assert "_meta" not in visible["result"]
     if is_error:
         assert "read_tool" in result.llm_text
         assert "read_mcp_server" in result.llm_text
@@ -50,5 +51,6 @@ def test_memory_conflict_exposes_existing_recovery_information():
 def test_degraded_empty_recall_is_not_reported_as_definitive_absence():
     text = render_recall_result_for_llm(provider_id="memory", query=MemoryQuery(queries=["test"]),
         result=L3RecallResult(metadata={"degraded": True, "degraded_reason": "embedding unavailable"}), view="summary")
-    assert "Recall degraded: embedding unavailable" in text
+    assert "Recall incomplete:" in text
+    assert "embedding unavailable" not in text
     assert "No matching memories found." not in text

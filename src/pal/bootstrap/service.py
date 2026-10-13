@@ -10,6 +10,7 @@ from pal.channel import (
 )
 from pal.channel.provider_manager import ChannelEndpointProviderManager
 from pal.control import ControlPlane, register_with_core as register_control_with_core
+from pal.control.configuration import CoreConfigurationService
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.runtime_config import RuntimeConfig
 from pal.execution import register_with_core as register_execution_with_core
@@ -47,6 +48,7 @@ class StubRuntimeHandle:
     plugin_host: PluginHost
     control_plane: ControlPlane
     failure_runtime: FailureRuntime
+    configuration_service: CoreConfigurationService | None = None
 
     def _optional_port(self, key: str):
         return self.core.context.port_registry.get(key)
@@ -65,10 +67,12 @@ class StubRuntimeHandle:
         return getattr(manager, "repository", None)
 
     async def stop_async(self) -> None:
+        if self.configuration_service is not None:
+            await self.configuration_service.stop_async()
         dreaming = self.core.context.port_registry.get("memory.dreaming:dreaming")
         if dreaming is not None:
             await dreaming.shutdown()
-        self.plugin_host.shutdown()
+        await self.plugin_host.shutdown_async()
         if self.plugin_host.shutdown_errors:
             raise RuntimeError("plugin shutdown incomplete: " + "; ".join(self.plugin_host.shutdown_errors))
         # Transports/providers can still use resident services and the database
@@ -186,6 +190,8 @@ def compose_runtime(
         plugin_host=plugin_host,
         control_plane=control_plane,
         failure_runtime=failure_runtime,
+        configuration_service=CoreConfigurationService(registration.runtime.runtime_root, core.cache_warm_deadline,
+                                                      identity_service=identity_service, control_plane=control_plane),
     )
 
 

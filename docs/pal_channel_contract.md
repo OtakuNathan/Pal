@@ -168,30 +168,33 @@ def build_channel_provider(context):
 
 `context` 包含 runtime root、provider 目录、manifest，以及 manager/runtime/repository/secret resolver 等 channel provider 需要的边界对象。
 
-`rescan_channel_providers` 的语义是：
+Channel provider 代码由 PluginHost 管理；ChannelRuntime 和 EndpointHub 常驻。
+新 provider 使用普通 `plugin.toml` 的 `[channel] endpoint_types` 声明，并通过
+`ModuleHandle.channel_extension = ChannelExtension(provider=...)` 提供实现。
+上面的 `provider.toml` / `build_channel_provider(context)` 是原地兼容的旧格式。
 
-- 重新扫描 `runtime_root/channel/providers`
-- 只比较物理新增、删除、enable/disable；不 fingerprint 源码，也不热重载 unchanged provider
-- 新增 provider 先完成 entrypoint/contract 检查，随即为匹配的持久化 row 创建 EndpointHub
-- 新增 provider 自动 attach 已配置的 enabled/attached endpoints
-- removed/disabled provider 先退出 LLM execution registry，再停 transport、卸载代码
-- 物理删除最后删除 EndpointHub，并把 hub backlog 改投不可 detach 的 recovery socket
-- 持久化 endpoint row 不随 provider 物理删除而删除，provider 回归后可重新发现
-- manifest 解析失败不应把一个已知 provider 误判为物理删除
-- 不替 provider 决定 endpoint 的具体 attach 机制
+`rescan_plugins` 扫描元数据，不自动导入或重载新增第三方 provider。
+原生声明可在扫描时建立 Hub；旧格式的 endpoint types 在首次 `attach_plugin` 时发现。
+`attach_plugin` 加载 provider 并恢复符合持久化 attach 意图的 endpoints；
+`reload_plugin(provider_id)` 执行 detach → unload → load → attach。
+`disable_plugin` / `enable_plugin` 管理代码启用状态，旧 manifest 的 enabled 仅用于首次发现。
+解析失败保留已知 provider，不作为物理删除处理。
 
-`reload_channel_provider(provider_id)` 是显式的 detach → unload → load → attach；
-它不接受 endpoint id，也不能 reload core recovery socket。失败时如实报告，Hub 与
-backlog 保留且 capability 保持撤回，不创建并行代码代次或隐式 rollback runtime。
-`restart_channel_endpoint(endpoint_id)` 只重建一个 endpoint/transport，不重新导入
-provider code。
+每个物理 endpoint id 在 ChannelRuntime 中有稳定 EndpointHub。
+插件或 endpoint detach 都保留 Hub 和 backlog；endpoint detach 不卸载所属插件。
+物理删除或卸载插件才移除 Hub，并把待投递内容转移到 recovery socket，持久化 row 保留。
+清理失败保留旧代次的所有权，阻止并行加载，允许重试。
+`restart_channel_endpoint(endpoint_id)` 只重建 transport，不重新导入 provider code。
 
-每个物理 endpoint id 在 `ChannelRuntime` 中有稳定 `EndpointHub`。Hub 是内部
-registry：rescan 成功发现物理 provider 后立即创建，detach 不删除，只有物理删除才销毁。
+attach 用于恢复明确 detached 的 endpoint。稳定的已 attached transport 重复 attach
+保持原实例，返回 `changed=false` / `transport_restarted=false` 和无副作用 receipt；
+成功只表示 attached，不表示连接健康。有连接故障时结果提供有条件的 health / restart
+affordance，由模型按原任务决定下一步。网络连接断开不等于 endpoint 已被 detach。
+核心 endpoint attach 同样保留实例；核心 endpoint reload 对已有实例走 restart。
+
 Hub 接管旧 endpoint outbox；transport 不可用期间的新 reply、stream、status 和 attachment
 进入同一有序缓冲。新 transport 可投递后 Hub 进入 `draining`，按序清空后才进入
-`attached` 并发布到 LLM execution registry。detach 的顺序相反：先撤 capability，再停
-transport 和卸载最后一个 provider handle。也就是“registry 迟到早退，内部早来晚走”。
+`attached` 并发布到 LLM execution registry。detach 先撤 capability，再停 transport。
 
 1024 items / 4 MiB 是可观测 soft high-water mark；critical delivery
 不会因超过该阈值而被静默丢弃。可合并的 ephemeral status 和相邻纯文本 delta 会被

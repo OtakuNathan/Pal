@@ -52,6 +52,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 from pal.shared.tool_protocol import ToolAffordance
 
 
@@ -105,6 +106,7 @@ class LspManagerPluginProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
             search_objects=('provider', 'providers'),
+            search_terms=('status', 'state', 'show',),
             purpose="Show LSP provider status.",
             use_when="Diagnosing LSP system health — manager process, server count, last error.",
             do_not_use_when="Checking workspace readiness (use inspect_lsp_status). Running server health check (use diagnose_lsp_server).",
@@ -112,7 +114,7 @@ class LspManagerPluginProvider:
         ), aliases=("inspect_lsp_provider",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        payload = self._status_payload()
+        payload = inspection_snapshot(self._status_payload(), source="resident_lsp_host")
         return IntrospectionResult(status=RuntimeStatus.OK, text="lsp status", structured=payload, llm_text=render_titled_structured_for_llm("LSP status", payload))
 
     @capability_action(
@@ -122,6 +124,7 @@ class LspManagerPluginProvider:
         action_name="status",
         guidance=ToolGuidance(
             search_objects=('status',),
+            search_terms=('state', 'health', 'show', 'check',),
             purpose="Report recorded workspace preparation and LSP server health. An absent preparation record alone does not block individual queries.",
             use_when="Inspecting workspace-wide preparation and server health, or diagnosing a readiness problem reported by an LSP operation.",
             do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. A recent result already establishes readiness for the unchanged workspace. Module-level status (use inspect_lsp_provider). One server health (use diagnose_lsp_server).",
@@ -142,10 +145,12 @@ class LspManagerPluginProvider:
         execution=INDIRECT_LOCAL_READ,
     )
     def status(self, call: CapabilityCall) -> CapabilityResult:
-        return _capability_from_rpc(
-            "LSP status",
-            self._request_or_error("status", dict(call.args or {})),
-        )
+        payload = self._request_or_error("status", dict(call.args or {}), start_manager=False)
+        payload = inspection_snapshot(payload, source="lsp_manager")
+        payload["manager"] = self._status_payload()
+        if payload.get("status") in {RuntimeStatus.ERROR, "unavailable"}:
+            payload["diagnostics"].update(partial=True, unavailable_sections={"workspace": payload.get("error") or payload.get("reason")})
+        return _capability_from_rpc("LSP status", payload)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -154,6 +159,7 @@ class LspManagerPluginProvider:
         action_name="prepare_workspace",
         guidance=ToolGuidance(
             search_objects=('workspace', 'workspaces'),
+            search_terms=('configure', 'setup', 'initialize', 'project',),
             purpose="Configure a workspace's LSP project environment and optionally prewarm its language servers.",
             use_when='Project environment setup is needed, such as C/C++ compile commands or include paths; those settings changed; a query reported missing project context; or workspace prewarming is explicitly requested. name pins the server and workspace_root pins the root. Usable project compilation databases, compile_flags.txt and .clangd take precedence over generated fallback flags.',
             do_not_use_when="Routine navigation or diagnostics with usable project configuration: call the relevant LSP tool directly; it starts or reuses its server. Selecting a project alone does not require preparation. Not for non-LSP projects.",
@@ -174,6 +180,7 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor",
         guidance=ToolGuidance(
             search_objects=('server', 'servers'),
+            search_terms=('check', 'health', 'readiness',),
             purpose="Check one LSP server's binary, workspace, and initialization readiness.",
             use_when="Diagnosing why a specific language server is not working.",
             do_not_use_when="Workspace-wide readiness (use inspect_lsp_status). Module status (use inspect_lsp_provider).",
@@ -185,6 +192,7 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="diagnostics",
         guidance=ToolGuidance(
             search_objects=('diagnostic', 'diagnostics', 'error', 'errors', 'warning', 'warnings'),
+            search_terms=('check', 'problems',),
             purpose="Read diagnostics (errors/warnings) for a file.",
             use_when='Checking compile errors or type issues after editing a file. A successful empty result means no diagnostics were reported. Diagnose readiness only when the operation reports an error.',
             do_not_use_when="Reading file content (use read_file). Searching code (use run_shell rg). No LSP server available.",
@@ -194,8 +202,9 @@ class LspManagerPluginProvider:
         return _capability_from_rpc("LSP diagnostics", self._request_or_error("diagnostics", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="hover",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('read symbol type signature and documentation', 'inspect hover documentation at source position'),
             search_objects=('hover', 'information', 'type', 'types'),
+            search_terms=('docs', 'documentation', 'signature',),
             purpose="Read hover information (type, docs) at a file position.",
             use_when="Checking a symbol's type signature or documentation at a specific location. A successful empty result means no hover information was returned at this position. Diagnose readiness only on a reported error.",
             do_not_use_when="Finding definitions (use find_lsp_definitions). Reading file content (use read_file).",
@@ -207,6 +216,7 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="definition",
         guidance=ToolGuidance(
             search_objects=('definition', 'definitions'),
+            search_terms=('goto', 'jump',),
             purpose="Find definitions at a file position.",
             use_when='Jumping to where a symbol is defined. A successful empty result means no definition was returned. Check the requested position or use text search if needed; diagnose readiness only on a reported error.',
             do_not_use_when="Finding references (use find_lsp_references). Finding implementations (use find_lsp_implementations).",
@@ -227,8 +237,9 @@ class LspManagerPluginProvider:
         return _capability_from_rpc("LSP implementation", self._request_or_error("implementation", dict(call.args or {})))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="references",
-        guidance=ToolGuidance(
+        guidance=ToolGuidance(search_intents=('find symbol reference locations', 'list source usages of a symbol'),
             search_objects=('reference', 'references'),
+            search_terms=('usage', 'usages',),
             purpose="Find references at a file position.",
             use_when='Finding all places that reference a symbol. A successful empty result means no references were returned. Diagnose readiness only on a reported error.',
             do_not_use_when="Finding definitions (use find_lsp_definitions). Call hierarchy (use find_lsp_incoming_calls).",
@@ -280,6 +291,7 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="document_symbols",
         guidance=ToolGuidance(
             search_objects=('symbol', 'symbols', 'function', 'functions', 'class', 'classes', 'variable', 'variables'),
+            search_terms=('file', 'outline',),
             purpose="List document symbols (functions, classes, variables) for a file.",
             use_when='Mapping the structure of a file before reading it in detail. A successful empty result means no document symbols were returned. Read the file if its contents are needed; diagnose readiness only on a reported error.',
             do_not_use_when="Workspace-wide symbol search (use search_lsp_workspace_symbols). Reading file content (use read_file).",
@@ -316,6 +328,7 @@ class LspManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="rescan",
         guidance=ToolGuidance(
             search_objects=('server', 'servers'),
+            search_terms=('scan', 'refresh',),
             purpose="Rescan LSP server configs and refresh health.",
             use_when="After adding or modifying LSP server configuration.",
             do_not_use_when="Restarting the manager (use reload_plugin with name='lsp').",
@@ -475,9 +488,10 @@ class LspManagerPluginProvider:
                     "LSP manager did not exit after its one-shot termination; replacement remains fenced"
                 ) from exc
 
-    def _request_or_error(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request_or_error(self, method: str, params: dict[str, Any] | None = None, *, start_manager: bool = True) -> dict[str, Any]:
         try:
-            self._ensure_manager_started()
+            if start_manager or self.client_only:
+                self._ensure_manager_started()
             routed_params = dict(params or {})
             server_name = str(routed_params.pop("name", "") or "").strip()
             if server_name:
@@ -514,7 +528,9 @@ class LspManagerPluginProvider:
             "manager_owned": process_status is not None and process_status[1] is None,
             "log_sink": current_service_log_sink_description(),
             "last_error": self.last_error,
-            "cached_snapshot": dict(self.last_health or {}),
+            "cached_snapshot": {key: value for key, value in dict(self.last_health or {}).items()
+                                if key in {"ok", "health_source", "manager_pid", "started_at", "last_rescan_at", "last_error",
+                                           "server_count", "attached_count", "prepared_workspace_count", "shutdown_requested", "config_root"}},
         }
 
 def _failing_servers(payload: dict[str, Any]) -> list[str]:
@@ -662,6 +678,8 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
     if status != RuntimeStatus.OK and not payload.get("error_code"):
         payload = {**payload, "error_code": "lsp_unavailable" if payload.get("status") == "unavailable" else "lsp_operation_failed"}
     projection = dict(payload)
+    if payload.get("status") == "ok" and "result" in payload and isinstance(payload.get("evidence"), dict):
+        projection.pop("server", None)
     evidence = payload.get("evidence")
     if isinstance(evidence, dict) and "result" in payload and evidence.get("result") == payload["result"]:
         projection["evidence"] = {key: value for key, value in evidence.items() if key != "result"}

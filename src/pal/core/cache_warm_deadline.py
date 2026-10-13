@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, ContextManager, Mapping, Protocol, runtime_checkable
 
 from pal.control.contracts import ControlRoute
 
@@ -25,11 +26,47 @@ class RuntimeSettingsPort(Protocol):
     def set(self, setting_key: str, setting_value: str) -> Any: ...
 
 
+@runtime_checkable
+class TransactionalRuntimeSettingsPort(RuntimeSettingsPort, Protocol):
+    def selection_transaction(self) -> ContextManager[Any]: ...
+
+
 @dataclass(frozen=True)
 class CacheWarmDeadlineSettings:
     enabled: bool = DEFAULT_CACHE_WARM_DEADLINE_ENABLED
     lead_seconds: int = DEFAULT_CACHE_WARM_DEADLINE_LEAD_SECONDS
     min_prefix_tokens: int = DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS
+
+
+def read_cache_reminder_settings(repository: RuntimeSettingsPort | None) -> CacheWarmDeadlineSettings:
+    if repository is None:
+        return CacheWarmDeadlineSettings()
+    return CacheWarmDeadlineSettings(
+        enabled=_setting_bool(repository.get(CACHE_WARM_DEADLINE_ENABLED_KEY), DEFAULT_CACHE_WARM_DEADLINE_ENABLED),
+        lead_seconds=_setting_int(repository.get(CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY), DEFAULT_CACHE_WARM_DEADLINE_LEAD_SECONDS, minimum=30),
+        min_prefix_tokens=_setting_int(repository.get(CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY), DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS, minimum=1024),
+    )
+
+
+def configure_cache_reminder_settings(repository: RuntimeSettingsPort, *, enabled: bool | None = None,
+                                     lead_seconds: int | None = None,
+                                     min_prefix_tokens: int | None = None) -> CacheWarmDeadlineSettings:
+    # Validate the entire patch before storing any value, including enabled.
+    updates = {}
+    if lead_seconds is not None:
+        if int(lead_seconds) < 30:
+            raise ValueError("lead_seconds must be at least 30")
+        updates[CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY] = str(int(lead_seconds))
+    if min_prefix_tokens is not None:
+        if int(min_prefix_tokens) < 1024:
+            raise ValueError("min_prefix_tokens must be at least 1024")
+        updates[CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY] = str(int(min_prefix_tokens))
+    if enabled is not None:
+        updates[CACHE_WARM_DEADLINE_ENABLED_KEY] = "true" if bool(enabled) else "false"
+    with repository.selection_transaction() if isinstance(repository, TransactionalRuntimeSettingsPort) else nullcontext():
+        for key, value in updates.items():
+            repository.set(key, value)
+    return read_cache_reminder_settings(repository)
 
 
 @dataclass(frozen=True)
@@ -73,25 +110,7 @@ class CacheWarmDeadlineManager:
     _last_error: str = ""
 
     def settings(self) -> CacheWarmDeadlineSettings:
-        repository = self.settings_provider()
-        if repository is None:
-            return CacheWarmDeadlineSettings()
-        return CacheWarmDeadlineSettings(
-            enabled=_setting_bool(
-                repository.get(CACHE_WARM_DEADLINE_ENABLED_KEY),
-                DEFAULT_CACHE_WARM_DEADLINE_ENABLED,
-            ),
-            lead_seconds=_setting_int(
-                repository.get(CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY),
-                DEFAULT_CACHE_WARM_DEADLINE_LEAD_SECONDS,
-                minimum=30,
-            ),
-            min_prefix_tokens=_setting_int(
-                repository.get(CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY),
-                DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS,
-                minimum=1_024,
-            ),
-        )
+        return read_cache_reminder_settings(self.settings_provider())
 
     def configure(
         self,
@@ -103,28 +122,8 @@ class CacheWarmDeadlineManager:
         repository = self.settings_provider()
         if repository is None:
             raise RuntimeError("runtime settings repository is unavailable")
-        if enabled is not None:
-            repository.set(
-                CACHE_WARM_DEADLINE_ENABLED_KEY,
-                "true" if bool(enabled) else "false",
-            )
-        if lead_seconds is not None:
-            normalized_lead = int(lead_seconds)
-            if normalized_lead < 30:
-                raise ValueError("lead_seconds must be at least 30")
-            repository.set(
-                CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY,
-                str(normalized_lead),
-            )
-        if min_prefix_tokens is not None:
-            normalized_minimum = int(min_prefix_tokens)
-            if normalized_minimum < 1_024:
-                raise ValueError("min_prefix_tokens must be at least 1024")
-            repository.set(
-                CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY,
-                str(normalized_minimum),
-            )
-        resolved = self.settings()
+        resolved = configure_cache_reminder_settings(repository, enabled=enabled,
+            lead_seconds=lead_seconds, min_prefix_tokens=min_prefix_tokens)
         if not resolved.enabled:
             self.cancel()
         return self.inspect()

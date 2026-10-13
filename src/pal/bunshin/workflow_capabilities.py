@@ -12,15 +12,10 @@ from pal.execution.generated_tool_models import (
     BunshinV2CapabilitiesBunshinV2PublicProviderArchiveWorkflowInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderReadInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderRefreshInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderResetFamilyOverrideInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderResetProfileOverrideInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderResumeWorkflowInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput,
 )
@@ -60,6 +55,7 @@ BUNSHIN_START_WORKFLOW_PURPOSE = (
 BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
     search_enum_fields=("operation", "execution_mode"),
     search_objects=('workflow', 'workflows'),
+    search_terms=('create', 'launch', 'delegate', 'task', 'tasks', 'project',),
     purpose=BUNSHIN_START_WORKFLOW_PURPOSE,
     use_when=(
         "Use when the requested work is identity-light executor work: a medium-to-large or long-running project, work "
@@ -297,6 +293,7 @@ class BunshinPublicProvider:
         action_name="read",
         guidance=ToolGuidance(
             search_objects=('catalog', 'catalogs'),
+            search_terms=('list', 'inspect', 'profiles', 'families',),
             purpose="Read the effective Bunshin profile/family catalog from the sidecar.",
             use_when="Checking available Bunshin profiles and families before starting a workflow.",
             do_not_use_when="Starting a workflow (use start_bunshin_workflow). Checking task status (use read_bunshin_task_status).",
@@ -323,21 +320,7 @@ class BunshinPublicProvider:
                 llm_text=render_titled_structured_for_llm("Bunshin catalog read failed", payload),
             )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="bunshin_catalog",
-        action_name="set_profile_override",
-        guidance=ToolGuidance(
-            search_objects=('profile', 'profiles', 'override', 'overrides'),
-            purpose="Patch one Bunshin profile override in the sidecar.",
-            use_when="Customizing a profile (e.g. changing model, constraints, or instructions) for future Tasks.",
-            do_not_use_when="Removing an override (use reset_bunshin_profile_override). Existing Tasks are unaffected.",
-            failure_next_steps="If profile name invalid, check read_bunshin_catalog for available profiles.",
-        ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput,
-        aliases=("set_bunshin_profile_override",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def set_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, _channel = self._actor_and_channel(call)
@@ -354,21 +337,7 @@ class BunshinPublicProvider:
         except Exception as exc:
             return _error("bunshin profile override failed", exc)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="bunshin_catalog",
-        action_name="reset_profile_override",
-        guidance=ToolGuidance(
-            search_objects=('profile', 'profiles', 'override', 'overrides'),
-            purpose="Remove one profile override and restore the package builtin.",
-            use_when='Reverting a profile customization back to defaults. If no override exists, resetting is an idempotent no-op.',
-            do_not_use_when="Patching a profile (use set_bunshin_profile_override).",
-            failure_next_steps="If no override exists, this is a no-op.",
-        ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderResetProfileOverrideInput,
-        aliases=("reset_bunshin_profile_override",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def reset_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, _channel = self._actor_and_channel(call)
@@ -380,21 +349,7 @@ class BunshinPublicProvider:
         except Exception as exc:
             return _error("bunshin profile override reset failed", exc)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="bunshin_catalog",
-        action_name="set_family_override",
-        guidance=ToolGuidance(
-            search_objects=('family', 'families', 'override', 'overrides'),
-            purpose="Patch one Bunshin family override in the sidecar.",
-            use_when="Customizing role bindings or profile availability for a family.",
-            do_not_use_when="Removing a family override (use reset_bunshin_family_override).",
-            failure_next_steps="If family name invalid, check read_bunshin_catalog for available families.",
-        ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput,
-        aliases=("set_bunshin_family_override",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def set_family_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, _channel = self._actor_and_channel(call)
@@ -406,21 +361,7 @@ class BunshinPublicProvider:
         except Exception as exc:
             return _error("bunshin family override failed", exc)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="bunshin_catalog",
-        action_name="reset_family_override",
-        guidance=ToolGuidance(
-            search_objects=('family', 'families', 'override', 'overrides'),
-            purpose="Remove one family override and restore the package builtin.",
-            use_when='Reverting a family customization back to defaults. If no override exists, resetting is an idempotent no-op.',
-            do_not_use_when="Patching a family (use set_bunshin_family_override).",
-            failure_next_steps="If no override exists, this is a no-op.",
-        ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderResetFamilyOverrideInput,
-        aliases=("reset_bunshin_family_override",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def reset_family_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, _channel = self._actor_and_channel(call)
@@ -432,21 +373,7 @@ class BunshinPublicProvider:
         except Exception as exc:
             return _error("bunshin family override reset failed", exc)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="bunshin_catalog",
-        action_name="refresh",
-        guidance=ToolGuidance(
-            search_objects=('catalog', 'catalogs'),
-            purpose="Reload Bunshin package builtins and validate overrides.",
-            use_when="After upgrading the Bunshin package or when catalog changes are not reflected.",
-            do_not_use_when="Reading the catalog (use read_bunshin_catalog). Patching profiles (use set_bunshin_profile_override).",
-            failure_next_steps="If refresh fails, the sidecar may need restart.",
-        ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderRefreshInput,
-        aliases=("refresh_bunshin_catalog",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
+    # Configuration maintenance is exposed through the official Pal CLI.
     def refresh_catalog(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, _channel = self._actor_and_channel(call)
@@ -500,6 +427,7 @@ class BunshinPublicProvider:
         action_name="submit_artifact",
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts'),
+            search_terms=('publish',),
             purpose="Publish a durable artifact under a natural-language name for the current actor.",
             use_when="When the user has a named architecture or design to reference in later workflow calls.",
             do_not_use_when="This does not execute the artifact. Not for unnamed or ad-hoc content.",
@@ -532,6 +460,7 @@ class BunshinPublicProvider:
         action_name="search",
         guidance=ToolGuidance(
             search_objects=('task', 'tasks'),
+            search_terms=('find', 'lookup',),
             purpose="Search the durable Bunshin V2 Task Ledger for the current actor.",
             use_when='Before claiming a workflow cannot be found. Empty query lists most recently updated Tasks. An empty result means no matching actor-owned Task was found; broaden the query before declaring the workflow missing.',
             do_not_use_when="Not for live workflow state (use read_bunshin_task_status).",
@@ -587,6 +516,7 @@ class BunshinPublicProvider:
         action_name="status",
         guidance=ToolGuidance(
             search_objects=('task', 'tasks'),
+            search_terms=('inspect', 'show', 'get', 'workflow', 'progress', 'phase',),
             purpose="Read a Task by natural-language title, then mechanically attach its single current workflow when one exists.",
             use_when=(
                 "Checking workflow phase, module Coder/Verifier state, blockers, next legal actions, timings, or liveness. "
@@ -833,6 +763,7 @@ class BunshinPublicProvider:
         action_name="answer_question",
         guidance=ToolGuidance(
             search_objects=('question', 'questions'),
+            search_terms=('respond', 'clarification',),
             purpose="Answer the single pending Architect question for the named Task.",
             use_when="When the user's response is not one of the inline options.",
             do_not_use_when="Not for multiple-choice answers (use inline options when available).",
@@ -872,7 +803,7 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="control_workflow",
         guidance=ToolGuidance(
-            search_enum_fields=("command",), search_terms=("stop",),
+            search_enum_fields=("command",), search_terms=('stop', 'task', 'async'),
             search_objects=('workflow', 'workflows'),
             purpose="Request asynchronous pause or cancel for a V2 workflow.",
             use_when="The user wants to stop a running workflow.",

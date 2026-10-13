@@ -343,6 +343,28 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(search.structured["hits"][0]["alias"], "send_channel_attachment")
         self.assertNotIn("aliases", search.structured["hits"][0])
 
+    def test_attachment_discovery_covers_delivery_and_file_type_queries(self) -> None:
+        core, _, _ = self._build_core_with_channel()
+        runtime = core.context.execution_runtime
+        try:
+            for query in (
+                "send_channel_attachment", "send attachment", "send channel file",
+                "send image", "send documents", "send photo", "send pdf",
+                "upload file", "deliver attachment", "share image", "return artifact",
+            ):
+                with self.subTest(query=query):
+                    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
+                    self.assertTrue(result.ok)
+                    self.assertEqual([hit["alias"] for hit in result.structured["hits"]],
+                                     ["send_channel_attachment"])
+                    self.assertIn("path", result.structured["hits"][0]["input_contract"]["properties"])
+            for query in ("git upload file", "llm send attachment", "read image", "write document"):
+                with self.subTest(query=query):
+                    result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
+                    self.assertEqual(result.structured["hits"], [])
+        finally:
+            runtime.shutdown()
+
     async def test_llm_alias_send_attachment_uses_async_turn_context(self) -> None:
         core, channel_runtime, endpoint = self._build_core_with_channel()
         continuation = self._start_turn(core, endpoint)

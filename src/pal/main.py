@@ -43,6 +43,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     configure_llm_parser(llm_parser)
 
+    from pal.web_search.cli import configure_web_search_parser
+    configure_web_search_parser(subparsers.add_parser("web-search", help="Configure web search backends"))
+    from pal.core.cli import configure_core_parser
+    configure_core_parser(subparsers.add_parser("core", help="Configure resident core settings"))
+    from pal.identity.cli import configure_identity_parser
+    configure_identity_parser(subparsers.add_parser("identity", help="Inspect and refresh human-configured identity"))
+    from pal.control.cli import configure_control_parser
+    configure_control_parser(subparsers.add_parser("control", help="Inspect the resident human control registry"))
+
     # -- provider ------------------------------------------------------------
     provider_parser = subparsers.add_parser("provider", help="Install channel-provider artifacts")
     from pal.provider_cli import configure_provider_parser
@@ -106,6 +115,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _run_async(args: argparse.Namespace) -> int:
+    if args.command == "identity":
+        from pal.identity.cli import run_identity_cli_async
+        return await run_identity_cli_async(args)
+    if args.command == "control":
+        from pal.control.cli import run_control_cli_async
+        return await run_control_cli_async(args)
+    if args.command == "core":
+        from pal.core.cli import run_core_cli_async
+        return await run_core_cli_async(args)
+    if args.command == "bunshin" and args.bunshin_command in {"catalog", "profile", "family"}:
+        from pal.bunshin.config_cli import run_bunshin_config_cli_async
+        return await run_bunshin_config_cli_async(args)
     if args.command == "run":
         from pal.runtime_app import DEFAULT_DB_FILENAME
         if not (args.runtime_root / DEFAULT_DB_FILENAME).is_file():
@@ -145,7 +166,10 @@ def main() -> int:
     if getattr(args, "runtime_root", None) is not None:
         args.runtime_root = Path(args.runtime_root).expanduser().resolve()
 
-    requires_existing = args.command in {"llm", "eval", "bunshin"} or (
+    # Configuration command handlers validate the existing database and render
+    # their --json errors themselves, including missing runtime directories.
+    requires_existing = args.command in {"llm", "eval"} or (
+        args.command == "bunshin" and args.bunshin_command == "efficiency") or (
         args.command == "package" and args.package_command == "status")
     if requires_existing and not args.runtime_root.is_dir():
         print(f"No Pal runtime directory found at {args.runtime_root}. {RUNTIME_ROOT_HINT}", file=sys.stderr)
@@ -159,6 +183,10 @@ def main() -> int:
         from pal.llm.cli import run_llm_cli
 
         return run_llm_cli(args)
+
+    if args.command == "web-search":
+        from pal.web_search.cli import run_web_search_cli
+        return run_web_search_cli(args)
 
     if args.command == "provider":
         from pal.provider_cli import run_provider_cli

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
-
-from pal.foundation.diagnostics import diagnostic_text
+from pal.foundation.diagnostics import diagnostic_summary, diagnostic_text
 from pal.memory.contracts import L3MutationResult, L3RecallResult, L3RecallView, MemoryQuery
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 def normalize_recall_view(raw: object) -> L3RecallView:
     if isinstance(raw, L3RecallView):
@@ -41,16 +40,16 @@ def render_recall_result_for_llm(
     result: L3RecallResult,
     view: L3RecallView | str,
 ) -> str:
-    _ = (provider_id, query)
     normalized_view = normalize_recall_view(view)
     lines: list[str] = [
         f'<recalled_memories view="{normalized_view.value}">',
-        "When updating or deleting memory, copy the complete mem_ref exactly, including prefixes such as fact: or case:.",
+        f"provider_id: {str(provider_id or '').strip() or 'unknown'}",
     ]
 
     metadata = result.metadata or {}
-    if metadata.get("degraded") or metadata.get("degraded_reason"):
-        lines.append("Recall degraded: " + str(metadata.get("degraded_reason") or "retrieval is incomplete"))
+    incomplete = any(metadata.get(key) for key in ('degraded', 'degraded_reason', 'backend_error', 'error'))
+    if incomplete:
+        lines.append("Recall incomplete: some retrieval sources are unavailable; returned matches may be partial. Inspect memory health for diagnostics.")
     if query.mem_ref:
         lines.append(f"mem_ref: {query.mem_ref}; lookup_status: {metadata.get('lookup_status', 'unavailable')}")
         if metadata.get("successors"):
@@ -60,9 +59,7 @@ def render_recall_result_for_llm(
         lines.extend(item_lines)
     else:
         if not query.mem_ref:
-            lines.append("No matching memories returned.")
-    if metadata:
-        lines.append("Provider metadata: " + _metadata_text(metadata))
+            lines.append("No memories returned; recall may be incomplete." if incomplete else "No matching memories returned.")
     lines.append("</recalled_memories>")
     return "\n".join(lines)
 
@@ -80,23 +77,46 @@ def build_mutation_structured_payload(result: L3MutationResult) -> dict[str, obj
     return payload
 
 
-def render_mutation_result_for_llm(action: str, result: L3MutationResult) -> str:
-    mem_ref = str(result.document_id or "").strip()
+def render_mutation_result_for_llm(action: str, result: L3MutationResult, *, provider_id: str = "") -> str:
+    hit = result.hit or {}
+    mem_ref = str(result.document_id or hit.get("mem_ref") or hit.get("document_id") or "").strip()
     lines = [f"Memory {action} result:", f"status: {result.status}"]
+    if provider_id:
+        lines.append(f"provider_id: {provider_id}")
     if mem_ref:
         lines.append(f"mem_ref: {mem_ref}")
     metadata = result.metadata or {}
     if metadata.get("reason"):
-        lines.append(f"reason: {metadata['reason']}")
+        lines.append("reason: " + diagnostic_text(str(metadata['reason']), limit=240))
+    if metadata.get('warning'):
+        lines.append("warning: " + diagnostic_text(diagnostic_summary(str(metadata['warning'])), limit=240))
+    for key in ('error', 'backend_error'):
+        if metadata.get(key):
+            lines.append("error: " + diagnostic_text(diagnostic_summary(str(metadata[key])), limit=240))
     if metadata.get("successors"):
         lines.append("successors: " + ", ".join(metadata["successors"]))
-    if metadata:
-        lines.append("Provider metadata: " + _metadata_text(metadata))
+    for key in ('replayed', 'deduplicated', 'deleted', 'forgotten', 'changed', 'no_changes'):
+        if key in metadata:
+            lines.append(f"{key}: {bool(metadata[key])}")
     return "\n".join(lines)
 
 
-def _metadata_text(metadata: dict) -> str:
-    return diagnostic_text(json.dumps(metadata, ensure_ascii=False, default=str), limit=None)
+def render_batch_result_for_llm(payload: dict[str, object]) -> str:
+    visible = {key: value for key, value in payload.items() if key != "provider_result"}
+    provider = payload.get("provider_result")
+    if isinstance(provider, dict):
+        receipt = L3MutationResult(status=str(provider.get("status") or "unknown"), document_id="",
+                                   metadata=dict(provider.get("metadata") or {}))
+        visible["provider_receipt"] = render_mutation_result_for_llm("batch", receipt)
+        if receipt.status == "ok" and receipt.metadata.get("projection_failed"):
+            visible["warning"] = "Durable write succeeded; the in-context memory projection needs refresh."
+        visible["item_receipts"] = [
+            render_mutation_result_for_llm("commit", L3MutationResult(
+                status=str(item.get("status") or "unknown"), document_id=str(item.get("document_id") or ""),
+                hit=dict(item.get("hit") or {}), metadata=dict(item.get("metadata") or {})))
+            for item in provider.get("results", ())
+        ]
+    return render_titled_structured_for_llm("Memory review batch commit", visible)
 
 
 def _render_hit_lines(hits: list[dict[str, object]], *, view: L3RecallView) -> list[str]:

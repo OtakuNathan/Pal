@@ -29,3 +29,10 @@ Plugins can observe resident state through `scope.subscribe_core_events(...)`.
 Subscriptions become active on publication and close with the plugin generation.
 See [Core system observations](../../../docs/pal_core_events.md) for the bounded
 mailbox, snapshot and worker cleanup contract.
+
+Channel providers are plugin contributions. PluginHost owns their generations,
+cleanup retries and import eviction; resident ChannelRuntime owns endpoint hubs
+and queued delivery across generation replacement. See the
+[channel plugin contract](../channel/README.md). Legacy runtime-root
+`channel/providers/*/provider.toml` packages are adapted without moving their
+files or endpoint data. Manage them with the same plugin tools as other bundles.

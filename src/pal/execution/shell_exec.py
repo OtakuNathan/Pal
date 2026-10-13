@@ -36,6 +36,10 @@ SHELL_EXEC_DESCRIPTION = "Run one shell command and return stdout, stderr, and e
 
 SHELL_EXEC_GUIDANCE = ToolGuidance(
     search_objects=('command', 'commands'),
+    search_terms=('execute', 'exec', 'terminal', 'bash', 'script', 'scripts', 'test', 'tests',
+                  'build', 'builds', 'directory', 'directories', 'folder', 'folders', 'listing',
+                  'list', 'file', 'files', 'local', 'filesystem', 'repository', 'repo', 'code',
+                  'search', 'find', 'tree', 'rg', 'grep'),
     purpose=SHELL_EXEC_DESCRIPTION,
     use_when=(
         "Use for tests, builds, scripts, package commands, process probes, and bounded directory listings. "

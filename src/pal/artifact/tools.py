@@ -28,7 +28,8 @@ def _scope_from_runtime(runtime: TurnIOHost | None, turn_id: str | None) -> str:
 
 
 def _result(status: str, title: str, structured: dict[str, Any], text: str = "", *,
-            effect: EffectOutcome | None = None, recovery_hint: str = "") -> CapabilityResult:
+            effect: EffectOutcome | None = None, recovery_hint: str = "",
+            visible: dict[str, Any] | None = None) -> CapabilityResult:
     if status != RuntimeStatus.OK:
         structured = dict(structured)
         structured.setdefault("error_code", structured.get("reason") or "artifact_failed")
@@ -38,7 +39,7 @@ def _result(status: str, title: str, structured: dict[str, Any], text: str = "",
         status=status,
         text=text or title,
         structured=structured,
-        llm_text=render_titled_structured_for_llm(title, structured),
+        llm_text=render_titled_structured_for_llm(title, structured if visible is None else visible),
         effect_receipt=EffectReceipt(outcome=effect) if effect is not None else None,
         recovery_hint=recovery_hint,
     )
@@ -178,7 +179,13 @@ class ArtifactReadTool:
                 max_chars=_optional_int(args.get("max_chars")),
             )
             status = RuntimeStatus.OK if result.ok else RuntimeStatus.UNSUPPORTED
-            return _result(status, "Artifact read", result.to_dict(), text=result.text)
+            payload = result.to_dict()
+            visible = None
+            if result.ok and result.representation != "metadata":
+                visible = dict(payload)
+                visible["metadata"] = {key: value for key, value in payload.get("metadata", {}).items()
+                                       if key in {"file_name", "status", "notes"}}
+            return _result(status, "Artifact read", payload, text=result.text, visible=visible)
         except ValueError as exc:
             return _result(RuntimeStatus.INVALID, "Artifact read failed", {"reason": str(exc), "error": exception_report(exc)})
         except KeyError as exc:

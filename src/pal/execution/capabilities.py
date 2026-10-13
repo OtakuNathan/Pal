@@ -22,6 +22,7 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -75,6 +76,7 @@ class ExecutionIntrospectionProvider(
         action_name="show",
         guidance=ToolGuidance(
             search_objects=('state', 'states'),
+            search_terms=('status', 'show', 'get', 'count', 'counts', 'tool', 'tools', 'capability', 'capabilities',),
             purpose="Show execution runtime state — capability count and tool count.",
             use_when='Diagnosing whether all expected capabilities are mounted. Checking if a capability generation swap occurred. If counts differ from expectations, inspect observe_core for module lifecycle state and search_tools for the current registry; counts alone do not identify a missing capability.',
             do_not_use_when="Listing specific tools (use list_tools). Searching for a capability (use search_tools).",
@@ -85,11 +87,18 @@ class ExecutionIntrospectionProvider(
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_execution(self)
+        generation = self.runtime.registry_generation
+        payload = inspection_snapshot({**snapshot.__dict__,
+            "registry_generation": generation.generation_id,
+            "native_tool_count": len(generation.provider_specs),
+            "search_only_tool_count": len(generation.search_records) - len(generation.provider_specs),
+            "module_count": len({row.get("module_id") for row in generation.search_records.values()}),
+        })
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="execution snapshot",
-            structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("Execution snapshot", snapshot.__dict__),
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Execution snapshot", payload),
         )
 
 

@@ -25,6 +25,7 @@ def _build_app(root: Path) -> PalRuntimeApp:
     register_execution_with_core(core.context)
     register_memory_with_core(core.context, memory_service)
     handle = SimpleNamespace(
+        configuration_service=None,
         core=core,
         memory_service=memory_service,
         registration=SimpleNamespace(

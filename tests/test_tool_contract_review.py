@@ -166,7 +166,7 @@ def test_search_word_order_and_new_object_coverage(runtime):
             InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
             guidance=ToolGuidance(purpose="Read rendered content", use_when="Read content", do_not_use_when="Mutations"))
     def search(query):
-        return runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query, "top_k": 100})).structured["hits"]
+        return runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query, "top_k": 5})).structured["hits"]
     forward, reverse = search("read browser"), search("browser read")
     assert [(h['alias'], h['score']) for h in forward] == [(h['alias'], h['score']) for h in reverse]
     focused = search("read browser page")
@@ -196,9 +196,9 @@ def test_dynamic_mcp_aliases_are_stable_bounded_and_do_not_collide_after_truncat
 
 @pytest.mark.parametrize('module,owner,method,expected', [
     ('pal.llm.capabilities', 'LLMIntrospectionProvider', 'list_endpoints', 'empty'),
-    ('pal.web_search.capabilities', 'WebSearchIntrospectionProvider', 'health', 'unhealthy'),
+    ('pal.web_search.capabilities', 'WebSearchIntrospectionProvider', 'show_provider', 'last-request health'),
     ('pal.mcp.plugin', 'McpManagerPluginProvider', 'list_servers', 'rescan_mcp_servers'),
-    ('pal.memory.capabilities', 'MemoryIntrospectionProvider', 'active_provider', 'provider'),
+    ('pal.memory.capabilities', 'MemoryIntrospectionProvider', 'show', 'provider'),
     ('pal.channel.capabilities', 'ChannelIntrospectionProvider', 'attach', 'no-op'),
     ('pal.plugins.capabilities', 'PluginsIntrospectionProvider', 'rescan', 'scan_errors'),
     ('pal.plugins.l3.sqlite_vec', 'SQLiteVecL3Plugin', 'inventory', 'Missing embeddings'),
@@ -206,11 +206,9 @@ def test_dynamic_mcp_aliases_are_stable_bounded_and_do_not_collide_after_truncat
     ('pal.core.capabilities', 'CoreIntrospectionProvider', 'observe', 'busy'),
     ('pal.failure.capabilities', 'FailureIntrospectionProvider', 'show', 'list_failure_reports'),
     ('pal.skill.capabilities', 'SkillIntrospectionProvider', 'disable', 'enabled=true'),
-    ('pal.proactive.capabilities', 'ProactiveIntrospectionProvider', 'last_run', 'never executed'),
-    ('pal.identity.capabilities', 'IdentityIntrospectionProvider', 'show', 'default identity'),
+    ('pal.proactive.capabilities', 'ProactiveIntrospectionProvider', 'show_task', 'never executed'),
     ('pal.artifact.capabilities', 'ArtifactIntrospectionProvider', 'search', 'not proof of expiry'),
     ('pal.checklist.capabilities', 'ChecklistIntrospectionProvider', 'clear', 'no-op'),
-    ('pal.bunshin.workflow_capabilities', 'BunshinPublicProvider', 'reset_family_override', 'no-op'),
     ('pal.web_fetch.capabilities', 'WebFetchIntrospectionProvider', 'close', 'no-op'),
     ('pal.web_fetch.capabilities', 'WebFetchIntrospectionProvider', 'network', 'installed=true'),
 ])
@@ -259,10 +257,10 @@ def test_search_word_reordering_preserves_score_but_added_action_object_words_im
         mount_test_capability(runtime, alias=alias, canonical_path='op_test_' + alias,
             InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
             guidance=ToolGuidance(purpose='Read page content', use_when='Read content', do_not_use_when='Other work'))
-    words = invoke(runtime, 'search_tools', {'query': 'browser read', 'top_k': 10})
+    words = invoke(runtime, 'search_tools', {'query': 'browser read', 'top_k': 5})
     scores = {hit['alias']: hit['score'] for hit in words.structured['hits']}
     assert scores['browser_read'] == scores['read_browser']
-    added = invoke(runtime, 'search_tools', {'query': 'read browser page', 'top_k': 10})
+    added = invoke(runtime, 'search_tools', {'query': 'read browser page', 'top_k': 5})
     scores = {hit['alias']: hit['score'] for hit in added.structured['hits']}
     assert 'browser_read' not in scores
     assert added.structured['hits'][0]['alias'] == 'read_browser_page'

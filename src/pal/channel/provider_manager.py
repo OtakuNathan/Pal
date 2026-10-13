@@ -23,7 +23,9 @@ from pal.channel.models import ChannelEndpointModel
 from pal.channel.repository import ChannelEndpointRepository
 from pal.channel.runtime import ChannelRuntime
 from pal.channel.cleanup import OwnedLifecycleStep
+from pal.channel.lifecycle import EndpointHubState
 from pal.shared import IntrospectionResult, RuntimeStatus
+from pal.shared.tool_protocol import ToolAffordance
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
@@ -337,6 +339,7 @@ class ChannelEndpointProviderManager:
     endpoint_type_to_provider: dict[str, str] = field(default_factory=dict)
     scan_errors: list[str] = field(default_factory=list)
     plugin_host: Any = None
+    plugin_provider_ids: set[str] = field(default_factory=set)
     discovered_runtime_providers: dict[str, DiscoveredChannelProvider] = field(default_factory=dict)
     runtime_provider_handles: dict[str, RuntimeChannelProviderHandle] = field(default_factory=dict)
     runtime_provider_load_errors: list[str] = field(default_factory=list)
@@ -507,7 +510,7 @@ class ChannelEndpointProviderManager:
                     hydrated.append(record.endpoint_id)
         return hydrated
 
-    def attach_endpoint(self, endpoint_id: str) -> IntrospectionResult:
+    def attach_endpoint(self, endpoint_id: str) -> IntrospectionResult | CapabilityResult:
         record = self.repository.get(endpoint_id)
         provider_id = self._provider_id_for_endpoint(endpoint_id)
         if record is None or not provider_id:
@@ -522,6 +525,11 @@ class ChannelEndpointProviderManager:
                 exc.add_note("Provider cleanup also failed:\n" + exception_report(cleanup_exc))
             self.runtime.fail_endpoint_transition(endpoint_id, exception_report(exc))
             return _provider_lifecycle_error("attach", provider_id, endpoint_id, exc)
+        endpoint = self.runtime.get_endpoint(endpoint_id)
+        hub = self.runtime.get_endpoint_hub(endpoint_id)
+        if (endpoint is not None and endpoint.attached and record.detached_at is None
+                and hub.state in {EndpointHubState.ATTACHED, EndpointHubState.DRAINING}):
+            return _already_attached_result(endpoint_id, provider_id, bool(endpoint.enabled))
         self.runtime.begin_endpoint_transition(endpoint_id, provider_id=provider_id)
         try:
             result = provider.attach_endpoint(endpoint_id, self.context())
@@ -655,6 +663,10 @@ class ChannelEndpointProviderManager:
         )
 
     def rescan_providers(self) -> dict[str, Any]:
+        if self.plugin_host is not None:
+            result = self.plugin_host.rescan()
+            return {**result, "runtime_provider_ids": sorted(self.runtime_provider_ids),
+                    "provider_count": len(self.list_providers())}
         before = sorted(set(self.providers) | set(self.discovered_runtime_providers))
         scan = self._scan_runtime_provider_manifests()
         enabled = scan["enabled"]
@@ -805,6 +817,10 @@ class ChannelEndpointProviderManager:
         }
 
     def reload_provider(self, provider_id: str) -> IntrospectionResult:
+        if self.plugin_host is not None:
+            result = self.plugin_host.reattach(provider_id)
+            return IntrospectionResult(status=result["status"], text="channel plugin reload",
+                                       structured=result, llm_text=render_titled_structured_for_llm("Channel plugin reload", result))
         normalized = str(provider_id or "").strip()
         discovered = self.discovered_runtime_providers.get(normalized)
         if discovered is None:
@@ -1093,6 +1109,12 @@ class ChannelEndpointProviderManager:
         provider = self.providers.get(provider_id)
         if provider is not None:
             return provider
+        if provider_id in self.plugin_provider_ids and self.plugin_host is not None:
+            result = self.plugin_host.attach(provider_id)
+            provider = self.providers.get(provider_id)
+            if result["status"] != RuntimeStatus.OK or provider is None:
+                raise RuntimeError(result.get("error", "channel plugin is not attached"))
+            return provider
         discovered = self.discovered_runtime_providers.get(provider_id)
         if discovered is None:
             raise RuntimeError(f"channel provider is not physically available: {provider_id}")
@@ -1138,6 +1160,8 @@ class ChannelEndpointProviderManager:
         return errors
 
     def _unload_provider_if_idle(self, provider_id: str) -> None:
+        if provider_id in self.plugin_provider_ids:
+            return  # Endpoint lifetime does not own the plugin generation.
         if provider_id not in self.runtime_provider_handles:
             return
         if any(
@@ -1162,17 +1186,25 @@ class ChannelEndpointProviderManager:
         unload_errors = self._unload_runtime_provider(provider_id)
         if unload_errors:
             raise RuntimeError("; ".join(unload_errors))
+        # Keep physical ownership metadata until recovery transfer completes so
+        # a failed removal can be retried without orphaning delivery hubs.
+        for endpoint_id in endpoint_ids:
+            self.runtime.remove_endpoint_hub(endpoint_id)
         for endpoint_type in discovered.endpoint_types:
             if self.endpoint_type_to_provider.get(endpoint_type) == provider_id:
                 self.endpoint_type_to_provider.pop(endpoint_type, None)
         self.discovered_runtime_providers.pop(provider_id, None)
-        for endpoint_id in endpoint_ids:
-            self.runtime.remove_endpoint_hub(endpoint_id)
         lifecycle_errors = stop_errors + unload_errors
         if lifecycle_errors:
             raise RuntimeError("; ".join(lifecycle_errors))
 
     async def stop_async(self) -> None:
+        owned = self.plugin_provider_ids.intersection(self.runtime_provider_handles)
+        if owned:
+            self.shutdown_errors = [
+                'channel plugins must finish PluginHost shutdown first: ' + ', '.join(sorted(owned))
+            ]
+            return
         errors: list[str] = []
         for hub in self.runtime.list_endpoint_hubs():
             try:
@@ -1639,6 +1671,25 @@ def commit_channel_endpoint_detach(
     if endpoint is not None:
         endpoint.detach()
     return record, endpoint, removed
+
+
+def _already_attached_result(endpoint_id: str, provider_id: str, enabled: bool) -> CapabilityResult:
+    return CapabilityResult(
+        status=RuntimeStatus.OK, text="Channel endpoint already attached; transport preserved",
+        llm_text="The endpoint is already attached. No transport was rebuilt and no code was reloaded. "
+                 "This does not establish that the connection is healthy. If the goal is to repair a broken "
+                 "connection, inspect its health or explicitly restart the endpoint for a fresh transport session.",
+        structured={"endpoint_id": endpoint_id, "provider_id": provider_id, "attached": True,
+                    "enabled": enabled, "changed": False, "reason": "already_attached",
+                    "transport_restarted": False},
+        effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE),
+        affordances=(
+            ToolAffordance(tool="call_tool", arguments={"name": "inspect_channel_endpoint",
+                "args": {"name": endpoint_id}}, reason="If a connection problem is suspected, inspect health; attached does not mean healthy."),
+            ToolAffordance(tool="call_tool", arguments={"name": "restart_channel_endpoint",
+                "args": {"name": endpoint_id}}, reason="If the authorized goal requires a fresh transport session, explicitly restart; attach preserved the existing transport."),
+        ),
+    )
 
 
 def _ok(text: str, payload: dict[str, Any]) -> IntrospectionResult:

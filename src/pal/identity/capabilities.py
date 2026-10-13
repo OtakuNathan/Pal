@@ -42,19 +42,6 @@ class IdentityIntrospectionProvider:
     service: IdentityService
     module_id: str = "identity"
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="show",
-        guidance=ToolGuidance(
-            search_objects=('identity', 'identities', 'preference', 'preferences'),
-            purpose="Read Pal's configured identity and preferences from durable storage and refresh the resident in-memory projection.",
-            use_when="Inspecting Pal's configured persona/preferences or explicitly refreshing identity after external configuration changes. If no persona is configured, prompt assembly uses the default identity fragments.",
-            do_not_use_when="Recalling user facts (use recall_memory).",
-            failure_next_steps="Read-only. If no persona, identity prompt fragments will use defaults.",
-        ),
-        aliases=("refresh_identity",),
-    )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_identity(self)

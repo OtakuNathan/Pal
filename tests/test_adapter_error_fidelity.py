@@ -266,6 +266,7 @@ def test_mcp_management_error_cannot_be_overwritten_by_cached_success(runtime, t
     provider = McpManagerPluginProvider(runtime_root=tmp_path, core_context=SimpleNamespace())
     provider.last_health = {"status": "ok", "error": "old error", "manager_running": True, "result": "OLD_RESULT"}
     monkeypatch.setattr(provider, "_ensure_manager_started", lambda: chained_failure("current MCP failure"))
+    monkeypatch.setattr(provider.client, "request_sync", lambda *a, **kw: chained_failure("current MCP failure"))
     monkeypatch.setattr(provider, "_prepare_image_payload", lambda *a, **kw: chained_failure("current MCP failure"))
     def handler(_):
         raw = getattr(provider, action)(CapabilityCall(name="probe", args={"name": "server"}))
@@ -279,4 +280,5 @@ def test_mcp_management_error_cannot_be_overwritten_by_cached_success(runtime, t
     assert metadata(result)["error_code"] == ("mcp_image_prepare_failed" if action == "image_prepare" else "mcp_manager_failed")
     shown = provider._status_payload()
     assert shown["manager_running"] is False
-    assert shown["cached_snapshot"]["result"] == "OLD_RESULT"
+    assert "result" not in shown["cached_snapshot"]
+    assert provider.last_health["result"] == "OLD_RESULT"

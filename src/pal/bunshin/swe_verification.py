@@ -343,7 +343,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "search_objects": ('outcome', 'outcomes', 'evidence'),
             "purpose": "Submit an UNKNOWN outcome for required evidence unavailable in the bound environment.",
             "use_when": (
-                "Use only when a required platform or environment genuinely cannot be exercised "
+                "Submit the final verifier outcome when a required platform or environment genuinely cannot be exercised "
                 "and provide the concrete missing evidence and follow-up plan."
             ),
             "do_not_use_when": (

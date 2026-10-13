@@ -4828,11 +4828,6 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     "op_bunshin_control_workflow",
                     "op_bunshin_archive_workflow",
                     "intro_bunshin_catalog_read",
-                    "op_bunshin_catalog_set_profile_override",
-                    "op_bunshin_catalog_reset_profile_override",
-                    "op_bunshin_catalog_set_family_override",
-                    "op_bunshin_catalog_reset_family_override",
-                    "op_bunshin_catalog_refresh",
                 },
             )
             schemas = json.dumps(
