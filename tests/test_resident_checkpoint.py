@@ -66,7 +66,7 @@ class ResidentCheckpointTests(unittest.TestCase):
             self.assertEqual(app.last_checkpoint_status, "save_failed")
             self.assertIn("disk unavailable", "\n".join(logs.output))
 
-    def test_checkpoint_is_encrypted_and_restores_then_consumes_l1(self) -> None:
+    def test_checkpoint_is_encrypted_and_remains_available_after_restore(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = _build_app(root)
@@ -90,7 +90,11 @@ class ResidentCheckpointTests(unittest.TestCase):
             self.assertEqual(turn.state.value, "settled")
             self.assertIn("resident checkpoint secret", repr(turn.messages))
             self.assertEqual(restored.last_checkpoint_status, "restored")
-            self.assertFalse(path.exists())
+            self.assertTrue(path.exists())
+            restarted_again = _build_app(root)
+            asyncio.run(restarted_again._restore_checkpoint_async())
+            self.assertEqual(restarted_again.last_checkpoint_status, "restored")
+            self.assertIn("resident checkpoint secret", repr(restarted_again.handle.memory_service.l1_store.turns.turns))
 
     def test_restore_marks_an_active_resident_turn_interrupted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

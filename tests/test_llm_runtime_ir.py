@@ -214,7 +214,7 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
         return SimpleNamespace(user_feedback="feedback")
 
     executor = TurnExecutor(
-        SimpleNamespace(require_port=lambda _name: runtime),
+        SimpleNamespace(require_port=lambda _name: runtime, port_registry={}),
         AgentTurnRuntimeState(),
         SimpleNamespace(),
         build_canonical_prompt=lambda *args, **kwargs: None,

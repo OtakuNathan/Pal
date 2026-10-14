@@ -114,6 +114,32 @@ BrowserScrollInput = _strict_model(
     "BrowserScrollInput",
     {"dx": (int, Field(0, ge=-100000, le=100000)), "dy": (int, Field(..., ge=-100000, le=100000)), "timeout_ms": (int, Field(15000, ge=1000, le=120000, description="Timeout in milliseconds."))},
 )
+class BrowserDragInput(StrictToolModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    start_target: str | None = Field(None, max_length=500, description=TARGET_DESCRIPTION)
+    end_target: str | None = Field(None, max_length=500, description=TARGET_DESCRIPTION)
+    start_x: int | None = Field(None, ge=0, le=16384, description="Coordinate mode: start x in viewport pixels.")
+    start_y: int | None = Field(None, ge=0, le=16384, description="Coordinate mode: start y in viewport pixels.")
+    end_x: int | None = Field(None, ge=0, le=16384, description="Coordinate mode: end x in viewport pixels.")
+    end_y: int | None = Field(None, ge=0, le=16384, description="Coordinate mode: end y in viewport pixels.")
+    steps: int = Field(10, ge=2, le=40, description="Coordinate mode: interpolation steps between press and release; more steps look more human.")
+    timeout_ms: int = Field(60000, ge=1000, le=300000, description="Timeout in milliseconds for the whole drag.")
+
+    @model_validator(mode="after")
+    def validate_mode(self):
+        element_mode = bool(self.start_target or self.end_target)
+        coordinates = (self.start_x, self.start_y, self.end_x, self.end_y)
+        coordinate_mode = any(value is not None for value in coordinates)
+        if element_mode and coordinate_mode:
+            raise ValueError("Provide element targets or coordinates, not both.")
+        if element_mode and not (self.start_target and self.end_target):
+            raise ValueError("Element mode requires both start_target and end_target.")
+        if coordinate_mode and any(value is None for value in coordinates):
+            raise ValueError("Coordinate mode requires all of start_x, start_y, end_x, and end_y.")
+        if not element_mode and not coordinate_mode:
+            raise ValueError("Provide start_target/end_target or start_x/start_y/end_x/end_y.")
+        return self
+
 BrowserResizeInput = _strict_model(
     "BrowserResizeInput",
     {
@@ -161,6 +187,17 @@ BrowserEvaluateInput = _strict_model(
         "target": (str | None, Field(None, max_length=500, description=TARGET_DESCRIPTION)),
         "max_chars": (int, Field(20000, ge=200, le=100000, description="Inline preview budget. Oversized objects/arrays return a JSON preview and original result_type; text_file preserves the complete result. Read that file instead of rerunning the script.")),
         "timeout_ms": (int, Field(15000, ge=1000, le=120000, description="Timeout in milliseconds.")),
+    },
+)
+BrowserFetchInput = _strict_model(
+    "BrowserFetchInput",
+    {
+        "url": (str, Field(..., max_length=8192, description="Same-origin relative path such as /api/v1/data, or an absolute http(s) URL; fetched from the current page's context with its cookies.")),
+        "method": (Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], Field("GET")),
+        "headers": (dict[str, str], Field(default_factory=dict, max_length=20, description="Additional request headers.")),
+        "body": (str | None, Field(None, max_length=100000, description="Raw request body for non-GET/HEAD methods.")),
+        "max_chars": (int, Field(20000, ge=200, le=200000, description="Inline body preview budget; the complete body is saved to text_file.")),
+        "timeout_ms": (int, Field(30000, ge=1000, le=120000, description="Timeout in milliseconds.")),
     },
 )
 BrowserNetworkInput = _strict_model(
@@ -225,7 +262,9 @@ __all__ = [
     "BrowserCheckInput",
     "BrowserClickInput",
     "BrowserDialogInput",
+    "BrowserDragInput",
     "BrowserEvaluateInput",
+    "BrowserFetchInput",
     "BrowserFillInput",
     "BrowserFindInput",
     "BrowserHistoryInput",

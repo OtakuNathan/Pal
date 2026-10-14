@@ -47,7 +47,7 @@ class _BarrierEngine:
         self.timeout_seconds = 30.0
 
     async def run(self, snapshot, *, llm_runtime=None, memory_service=None,
-                  after_commit=None, replay_guard=None, commit_guard=None):
+                  after_commit=None, replay_guard=None, commit_guard=None, commit_hooks=None):
         self.calls += 1
         self.entered.set()
         await self.release.wait()

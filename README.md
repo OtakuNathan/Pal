@@ -148,9 +148,11 @@ unloaded. Channel endpoints retain their own target-level lifecycle.
 **Reboot the brain — you do it, not Pal.** Pal cannot restart itself. A
 session reset is a slash command (`/reset`); a full daemon restart is
 `systemctl --user restart pal` on Linux (or restarting the LaunchAgent on
-macOS), performed by the operator. Because memory (L1/L2/L3), bunshin task
-ledgers, and invocation checkpoints are all durable on disk, restarting the
-brain costs nothing — the conversation continues with memory intact. That's
+macOS), performed by the operator. Resident L1 recovery is saved at request
+admission and completed-round boundaries, with a full checkpoint on clean shutdown;
+unfinished rounds or unsaved progress during storage failure can still be lost.
+Durable memory and Bunshin task/checkpoint stores retain their own lifecycles.
+The conversation continues from the last valid recovery point. That's
 the developer loop: break it, fix it, restart, `pal tty` back in.
 
 **Control without a chat:** slash commands (`/interrupt`, `/reset`, …) ride
@@ -221,6 +223,12 @@ Memory owns only the atomic L1 replacement plus dependent L2
 cleanup/rollback; each agent host policy owns the semantic checkpoint schema
 and rendering. Automatic compaction is driven by the real context budget, not
 a fixed turn interval.
+
+Resident recovery keeps encrypted full L1 and round deltas separately from
+searchable dialogue. Current conversation and compact archives are credential-redacted
+UTF-8 JSONL files in `{runtime_root}/data/conversation-history/`; `rg` searches the
+whole directory and `jq` extracts message text and timestamps. Reasoning, native
+replay and external output files remain outside this searchable copy.
 
 ### Capability Forest
 

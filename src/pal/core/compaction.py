@@ -175,6 +175,14 @@ class CompactionPolicy(Protocol):
     ) -> L2Entry:
         ...
 
+
+class CompactionCommitHooks(Protocol):
+    def decorate(self, entry: L2Entry) -> L2Entry:
+        ...
+
+    def publish(self) -> None:
+        ...
+
 @dataclass(frozen=True)
 class CompactionRunResult:
     status: str
@@ -245,6 +253,7 @@ class CompactionEngine:
         after_commit: Callable[[], None] | None = None,
         replay_guard: Callable[[], bool] | None = None,
         commit_guard: Callable[[], bool] | None = None,
+        commit_hooks: CompactionCommitHooks | None = None,
     ) -> CompactionRunResult:
         snapshot = _scope_safe_snapshot(snapshot)
         units = list(build_compaction_units(snapshot))
@@ -515,6 +524,8 @@ class CompactionEngine:
                     raw_text,
                     snapshot,
                 )
+                if commit_hooks is not None:
+                    summary_entry = commit_hooks.decorate(summary_entry)
                 normalized_tokens = _estimate_visible_tokens(json.dumps(summary_entry.payload, ensure_ascii=False))
                 if normalized_tokens > visible_limit:
                     raise ValueError(f"checkpoint exceeds the {visible_limit:,}-token visible output limit")
@@ -573,6 +584,22 @@ class CompactionEngine:
                     source_sizes=source_sizes,
                     failures=failures,
                 )
+            if commit_hooks is not None:
+                try:
+                    publish = asyncio.create_task(asyncio.to_thread(commit_hooks.publish))
+                    try:
+                        await asyncio.shield(publish)
+                    except asyncio.CancelledError:
+                        await publish
+                        raise
+                except Exception as exc:
+                    failure_details.append(exception_report(exc))
+                    log_failure(f"archive:{type(exc).__name__}")
+                    return finish(snapshot, status="commit_failed", attempts=attempts,
+                                  source_sizes=source_sizes, failures=failures)
+                if commit_guard is not None and not commit_guard():
+                    return finish(snapshot, status="ticket_cancelled", attempts=attempts,
+                                  source_sizes=source_sizes, failures=failures)
             committed = await self._commit(
                 snapshot,
                 memory_service=memory_service,

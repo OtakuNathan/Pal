@@ -13,7 +13,7 @@ H03 · a failed shutdown write is reported honestly: the previous complete
         and nothing claims success.
 
 Layering: the app-level save/restore chain (publish -> encrypted envelope
--> restore -> consume) is exercised with the inherited resident-checkpoint
+-> restore -> durable rebase) is exercised with the inherited resident-checkpoint
 harness; engine/owner round-trips use the real MemoryService and port with
 a network-side fake only (H01 pattern).
 """
@@ -26,7 +26,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.core.resident_checkpoint import ResidentCheckpointStore
+from pal.core.resident_checkpoint import ResidentCheckpointError, ResidentCheckpointStore
 from pal.llm.ir import (
     LLMMessageIR,
     MessageRole,
@@ -291,6 +291,7 @@ class H02GracefulRecoveryTests(unittest.TestCase):
             asyncio.run(source._publish_checkpoint_async())
             store = ResidentCheckpointStore(root)
             first = store.read()
+            original_bytes = store.path.read_bytes()
             self.assertEqual(first["sequence"], 1)
 
             service.begin_l1_turn("turn-b", user_text="second checkpoint")
@@ -304,25 +305,33 @@ class H02GracefulRecoveryTests(unittest.TestCase):
 
             with patch("pal.core.resident_checkpoint.os.replace",
                        side_effect=failing_replace):
-                with self.assertRaises(OSError):
+                with self.assertRaisesRegex(ResidentCheckpointError, "OSError"):
                     asyncio.run(source._publish_checkpoint_async())
 
             # The previous complete checkpoint is still readable and
             # authenticated; no half-written file or temp residue.
             still = store.read()
             self.assertEqual(still["sequence"], 1)
+            self.assertEqual(store.path.read_bytes(), original_bytes)
+            self.assertEqual(source.history.status, "degraded")
+            self.assertEqual(source.history.store.sequence, 1)
+            self.assertEqual(len(service.history.turns), 2)
             self.assertEqual(
                 still["modules"]["memory"]["payload"]["l1_turns"][0]["turn_id"],
                 "turn-a",
             )
             leftovers = [
-                p.name for p in root.iterdir()
+                p.name for p in store.path.parent.iterdir()
                 if p.name.endswith(".tmp") or p.name.startswith(".")
             ]
             self.assertEqual(leftovers, [])
             # The failed write never replaced the old file: turn-b is absent.
             self.assertNotIn("turn-b",
                              str(still["modules"]["memory"]["payload"]))
+            asyncio.run(source._publish_checkpoint_async())
+            retried = store.read()
+            self.assertEqual(retried["sequence"], 2)
+            self.assertEqual(len(retried["modules"]["memory"]["payload"]["l1_turns"]), 2)
 
 
 if __name__ == "__main__":

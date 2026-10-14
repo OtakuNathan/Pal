@@ -22,7 +22,7 @@ def test_fuzzy_contract_review_then_validated_selection_never_executes_business(
     record = fx.runtime.registry_generation.record_for_alias(alias)
     business = new_tool_call(name='call_tool', args={'name': alias, 'args': {}}) if (
         record.execution.invocation_mode.value == 'indirect') else new_tool_call(name=alias, args={})
-    calls = [new_tool_call(name='search_tools', args={'query': 'browser inspectt status'}),
+    calls = [new_tool_call(name='search_tools', args={'query': 'browser healt', 'domain': 'browser'}),
              new_tool_call(name='read_tool', args={'name': alias}), business]
     original = fx.runtime.execute_tool_async
     executed = []

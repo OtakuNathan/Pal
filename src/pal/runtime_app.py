@@ -17,11 +17,10 @@ from pal.core.debug_dump import write_runtime_debug_dump
 from pal.core.resident_checkpoint import (
     RESIDENT_LOGICAL_COROUTINE_ID,
     ResidentCheckpointError,
-    ResidentCheckpointStore,
 )
+from pal.core.resident_history import RESIDENT_HISTORY, ResidentHistory, ResidentHistoryPromptProvider
 from pal.core.runtime_state import (
     RuntimeSnapshotCoordinator,
-    RuntimeSnapshotIdentity,
     runtime_spec_hash,
 )
 from pal.foundation.log_paths import pal_debug_log_path
@@ -90,6 +89,13 @@ class PalRuntimeApp:
     last_checkpoint_error: str = ""
     _checkpoint_sequence: int = field(default=0, init=False, repr=False)
     _shutdown_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    history: ResidentHistory = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        core = self.handle.core
+        self.history = ResidentHistory(self._runtime_root(), core.context, core.state.diagnostics)
+        core.context.port_registry.register(RESIDENT_HISTORY, self.history)
+        core.context.prompt_fragment_registry.register(ResidentHistoryPromptProvider(self._runtime_root()))
 
     async def run(self) -> None:
         stop_event = asyncio.Event()
@@ -149,24 +155,30 @@ class PalRuntimeApp:
             await self.handle.stop_async()
 
     async def _restore_checkpoint_async(self) -> None:
-        store = ResidentCheckpointStore(self._runtime_root())
         try:
-            snapshot = store.read()
+            snapshot = self.history.store.read()
             if snapshot is None:
                 self.last_checkpoint_status = "none"
                 return
             expected_spec = self._runtime_spec_hash()
             if str(snapshot.get("runtime_spec_hash") or "") != expected_spec:
                 snapshot = self._upgrade_legacy_checklist_snapshot(snapshot, expected_spec)
+            self.history.protect(snapshot)
             prepared = _interrupt_active_resident_turns(snapshot)
             await RuntimeSnapshotCoordinator(
                 self.handle.core.context.module_registry
             ).restore(prepared)
             self._checkpoint_sequence = int(prepared.get("sequence") or 0)
-            store.consume()
+            # Retain a valid recovery point during this process's lifetime.
+            # Persist the normalized interruption state before releasing old
+            # output leases or retiring the journal used to reconstruct it.
+            saved = await self.history.checkpoint_async("restore", rebase=True)
+            if not saved:
+                raise ResidentCheckpointError("restored context could not be durably rebased")
             self.last_checkpoint_status = "restored"
             self.last_checkpoint_error = ""
         except Exception as exc:
+            self.history.restore_failure(exc)
             self.last_checkpoint_status = "restore_failed"
             self.last_checkpoint_error = f"{type(exc).__name__}: {exc}"
             self.handle.core.state.diagnostics.append(
@@ -210,19 +222,11 @@ class PalRuntimeApp:
             )
 
     async def _publish_checkpoint_async(self) -> None:
-        self._checkpoint_sequence += 1
-        identity = RuntimeSnapshotIdentity(
-            logical_coroutine_id=RESIDENT_LOGICAL_COROUTINE_ID,
-            workflow_id=RESIDENT_LOGICAL_COROUTINE_ID,
-            stage_key="resident_exit",
-            sequence=self._checkpoint_sequence,
-            producer_fencing_token=1,
-            runtime_spec_hash=self._runtime_spec_hash(),
-        )
-        snapshot = await RuntimeSnapshotCoordinator(
-            self.handle.core.context.module_registry
-        ).snapshot(identity)
-        ResidentCheckpointStore(self._runtime_root()).publish(snapshot)
+        if self.history.tasks:
+            await asyncio.gather(*tuple(self.history.tasks))
+        if not await self.history.checkpoint_async("exit", rebase=True):
+            raise ResidentCheckpointError(self.history.last_error)
+        self._checkpoint_sequence = self.history.store.sequence
 
     def _runtime_spec_hash(self) -> str:
         return runtime_spec_hash(
@@ -299,6 +303,7 @@ class PalRuntimeApp:
             "last_debug_dump_error": self.last_debug_dump_error,
             "last_checkpoint_status": self.last_checkpoint_status,
             "last_checkpoint_error": self.last_checkpoint_error,
+            "resident_history": self.history.inspect(),
         }
 
     def _runtime_root(self) -> Path:

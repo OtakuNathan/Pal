@@ -340,6 +340,9 @@ class MemoryServicePort(Protocol):
     def stream_l1_assistant(self, turn_id: str, message: "LLMMessageIR") -> None:
         ...
 
+    def record_conversation_reply(self, turn_id: str, text: str, *, timestamp: str, partial: bool = False) -> None:
+        ...
+
     def upsert_l1_assistant(self, turn_id: str, message: "LLMMessageIR") -> "L1TurnIR":
         ...
 

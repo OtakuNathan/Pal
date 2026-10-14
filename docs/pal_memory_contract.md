@@ -89,10 +89,12 @@ semantic compact，并原子地以一个 continuity checkpoint 替换冻结的�
 ### 边界
 
 - `L1` 属于 runtime memory
-- 运行中的 `L1` 以 RAM 内工作集为唯一权威来源；正常停机时会生成一次加密恢复快照
-- resident Pal 在正常停机时把完整 `L1` 加密导出，并在下次启动、channel
-  接入前恢复后消费；停机路径不调用 LLM。未及写出 checkpoint 的突然死亡仍可能
-  丢失 resident L1。durable Bunshin role session 则按自己的 checkpoint 合约恢复 L1
+- 运行中的 `L1` 以 RAM 内工作集为唯一权威来源；本体使用加密基线和增量日志保存恢复副本
+- resident Pal 在 L 提交时追加恢复记录，每轮模型响应与工具结果闭合后补存 R；最后一轮、turn 结算和中断也保存。
+  流式碎片不逐条落盘。正常停机保存完整基线，不调用 LLM。
+- 下次启动在 channel 接入前恢复并保留有效恢复点，未结束 turn 标记为 interrupted，不重放旧工具。
+  突然退出最多恢复到最近一次成功持久化的边界；写入失败时继续保留 RAM 进展并报告降级。
+  durable Bunshin role session 继续按自己的 checkpoint 合约恢复 L1。
 - `L1` 不属于 Core durable state
 - `L1` 不是 summary bucket
 
@@ -750,7 +752,65 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 - 从该 L1 生成结构化 continuity
 - 原子替换 L1，并清理依赖该旧 prompt generation 的投影
 
-`compact` 不是 durable write。
+Memory 的 compact 提交是 RAM 内 L1 替换。Pal 本体宿主在提交前另行写入历史归档，提交后更新恢复基线；Bunshin 保留现有 checkpoint 合约。
+
+### Resident history and recovery
+
+The resident host stores the encrypted full baseline at `data/core/resident_checkpoint.json`
+and encrypted message/state deltas at `data/core/resident_journal.jsonl`. Both retain
+reasoning, native replay and the L/R owner cut needed to reconstruct full L1.
+The latest durable state owns its referenced output files until a successor is
+durably published. An incomplete journal tail can be ignored; an invalid complete
+record or sequence gap reports a restore failure and ordinary saves do not overwrite it.
+
+Before replacing frozen L, the resident host writes its searchable projection to
+`data/conversation-history/<UTC-archive-time>_<archive-id>.jsonl`. The header records
+the conversation incarnation, compact operation, source identity, archive time,
+known dialogue time range and missing timestamp count. Each following physical
+line is one message record. UTF-8 text keeps Chinese literal and encodes line breaks
+as `\n`; `jq -r` or Python decoding restores them. File time is archive time, not
+message time. Old records without clocks or origin evidence remain explicitly unknown.
+Resident inputs and replies receive their timestamps when recorded, before compact,
+so a multi-day live session retains its original dialogue times. Recovery preserves
+those clocks as storage metadata for later archival; provider requests encode only
+message content and do not include the conversation timestamps.
+
+At the same round/L-admission boundaries, the resident host separately appends a
+searchable, credential-redacted copy to `data/conversation-history/current_<id>.jsonl`.
+Compact archives live alongside these current files, so `rg -n PATTERN DIRECTORY`
+searches both in one pass. After compact commits and recovery is saved, atomically
+rewrite the current file with only the remaining live tail. Reset keeps the old
+incarnation's searchable file. If the old dialogue cannot be preserved, reset fails
+before clearing it. A crash can leave overlapping records; the header's conversation
+ID plus message ID identifies them, and the last version of a message
+in a current file is authoritative. Current-file headers are not end-time indexes;
+filter message timestamps when searching live dialogue.
+
+Both searchable copies contain user inputs, channel-submitted replies/progress and original tool
+text previews with tool names, call IDs and status. Runtime injections, prior
+compact summaries, reasoning, replay, structured result bodies, result handlers and
+external snapshot references are omitted. Legacy assistant text is labeled as model
+text because older state did not record channel submission. Queued reply text is
+evidence of submission, not proof that a remote user received it. Recognizable
+credentials (key/token/password assignments, bearer credentials, bot URLs, common
+credential prefixes, cookie headers and private-key blocks) are redacted before
+JSON encoding, with a per-message `redacted` flag. This is pattern-based credential
+masking, not a guarantee that arbitrary personal information is anonymized. Exact
+wording can differ at a redaction marker; encrypted recovery preserves the original
+L1 and replay independently. A failed searchable write reports degradation and
+retries without invalidating a successfully saved recovery point.
+
+The host appends the latest archive path and coverage to compact continuity and
+provides a resident history lookup affordance. Use `rg -n` to find records and inspect
+neighbors; for example `jq -r 'select(.type == "message" and .role == "user") | .text' ARCHIVE`
+extracts user-role text. Check origin metadata before attributing legacy inputs to
+the user. A search miss does not establish that something was never said.
+
+Historical dialogue establishes prior wording and recorded observations. Current
+runtime/source/external state retains its existing truth owners. Memory contains
+maintained, distilled information and remains available through recall. `/reset`
+rolls the active incarnation and durably clears recovery state while preserving
+published archives. There is no automatic vector indexing or archive deletion.
 
 当前实现由 Core 的共享 compaction engine 负责预算防护、完整冻结 L 源材料、模型尝试、结果校验和提交编排；源材料超窗时失败，不静默裁剪。Memory 只接收已经由 host policy 校验并渲染好的 `summary_entry`，然后原子替换 L1、清理依赖的 L2 projection；提交失败时必须整体回滚。
 

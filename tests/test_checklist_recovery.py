@@ -64,7 +64,9 @@ def test_legacy_snapshot_adds_only_empty_checklist_without_rewriting_history(tmp
     assert checklist.show() is None
     port = restored.handle.core.context.module_registry.modules["memory"].runtime_state_port
     assert port.snapshot_state()["l1_turns"] == old_snapshot["modules"]["memory"]["payload"]["l1_turns"]
-    assert ResidentCheckpointStore(tmp_path).read() is None
+    rebased = ResidentCheckpointStore(tmp_path).read()
+    assert rebased["modules"]["checklist"]["payload"] == {"plan": None}
+    assert rebased["modules"]["memory"]["payload"]["l1_turns"] == old_snapshot["modules"]["memory"]["payload"]["l1_turns"]
 
 
 @pytest.mark.parametrize("damage", ["bad_plan", "missing_current_module", "bad_hash", "extra_module"])

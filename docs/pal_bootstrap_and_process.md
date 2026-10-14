@@ -202,14 +202,30 @@ sidecars.
 The service layer restarts Pal. Pal reloads runtime root state, reconnects to
 configured channels, republishes capabilities, and resumes from durable stores.
 
-On SIGINT/SIGTERM, resident Pal stops admitting turns and writes the complete L1
-as one encrypted, atomic runtime checkpoint. Shutdown never calls an external
-model. The next process restores and consumes the checkpoint before starting
-channel endpoints; ordinary context-budget policy can compact it later if
-needed. This preserves a warm provider prefix across a short restart without
-putting network latency inside the supervisor's stop deadline. This lifecycle
-path performs no periodic saves; an unannounced SIGKILL, power loss, or OOM kill
-before the exit checkpoint begins cannot be intercepted.
+Resident Pal maintains an encrypted atomic baseline plus an encrypted incremental
+journal. Accepted L submissions and completed rounds persist state; completed
+rounds include the closed R tail, including the final text reply. Streaming chunks
+do not each trigger disk writes. The single writer synchronizes committed bytes
+and preserves output files needed by the last durable state. Save failure leaves
+RAM progress intact, reports degradation and retries at a later boundary.
+
+On SIGINT/SIGTERM, Pal stops admitting turns and publishes a complete baseline
+without calling an external model. The next process restores before starting
+channel endpoints, marks active turns interrupted and rebases the normalized
+state; it retains a recovery point during its lifetime. Tools are not replayed.
+The current incomplete round and progress made during storage degradation may
+still be lost after SIGKILL, power loss or OOM. Interrupted tool side effects
+require observation and reconciliation, not automatic retry.
+
+Compaction writes searchable dialogue JSONL before retiring L and publishes a new
+recovery baseline afterward. A separate credential-redacted current-dialogue JSONL
+is appended at round/L-admission boundaries in the same `data/conversation-history/`
+directory as compact archives; `rg` can search both. Its persistence failure never
+invalidates a saved encrypted recovery point. `/reset` preserves searchable dialogue
+and archives but persists an
+empty active state before reporting success. Existing exit checkpoints remain
+readable. Invalid complete journal records fail restoration without being silently
+replaced by later normal saves.
 
 ### Worker Crash
 

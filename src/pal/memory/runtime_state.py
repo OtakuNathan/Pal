@@ -251,6 +251,9 @@ class MemoryRuntimeStatePort:
         # All construction and validation happened in prepare_restore_state.
         # These assignments are the only visible restore boundary.
         self.service.l1_store.turns = prepared.turns
+        self.service._conversation_turns = {turn.turn_id for turn in prepared.turns.turns
+                                            if turn.metadata.get("conversation_tracking")}
+        self.service._conversation_times.clear()
         self.service.l2_store.items = prepared.entries
         self.service.l2_store.top_of_mind_refs = list(prepared.top_of_mind_refs)
         self.service.l2_store.heat_registry = prepared.heat

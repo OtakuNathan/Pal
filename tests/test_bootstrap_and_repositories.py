@@ -288,12 +288,13 @@ class PalV2BootstrapTests(unittest.TestCase):
             r"\b(?:read|list|inspect|search|inject|write|edit|delete|upsert|complete|close|navigate|run|call|"
             r"reload|attach|rescan|start|observe|remember|recall|forget|update|set|enable|disable|capture|find)_[a-z0-9_]+\b"
         )
-        # These look like aliases but are result data fields.
+        # These look like aliases but are result or input data fields.
         data_fields = {"attach_errors", "search_text"}
         for alias, record in records.items():
             with self.subTest(alias=alias):
                 prose = "\n".join((record.guidance.purpose, record.guidance.use_when, record.guidance.do_not_use_when))
-                for mentioned in set(tool_name.findall(prose)) - data_fields:
+                fields = data_fields | set(record.input_schema.get("properties", {}))
+                for mentioned in set(tool_name.findall(prose)) - fields:
                     if mentioned == "inspect_channel_endpoint" and mentioned not in records:
                         self.assertIn("If endpoints exist", prose)
                     else:
