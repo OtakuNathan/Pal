@@ -231,8 +231,6 @@ def test_diagnostic_context_and_owned_object_names_recall_real_tools(generation,
     ("check checklist step", {"read_checklist"}),
     ("mark checklist step done", {"complete_checklist_step"}),
     ("finish checklist step", {"complete_checklist_step"}),
-    ("browser fetch", {"navigate_browser", "read_browser_page"}),
-    ("browser fetch page", {"navigate_browser", "read_browser_page"}),
     ("browser network traffic", {"manage_browser_network_capture"}),
     ("browser api requests", {"manage_browser_network_capture"}),
     ("check browser state", {"inspect_browser_status"}),
@@ -300,6 +298,23 @@ def test_keyword_precision_and_existing_matches_survive_purpose_fallback(generat
     assert set(aliases(generation, query, top_k, keyword_only=True)) == allowed
     if allowed:
         assert set(aliases(generation, query, top_k)) == allowed
+
+
+def test_browser_fetch_queries_match_new_tool_without_crowding_existing_matches(generation):
+    # fetch_browser_url adds an exact keyword match for "browser fetch": at the
+    # default width it dominates alone, while a wider width also keeps the
+    # pre-existing navigate/read partials. "browser fetch page" keeps the
+    # page-oriented tools dominant until a wider width admits the fetch tool.
+    assert set(aliases(generation, "browser fetch", None, keyword_only=True)) == {"fetch_browser_url"}
+    assert set(aliases(generation, "browser fetch", 5, keyword_only=True)) == {
+        "fetch_browser_url", "navigate_browser", "read_browser_page",
+    }
+    assert set(aliases(generation, "browser fetch page", None, keyword_only=True)) == {
+        "navigate_browser", "read_browser_page",
+    }
+    assert set(aliases(generation, "browser fetch page", 5, keyword_only=True)) == {
+        "fetch_browser_url", "navigate_browser", "read_browser_page",
+    }
 
 
 def test_catalog_memory_scope_prefers_public_facade(generation):

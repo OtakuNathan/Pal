@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import shutil
@@ -435,9 +436,9 @@ class _PlaywrightCliWorker:
     ) -> dict[str, Any]:
         if action not in {
             "navigate", "read", "snapshot", "find", "click", "fill", "type",
-            "press", "hover", "select", "check", "scroll", "resize", "history",
+            "press", "hover", "select", "check", "scroll", "drag", "resize", "history",
             "tabs", "dialog", "inspect_layout", "screenshot", "status",
-            "evaluate", "network", "clear_cache",
+            "evaluate", "fetch", "network", "clear_cache",
         }:
             raise BrowserServiceError("unsupported browser action", code="unsupported_action")
         if action == "status":
@@ -461,7 +462,13 @@ class _PlaywrightCliWorker:
         try:
             payload = self._dispatch_action(record, action=action, args=args, timeout_ms=timeout_ms)
         except BrowserServiceError as exc:
-            if any(marker in str(exc).lower() for marker in _BROWSER_MISSING_MARKERS):
+            if exc.code == "cli_command_failed" and "is not open" in str(exc).lower():
+                # The live browser died while its session record survived
+                # (idle shutdown, crash, or external kill). Relaunch and retry once.
+                self._relaunch_session(record, timeout_ms=timeout_ms)
+                recovered = True
+                payload = self._dispatch_action(record, action=action, args=args, timeout_ms=timeout_ms)
+            elif any(marker in str(exc).lower() for marker in _BROWSER_MISSING_MARKERS):
                 self._schedule_install(browser_only=True, reason="Chromium build missing")
                 raise BrowserServiceError(
                     "Chromium is being provisioned",
@@ -470,7 +477,8 @@ class _PlaywrightCliWorker:
                     state_unknown=exc.state_unknown,
                     curl_applicable=action in {"navigate", "read"},
                 ) from exc
-            raise
+            else:
+                raise
         record.last_used_at = time.time()
         try:
             page = dict(payload.get("page") or self._page_state(record, timeout_ms=timeout_ms))
@@ -623,6 +631,37 @@ class _PlaywrightCliWorker:
             dy = max(-100000, min(100000, int(args.get("dy") or 0)))
             self._run_write(record, _cli_args("mousewheel", str(dx), str(dy)), timeout_ms=timeout_ms)
             return {}
+        if action == "drag":
+            start_target = _bounded_text(args.get("start_target") or "", limit=500, field_name="start_target").strip()
+            end_target = _bounded_text(args.get("end_target") or "", limit=500, field_name="end_target").strip()
+            if start_target.startswith("-") or end_target.startswith("-"):
+                raise BrowserServiceError("drag targets must not start with '-'", code="invalid_arguments")
+            if start_target and end_target:
+                self._run_write(record, _cli_args("drag", start_target, end_target), timeout_ms=timeout_ms)
+                return {}
+            coordinates = tuple(args.get(name) for name in ("start_x", "start_y", "end_x", "end_y"))
+            if any(value is None for value in coordinates):
+                raise BrowserServiceError(
+                    "drag requires start_target and end_target, or all of start_x/start_y/end_x/end_y",
+                    code="invalid_arguments",
+                )
+            start_x, start_y, end_x, end_y = (int(value) for value in coordinates)
+            steps = max(2, min(40, int(args.get("steps") or 10)))
+            per_step_ms = max(1000, int(timeout_ms / (steps + 2)))
+
+            def _pointer(*argv: str) -> None:
+                self._run_write(record, list(argv), timeout_ms=per_step_ms)
+
+            _pointer("mousemove", str(start_x), str(start_y))
+            _pointer("mousedown")
+            for index in range(1, steps + 1):
+                final = index == steps
+                progress = index / steps
+                x = end_x if final else round(start_x + (end_x - start_x) * progress + random.uniform(-2.0, 2.0))
+                y = end_y if final else round(start_y + (end_y - start_y) * progress + random.uniform(-2.0, 2.0))
+                _pointer("mousemove", str(x), str(y))
+            _pointer("mouseup")
+            return {"drag": {"start": [start_x, start_y], "end": [end_x, end_y], "steps": steps}}
         if action == "resize":
             width = max(320, min(4096, int(args.get("width") or 1280)))
             height = max(320, min(4096, int(args.get("height") or 900)))
@@ -698,6 +737,37 @@ class _PlaywrightCliWorker:
                 result["result_format"] = "json_preview"
             result["_full_text"] = preview
             return result
+        if action == "fetch":
+            url = _bounded_text(args.get("url"), limit=8192, field_name="url").strip()
+            if not url or url.startswith("-"):
+                raise BrowserServiceError("url is required and must not start with '-'", code="invalid_arguments")
+            method = str(args.get("method") or "GET").upper()
+            if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}:
+                raise BrowserServiceError("unsupported fetch method", code="invalid_arguments")
+            headers: dict[str, str] = {}
+            for name, value in dict(args.get("headers") or {}).items():
+                clean_name = _bounded_text(name, limit=200, field_name="header name").strip()
+                if not clean_name or clean_name.startswith("-"):
+                    raise BrowserServiceError("invalid header name", code="invalid_arguments")
+                headers[clean_name] = _bounded_text(value, limit=2000, field_name="header value")
+            if len(headers) > 20:
+                raise BrowserServiceError("at most 20 fetch headers are allowed", code="invalid_arguments")
+            body = args.get("body")
+            request: dict[str, Any] = {"method": method, "credentials": "include", "headers": headers}
+            if body is not None and method not in {"GET", "HEAD"}:
+                request["body"] = _bounded_text(body, limit=100000, field_name="body")
+            script = (
+                "() => fetch(" + json.dumps(url) + ", " + json.dumps(request) + ")"
+                ".then(async r => JSON.stringify({status: r.status, url: r.url, body: await r.text()}))"
+            )
+            raw = self._run(record, ["eval", script], timeout_ms=timeout_ms, raw=True)
+            document = _parse_json_object(raw, "browser fetch")
+            max_chars = max(200, min(200000, int(args.get("max_chars") or 20000)))
+            body_text = str(document.get("body") or "")
+            document["body_truncated"] = len(body_text) > max_chars
+            document["body"] = body_text[:max_chars]
+            document["_full_text"] = body_text
+            return {"response": document}
         if action == "network":
             operation = str(args.get("operation") or "read").lower()
             if operation == "start":
@@ -802,16 +872,12 @@ class _PlaywrightCliWorker:
             })
         return completed.stdout.strip()
 
-    def _ensure_session(
-        self, key: str, *, persistent: bool, timeout_ms: int, restore_page: bool = True
-    ) -> tuple[_SessionRecord, bool]:
-        with self._lock:
-            current = self.sessions.get(key)
-        if current is not None:
-            return current, False
-        record = _SessionRecord(key=key, name=f"pal-{key[:24]}", persistent=bool(persistent))
+    def _launch_session_browser(
+        self, record: _SessionRecord, *, timeout_ms: int, restore_page: bool,
+    ) -> str:
+        """Open the CLI browser for a session; return the saved last url ("" when none)."""
         config_path = self.paths.config
-        extensions = read_extensions(self.paths.profiles / key) if persistent else []
+        extensions = read_extensions(self.paths.profiles / record.key) if record.persistent else []
         if extensions:
             extensions = [inspect_extension(item["path"]) for item in extensions]
             config = json.loads(self.paths.config.read_text())
@@ -819,17 +885,17 @@ class _PlaywrightCliWorker:
             config['browser']['launchOptions']['args'] = [
                 f'--disable-extensions-except={directories}', f'--load-extension={directories}',
             ]
-            config_path = self.paths.profiles / key / 'browser.config.json'
+            config_path = self.paths.profiles / record.key / 'browser.config.json'
             _atomic_write_json(config_path, config, mode=0o600)
         open_options = [f"--config={config_path}"]
         restored_url = ""
-        if persistent:
-            profile_dir = self.paths.profiles / key
+        if record.persistent:
+            profile_dir = self.paths.profiles / record.key
             profile_dir.mkdir(parents=True, exist_ok=True)
             with contextlib.suppress(OSError):
                 profile_dir.chmod(0o700)
             if restore_page:
-                restored_url = str(self._read_profile_meta(key).get("last_url") or "")
+                restored_url = str(self._read_profile_meta(record.key).get("last_url") or "")
             open_options.append(f"--profile={profile_dir / 'user-data'}")
         # Starting the browser and restoring a page are separate operations:
         # an unreachable saved URL must not block an explicit new destination.
@@ -842,6 +908,36 @@ class _PlaywrightCliWorker:
             except Exception as cleanup:
                 exc.add_note("Browser cleanup also failed:\n" + exception_report(cleanup))
             raise
+        return restored_url
+
+    def _relaunch_session(self, record: _SessionRecord, *, timeout_ms: int) -> None:
+        """Relaunch the live browser when its session record outlived the process."""
+        restored_url = self._launch_session_browser(record, timeout_ms=timeout_ms, restore_page=True)
+        if restored_url.startswith(("http://", "https://")):
+            with contextlib.suppress(BrowserServiceError):
+                self._run(record, _cli_args("goto", restored_url), timeout_ms=timeout_ms, raw=True)
+            record.last_url = restored_url
+        # The CLI daemon registers the reopened session slightly after `open`
+        # returns; probe briefly so the retried action does not race a repeat
+        # "is not open" failure.
+        probe = ["eval", "() => document.readyState"]
+        probe_timeout = max(5000, min(15000, int(timeout_ms)))
+        for _ in range(5):
+            try:
+                self._run(record, probe, timeout_ms=probe_timeout, raw=True)
+                return
+            except BrowserServiceError:
+                time.sleep(1.0)
+
+    def _ensure_session(
+        self, key: str, *, persistent: bool, timeout_ms: int, restore_page: bool = True
+    ) -> tuple[_SessionRecord, bool]:
+        with self._lock:
+            current = self.sessions.get(key)
+        if current is not None:
+            return current, False
+        record = _SessionRecord(key=key, name=f"pal-{key[:24]}", persistent=bool(persistent))
+        restored_url = self._launch_session_browser(record, timeout_ms=timeout_ms, restore_page=restore_page)
         restore_http_page = restored_url.startswith(("http://", "https://"))
         if restore_http_page:
             try:
