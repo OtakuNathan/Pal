@@ -2000,7 +2000,8 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         await self._deliver_control_delivery_async(
             control_interactions.terminal_delivery_for_interaction(
                 request.route,
-                interaction_id=request.request_id,
+                interaction_id=(control_interactions.control_panel_interaction_id(request.route)
+                                if request.request_kind == "model_switch" else request.request_id),
                 interaction_kind="control_panel" if request.request_kind == "model_switch" else "reset_confirm",
                 text="This model selection expired." if request.request_kind == "model_switch" else "This reset request expired.",
                 delivery_kind="interactive_expire",

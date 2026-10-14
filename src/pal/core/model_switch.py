@@ -105,7 +105,8 @@ class ModelSwitchMixin:
             control_scope_key=action.route.control_scope_key, route=action.route,
             expires_at=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
             payload={"target_id": target_id, "identity": self._model_selection_identity(llm, target_id),
-                     "stage": "confirm" if advice.compact_required else "think", "compact_confirmed": False},
+                     "stage": "confirm" if advice.compact_required else "think", "compact_confirmed": False,
+                     "interactive": interactions.is_interaction_action(action)},
         )
         scope = self._ensure_scope_state(action.route.control_scope_key)
         previous = scope.pending_requests.get("model_switch")
@@ -121,12 +122,32 @@ class ModelSwitchMixin:
         if status is None:
             status = self.context.require_port(LLM_RUNTIME).thinking_status(request.payload["target_id"])
         if request.payload["stage"] == "think" and len(status.get("choices", ())) == 1:
+            args = {"request_id": request.request_id, "operation": "think", "think_level": status["choices"][0]["id"]}
+            if request.payload.get("interactive"):
+                args.update(interaction_origin="button",
+                            interaction_id=interactions.control_panel_interaction_id(request.route),
+                            interaction_kind="control_panel")
             await self._handle_model_switch_action_async(ControlAction(
                 action_kind="model_switch_step", target_scope="runtime", route=request.route,
-                args={"request_id": request.request_id, "operation": "think", "think_level": status["choices"][0]["id"]},
+                args=args,
             ))
             return
+        request.payload["interactive"] = True
         await self._deliver_control_delivery_async(interactions.model_switch_delivery(request, status))
+
+    async def _complete_model_switch_reply_async(
+        self, action: ControlAction, request: PendingControlRequest, text: str,
+        *, preserve_panel: bool = False,
+    ) -> None:
+        if preserve_panel:
+            action = replace(action, args={**action.args, "interaction_origin": ""})
+        elif request.payload.get("interactive") and not interactions.is_interaction_action(action):
+            await self._deliver_control_delivery_async(interactions.terminal_delivery_for_interaction(
+                request.route,
+                interaction_id=interactions.control_panel_interaction_id(request.route),
+                interaction_kind="control_panel", text=text,
+            ))
+        await self._complete_action_reply_async(action, text)
 
     async def _handle_model_switch_action_async(self, action: ControlAction) -> None:
         if action.route is None:
@@ -135,6 +156,9 @@ class ModelSwitchMixin:
         request = scope.pending_requests.get("model_switch")
         if (request is None or request.request_id != action.args.get("request_id")
                 or request.route.endpoint_id != action.route.endpoint_id):
+            # A stale selection must not resolve the shared panel now showing
+            # another draft or the model list.
+            action = replace(action, args={**action.args, "interaction_origin": ""})
             await self._complete_action_reply_async(action, "Model selection is missing, expired, or already consumed. Use /model again.")
             return
         operation = action.args.get("operation")
@@ -144,30 +168,37 @@ class ModelSwitchMixin:
                 async with self.state.channel_turn_transition_lock:
                     self._compaction_gate().cancel("pal:resident", reason="model_switch_cancelled")
                     self.context.require_port(MEMORY).cancel_active_compaction(reason="model_switch_cancelled")
-            await self._complete_action_reply_async(action, "Model selection cancelled.")
+            if not interactions.is_interaction_action(action):
+                await self._complete_action_reply_async(action, "Model selection cancelled.")
             await self._handle_show_model_async(action)
             return
         if request.payload["stage"] == "executing":
-            await self._complete_action_reply_async(action, "This model selection is already executing.")
+            await self._complete_model_switch_reply_async(
+                action, request, "This model selection is already executing.", preserve_panel=True,
+            )
             return
         llm = self.context.require_port(LLM_RUNTIME)
         self._refresh_llm_runtime_settings(llm)
         target_id = request.payload["target_id"]
         if request.payload["identity"] != self._model_selection_identity(llm, target_id):
             scope.pending_requests.pop("model_switch", None)
-            await self._complete_action_reply_async(action, "Model configuration changed. Use /model again.")
+            await self._complete_model_switch_reply_async(action, request, "Model configuration changed. Use /model again.")
             return
         if operation == "confirm" and request.payload["stage"] == "confirm":
             request.payload.update(stage="think", compact_confirmed=True)
             await self._render_model_switch_async(request)
             return
         if operation != "think" or request.payload["stage"] != "think":
-            await self._complete_action_reply_async(action, "Complete the current /model selection step first.")
+            await self._complete_model_switch_reply_async(
+                action, request, "Complete the current /model selection step first.", preserve_panel=True,
+            )
             return
         status = llm.thinking_status(target_id)
         level = str(action.args.get("think_level") or status["current"])
         if level not in {choice["id"] for choice in status["choices"]}:
-            await self._complete_action_reply_async(action, "Invalid thinking level for the target model.")
+            await self._complete_model_switch_reply_async(
+                action, request, "Invalid thinking level for the target model.", preserve_panel=True,
+            )
             return
         async with self.state.channel_turn_transition_lock:
             busy = self._model_switch_busy_reason()
@@ -179,7 +210,9 @@ class ModelSwitchMixin:
                 request.payload["stage"] = "executing"
         if ticket is None:
             scope.pending_requests.pop("model_switch", None)
-            await self._complete_action_reply_async(action, busy or "Model switching is busy. Use /model again later.")
+            await self._complete_model_switch_reply_async(
+                action, request, busy or "Model switching is busy. Use /model again later.",
+            )
             return
 
         def current() -> bool:
@@ -214,10 +247,11 @@ class ModelSwitchMixin:
                     commit_guard=current,
                 )
                 if not compact_result.success:
-                    await self._complete_action_reply_async(
-                        action,
+                    await self._complete_model_switch_reply_async(
+                        action, request,
                         f"Model switch failed: Compact did not complete ({compact_result.status}); the model was not changed.\n"
                         + compact_result.user_notice,
+                        preserve_panel=scope.pending_requests.get("model_switch") is not request,
                     )
                     return
             async with self.state.channel_turn_transition_lock:
@@ -232,14 +266,17 @@ class ModelSwitchMixin:
                 "\nThe completed Compact remains in effect.\n" + compact_result.user_notice
                 if compact_result and compact_result.success else ""
             )
-            await self._complete_action_reply_async(action, f"Model switch failed: {exception_report(exc)}{suffix}")
+            await self._complete_model_switch_reply_async(
+                action, request, f"Model switch failed: {exception_report(exc)}{suffix}",
+                preserve_panel=scope.pending_requests.get("model_switch") is not request,
+            )
         else:
             # Delivery failure cannot roll back an already committed selection.
             # Let the channel error propagate without reporting a switch failure.
             message = f"Model updated to {target_id}. Thinking level: {level}. This applies to new turns only."
             if compact_result and compact_result.user_notice:
                 message += "\n" + compact_result.user_notice
-            await self._complete_action_reply_async(action, message)
+            await self._complete_model_switch_reply_async(action, request, message)
         finally:
             if request.payload.get("stage") == "executing" and scope.pending_requests.get("model_switch") is request:
                 scope.pending_requests.pop("model_switch", None)

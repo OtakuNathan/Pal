@@ -238,6 +238,10 @@ def model_switch_delivery(request: Any, think_status: dict[str, Any]) -> Control
         buttons = [(InteractionButtonSpec("Continue to thinking level", "control.model.confirm", {"request_id": token}),)]
     else:
         text = f"Select thinking level for {target}. The active model has not changed."
+        if request.payload.get("compact_confirmed"):
+            text += "\nCompact will run on the current model after you select a thinking level."
+        else:
+            text += "\nThe current history is compatible; Compact is not required."
         buttons = []
         for choice in think_status.get("choices", ()):
             level = choice["id"]
@@ -249,8 +253,10 @@ def model_switch_delivery(request: Any, think_status: dict[str, Any]) -> Control
     text += f"\nCancel: /model cancel {token}"
     buttons.append((InteractionButtonSpec("Back to models", "control.model.cancel", {"request_id": token}),))
     spec = InteractionMessageSpec(
-        interaction_id=token, interaction_kind="control_panel", route=request.route,
+        interaction_id=control_panel_interaction_id(request.route),
+        interaction_kind="control_panel", route=request.route,
         text=text, buttons=tuple(buttons), expires_at=request.expires_at,
+        revision=f"{token}:{request.payload['stage']}",
     )
     return delivery_for_interaction(request.route, "interactive_update", spec)
 

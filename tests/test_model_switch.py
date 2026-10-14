@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from pal.control.contracts import ControlAction, ControlCommandInvocation
+from pal.control import interactions
 from pal.core.compaction import CompactionRunResult
 from pal.llm import EndpointResolver, LLMRuntime
 from pal.llm.contracts import generation_result_from_values
@@ -278,6 +279,190 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
     def replies(self):
         return "\n".join(item.text for item in self.fixture.endpoint.outbox)
 
+    @contextmanager
+    def telegram_panel(self):
+        from pal.channel.contracts import EndpointConfig, ResponseHandle
+        from pal.control.contracts import ControlRoute
+
+        with tempfile.TemporaryDirectory(prefix="pal_model_panel_") as root:
+            provider = control_fixture.TelegramChannelEndpoint(
+                endpoint=EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram",
+                                        binding_key="user:42", send_policy={}),
+                runtime_root=Path(root), bot_token="token",
+            )
+            bot = SimpleNamespace(
+                send_message=AsyncMock(return_value=SimpleNamespace(message_id=10)),
+                edit_message_text=AsyncMock(),
+            )
+            provider.application = SimpleNamespace(bot=bot)
+            self.route = ControlRoute("telegram_main", "telegram", {"chat_id": 100, "user_id": 42},
+                                      control_scope_key="telegram:telegram_main:100:root")
+            original = self.core._deliver_control_delivery_async
+
+            async def deliver(delivery, **kwargs):
+                if delivery.delivery_kind == "reply":
+                    await bot.send_message(chat_id=100, text=delivery.text)
+                elif delivery.interaction is not None:
+                    if delivery.delivery_kind == "interactive_update":
+                        await provider._open_or_update_interaction_async(
+                            ResponseHandle("telegram_main", self.route.reply_target),
+                            spec=delivery.interaction, allow_update=True,
+                        )
+                    elif delivery.delivery_kind in {"interactive_resolve", "interactive_expire"}:
+                        await provider._resolve_interaction_async(delivery.interaction)
+                return True
+
+            self.core._deliver_control_delivery_async = deliver
+            try:
+                yield provider, bot
+            finally:
+                self.core._deliver_control_delivery_async = original
+
+    async def open_model_panel(self):
+        await self.core.handle_control_action_async(ControlAction(
+            action_kind="show_model", target_scope="runtime", route=self.route,
+        ))
+
+    async def click(self, provider, action_key, **args):
+        panel_id = interactions.control_panel_interaction_id(self.route)
+        metadata = provider._restore_interaction(panel_id)
+        self.assertIsNotNone(metadata)
+        token = next(token for token, spec in metadata["actions"].items()
+                     if spec["action_key"] == action_key
+                     and all(spec["action_args"].get(key) == expected for key, expected in args.items()))
+        result = provider.interaction_result_from_token(panel_id, token)
+        self.assertIsNotNone(result)
+        result = replace(result, route=self.route)
+        action = self.fixture.control_plane.handle_interaction(result)
+        self.assertIsNotNone(action)
+        await self.core.handle_control_action_async(action)
+
+    async def test_telegram_incompatible_switch_updates_original_panel_through_completion(self):
+        with self.telegram_panel() as (provider, bot):
+            await self.open_model_panel()
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            confirmation = bot.edit_message_text.await_args.kwargs
+            self.assertIn("reasoning/replay is incompatible", confirmation["text"])
+            self.assertEqual([row[0].text for row in confirmation["reply_markup"].inline_keyboard],
+                             ["Continue to thinking level", "Back to models"])
+            self.assertEqual(self.compact_calls, [])
+            await self.click(provider, "control.model.confirm")
+            self.assertIn("Select thinking level for b", bot.edit_message_text.await_args.kwargs["text"])
+            self.assertEqual(self.compact_calls, [])
+            await self.click(provider, "control.model.think", think_level="high")
+            self.assertEqual(self.llm.active_endpoint_id, "b")
+            self.assertEqual(len(self.compact_calls), 1)
+            bot.send_message.assert_awaited_once()
+            self.assertTrue(all(call.kwargs["message_id"] == 10
+                                for call in bot.edit_message_text.await_args_list))
+            self.assertIn("Model updated", bot.edit_message_text.await_args.kwargs["text"])
+            self.assertIsNone(bot.edit_message_text.await_args.kwargs["reply_markup"])
+            self.assertIsNone(provider._restore_interaction(interactions.control_panel_interaction_id(self.route)))
+
+    async def test_telegram_compatible_switch_and_back_reuse_original_panel(self):
+        self.memory.soft_reset()
+        with self.telegram_panel() as (provider, bot):
+            await self.open_model_panel()
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            self.assertIn("Compact is not required", bot.edit_message_text.await_args.kwargs["text"])
+            await self.click(provider, "control.model.cancel")
+            self.assertIn("Model: a", bot.edit_message_text.await_args.kwargs["text"])
+            self.assertIsNotNone(bot.edit_message_text.await_args.kwargs["reply_markup"])
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            await self.click(provider, "control.model.think", think_level="high")
+            bot.send_message.assert_awaited_once()
+            self.assertEqual(self.compact_calls, [])
+            self.assertEqual(self.llm.active_endpoint_id, "b")
+
+    async def test_telegram_expiry_clears_original_panel(self):
+        with self.telegram_panel() as (provider, bot):
+            await self.open_model_panel()
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            request = self.core.state.control_scopes[self.route.control_scope_key].pending_requests["model_switch"]
+            request.expires_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+            await self.core.expire_pending_control_requests_async()
+            self.assertIn("model selection expired", bot.edit_message_text.await_args.kwargs["text"])
+            self.assertIsNone(bot.edit_message_text.await_args.kwargs["reply_markup"])
+            self.assertIsNone(provider._restore_interaction(interactions.control_panel_interaction_id(self.route)))
+            bot.send_message.assert_awaited_once()
+
+    async def test_telegram_single_thinking_choice_clears_original_panel(self):
+        self.memory.soft_reset()
+        self.target.thinking_levels_blob = ["low"]
+        with self.telegram_panel() as (provider, bot):
+            await self.open_model_panel()
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            self.assertEqual(self.llm.active_endpoint_id, "b")
+            self.assertIn("Model updated", bot.edit_message_text.await_args.kwargs["text"])
+            self.assertIsNone(bot.edit_message_text.await_args.kwargs["reply_markup"])
+            self.assertIsNone(provider._restore_interaction(interactions.control_panel_interaction_id(self.route)))
+            bot.send_message.assert_awaited_once()
+
+    async def test_telegram_old_confirmation_callback_cannot_select_thinking_level(self):
+        with self.telegram_panel() as (provider, bot):
+            await self.open_model_panel()
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            panel_id = interactions.control_panel_interaction_id(self.route)
+            confirmation = provider._restore_interaction(panel_id)
+            old_token = next(token for token, spec in confirmation["actions"].items()
+                             if spec["action_key"] == "control.model.confirm")
+            await self.click(provider, "control.model.confirm")
+            self.assertIsNone(provider.interaction_result_from_token(panel_id, old_token))
+            self.assertEqual(self.llm.active_endpoint_id, "a")
+            self.assertEqual(self.compact_calls, [])
+
+    async def test_telegram_text_submission_also_clears_open_keyboard(self):
+        self.memory.soft_reset()
+        with self.telegram_panel() as (provider, bot):
+            await self.open_model_panel()
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            request = self.core.state.control_scopes[self.route.control_scope_key].pending_requests["model_switch"]
+            await self.step(request, "think", think_level="high")
+            self.assertIsNone(provider._restore_interaction(interactions.control_panel_interaction_id(self.route)))
+            self.assertIsNone(bot.edit_message_text.await_args.kwargs["reply_markup"])
+            self.assertIn("Model updated", bot.send_message.await_args.kwargs["text"])
+
+    async def test_telegram_cancelled_compact_cannot_overwrite_returned_model_list(self):
+        self.compact_release.clear()
+        with self.telegram_panel() as (provider, bot):
+            await self.open_model_panel()
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            await self.click(provider, "control.model.confirm")
+            request = self.core.state.control_scopes[self.route.control_scope_key].pending_requests["model_switch"]
+            panel_id = interactions.control_panel_interaction_id(self.route)
+            task = asyncio.create_task(self.step(
+                request, "think", think_level="high", interaction_origin="button",
+                interaction_id=panel_id, interaction_kind="control_panel",
+            ))
+            try:
+                await asyncio.wait_for(self.compact_started.wait(), timeout=5)
+                await self.step(request, "cancel", interaction_origin="button",
+                                interaction_id=panel_id, interaction_kind="control_panel")
+                returned = provider._restore_interaction(panel_id)
+                self.assertIn("Model: a", bot.edit_message_text.await_args.kwargs["text"])
+            finally:
+                self.compact_release.set()
+                await task
+            self.assertEqual(provider._restore_interaction(panel_id), returned)
+            self.assertEqual(self.llm.active_endpoint_id, "a")
+            self.assertFalse(self.core._compaction_gate_active())
+
+    async def test_telegram_stale_selection_does_not_clear_new_draft(self):
+        with self.telegram_panel() as (provider, bot):
+            await self.open_model_panel()
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            panel_id = interactions.control_panel_interaction_id(self.route)
+            old_request = self.core.state.control_scopes[self.route.control_scope_key].pending_requests["model_switch"]
+            await self.click(provider, "control.model.cancel")
+            await self.click(provider, "control.model.set", endpoint_id="b")
+            current = provider._restore_interaction(panel_id)
+            edits = bot.edit_message_text.await_count
+            await self.step(old_request, "confirm", interaction_origin="button",
+                            interaction_id=panel_id, interaction_kind="control_panel")
+            self.assertEqual(bot.edit_message_text.await_count, edits)
+            self.assertEqual(provider._restore_interaction(panel_id), current)
+            self.assertIn("already consumed", bot.send_message.await_args.kwargs["text"])
+
     async def _check_button_compact_result(self, *, success):
         from pal.channel.contracts import EndpointConfig, ResponseHandle
         from pal.control import interactions
@@ -309,12 +494,12 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
 
             self.core._deliver_control_delivery_async = deliver
             await self.step(request, "think", think_level="high", interaction_origin="button",
-                            interaction_id=request.request_id, interaction_kind="control_panel")
+                            interaction_id=spec.interaction_id, interaction_kind="control_panel")
             texts = [call.kwargs["text"] for call in bot.edit_message_text.await_args_list]
             self.assertEqual(len(texts), 2, texts)
             self.assertIn("Compacting", texts[0])
             self.assertIn("Model updated" if success else "Model switch failed", texts[-1])
-            self.assertIsNone(provider._restore_interaction(request.request_id))
+            self.assertIsNone(provider._restore_interaction(spec.interaction_id))
             self.assertEqual(self.llm.active_endpoint_id, "b" if success else "a")
 
     async def test_button_compact_delivers_final_success(self):

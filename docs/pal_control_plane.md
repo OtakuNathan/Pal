@@ -27,6 +27,12 @@ loss may reduce task performance and that rebuilding the target cache may cost m
 The text equivalents are `/model confirm <token>`, `/model think <token> <level>`,
 and `/model cancel <token>`. Reopening the model list or selecting another model
 invalidates the old draft; reset and endpoint refresh invalidate all drafts.
+The model list, Compact confirmation, and thinking menu update the same control
+panel. Back restores that model list; completion and expiry clear its keyboard.
+Draft and stage revisions reject callbacks from an earlier selection step.
+When Compact is unnecessary, the thinking menu says the current history is
+compatible. After confirmation, it says Compact will run once a thinking level
+is selected.
 
 Submitting a thinking level rechecks idle state, endpoint metadata, and history.
 When needed, the same compaction engine as `/compact` runs on the old endpoint.
