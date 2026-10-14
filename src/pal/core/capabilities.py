@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.core.runtime import PalCore
+from pal.core.resident_history import RESIDENT_HISTORY
 from pal.execution.generated_tool_models import (
     CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
 )
@@ -64,8 +65,10 @@ class CoreIntrospectionProvider:
     def observe(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_core(self)
+        history = self.core.context.port_registry.optional(RESIDENT_HISTORY)
         payload = inspection_snapshot(snapshot.__dict__, sections={
             "cache_reminder": lambda: self.core.cache_warm_deadline.inspect(),
+            "resident_history": lambda: history.inspect() if history is not None else {"status": "unavailable"},
         })
         return IntrospectionResult(
             status=RuntimeStatus.OK,

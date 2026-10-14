@@ -301,6 +301,8 @@ class MemoryService:
     context_epoch: int = 0
     compaction_receipts: dict[str, CompactionReceipt] = field(default_factory=dict)
     _reviews: Any = field(default=None, init=False, repr=False)
+    _conversation_turns: set[str] = field(default_factory=set, init=False, repr=False)
+    _conversation_times: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def reviews(self):
@@ -450,6 +452,9 @@ class MemoryService:
             # offending identities for any illegal delivery.
             root.mark_ready(run_id, summary_entry, candidate_id=candidate_id)
         outcome = root.commit(run_id)
+        live = {(turn.turn_id, message.message_id) for turn in self.history.turns for message in turn.messages}
+        self._conversation_turns.intersection_update(turn_id for turn_id, _ in live)
+        self._conversation_times = {key: value for key, value in self._conversation_times.items() if key in live}
         if getattr(outcome, "status", "") == "committed":
             # A committed left install changes the context identity exactly
             # like the retired whole-source install did: late candidates
@@ -481,6 +486,8 @@ class MemoryService:
         user_message: LLMMessageIR | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> L1TurnIR:
+        if (metadata or {}).get("conversation_tracking"):
+            self._conversation_turns.add(turn_id)
         existing = self.l1_store.turns.get(turn_id)
         if existing is not None:
             if existing.state != L1TurnState.ACTIVE:
@@ -535,7 +542,28 @@ class MemoryService:
 
     def stream_l1_assistant(self, turn_id: str, message: LLMMessageIR) -> None:
         """Record a streaming update without materializing an entire turn snapshot."""
+        if turn_id in self._conversation_turns:
+            timestamp = self._conversation_times.setdefault(
+                (turn_id, message.message_id), message.metadata.get("conversation_timestamp") or utc_now())
+            message = replace(message, metadata={**thaw_json(message.metadata),
+                                               "conversation_timestamp": timestamp})
         self.l1_store.turns.stream_assistant(turn_id, message)
+
+    def record_conversation_reply(self, turn_id: str, text: str, *, timestamp: str, partial: bool = False) -> None:
+        current = self.active_l1_turn(turn_id)
+        if current is None or not current.metadata.get("conversation_tracking") or not text:
+            return
+        source = next((message.message_id for message in reversed(current.messages)
+                       if message.role == MessageRole.ASSISTANT), "")
+        if not source and current.messages:
+            source = current.messages[0].message_id
+        replies = list(thaw_json(current.metadata).get("conversation_replies", ()))
+        if replies and replies[-1]["source_message_id"] == source and replies[-1]["text"] == text:
+            return
+        replies.append({"message_id": f"reply:{turn_id}:{len(replies)}", "source_message_id": source,
+                        "timestamp": timestamp, "partial": partial, "text": text})
+        self.l1_store.replace(replace(current, revision=current.revision + 1,
+                                     metadata={**thaw_json(current.metadata), "conversation_replies": replies}))
 
     def upsert_l1_assistant(self, turn_id: str, message: LLMMessageIR) -> L1TurnIR:
         current = self.l1_store.active(turn_id)
@@ -552,6 +580,10 @@ class MemoryService:
     def append_l1_tool_result(self, turn_id: str, result: ToolResultIR) -> L1TurnIR:
         current = self.l1_store.active(turn_id)
         updated = current.append_tool_result(result)
+        if current.metadata.get("conversation_tracking"):
+            message = updated.messages[-1]
+            message = replace(message, metadata={**thaw_json(message.metadata), "conversation_timestamp": utc_now()})
+            updated = replace(updated, messages=(*updated.messages[:-1], message))
         self.l1_store.replace(updated)
         return updated
 
@@ -563,6 +595,10 @@ class MemoryService:
         batch and is seen by the next LLM generation.
         """
         current = self.l1_store.active(turn_id)
+        if current.metadata.get("conversation_tracking"):
+            message = replace(message, metadata={**thaw_json(message.metadata),
+                              "conversation_origin": "user",
+                              "conversation_timestamp": message.metadata.get("conversation_timestamp") or utc_now()})
         updated = current.append_user_once(message)
         if updated is current:
             return current
@@ -816,6 +852,8 @@ class MemoryService:
             self.l2_store.heat_registry.pop(entry_id, None)
 
     def soft_reset(self) -> None:
+        self._conversation_turns.clear()
+        self._conversation_times.clear()
         self.l1_store.turns.clear()
         self.l2_store.items = {}
         self.l2_store.top_of_mind_refs = []

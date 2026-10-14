@@ -9,6 +9,7 @@ from typing import Any
 
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.core.compaction_coordinator import compaction_gate_active
+from pal.core.resident_history import RESIDENT_HISTORY
 from pal.shared.payloads import extract_text_from_payload
 
 
@@ -57,6 +58,9 @@ async def inject_pending_interjection_async(
             # processing; never silently discard them or change FIFO order.
             if not message.parts or message.role != MessageRole.USER:
                 break
+            if context.port_registry.get(RESIDENT_HISTORY.name) is not None:
+                message = replace(message, metadata={**dict(message.metadata),
+                    "conversation_origin": "user", "conversation_timestamp": envelope.event.created_at})
             batch.append(envelope)
             messages.append(message)
         if not messages:
@@ -80,6 +84,11 @@ async def inject_pending_interjection_async(
                     for item in messages
                 ]},
             )
+            if context.port_registry.get(RESIDENT_HISTORY.name) is not None:
+                sources = [{"message_id": item.message_id, "metadata": dict(item.metadata),
+                            "conversation_text": "".join(part.text for part in item.parts if isinstance(part, TextPartIR))}
+                           for item in messages]
+                message = replace(message, metadata={**dict(message.metadata), "interjection_sources": sources})
         memory_service = context.port_registry.get("memory:memory")
         append_user = getattr(memory_service, "append_l1_user", None)
         if not callable(append_user):

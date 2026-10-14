@@ -28,7 +28,12 @@ old references during replacement; prepublication validation rejects malformed
 paths. Pending delivery, snapshot reads and an in-flight model request also pin
 files. A running native shell independently leases the snapshots visible to its
 launching request until observed execution termination or explicit session cleanup;
-compact and later requests cannot revoke that lease. Once the last owner is gone, Execution deletes the managed file.
+compact and later requests cannot revoke that lease. The resident recovery owner
+also pins references belonging to its latest durable L1. A successor checkpoint
+or journal record must become durable before it releases predecessor references;
+write failure retains the previous recovery point's files. Searchable conversation
+archives store only the initial delivered preview and acquire no output-file lease.
+Once the last owner is gone, Execution deletes the managed file.
 
 Execution extensions acquire that independent lease with
 `ResultSnapshotStore.lease_request(turn_id)` and release its returned owner with

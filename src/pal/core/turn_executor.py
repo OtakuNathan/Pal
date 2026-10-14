@@ -25,6 +25,7 @@ from pal.core.compaction import (
     CompactionSnapshot,
 )
 from pal.core.compaction_coordinator import compaction_gate_active
+from pal.core.resident_history import RESIDENT_HISTORY
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
@@ -155,6 +156,22 @@ class TurnExecutor:
         self._ensure_not_interrupted(continuation)
         continuation.waiting_effect_id = None
         return result
+
+    async def _checkpoint_resident_async(self, turn_id: str, reason: str, continuation=None) -> None:
+        history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+        if history is not None:
+            history.finish_partial_stream(str(turn_id))
+            saved = await history.checkpoint_async(reason)
+            if not saved and continuation is not None:
+                output = self._agent_output_port()
+                binding = continuation.delivery_binding
+                if output is not None and binding is not None and history.take_degraded_notice():
+                    try:
+                        await self._call_output_port_async(output, "queue_status", binding, "history_persistence_degraded",
+                            payload={"text": "Conversation recovery storage is temporarily unavailable. "
+                                     "Current progress remains in memory; Pal will retry saving at the next round boundary."})
+                    except Exception:
+                        self.state.diagnostics.append({"kind": "resident.history.notice_failed", "turn_id": turn_id})
 
     # ── effect dispatch (singledispatch — C++ overload style) ────────────
 
@@ -544,6 +561,8 @@ class TurnExecutor:
                 tool_call for tool_call in outcome.tool_calls
             ]
             continuation.pending_tool_results = []
+        else:
+            await self._checkpoint_resident_async(continuation.turn_id, "round", continuation)
         if (
             self._handle_llm_provider_errors
             and effect.assembly_context.turn_kind != "failure"
@@ -821,6 +840,7 @@ class TurnExecutor:
                 continuation.pending_tool_results = []
                 if self._after_tool_batch is not None:
                     await self._after_tool_batch(continuation)
+                await self._checkpoint_resident_async(continuation.turn_id, "round", continuation)
                 refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
                 if refresh is not None:
                     refresh(continuation)
@@ -964,6 +984,9 @@ class TurnExecutor:
                 )
             if text:
                 continuation.emitted_reply_texts.append(text)
+                history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+                if history is not None:
+                    history.record_reply(str(continuation.turn_id), text)
             self._debug_log_reply(continuation, effect.text)
             return EffectResult(status=RuntimeStatus.QUEUED, text=effect.text)
         if not effect.terminal:
@@ -980,6 +1003,9 @@ class TurnExecutor:
         text = str(message.text or "").strip()
         if text:
             continuation.emitted_reply_texts.append(text)
+            history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+            if history is not None:
+                history.record_reply(str(continuation.turn_id), text)
         self._debug_log_reply(continuation, effect.text)
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"reply_id": reply_id}, text=effect.text)
 
@@ -999,6 +1025,9 @@ class TurnExecutor:
             binding,
             effect.update,
         )
+        history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+        if history is not None:
+            history.record_stream(str(continuation.turn_id), str(effect.update.kind), str(effect.update.text or ""))
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"update_id": update_id})
 
     def _agent_output_port(self):
@@ -1852,11 +1881,25 @@ class TurnExecutor:
             text = str(dict(getattr(assembly_context, "metadata", {}) or {}).get("proactive_input") or "").strip()
         try:
             method = memory_service.begin_l1_turn
+            turn_metadata = {"_pal_input_id": self._active_input_id(continuation, assembly_context)}
+            if self.context.port_registry.get(RESIDENT_HISTORY.name) is not None:
+                origin = "proactive" if (assembly_context.turn_kind == "proactive_trigger"
+                    or assembly_context.metadata.get("proactive_input")) else "user"
+                if user_message is None and text:
+                    user_message = LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR(text),),
+                                               semantic_kind="user_request")
+                    text = ""
+                if user_message is not None:
+                    user_message = replace(user_message, semantic_kind=user_message.semantic_kind or "user_request",
+                        metadata={**thaw_json(user_message.metadata),
+                        "conversation_origin": origin,
+                        "conversation_timestamp": event.created_at if event is not None else datetime.now(timezone.utc).isoformat()})
+                turn_metadata.update(conversation_tracking=True, conversation_input_kind=origin)
             method(
                 str(continuation.turn_id),
                 user_text=text,
                 user_message=user_message,
-                metadata={"_pal_input_id": self._active_input_id(continuation, assembly_context)},
+                metadata=turn_metadata,
             )
             return True
         except Exception:
@@ -2043,6 +2086,8 @@ class TurnExecutor:
             except Exception:
                 pass
         self._reap_expired_artifacts()
+        await self._checkpoint_resident_async(
+            outcome.commit_payload.turn_id, "turn")
         return result
 
     def _reap_expired_artifacts(self) -> None:
@@ -2418,6 +2463,8 @@ class TurnExecutor:
                 return False
 
         try:
+            history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+            archive = history.prepare_archive(left_snapshot) if history is not None else None
             snapshot = CompactionSnapshot.capture_left(
                 memory_service,
                 left_snapshot,
@@ -2438,6 +2485,7 @@ class TurnExecutor:
                     after_commit=after_compact,
                     replay_guard=replay_guard if cache_epoch else None,
                     commit_guard=commit_guard,
+                    commit_hooks=archive,
                 ),
                 timeout=max(deadline_at - _time.monotonic(), 0.05),
             )
@@ -2486,6 +2534,8 @@ class TurnExecutor:
             close_run_terminal(cancel=False,
                                reason=f"engine:{run_result.status}")
         else:
+            if history is not None:
+                await history.checkpoint_async("compact", rebase=True)
             # The install already won: rebasing the hosted projection
             # session is post-commit work (F13) — a failure here is
             # recorded, never a rollback of the new left.
@@ -2507,7 +2557,10 @@ class TurnExecutor:
         def submitted(receipt):
             # Runs on the owner loop, never the SDK worker. The root fences
             # reset, retries and mutations after this request's snapshot.
-            root.commit_submission(prepared, receipt.message_ids)
+            if root.commit_submission(prepared, receipt.message_ids):
+                history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+                if history is not None:
+                    history.submitted()
 
         return submitted
 

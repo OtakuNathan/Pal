@@ -25,6 +25,7 @@ from pal.core.compaction_coordinator import (
     compaction_gate_active,
 )
 from pal.core.compaction import CompactionRunResult
+from pal.core.resident_history import RESIDENT_HISTORY
 from pal.memory.contracts import MemoryCompactResult
 
 RESIDENT_COMPACTION_SCOPE = "pal:resident"
@@ -273,6 +274,9 @@ class TurnManager:
         if not callable(method):
             return
         try:
+            history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+            if history is not None:
+                history.finish_partial_stream(continuation.turn_id)
             from pal.core.prompt_context import completed_tool_contexts
             reader = getattr(memory_service, "active_l1_turn", None)
             active = reader(continuation.turn_id) if callable(reader) else None
@@ -284,6 +288,8 @@ class TurnManager:
             )
             if inspect.isawaitable(value):
                 await value
+            if history is not None:
+                await history.checkpoint_async("interrupted")
         except Exception as exc:
             self.state.diagnostics.append(
                 {
@@ -1669,7 +1675,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             (
                 "Soft reset complete. L1/L2 and working memory projection were cleared."
                 if reset_applied
-                else "Soft reset was not applied: the active turn did not drain before the timeout."
+                else "Soft reset was not applied. Inspect core diagnostics for a drain timeout or recovery storage failure."
             ),
         )
 
@@ -1710,7 +1716,14 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             from pal.core.runtime_state import RuntimeSnapshotCoordinator
 
             coordinator = RuntimeSnapshotCoordinator(self.context.module_registry)
-            if any(
+            history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+            if history is not None:
+                try:
+                    await history.reset_async()
+                except Exception:
+                    self.state.diagnostics.append({"kind": "resident.history.reset_failed"})
+                    return False
+            elif any(
                 handle.runtime_state_port is not None
                 for handle in self.context.module_registry.modules.values()
             ):
