@@ -101,17 +101,18 @@ def test_navigate_retains_snapshot_through_runtime_normalization():
         runtime.shutdown()
 
 
-@pytest.mark.parametrize('action', ['snapshot', 'find', 'evaluate'])
+@pytest.mark.parametrize('action', ['snapshot', 'find', 'evaluate', 'fetch'])
 @pytest.mark.parametrize('fail_storage', [False, True])
 def test_truncated_browser_operations_keep_full_output_without_reexecution(runtime, tmp_path, monkeypatch, action, fail_storage):
     worker = _PlaywrightCliWorker(runtime_root=tmp_path, max_concurrency=1)
     text = 'captured line\n' * 2000
-    value = {'content': text} if action == 'evaluate' else text
+    value = ({'content': text} if action == 'evaluate' else
+             {'status': 200, 'url': 'https://example.test/api', 'body': text} if action == 'fetch' else text)
     calls = []
 
     def run(*args, **kwargs):
         calls.append(args)
-        return json.dumps(value) if action == 'evaluate' else text
+        return json.dumps(value) if action in {'evaluate', 'fetch'} else text
 
     monkeypatch.setattr(worker, '_run', run)
     def execute(**kwargs):
@@ -123,26 +124,52 @@ def test_truncated_browser_operations_keep_full_output_without_reexecution(runti
             raise OSError('disk full')
         monkeypatch.setattr(runtime.result_snapshots, 'capture', fail)
     provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=execute))
-    args = {'max_chars': 1000} if action == 'snapshot' else {'text': 'captured'} if action == 'find' else {'func': '() => document.title', 'max_chars': 200}
+    args = ({'max_chars': 1000} if action == 'snapshot' else {'text': 'captured'} if action == 'find' else
+            {'url': '/api', 'max_chars': 200} if action == 'fetch' else {'func': '() => document.title', 'max_chars': 200})
     result = getattr(provider, action)(IntrospectionCall(name='browser_' + action, args=args,
         meta={'execution_runtime': runtime, 'turn_id': 'captured-output'}))
-    payload = result.structured
+    payload = result.structured['response'] if action == 'fetch' else result.structured
     assert len(calls) == 1
-    assert payload['truncated'] is True
+    assert payload['body_truncated' if action == 'fetch' else 'truncated'] is True
     assert '_full_text' not in payload and '_full_text' not in result.llm_text
     assert text not in result.llm_text
     assert 'do not repeat' in payload['next_step']
     if fail_storage:
         assert 'OSError: disk full' in payload['text_file_error']
         captured = payload['text_file_content']
-        assert (json.loads(captured) if action == 'evaluate' else captured) == value
+        assert (json.loads(captured) if action == 'evaluate' else captured) == (value if action == 'evaluate' else text)
         assert 'text_file' not in payload
         assert result.snapshot_refs == ()
     else:
         path = Path(payload['text_file']['file_path'])
         saved = path.read_text()
-        assert (json.loads(saved) if action == 'evaluate' else saved) == value
+        assert (json.loads(saved) if action == 'evaluate' else saved) == (value if action == 'evaluate' else text)
         assert result.snapshot_refs[0].path == str(path)
+
+
+def test_fetch_full_response_is_saved_by_receiving_worker_without_reexecution(runtime):
+    text = 'response line\n' * 10000
+    calls = []
+    def execute(**kwargs):
+        calls.append(kwargs)
+        return {'response': {'status': 200, 'url': 'https://example.test/api',
+                             'body': text[:200], 'body_truncated': True, '_full_text': text}}
+    host = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=execute))
+    transported = host.fetch(IntrospectionCall(name='fetch_browser_url', args={'url': '/api'},
+        meta={'broker_run_id': 'run1'}))
+    assert text not in transported.llm_text
+    assert 'text_file' not in transported.structured['response']
+    assert runtime.result_snapshots.references() == ()
+    payload = web_result_to_payload(transported)
+    receiver = WebFetchIntrospectionProvider(service=None, read_delegate=lambda _: web_result_from_payload(payload))
+    received = receiver.read(IntrospectionCall(name='read_browser_page', meta={
+        'execution_runtime': runtime, 'turn_id': 'fetch-delivery'}))
+    response = received.structured['response']
+    assert len(calls) == 1 and calls[0]['persistent'] is False
+    assert Path(response['text_file']['file_path']).read_text() == text
+    assert received.snapshot_refs[0].path == response['text_file']['file_path']
+    assert len(response['body']) == 200
+    assert '_full_text' not in response and '_full_text' not in received.llm_text
 
 
 @pytest.mark.parametrize('broker', [False, True])

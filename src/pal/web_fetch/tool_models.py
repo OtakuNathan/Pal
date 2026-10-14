@@ -123,7 +123,7 @@ class BrowserDragInput(StrictToolModel):
     end_x: int | None = Field(None, ge=0, le=16384, description="Coordinate mode: end x in viewport pixels.")
     end_y: int | None = Field(None, ge=0, le=16384, description="Coordinate mode: end y in viewport pixels.")
     steps: int = Field(10, ge=2, le=40, description="Coordinate mode: interpolation steps between press and release; more steps look more human.")
-    timeout_ms: int = Field(60000, ge=1000, le=300000, description="Timeout in milliseconds for the whole drag.")
+    timeout_ms: int = Field(60000, ge=1000, le=120000, description="Timeout in milliseconds for the whole drag; releasing the pointer may take a bounded cleanup grace period.")
 
     @model_validator(mode="after")
     def validate_mode(self):

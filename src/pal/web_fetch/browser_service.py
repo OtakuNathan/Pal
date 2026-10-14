@@ -464,8 +464,26 @@ class _PlaywrightCliWorker:
         except BrowserServiceError as exc:
             if exc.code == "cli_command_failed" and "is not open" in str(exc).lower():
                 # The live browser died while its session record survived
-                # (idle shutdown, crash, or external kill). Relaunch and retry once.
-                self._relaunch_session(record, timeout_ms=timeout_ms)
+                # (idle shutdown, crash, or external kill). Only repeat reads:
+                # reopening cannot reconstruct refs, focus or partial writes.
+                safe_retry = action in {"navigate", "read", "snapshot", "find", "inspect_layout"} or (
+                    action == "fetch" and str(args.get("method") or "GET").upper() in {"GET", "HEAD"}
+                )
+                try:
+                    self._relaunch_session(record, timeout_ms=timeout_ms, restore_page=not explicit_url)
+                except BrowserServiceError as recovery_error:
+                    raise BrowserServiceError(
+                        str(recovery_error), code=recovery_error.code,
+                        state_unknown=exc.state_unknown or recovery_error.state_unknown,
+                        diagnostic=recovery_error.diagnostic, details=recovery_error.details,
+                    ) from recovery_error
+                if not safe_retry:
+                    raise BrowserServiceError(
+                        "The browser was restarted, but the failed action was not replayed. "
+                        "Inspect the current page and server state, then refresh element refs and focus before continuing.",
+                        code="browser_recovered_action_not_replayed", state_unknown=exc.state_unknown,
+                        details={"action": action, "browser_recovered": True},
+                    ) from exc
                 recovered = True
                 payload = self._dispatch_action(record, action=action, args=args, timeout_ms=timeout_ms)
             elif any(marker in str(exc).lower() for marker in _BROWSER_MISSING_MARKERS):
@@ -648,19 +666,35 @@ class _PlaywrightCliWorker:
             start_x, start_y, end_x, end_y = (int(value) for value in coordinates)
             steps = max(2, min(40, int(args.get("steps") or 10)))
             per_step_ms = max(1000, int(timeout_ms / (steps + 2)))
+            deadline = time.monotonic() + timeout_ms / 1000.0
 
-            def _pointer(*argv: str) -> None:
-                self._run_write(record, list(argv), timeout_ms=per_step_ms)
+            def _pointer(command: str, *positionals: str) -> None:
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    raise BrowserServiceError("Browser drag timed out", code="command_timeout", state_unknown=True)
+                self._run_write(record, _cli_args(command, *positionals), timeout_ms=min(per_step_ms, remaining_ms))
+
+            def _release_pointer() -> None:
+                # Release still gets a bounded attempt after the drag's
+                # deadline; a pressed button must not leak to the next action.
+                self._run_write(record, ["mouseup"], timeout_ms=min(per_step_ms, 1000))
 
             _pointer("mousemove", str(start_x), str(start_y))
-            _pointer("mousedown")
-            for index in range(1, steps + 1):
-                final = index == steps
-                progress = index / steps
-                x = end_x if final else round(start_x + (end_x - start_x) * progress + random.uniform(-2.0, 2.0))
-                y = end_y if final else round(start_y + (end_y - start_y) * progress + random.uniform(-2.0, 2.0))
-                _pointer("mousemove", str(x), str(y))
-            _pointer("mouseup")
+            try:
+                _pointer("mousedown")
+                for index in range(1, steps + 1):
+                    final = index == steps
+                    progress = index / steps
+                    x = end_x if final else round(start_x + (end_x - start_x) * progress + random.uniform(-2.0, 2.0))
+                    y = end_y if final else round(start_y + (end_y - start_y) * progress + random.uniform(-2.0, 2.0))
+                    _pointer("mousemove", str(x), str(y))
+            except BaseException as exc:
+                try:
+                    _release_pointer()
+                except Exception as cleanup:
+                    exc.add_note("Pointer release also failed:\n" + exception_report(cleanup))
+                raise
+            _release_pointer()
             return {"drag": {"start": [start_x, start_y], "end": [end_x, end_y], "steps": steps}}
         if action == "resize":
             width = max(320, min(4096, int(args.get("width") or 1280)))
@@ -760,8 +794,17 @@ class _PlaywrightCliWorker:
                 "() => fetch(" + json.dumps(url) + ", " + json.dumps(request) + ")"
                 ".then(async r => JSON.stringify({status: r.status, url: r.url, body: await r.text()}))"
             )
-            raw = self._run(record, ["eval", script], timeout_ms=timeout_ms, raw=True)
-            document = _parse_json_object(raw, "browser fetch")
+            run = self._run if method in {"GET", "HEAD"} else self._run_write
+            raw = run(record, ["eval", script], timeout_ms=timeout_ms, raw=True)
+            try:
+                document = _parse_json_object(raw, "browser fetch")
+            except BrowserServiceError as exc:
+                if method in {"GET", "HEAD"}:
+                    raise
+                raise BrowserServiceError(
+                    str(exc), code=exc.code, state_unknown=True,
+                    diagnostic=exc.diagnostic, details=exc.details,
+                ) from exc
             max_chars = max(200, min(200000, int(args.get("max_chars") or 20000)))
             body_text = str(document.get("body") or "")
             document["body_truncated"] = len(body_text) > max_chars
@@ -910,24 +953,38 @@ class _PlaywrightCliWorker:
             raise
         return restored_url
 
-    def _relaunch_session(self, record: _SessionRecord, *, timeout_ms: int) -> None:
+    def _relaunch_session(self, record: _SessionRecord, *, timeout_ms: int, restore_page: bool = True) -> None:
         """Relaunch the live browser when its session record outlived the process."""
-        restored_url = self._launch_session_browser(record, timeout_ms=timeout_ms, restore_page=True)
-        if restored_url.startswith(("http://", "https://")):
-            with contextlib.suppress(BrowserServiceError):
-                self._run(record, _cli_args("goto", restored_url), timeout_ms=timeout_ms, raw=True)
-            record.last_url = restored_url
+        previous_url = record.last_url
+        saved_url = self._launch_session_browser(record, timeout_ms=timeout_ms, restore_page=restore_page)
+        restored_url = (previous_url or saved_url) if restore_page else ""
+        record.last_url = "about:blank"
         # The CLI daemon registers the reopened session slightly after `open`
         # returns; probe briefly so the retried action does not race a repeat
         # "is not open" failure.
         probe = ["eval", "() => document.readyState"]
         probe_timeout = max(5000, min(15000, int(timeout_ms)))
-        for _ in range(5):
+        for attempt in range(5):
             try:
                 self._run(record, probe, timeout_ms=probe_timeout, raw=True)
-                return
-            except BrowserServiceError:
+                break
+            except BrowserServiceError as exc:
+                if attempt == 4:
+                    raise BrowserServiceError(
+                        "The reopened browser did not become ready", code="browser_recovery_failed",
+                        state_unknown=exc.state_unknown,
+                    ) from exc
                 time.sleep(1.0)
+        if restored_url.startswith(("http://", "https://")):
+            try:
+                self._run(record, _cli_args("goto", restored_url), timeout_ms=timeout_ms, raw=True)
+            except BrowserServiceError as exc:
+                raise BrowserServiceError(
+                    "The browser restarted, but restoring its page failed. Provide a new URL to "
+                    "navigate_browser or read_browser_page; inspect state before retrying an interaction.",
+                    code="page_restore_failed", state_unknown=exc.state_unknown,
+                ) from exc
+            record.last_url = restored_url
 
     def _ensure_session(
         self, key: str, *, persistent: bool, timeout_ms: int, restore_page: bool = True
