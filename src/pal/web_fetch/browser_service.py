@@ -37,6 +37,8 @@ from pal.web_fetch.runtime_paths import (
 
 PROFILE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 PROFILE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+PROFILE_STATS_TTL_SECONDS = 300.0
+SIDECAR_HEALTH_TIMEOUT_SECONDS = 2.0
 SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024
 DEFAULT_IDLE_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_CONCURRENCY = 2
@@ -167,12 +169,15 @@ class _PlaywrightCliWorker:
             "in_progress": False,
             "last_result": "",
         }
+        self._profile_stats: tuple[float, int, int] | None = None
+        self._profile_stats_lock = threading.Lock()
         self._write_config()
         self._node_major_cached = self._node_major()
         self._cli_version_cached = self._detected_cli_version()
         if self._cli_ready():
             self._close_workspace_sessions(force=True)
         self._prune_profiles()
+        self._cached_profile_stats()
 
     def _write_config(self) -> None:
         launch_options: dict[str, Any] = {"headless": True, "channel": "chromium"}
@@ -284,6 +289,18 @@ class _PlaywrightCliWorker:
             self._install_state["error"] = error
             self._install_state["preparation_result"] = preparation_result
 
+    def _cached_profile_stats(self) -> tuple[int, int]:
+        now = time.monotonic()
+        with self._profile_stats_lock:
+            cached = self._profile_stats
+            if cached is not None and now - cached[0] < PROFILE_STATS_TTL_SECONDS:
+                return cached[1], cached[2]
+        count = len(tuple(self.paths.profiles.glob("*")))
+        size = _tree_size(self.paths.profiles)
+        with self._profile_stats_lock:
+            self._profile_stats = (now, count, size)
+        return count, size
+
     def health(self) -> dict[str, Any]:
         with self._lock:
             sessions = list(self.sessions.values())
@@ -297,6 +314,7 @@ class _PlaywrightCliWorker:
             and cli_version == PLAYWRIGHT_CLI_VERSION
         )
         browser_installed = _chromium_installed(self.paths)
+        profile_count, profile_bytes = self._cached_profile_stats()
         return {
             "ok": True,
             "service": "playwright_cli",
@@ -312,8 +330,8 @@ class _PlaywrightCliWorker:
             "persistent_sessions": sum(1 for item in sessions if item.persistent),
             "last_error": self.last_error,
             "self_heal": install_state,
-            "profile_count": len(tuple(self.paths.profiles.glob("*"))),
-            "profile_bytes": _tree_size(self.paths.profiles),
+            "profile_count": profile_count,
+            "profile_bytes": profile_bytes,
         }
 
     def install_in_progress(self) -> bool:
@@ -1017,6 +1035,7 @@ class _PlaywrightCliWorker:
                 break
             shutil.rmtree(path)
             total = max(0, total - size)
+        self._profile_stats = None
 
 
 _PAGE_STATE_SCRIPT = "() => JSON.stringify({url: location.href, title: document.title || ''})"
@@ -1568,7 +1587,7 @@ class BrowserServiceManager:
                 if not self._process_running(resource):
                     break
                 try:
-                    payload = self._request_json("GET", "/health", None, timeout_seconds=0.25, resource=resource)
+                    payload = self._request_json("GET", "/health", None, timeout_seconds=SIDECAR_HEALTH_TIMEOUT_SECONDS, resource=resource)
                 except Exception as exc:
                     diagnostic = exception_report(exc)
                     if diagnostic not in startup_errors:
