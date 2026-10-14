@@ -189,6 +189,30 @@ and web integrations belong to plugins. Check actual availability before use.
 | Memory provider and skills | Use their live management tools. `recall_memory(mem_ref=...)` reads an exact durable reference without waiting for indexing; use it for uncertain outcomes, not as mandatory verification of successful writes. Facts, preferences and experience belong to memory; reusable procedures belong to skills. | Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
 | Host environment / OS service | Prepare the actual systemd/launchd/manual-service change and external restart instructions. | Daemon-reload alone does not replace a running process. Never stop, restart, kill, or schedule a delayed restart of Pal's own host from its active turn. |
 
+### Publish new plugin tools and verify discovery
+
+Adding an alias to an existing plugin uses the same `reload_plugin` path as
+changing its implementation, including builtins. For browser tools the owner is
+`web_fetch`, whose manifest declares `reload_modules = ["pal.web_fetch"]`.
+After updating the actual installed source, discover and call `reload_plugin`
+with `name="web_fetch"`; inspect load/cleanup errors and attached state, then
+use `search_tools`, `read_tool`, and a representative `call_tool` to verify the
+new alias and its input contract. Reload republishes the plugin's capabilities
+to the host registry. Rescan, another attach of an attached instance, or a
+sidecar-only restart does not publish changed Python capabilities.
+
+If discovery still misses an alias, check the loaded source, manifest reload
+coverage, matching capability node/action namespace and scope, and candidate
+contract validation before proposing a host restart. Resident/shared contract
+changes still require the external restart described above. Defer further
+activation while Pal is busy; do not restart its host from the active turn.
+
+Before activation, use `pal.plugin.development` for local registry preflight.
+`search_terms` accepts unique lowercase ASCII whole words, not phrases or
+underscored aliases; phrases belong in `search_intents`. A non-empty input
+schema needs valid examples at registry compilation. Simple schemas can receive
+generated examples; cross-field constraints often need explicit `examples`.
+
 ## Reuse Core's system observation bus
 
 Pal already has `MainContext.core_event_bus`; `turn_event_bus` is a compatibility
@@ -396,6 +420,14 @@ purpose, use_when and do_not_use_when accurate about targets and effects.
 Every action needs a matching capability node for its namespace and scope;
 compile the provider to verify that all intended aliases are actually published.
 
+`search_terms`, `search_objects`, and `search_scope_terms` contain unique tokens
+matching `[a-z][a-z0-9]*`: for example `("drag", "fetch")`. Do not put
+`"drag target"`, `"drag_browser_target"`, uppercase words, or Chinese in these
+fields. Put multiword or Chinese intent phrases in `search_intents`, for example
+`("drag a browser target", "拖动浏览器元素")`. It allows at most eight unique
+nonempty phrases, each up to 160 characters. Domain aliases have their own
+separator rules; do not apply those rules to `search_terms`.
+
 ## Runtime Entrypoint
 
 The entrypoint module must expose `build_plugin`. Pal calls it by name-aware dependency injection. Supported argument names include:
@@ -482,6 +514,7 @@ class DemoProvider:
         ),
         InputModel=EchoInput,
         aliases=("demo_echo",),
+        examples=({"message": "hello"},),
         execution=INDIRECT_NONE,
     )
     def echo(self, call: CapabilityCall) -> CapabilityResult:
@@ -495,6 +528,29 @@ class DemoProvider:
 ```
 
 The capability must declare exactly one public alias. Discover that alias with `search_tools` instead of guessing.
+
+### Input examples and local contract preflight
+
+Registry compilation requires at least one valid example for an InputModel with
+schema properties, and validates every example with `model_validate(strict=True)`.
+When `@capability_action` omits `examples`, the provider compiler generates a
+placeholder from the schema's required properties. This works for simple inputs
+such as EchoInput, but can fail for cross-field validators or mutually exclusive
+modes. Supply explicit `examples=({...},)` satisfying the complete input contract
+in those cases. A model with only optional fields can still need an explicit
+example if its validator rejects the generated empty object. Empty input schemas
+do not require an example. Generated placeholders validate the schema; they are
+not published as task examples in the tool description.
+
+Before starting a sidecar or reloading the live plugin, follow
+`tests/test_plugin_skill_example.py`: construct a provider with isolated/fake
+dependencies, call `compile_provider_subtree`, and mount it in an isolated
+`ExecutionRuntime` to exercise registry validation. Check that every intended
+alias was published, make a representative call, and shut down the runtime in
+`finally`. Compilation alone does not exercise all registry checks. Run
+`python -m pytest -q tests/test_plugin_skill_example.py tests/test_tool_guidance.py`
+for the documented example and common contracts, alongside the plugin's own
+tests. Fix example/guidance failures before live activation.
 
 ## Registering Other Surfaces
 
@@ -532,6 +588,34 @@ Useful operations:
 - `enable_plugin`: enable and attach a disabled plugin.
 - `search_tools`: find capabilities after attach.
 - `call_tool`: call a capability by discovered name.
+
+New aliases in an existing plugin appear after successful `reload_plugin`;
+builtin plugins follow the same path. For `web_fetch`, reload the plugin named
+`web_fetch`, then search for the intended operation, read its current schema with
+`read_tool`, and call its discovered alias. The host publishes the replacement
+subtree; a sidecar-only action or restart cannot refresh the host registry.
+Inspect scan/load errors, actual installed source, and manifest `reload_modules`
+if the alias is absent. Do not infer that the host requires a restart merely
+because an alias is missing. Changes to resident dependencies need that separate
+activation path; coordinate activation when Pal is idle.
+
+### Browser sidecar action verification
+
+For isolated integration checks, use the existing
+`pal.web_fetch.browser_service.BrowserServiceManager.execute` API rather than
+scraping `/proc` for ports/tokens or rebuilding an authenticated HTTP client.
+Construct the manager with a separate test runtime root, pass a stable
+`browser_session_key` for the test lifetime, an `action`, `args`, and bounded
+`timeout_ms`, and call `stop_sync()` in `finally`. Prepare browser dependencies
+for that test runtime before executing real browser actions. The manager starts
+and owns its own sidecar; it does not attach to a live plugin's sidecar. Never
+point a second test manager at the live runtime to inspect its browser sessions.
+
+For unit checks, follow `tests/test_browser_action_recovery.py` and
+`tests/test_browser_cli_plugin.py` to exercise the worker with mocked CLI calls.
+Verify the real host discovery/call path separately after plugin reload. Direct
+manager calls test the sidecar action, not publication, tool input validation,
+execution policy, or receiver-side output handling.
 
 ## Safety and Product Rules
 
