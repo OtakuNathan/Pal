@@ -65,6 +65,9 @@ never automatically replayed execution. Bunshin keeps its existing role recovery
 
 Before compact retires L, the host writes timestamped UTF-8 conversation JSONL,
 one record per line, and adds its actual path/time coverage to the continuity seed.
+At round/L-admission boundaries it also appends a separately redacted current
+dialogue JSONL in that same directory. Compact trims this current file to the
+remaining R after recovery commits; reset preserves old searchable dialogue.
 The resident prompt includes a history lookup affordance with `rg` and `jq` examples.
 This archive contains dialogue and initial tool previews, not reasoning or external
 snapshot ownership. Historical wording, recorded actions, maintained memory and

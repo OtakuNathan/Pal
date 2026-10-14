@@ -775,12 +775,30 @@ so a multi-day live session retains its original dialogue times. Recovery preser
 those clocks as storage metadata for later archival; provider requests encode only
 message content and do not include the conversation timestamps.
 
-Archives contain user inputs, channel-submitted replies/progress and original tool
+At the same round/L-admission boundaries, the resident host separately appends a
+searchable, credential-redacted copy to `data/conversation-history/current_<id>.jsonl`.
+Compact archives live alongside these current files, so `rg -n PATTERN DIRECTORY`
+searches both in one pass. After compact commits and recovery is saved, atomically
+rewrite the current file with only the remaining live tail. Reset keeps the old
+incarnation's searchable file. If the old dialogue cannot be preserved, reset fails
+before clearing it. A crash can leave overlapping records; the header's conversation
+ID plus message ID identifies them, and the last version of a message
+in a current file is authoritative. Current-file headers are not end-time indexes;
+filter message timestamps when searching live dialogue.
+
+Both searchable copies contain user inputs, channel-submitted replies/progress and original tool
 text previews with tool names, call IDs and status. Runtime injections, prior
 compact summaries, reasoning, replay, structured result bodies, result handlers and
 external snapshot references are omitted. Legacy assistant text is labeled as model
 text because older state did not record channel submission. Queued reply text is
-evidence of submission, not proof that a remote user received it.
+evidence of submission, not proof that a remote user received it. Recognizable
+credentials (key/token/password assignments, bearer credentials, bot URLs, common
+credential prefixes, cookie headers and private-key blocks) are redacted before
+JSON encoding, with a per-message `redacted` flag. This is pattern-based credential
+masking, not a guarantee that arbitrary personal information is anonymized. Exact
+wording can differ at a redaction marker; encrypted recovery preserves the original
+L1 and replay independently. A failed searchable write reports degradation and
+retries without invalidating a successfully saved recovery point.
 
 The host appends the latest archive path and coverage to compact continuity and
 provides a resident history lookup affordance. Use `rg -n` to find records and inspect

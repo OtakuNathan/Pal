@@ -304,6 +304,145 @@ def test_archive_is_jsonl_with_original_dialogue_and_first_preview_only(tmp_path
     assert decorated.payload["conversation_archive"]["path"] == str(archive.path)
 
 
+def test_current_text_is_redacted_but_full_recovery_preserves_original(tmp_path):
+    async def scenario():
+        instance = app(tmp_path)
+        original = "第一行\napi_key=private-value\nAuthorization: Bearer another-value"
+        memory = begin(instance, original)
+        answer(memory)
+        instance.history.record_reply("t", "已记录\npassword=reply-value")
+        assert await instance.history.checkpoint_async("round")
+        path = instance.history.text_store.path
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [record["role"] for record in records[1:]] == ["user", "assistant"]
+        assert records[1]["timestamp"] == NOW
+        assert records[1]["redacted"] and records[2]["redacted"]
+        for secret in ("private-value", "another-value", "reply-value", "PRIVATE REASONING", "signature"):
+            assert secret not in path.read_text()
+        saved = ResidentJournalStore(tmp_path).read()
+        assert saved["modules"]["memory"]["payload"]["l1_turns"][0]["messages"][0]["parts"][0]["text"] == original
+        restored = app(tmp_path)
+        await restored._restore_checkpoint_async()
+        assert restored.last_checkpoint_status == "restored", restored.last_checkpoint_error
+        turn = restored.handle.memory_service.history.turns[0]
+        assert turn.messages[0].text == original
+        assert turn.messages[-1].reasoning_text == "PRIVATE REASONING"
+        assert turn.messages[-1].replay.payload["message"]["signature"] == "opaque"
+        archive = restored.history.prepare_archive(frozen(restored.handle.memory_service))
+        archive.publish()
+        assert archive.path.parent == path.parent
+        assert all(secret not in archive.path.read_text() for secret in ("private-value", "another-value", "reply-value"))
+    asyncio.run(scenario())
+
+
+def test_current_text_appends_new_records_without_rewriting_old_rounds(tmp_path):
+    async def scenario():
+        instance = app(tmp_path)
+        memory = begin(instance)
+        await instance.history.checkpoint_async("round")
+        path = instance.history.text_store.path
+        previous = path.read_bytes()
+        answer(memory)
+        instance.history.record_reply("t", "新回复")
+        await instance.history.checkpoint_async("round")
+        assert path.read_bytes().startswith(previous)
+        assert len(path.read_text().splitlines()) == 3
+        await instance.history.checkpoint_async("round")
+        assert instance.history.text_store.last_bytes == 0
+        assert len(path.read_text().splitlines()) == 3
+    asyncio.run(scenario())
+
+
+def test_compact_moves_prefix_to_archive_keeps_live_right_and_reset_keeps_text(tmp_path):
+    async def scenario():
+        instance = app(tmp_path)
+        memory = begin(instance, "旧话")
+        answer(memory)
+        instance.history.record_reply("t", "旧回复")
+        memory.settle_l1_turn("t")
+        await instance.history.checkpoint_async("round")
+        current = instance.history.text_store.path
+        source = frozen(memory)
+        memory.begin_l1_turn("right", user_message=LLMMessageIR(
+            MessageRole.USER, (TextPartIR("正在进行"),), message_id="r", semantic_kind="user_request",
+            metadata={"conversation_origin": "user", "conversation_timestamp": NOW}),
+            metadata={"conversation_tracking": True})
+        await instance.history.checkpoint_async("round")
+        archive = instance.history.prepare_archive(source)
+        archive.publish()
+        memory.compact_left(source.run_id, archive.decorate(entry()))
+        await instance.history.checkpoint_async("compact", rebase=True)
+        assert archive.path.parent == current.parent
+        assert "旧话" in archive.path.read_text() and "旧回复" in archive.path.read_text()
+        assert "旧话" not in current.read_text() and "旧回复" not in current.read_text()
+        assert "正在进行" in current.read_text()
+        await instance.history.reset_async()
+        assert "正在进行" in current.read_text()
+        assert archive.path.exists()
+    asyncio.run(scenario())
+
+
+def test_searchable_write_failure_does_not_break_full_recovery_and_retries(tmp_path):
+    async def scenario():
+        instance = app(tmp_path)
+        begin(instance, "survives searchable write failure")
+        with patch.object(instance.history.text_store, "sync_memory", side_effect=OSError("private error")):
+            assert await instance.history.checkpoint_async("round")
+        assert instance.history.status == "degraded"
+        assert instance.history.take_degraded_notice()
+        assert not instance.history.restore_failed
+        assert "private error" not in instance.history.last_error
+        restored = app(tmp_path)
+        await restored._restore_checkpoint_async()
+        assert restored.last_checkpoint_status == "restored", restored.last_checkpoint_error
+        assert "survives searchable write failure" in restored.history.text_store.path.read_text()
+    asyncio.run(scenario())
+
+
+def test_current_text_repairs_incomplete_tail_without_repeating_old_messages(tmp_path):
+    from pal.core.conversation_history import ConversationTextJournal, records_from_memory_payload
+    async def scenario():
+        instance = app(tmp_path)
+        memory = begin(instance)
+        await instance.history.checkpoint_async("round")
+        current = instance.history.text_store.path
+        with current.open("ab") as stream:
+            stream.write(b'{"text":"partial')
+        answer(memory)
+        instance.history.record_reply("t", "新回复")
+        snapshot = await instance.history._capture("round")
+        payload = snapshot["modules"]["memory"]["payload"]
+        writer = ConversationTextJournal(tmp_path)
+        writer.sync(records_from_memory_payload(payload), memory.history_root.incarnation)
+        records = [json.loads(line) for line in current.read_text().splitlines()]
+        assert len(records) == 3
+        assert [record["role"] for record in records[1:]] == ["user", "assistant"]
+    asyncio.run(scenario())
+
+
+def test_failed_first_text_append_retries_with_a_valid_header(tmp_path):
+    import os
+    async def scenario():
+        instance = app(tmp_path)
+        begin(instance)
+        write = os.write
+        calls = 0
+        def broken(descriptor, data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return write(descriptor, data[:8])
+            raise OSError("text write unavailable")
+        with patch("pal.core.conversation_history.os.write", side_effect=broken):
+            assert await instance.history.checkpoint_async("round")
+        assert instance.history.status == "degraded"
+        assert await instance.history.checkpoint_async("round")
+        records = [json.loads(line) for line in instance.history.text_store.path.read_text().splitlines()]
+        assert len(records) == 2
+        assert records[0]["type"] == "header" and records[1]["role"] == "user"
+    asyncio.run(scenario())
+
+
 def test_durable_recovery_holds_output_until_new_compact_base_is_saved(tmp_path):
     async def scenario():
         instance = app(tmp_path)
@@ -373,6 +512,21 @@ def test_failed_reset_restores_live_state_without_reporting_success(tmp_path):
     asyncio.run(scenario())
 
 
+def test_reset_does_not_clear_dialogue_if_searchable_preservation_fails(tmp_path):
+    async def scenario():
+        instance = app(tmp_path)
+        memory = begin(instance)
+        await instance.history.checkpoint_async("round")
+        incarnation = memory.history_root.incarnation
+        answer(memory, "keep unsaved progress")
+        with patch.object(instance.history.text_store, "sync_memory", side_effect=OSError("disk unavailable")):
+            with pytest.raises(OSError):
+                await instance.history.reset_async()
+        assert memory.history_root.incarnation == incarnation
+        assert memory.history.turns[0].messages[-1].text == "keep unsaved progress"
+    asyncio.run(scenario())
+
+
 def test_stream_fragments_do_not_write_and_partial_reply_is_archived(tmp_path):
     instance = app(tmp_path)
     memory = begin(instance)
@@ -393,6 +547,8 @@ def test_affordance_explains_jq_and_is_absent_from_bunshin(tmp_path):
     text = "\n".join(fragment.content for fragment in fragments)
     assert "jq -r" in text and "type=header" in text and "rg -n" in text
     assert str(tmp_path / "data" / "conversation-history") in text
+    assert "current_*.jsonl" in text and "one pass" in text
+    assert "redacted" in text
     assert provider.build_prompt_fragments(PromptAssemblyContext(core_mode="bunshin")) == []
 
 

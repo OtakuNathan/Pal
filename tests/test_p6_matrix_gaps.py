@@ -123,7 +123,7 @@ class _CountingCompactEngine:
         self.policy = PalCompactionPolicy()
 
     async def run(self, snapshot, *, llm_runtime=None, memory_service=None,
-                  after_commit=None, replay_guard=None, commit_guard=None):
+                  after_commit=None, replay_guard=None, commit_guard=None, commit_hooks=None):
         self.calls += 1
         from pal.core.compaction import CompactionRunResult
 

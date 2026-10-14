@@ -218,7 +218,11 @@ still be lost after SIGKILL, power loss or OOM. Interrupted tool side effects
 require observation and reconciliation, not automatic retry.
 
 Compaction writes searchable dialogue JSONL before retiring L and publishes a new
-recovery baseline afterward. `/reset` preserves these archives but persists an
+recovery baseline afterward. A separate credential-redacted current-dialogue JSONL
+is appended at round/L-admission boundaries in the same `data/conversation-history/`
+directory as compact archives; `rg` can search both. Its persistence failure never
+invalidates a saved encrypted recovery point. `/reset` preserves searchable dialogue
+and archives but persists an
 empty active state before reporting success. Existing exit checkpoints remain
 readable. Invalid complete journal records fail restoration without being silently
 replaced by later normal saves.

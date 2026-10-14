@@ -161,15 +161,15 @@ class TurnExecutor:
         history = self.context.port_registry.get(RESIDENT_HISTORY.name)
         if history is not None:
             history.finish_partial_stream(str(turn_id))
-            saved = await history.checkpoint_async(reason)
-            if not saved and continuation is not None:
+            await history.checkpoint_async(reason)
+            if continuation is not None:
                 output = self._agent_output_port()
                 binding = continuation.delivery_binding
                 if output is not None and binding is not None and history.take_degraded_notice():
                     try:
                         await self._call_output_port_async(output, "queue_status", binding, "history_persistence_degraded",
-                            payload={"text": "Conversation recovery storage is temporarily unavailable. "
-                                     "Current progress remains in memory; Pal will retry saving at the next round boundary."})
+                            payload={"text": "Conversation storage is temporarily unavailable. Recovery or searchable "
+                                     "history may be incomplete; Pal will retry saving at the next round boundary."})
                     except Exception:
                         self.state.diagnostics.append({"kind": "resident.history.notice_failed", "turn_id": turn_id})
 

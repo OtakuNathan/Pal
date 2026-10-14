@@ -224,6 +224,12 @@ cleanup/rollback; each agent host policy owns the semantic checkpoint schema
 and rendering. Automatic compaction is driven by the real context budget, not
 a fixed turn interval.
 
+Resident recovery keeps encrypted full L1 and round deltas separately from
+searchable dialogue. Current conversation and compact archives are credential-redacted
+UTF-8 JSONL files in `{runtime_root}/data/conversation-history/`; `rg` searches the
+whole directory and `jq` extracts message text and timestamps. Reasoning, native
+replay and external output files remain outside this searchable copy.
+
 ### Capability Forest
 
 Everything Pal can *do* lives in a single Capability Forest — a unified tree of `introspection` and `operation` nodes. The LLM discovers capabilities by fuzzy search, then invokes them by strict canonical path.
