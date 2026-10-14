@@ -76,6 +76,10 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
     assert descriptors["click_browser_target"].execution.invocation_mode == InvocationMode.INDIRECT
     assert descriptors["click_browser_target"].execution.effect_kind == EffectKind.EXTERNAL_WRITE
     assert descriptors["click_browser_target"].execution.retry_policy == RetryPolicy.RECONCILE_FIRST
+    fetch = descriptors["fetch_browser_url"]
+    assert fetch.execution.effect_kind == EffectKind.EXTERNAL_WRITE
+    assert fetch.execution.retry_policy == RetryPolicy.RECONCILE_FIRST
+    assert fetch.execution.idempotency.value == "non_idempotent"
     assert descriptors["capture_browser_screenshot"].execution.effect_kind == EffectKind.LOCAL_WRITE
 
 

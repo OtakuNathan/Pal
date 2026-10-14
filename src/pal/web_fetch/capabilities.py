@@ -99,6 +99,12 @@ navigation), interact with the page, then read entries. For local extension deve
 an unpacked Manifest V3 directory. Changes close current tabs but preserve profile data;
 navigate afterward and verify content scripts or a mounted chrome-extension:// page.
 Use inspect_browser_extensions to inspect configuration and observed service workers.
+`drag_browser_target` supports inspected element refs or viewport coordinates; after a
+failed drag, inspect the page before deciding whether to repeat it. `fetch_browser_url`
+requests a URL with the current page's login context. It also accepts write methods,
+so authorize the requested operation and reconcile uncertain outcomes before retrying.
+Read complete response bodies through the returned response.text_file snapshot.
+After browser recovery, refresh refs and focus before retrying an interaction.
 Uploads, cookie/storage editing,
 request interception or modification, traces, videos, PDF and the Playwright dashboard
 are not part of this capability surface.
@@ -129,6 +135,7 @@ class WebFetchModuleSnapshot:
         "evaluate_browser_script", "manage_browser_network_capture", "inspect_browser_layout",
         "capture_browser_screenshot", "inspect_browser_status", "close_browser", "clear_browser_cache", "reset_browser",
         "inspect_browser_extensions", "manage_browser_extension",
+        "drag_browser_target", "fetch_browser_url",
     ),
     metadata={"internal": True, "plugin_id": "web_fetch"},
 )
@@ -341,8 +348,8 @@ class WebFetchIntrospectionProvider:
     def network(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "network", "Browser network")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="fetch", guidance=ToolGuidance(search_intents=('call api endpoint with the logged-in browser session', '带页面登录态请求接口拿 JSON 数据', 'pull json from the current page origin with cookies'), search_objects=('url', 'urls', 'response', 'responses', 'body', 'status'), search_terms=('fetch', 'http', 'json', 'api', 'cookie', 'cookies', 'session', 'get', 'post', 'xhr'), purpose="Fetch a URL from the current page's browser context, carrying the page session's cookies, and return status plus body.", use_when="Pulling API or JSON data that needs the logged-in page session; prefer same-origin relative URLs so cookies and origin apply.", do_not_use_when="Public pages readable via navigate_browser, or plain HTTP that curl can fetch without page cookies.", failure_next_steps="Relative URLs resolve against the current page; navigate to the right origin first if the fetch rejects or returns 404."), InputModel=BrowserFetchInput, examples=({"url": "/api/problems/all/"}, {"url": "/graphql/", "method": "POST", "headers": {"Content-Type": "application/json"}, "body": "{\"query\": \"{ user { name } }\"}"}), OutputModel=BrowserActionOutput, aliases=("fetch_browser_url",), metadata={"canonical_path": "op_browser_fetch", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
-    def fetch(self, call: IntrospectionCall) -> IntrospectionResult:
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="fetch", guidance=ToolGuidance(search_intents=('call api endpoint with the logged-in browser session', '带页面登录态请求接口拿 JSON 数据', 'pull json from the current page origin with cookies'), search_objects=('url', 'urls', 'response', 'responses', 'body', 'status'), search_terms=('fetch', 'http', 'json', 'api', 'cookie', 'cookies', 'session', 'get', 'post', 'xhr'), purpose="Fetch a URL from the current page's browser context, carrying the page session's cookies, and return status plus body.", use_when="Authorized API requests that need the logged-in page session; prefer same-origin relative URLs so cookies and origin apply.", do_not_use_when="Public pages readable via navigate_browser, or plain HTTP that curl can fetch without page cookies.", failure_next_steps="Relative URLs resolve against the current page; navigate to the right origin first if the fetch rejects or returns 404. For write methods, inspect server state before retrying an uncertain outcome."), InputModel=BrowserFetchInput, examples=({"url": "/api/problems/all/"}, {"url": "/graphql/", "method": "POST", "headers": {"Content-Type": "application/json"}, "body": "{\"query\": \"{ user { name } }\"}"}), OutputModel=BrowserActionOutput, aliases=("fetch_browser_url",), metadata={"canonical_path": "op_browser_fetch", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
+    def fetch(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._action(call, "fetch", "Browser fetch")
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(search_objects=('screenshot', 'screenshots'), search_terms=('image', 'picture', 'png',), purpose="Capture the current page or target as a PNG and register its artifact for automatic core delivery. Vision-capable models receive pixels within image budgets; other models receive the artifact reference.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check inspect_browser_status and page state; failed calls return no screenshot.", next_tool_hints=(NextToolHint(name="import_artifact", use_when="Automatic artifact registration was unavailable and the artifact owner has recovered; pass artifact.local_cached_path as path. Do not reimport an already registered screenshot."),)), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("capture_browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
@@ -438,12 +445,12 @@ class WebFetchIntrospectionProvider:
             raise browser_tool_error(
                 action, exc, allow_curl=not worker_scope, worker_scope=worker_scope,
             ) from exc
-        if action in {"navigate", "read"}:
+        if action in {"navigate", "read", "fetch"}:
             result = IntrospectionResult(status=RuntimeStatus.OK, text=title, structured=payload, llm_text=title)
             if call.meta.get("broker_run_id"):
                 # The receiving worker owns the readable output file. Host paths
                 # are not usable inside its sandbox; transport raw text once.
-                return replace(result, llm_text="Browser document captured for worker delivery")
+                return replace(result, llm_text="Browser content captured for worker delivery")
             return self._document_result(call, result)
         if "_full_text" in payload or "_full_files" in payload:
             result = IntrospectionResult(status=RuntimeStatus.OK, text=title, structured=payload, llm_text=title)
@@ -452,7 +459,8 @@ class WebFetchIntrospectionProvider:
 
     def _document_result(self, call: IntrospectionCall, result: IntrospectionResult, *, nested_document: bool = True) -> IntrospectionResult | CapabilityResult:
         payload = dict(result.structured or {})
-        document = dict(payload.get("document") or {}) if nested_document else payload
+        document_key = "response" if nested_document and "response" in payload and "document" not in payload else "document"
+        document = dict(payload.get(document_key) or {}) if nested_document else payload
         files = dict(document.pop("_full_files", {}) or {})
         if "_full_text" in document:
             files["text_file"] = document.pop("_full_text")
@@ -484,7 +492,7 @@ class WebFetchIntrospectionProvider:
         if len(refs) != len(files):
             document["next_step"] += " Saving one or more content files failed; their full captures are included in this result for normal output delivery. Resolve output storage before requesting further captures."
         if nested_document:
-            payload["document"] = document
+            payload[document_key] = document
         return CapabilityResult(status=result.status, text=result.text, structured=payload,
                        llm_text=render_titled_structured_for_llm(result.text, payload), snapshot_refs=tuple(refs))
 
