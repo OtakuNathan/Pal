@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from pal.core import PalCore as _PalCoreBootstrap
 from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.runtime import ExecutionRuntime
 from pal.shared.tool_protocol import CompleteResult, new_tool_call
