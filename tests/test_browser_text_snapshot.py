@@ -91,7 +91,7 @@ def test_navigate_retains_snapshot_through_runtime_normalization():
     runtime = core.context.execution_runtime
     try:
         result = asyncio.run(runtime.execute_tool_async(new_tool_call(
-            name='navigate_browser', args={'url': 'https://example.com'}), turn_id='navigation'))
+            name='read_browser_page', args={'url': 'https://example.com'}), turn_id='navigation'))
         assert result.ok, result.llm_text
         assert len(result.snapshot_refs) == 1
         assert Path(result.snapshot_refs[0].path).read_text() == text

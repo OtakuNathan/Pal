@@ -391,7 +391,7 @@ def test_partial_cleanup_reports_committed_unload_and_retries_owned_resource(liv
             raise RuntimeError('remaining resource busy')
     generation.scope.defer(fail_then_succeed)
     generation.scope.defer(close_once)
-    result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name': 'detach_plugin', 'args': {'name': 'demo'}}))
+    result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name': 'manage_plugin', 'args': {'name': 'demo', 'operation': 'detach'}}))
     assert not result.ok
     assert result.invocation_result.effect.value == 'applied'
     assert result.invocation_result.retry.value == 'reconcile_first'

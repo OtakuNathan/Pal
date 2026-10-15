@@ -42,6 +42,7 @@ from pal.artifact.contracts import (
 )
 from pal.artifact.processors import ArtifactProcessingContext, ArtifactProcessorRegistry, image_data_url
 from pal.artifact.repository import ArtifactRepository
+from pal.artifact.description import artifact_summary, describe_record
 from pal.foundation import StoredArtifact
 
 
@@ -476,6 +477,28 @@ class ArtifactManager:
                 refs.append(self._ref_from_record(record))
         return tuple(refs)
 
+    def _describe_record(self, record: ArtifactRecord) -> dict[str, Any]:
+        return describe_record(record, self.repository.list_representations(record.artifact_id))
+
+    def describe(self, artifact_id: str, scope_key: str) -> dict[str, Any]:
+        record = self._require_visible_record(artifact_id, scope_key)
+        self._refresh_hot(record.artifact_id, scope_key)
+        return self._describe_record(record)
+
+    def discover(self, scope_key: str, *, query: str = "", kind: str | None = None,
+                 limit: int = 5, offset: int = 0) -> dict[str, Any]:
+        limit = max(1, min(20, int(limit)))
+        offset = max(0, int(offset))
+        matches = self.artifact_search(scope_key, query=query, kind=kind,
+            limit=max(1, len(self.repository.list_records(scope_key=scope_key))))
+        items = matches[offset:offset + limit]
+        results = [self._describe_record(record) for item in items
+                   if (record := self.repository.get_record(item.artifact_id)) is not None]
+        has_more = offset + len(items) < len(matches)
+        return {"results": results, "count": len(results), "total": len(matches),
+                "offset": offset, "limit": limit, "has_more": has_more,
+                "next_offset": offset + len(items) if has_more else None}
+
     def info(self, artifact_id: str, scope_key: str) -> dict[str, Any]:
         record = self._require_visible_record(artifact_id, scope_key)
         self._refresh_hot(record.artifact_id, scope_key)
@@ -584,12 +607,14 @@ class ArtifactManager:
                 ]
             ).lower()
             lexical = sum(1.0 for term in query_terms if term in haystack)
+            if query_terms and lexical == 0:
+                continue
             age_seconds = max(0.0, (now - _parse_dt(state.last_accessed_at)).total_seconds())
             recency = max(0.0, 1.0 - (age_seconds / (24 * 60 * 60)))
             score = lexical + (0.1 * recency)
             if not query_terms:
                 score = 0.1 * recency
-            if score <= 0:
+            if query_terms and score <= 0:
                 continue
             scored.append(
                 ArtifactSearchResult(
@@ -665,120 +690,43 @@ class ArtifactManager:
         return tuple(list(unique.values())[: max(1, int(top_k or 5))])
 
     def select_prompt_exposure(
-        self,
-        scope_key: str,
-        turn_id: str,
-        user_text: str,
-        llm_capabilities: dict[str, Any] | None,
-        *,
-        artifact_ids: tuple[str, ...] = (),
+        self, scope_key: str, turn_id: str, user_text: str,
+        llm_capabilities: dict[str, Any] | None, *, artifact_ids: tuple[str, ...] = (),
     ) -> ArtifactPromptExposure:
+        """Render references into file manifests and optional image pixels, never L1 bytes."""
         with self._lifecycle_lock:
             self.reap_expired(scope_key=scope_key)
-            capabilities = dict(llm_capabilities or {})
-            supports_vision = bool(capabilities.get("supports_vision"))
-            records = self._visible_records_for_prompt(
-                scope_key=scope_key,
-                turn_id=turn_id,
-                user_text=user_text,
-                artifact_ids=tuple(artifact_ids or ()),
-            )
-            if not records:
-                return ArtifactPromptExposure()
-            inline_parts: list[ArtifactInlinePart] = []
-            manifest_lines: list[str] = []
-            inline_count = 0
-            needs_tool_handling = False
-            live_count = 0
-            retired_count = 0
+            records = self._visible_records_for_prompt(scope_key=scope_key, turn_id=turn_id,
+                user_text=user_text, artifact_ids=artifact_ids)
+            inline_parts = []
+            manifests = []
             for record in records:
                 if _artifact_handler_retired(record):
-                    manifest_lines.append(_retired_handler_manifest(record))
-                    retired_count += 1
+                    manifests.append(_retired_handler_manifest(record))
                     continue
-                live_count += 1
-                inlined = False
-                if record.kind != ARTIFACT_KIND_PDF and supports_vision and inline_count < self.policy.image.max_inline_images:
-                    image_rep = self._first_image_representation(record)
-                    if image_rep is not None and _representation_base64_fits(image_rep, self.policy):
-                        source = self.to_data_url(image_rep.representation_id)
-                        if source:
-                            inline_parts.append(
-                                ArtifactInlinePart(
-                                    part_type="artifact_image",
-                                    artifact_id=record.artifact_id,
-                                    representation_id=image_rep.representation_id,
-                                    mime_type=image_rep.mime_type,
-                                    source_url=source,
-                                )
-                            )
-                            inline_count += 1
-                            inlined = True
-                            coverage = (
-                                f"  visual_coverage: page {image_rep.selector.get('page')} only; other pages are not attached\n"
-                                if record.kind == ARTIFACT_KIND_PDF else ""
-                            )
-                            manifest_lines.append(
-                                f"- artifact_id: {record.artifact_id}\n"
-                                f"  file_name: {record.file_name}\n"
-                                f"  kind: {record.kind}\n"
-                                f"  visual_content: attached_inline\n"
-                                f"  visual_selector: {_prompt_scalar(image_rep.selector)}\n"
-                                f"{coverage}"
-                                f"  summary: {record.summary}\n"
-                                f"  use: answer from the attached image pixels directly\n"
-                                f"  optional_tools: {', '.join(_prompt_actions_for(record, image_inlined=True))}"
-                            )
-                text_rep = self._first_short_text_representation(record)
-                if text_rep is not None:
-                    manifest_lines.append(
-                        f"- artifact_id: {record.artifact_id}\n"
-                        f"  file_name: {record.file_name}\n"
-                        f"  kind: {record.kind}\n"
-                        f"  included_text: {text_rep.text_preview}"
-                    )
-                    continue
-                if not inlined or record.kind == ARTIFACT_KIND_PDF:
-                    manifest_lines.append(self._tool_handling_manifest(record))
-                    has_page_access = record.kind == ARTIFACT_KIND_PDF and record.metadata.get("page_index_file_path")
-                    needs_tool_handling = needs_tool_handling or not bool(self._text_file_for_record(record) or has_page_access)
-            if retired_count and not live_count:
-                text = (
-                    "The referenced artifact handlers have retired. Their managed bytes and representations "
-                    "are no longer available. Do not call artifact capabilities for them; ask the user to "
-                    "attach the source again if its content is still required.\n"
-                    + "\n".join(manifest_lines)
-                )
-            elif manifest_lines:
-                handling_reminder = ""
-                if needs_tool_handling:
-                    handling_reminder = (
-                        "Some live artifact content below is not directly attached or readable by this model. "
-                        "Use the metadata to check the current capability/tool surface for a suitable processor. "
-                        "If one exists, call it with the supported local path, base64 payload, or representation. "
-                        "If none exists, say the current runtime cannot process that artifact content directly. "
-                    )
-                retired_reminder = (
-                    "Entries marked retired are tombstones: do not call tools for them; ask the user to attach them again. "
-                    if retired_count
-                    else ""
-                )
-                text = (
-                    "These are short-lived conversation artifacts Pal can read by artifact_id. "
-                    "Use the supplied text_file directly with rg/read_file when text is needed; use artifact tools for missing paths, representations or metadata. "
-                    "Do not treat artifact_id as a local path. "
-                    "Managed artifact files are read-only inputs; copy one to an ordinary workspace path before modifying it. "
-                    "Use local_file.preferred_path only with a tool/capability that explicitly accepts local paths. "
-                    "If visual_content is attached_inline, image pixels are already attached to this same user message; "
-                    "answer from those pixels directly; visual_selector/visual_coverage identify the attached page. "
-                    "Use the supplied PDF page/index paths for other pages; attachment does not imply the entire PDF was inspected. "
-                    + retired_reminder
-                    + handling_reminder
-                    + "\n"
-                    + "\n".join(manifest_lines)
-                )
-            else:
-                text = ""
+                description = self._describe_record(record)
+                if record.kind == ARTIFACT_KIND_IMAGE:
+                    description['visual_content'] = 'not_attached'
+                    if (dict(llm_capabilities or {}).get('supports_vision') and
+                            len(inline_parts) < self.policy.image.max_inline_images):
+                        image = self._first_image_representation(record)
+                        if image is not None and _representation_base64_fits(image, self.policy):
+                            source = self.to_data_url(image.representation_id)
+                            if source:
+                                inline_parts.append(ArtifactInlinePart(part_type='artifact_image',
+                                    artifact_id=record.artifact_id, representation_id=image.representation_id,
+                                    mime_type=image.mime_type, source_url=source))
+                                description['visual_content'] = 'attached_inline'
+                manifests.append(json.dumps(description, ensure_ascii=False, indent=2))
+            if not manifests:
+                return ArtifactPromptExposure()
+            text = ('Conversation attachments: metadata and managed file paths follow. '
+                    'Only images marked attached_inline have pixels attached to this model input. '
+                    'Text, PDF, audio and other file contents are not injected automatically. '
+                    'Use read_file/rg or another suitable tool when the task needs their contents. '
+                    'Managed files are read-only inputs; copy before editing. '
+                    'Entries marked retired have no usable content; ask for the source again when needed.\n'
+                    + '\n'.join(manifests))
             return ArtifactPromptExposure(text=text, inline_parts=tuple(inline_parts))
 
     def to_data_url(self, representation_id: str) -> str | None:
@@ -857,101 +805,13 @@ class ArtifactManager:
         return []
 
     def _tool_handling_manifest(self, record: ArtifactRecord) -> str:
-        text_file = self._text_file_for_record(record)
-        if text_file:
-            page_guidance = (
-                "For PDFs, read a known page directly using page_file_pattern (1-based page); "
-                "page_index_file_path lists page processing status, text lines, and image_file_path. "
-                "PDF pixels are not attached. When needed, use import_artifact with the page image_file_path; "
-                "image injection requires a vision-capable model and available image budget. "
-                if "page_index_file_path" in text_file else ""
-            )
-            return (
-                f"- artifact_id: {record.artifact_id}\n"
-                f"  file_name: {_prompt_scalar(record.file_name)}\n"
-                f"  kind: {record.kind}\n"
-                f"  status: {record.status}\n"
-                f"  notes: {_prompt_scalar(record.notes)}\n"
-                f"  text_file: {_prompt_scalar(text_file)}\n"
-                "  handling: use run_shell with rg to locate text and read_file to read lines; "
-                f"{page_guidance}Use shell for oversized lines. The text is already extracted; no processor discovery "
-                "or read_artifact call is required. Copy this managed input before editing."
-            )
-        local_file = _local_file_metadata(record)
-        representations = [
-            _representation_prompt_dict(item)
-            for item in self.repository.list_representations(record.artifact_id)
-        ]
-        lines = [
-            f"- artifact_id: {record.artifact_id}",
-            f"  file_name: {_prompt_scalar(record.file_name)}",
-            f"  kind: {record.kind}",
-            f"  mime_type: {_prompt_scalar(record.original_mime_type)}",
-            f"  size_bytes: {record.original_size_bytes}",
-            f"  status: {record.status}",
-            f"  notes: {_prompt_scalar(record.notes)}",
-            f"  summary: {_prompt_scalar(record.summary)}",
-            "  direct_content: unavailable" if record.kind != ARTIFACT_KIND_PDF else "  extracted_text: unavailable",
-            "  handling: inspect current capabilities/tools for a suitable processor using the metadata below",
-        ]
-        if record.kind == ARTIFACT_KIND_AUDIO:
-            lines[-1] = f"  handling: {AUDIO_TRANSCRIPTION_GUIDANCE}"
-        if record.kind == ARTIFACT_KIND_PDF:
-            page_access = {key: record.metadata[key] for key in
-                           ("page_index_file_path", "page_file_pattern", "page_count", "extracted_pages", "extraction_truncated")
-                           if key in record.metadata}
-            if page_access:
-                lines[-1] = "  handling: read the page index first; use existing page text or rendered images where supported. Discover a processor only for content those representations cannot provide."
-                lines.append(f"  page_access: {_prompt_scalar(page_access)}")
-                lines.append("  page_guidance: use read_file on the index or a known page's text file; image_file_path identifies rendered page images when available. has_text=false means no text was extracted, not that the page is visually blank.")
-        if local_file:
-            lines.extend(
-                [
-                    "  local_file:",
-                    f"    preferred_path: {_prompt_scalar(local_file.get('preferred_path', ''))}",
-                    f"    preferred_path_kind: {_prompt_scalar(local_file.get('preferred_path_kind', ''))}",
-                    f"    preferred_mime_type: {_prompt_scalar(local_file.get('preferred_mime_type', ''))}",
-                    f"    preferred_size_bytes: {int(local_file.get('preferred_size_bytes') or 0)}",
-                ]
-            )
-        if representations:
-            lines.append("  representations:")
-            for item in representations:
-                lines.extend(
-                    [
-                        f"    - representation_kind: {_prompt_scalar(item.get('representation_kind', ''))}",
-                        f"      mime_type: {_prompt_scalar(item.get('mime_type', ''))}",
-                        f"      size_bytes: {int(item.get('size_bytes') or 0)}",
-                        f"      status: {_prompt_scalar(item.get('status', ''))}",
-                    ]
-                )
-                summary = str(item.get("summary") or "").strip()
-                if summary:
-                    lines.append(f"      summary: {_prompt_scalar(summary)}")
-                selector = item.get("selector")
-                if isinstance(selector, dict) and selector:
-                    lines.append(f"      selector: {_prompt_scalar(selector)}")
-        return "\n".join(lines)
+        return json.dumps(self._describe_record(record), ensure_ascii=False, indent=2)
 
     def _first_image_representation(self, record: ArtifactRecord) -> ArtifactRepresentation | None:
         for kind in (REPRESENTATION_NORMALIZED_IMAGE, REPRESENTATION_PAGE_IMAGE):
             reps = self.repository.list_representations(record.artifact_id, representation_kind=kind)
             if reps:
                 return reps[0]
-        return None
-
-    def _first_short_text_representation(self, record: ArtifactRecord) -> ArtifactRepresentation | None:
-        if record.kind != ARTIFACT_KIND_AUDIO:
-            return None
-        for kind in (REPRESENTATION_TEXT, REPRESENTATION_TRANSCRIPT):
-            for rep in self.repository.list_representations(record.artifact_id, representation_kind=kind):
-                path = _existing_path_text(rep.path)
-                if not path:
-                    continue
-                with Path(path).open(encoding="utf-8", newline="") as stream:
-                    text = stream.read(self.policy.text.inline_budget_chars + 1)
-                if text and len(text) <= self.policy.text.inline_budget_chars:
-                    return replace(rep, text_preview=text)
         return None
 
     def _select_representation(
@@ -1044,23 +904,21 @@ class ArtifactManager:
         return resolved
 
     def _ref_from_record(self, record: ArtifactRecord) -> ArtifactRef:
-        reps = self.repository.list_representations(record.artifact_id)
         text_file = self._text_file_for_record(record)
-        actions = ["inspect_artifact_info"]
-        if not text_file and any(self.representation_registry.is_textual(rep.representation_kind) for rep in reps):
-            actions.extend(("read_artifact", "grep_artifact"))
         return ArtifactRef(
             artifact_id=record.artifact_id,
             kind=record.kind,
             file_name=record.file_name,
-            summary=record.summary,
+            summary=artifact_summary(record),
             status=record.status,
-            available_actions=tuple(actions),
+            available_actions=("inspect_artifact_info",),
             text_file=text_file,
             notes=record.notes,
         )
 
     def _text_file_for_record(self, record: ArtifactRecord) -> dict[str, Any]:
+        if record.kind == ARTIFACT_KIND_PDF:
+            return {}
         for kind in (REPRESENTATION_TEXT, REPRESENTATION_TRANSCRIPT):
             for rep in self.repository.list_representations(record.artifact_id, representation_kind=kind):
                 result = _text_file_metadata(rep)
@@ -1189,6 +1047,7 @@ def _retired_handler_manifest(record: ArtifactRecord) -> str:
     return (
         f"- artifact_id: {record.artifact_id}\n"
         f"  file_name: {_prompt_scalar(record.file_name)}\n"
+        f"  extension: {_prompt_scalar(Path(record.file_name).suffix.lower())}\n"
         f"  kind: {record.kind}\n"
         "  status: retired\n"
         f"  content: {content}\n"
@@ -1231,6 +1090,8 @@ def _text_file_metadata(representation: ArtifactRepresentation) -> dict[str, Any
 def _local_file_metadata(record: ArtifactRecord) -> dict[str, Any]:
     original = _existing_path_text(record.original_path)
     normalized = _existing_path_text(record.normalized_path)
+    if normalized == original:
+        normalized = ""
     preferred = normalized or original
     if not preferred:
         return {}
@@ -1283,16 +1144,6 @@ def _sanitize_metadata_for_llm(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prompt_actions_for(record: ArtifactRecord, *, image_inlined: bool) -> tuple[str, ...]:
-    if record.kind == ARTIFACT_KIND_IMAGE:
-        if image_inlined:
-            return ("inspect_artifact_info",)
-        return ("inspect_artifact_info",)
-    if record.kind in {ARTIFACT_KIND_TEXT, ARTIFACT_KIND_PDF}:
-        if record.normalized_path or record.metadata.get("page_index_file_path"):
-            return ("inspect_artifact_info",)
-        return ("inspect_artifact_info", "read_artifact", "grep_artifact")
-    if record.kind == ARTIFACT_KIND_AUDIO:
-        return ("inspect_artifact_info",)
     return ("inspect_artifact_info",)
 
 
@@ -1309,7 +1160,7 @@ def _snippet(text: str, terms: list[str], *, max_chars: int) -> str:
 
 def _next_actions_for(record: ArtifactRecord) -> tuple[str, ...]:
     if record.kind == ARTIFACT_KIND_PDF:
-        return ("Use grep_artifact for specific terms.", "Use read_artifact with page or chunk for focused reading.")
+        return ("Use read_file or rg on the supplied file paths; PDF page indexes identify per-page files.",)
     if record.kind == ARTIFACT_KIND_AUDIO:
         return (AUDIO_TRANSCRIPTION_GUIDANCE,)
     if record.kind == ARTIFACT_KIND_IMAGE:

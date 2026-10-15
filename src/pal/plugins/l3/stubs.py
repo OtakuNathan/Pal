@@ -78,6 +78,9 @@ def _recall_scope_for_task_id(task_id: str | None) -> str | None:
     target_label_resolver="resolve_provider_label",
 )
 class _L3ProviderCapabilityMixin:
+    def inspect_summary(self) -> dict[str, object]:
+        return self.inspect()
+
     provider_id: str
     mounted: bool
 
@@ -104,20 +107,6 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_titled_structured_for_llm("Memory provider", payload),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="provider",
-        action_name="inventory",
-        guidance=ToolGuidance(
-            search_objects=('inventory', 'inventories'),
-            search_terms=('index', 'indexes', 'indices', 'status', 'show', 'state', 'health', 'backend', 'embedding', 'counts', 'records'),
-            purpose="Inspect one stub memory provider's lifecycle and inventory together.",
-            use_when="Checking stub memory record counts.",
-            do_not_use_when="Real provider inventory (use search_tools to discover the selected provider's bound inventory alias).",
-            failure_next_steps="Read-only. This is a stub provider.",
-        ),
-        aliases=("inspect_memory_provider_inventory",),
-    )
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         from pal.shared.inspection import inspection_snapshot
@@ -266,15 +255,6 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_mutation_result_for_llm("delete", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers', 'backend', 'backends', 'store', 'stores'),
-            search_terms=('connect', 'reconnect', 'mount'),
-            purpose="Attach the stub memory provider.",
-            use_when="Testing with the stub memory backend.",
-            do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound attach alias).",
-            failure_next_steps="This is a stub provider.",
-        ), aliases=("attach_memory_provider",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -285,14 +265,6 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Detach the stub memory provider.",
-            use_when="Disconnecting the stub memory backend.",
-            do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound detach alias).",
-            failure_next_steps="This is a stub provider.",
-        ), aliases=("detach_memory_provider",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
@@ -303,23 +275,6 @@ class _L3ProviderCapabilityMixin:
             llm_text=render_titled_structured_for_llm("Memory provider detached", {"mounted": False}),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="maintenance",
-        action_name="refresh_indexes",
-        guidance=ToolGuidance(
-            search_objects=('index', 'indexes', 'indices'),
-            purpose="Refresh stub provider indexes.",
-            use_when="Testing refresh paths with the stub provider.",
-            do_not_use_when="Real provider index refresh (use search_tools to discover the selected provider's bound refresh alias).",
-            failure_next_steps="This is a stub provider.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3StubsL3ProviderCapabilityMixinRefreshIndexesInput,
-        aliases=("refresh_memory_provider_indexes",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
     def refresh_indexes_action(self, call: IntrospectionCall) -> IntrospectionResult:
         limit = int(call.args.get("limit") or 8)
         retry_failed = bool(call.args.get("retry_failed", False))

@@ -45,9 +45,9 @@ NEGATIVES = [
 ]
 PROBES = [
  ('probe-typo', "Find the tool to inspect browser state. First search with domain='browser', query='inspectt status', then follow the returned discovery information.", 'inspect_browser_status'),
- ('probe-domain', "Find the tool that reloads an enabled plugin's Python implementation. First search with domain='lsp', query='reload plugin', then follow the returned discovery information.", 'reload_plugin'),
- ('probe-mode', "Select the plugin inventory tool. First use select_tool(name='list_plugins', invocation_mode='indirect'), then correct your decision from the result.", 'list_plugins'),
- ('probe-unknown-alias', "Find the tool for the currently active LLM endpoint. First use select_tool(name='llm_status', invocation_mode='indirect'), then follow the result to find a real tool.", 'inspect_active_llm'),
+ ('probe-domain', "Find the tool that reloads an enabled plugin's Python implementation. First search with domain='lsp', query='reload plugin', then follow the returned discovery information.", 'manage_plugin'),
+ ('probe-mode', "Select the plugin inventory tool. First use select_tool(name='list_plugins', invocation_mode='direct'), then correct your decision from the result.", 'list_plugins'),
+ ('probe-unknown-alias', "Find the tool for the currently active LLM endpoint. First use select_tool(name='llm_status', invocation_mode='indirect'), then follow the result to find a real tool.", 'inspect_llm'),
 ]
 
 
@@ -66,6 +66,12 @@ def build_flow_catalog():
         alias = declaration.alias
         if records[alias].get('input_contract') is not None:
             continue  # Same first-provider choice as the original catalog.
+        if declaration.module_id == 'emotion':
+            from pal.emotion.runtime import emotion_contract
+            model, _ = emotion_contract()
+            records[alias].update(input_contract=compact_input_contract(model.model_json_schema()),
+                                  invocation_mode='direct', failure_next_steps=declaration.guidance.failure_next_steps)
+            continue
         if declaration.generated_spec_key:
             from pal.bunshin.scoped_execution import _WORKSPACE_TOOL_SPECS
             spec = _WORKSPACE_TOOL_SPECS[declaration.generated_spec_key]
@@ -190,8 +196,6 @@ async def run_case(llm,values,case,generation,search,schema,prompt,*,max_output_
             discovery_description or 'Choose the strict owner domain and describe the task in query. Purpose and tool-authored auxiliary terms/intents rank up to three full contracts by default; action/object naming is not required. A candidate is not proof that every requested feature exists: compare its complete contract and unmatched_terms with the original request before invoking. Exact aliases remain supported. On a lexical miss, spelling recovery can return suggestions with full contracts. Domain alone or directory_offset browses up to 16 names and brief purposes; read a plausible directory contract. Domains stay strict; omit domain only if the owner is unknown. Do not search indefinitely for this capability. Try a reasonable change of query or owner and inspect relevant inventory if useful. If those checks reveal no suitable callable, it may be unavailable; explain that possibility and any uncertainty. Reuse unchanged inventory and complete contracts.', 'parameters':schema}},
         'read_tool':{'type':'function','function':{'name':'read_tool','description':'Read an exact visible alias contract.',
             'parameters':{'type':'object','properties':{'name':{'type':'string'}},'required':['name'],'additionalProperties':False}}},
-        'list_tools':{'type':'function','function':{'name':'list_tools','description':'List aliases and purposes in the visible catalog when discovery is unresolved.',
-            'parameters':{'type':'object','properties':{},'additionalProperties':False}}},
         'select_tool':{'type':'function','function':{'name':'select_tool','description':
             'EVALUATION ONLY: submit the final tool name and its direct/indirect invocation_mode for the original task. No business arguments are needed and no business tool executes. A valid decision ends the case; rejected mode/name decisions may be corrected.',
             'parameters':{'type':'object','properties':{'name':{'type':'string','minLength':1,'pattern':r'\S'},'invocation_mode':{'type':'string','enum':['direct','indirect']}},'required':['name','invocation_mode'],'additionalProperties':False}}},
@@ -261,10 +265,6 @@ async def run_case(llm,values,case,generation,search,schema,prompt,*,max_output_
                 record=generation.search_records.get(args['name'])
                 data=tool_contract(record) if record else {'kind':'rejected','error_code':'unknown_tool','effect':'not_started',
                     'affordances':[{'tool':'search_tools','arguments':{'query':args['name']},'reason':'Search visible aliases.'}]}
-            elif name=='list_tools':
-                row['inventory_seen']=True
-                data={'tools':[{'alias':a,'purpose':r['purpose'],'invocation_mode':r['invocation_mode']}
-                    for a,r in sorted(generation.search_records.items())]}
             else:
                 data=resolve_selection(generation,args['name'],args['invocation_mode'])
                 if 'first_selection_correct' not in row:

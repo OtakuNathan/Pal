@@ -1,20 +1,20 @@
 {
-  "date": "2026-10-13",
+  "date": "2026-10-15",
   "modules": {
     "artifact": {
-      "reason": "保留接收文件的发现、导入、读取、内容搜索和元信息；附件不是普通本地文件，不能全部改用 read_file/rg。"
+      "reason": "4 个间接入口：文件归一化与作用域引用；模型输入渲染时生成文件描述，仅图片自动附像素。list 并入 search，read/grep/select 撤下；PDF 逐页文件+索引，文本无 chunks，待统一测试。"
     },
     "browser": {
-      "reason": "26 项均有网页操作或网页排障用途；fill/type、click/set_checked、close/reset/cache 等效果不同。layout、network、extension 是浏览器业务能力，不是 Pal 后端测试。"
+      "reason": "23 个入口，统一打开/正文读取、扩展 inspection 和会话维护；保留明确的 DOM 动作和独立 resize。"
     },
     "bunshin": {
-      "reason": "13 项面向主 Pal 的任务账本、提交和工作流控制；restart/resume/triage、用户决策和 Architect 问答改变不同状态，保留。"
+      "reason": "11 项面向主 Pal 的工具：pause/resume/cancel/archive 统一 control_bunshin_workflow；rebind 改间接；start 仍常驻，restart/triage/人工决策/问答保留独立语义，待统一测试。"
     },
     "bunshin_roles": {
-      "reason": "36 项只在获授权的 worker 角色中挂载；涉及 Manager 账本、冻结合同、证据和提交，不能用主 Pal 的文件或记忆工具直接替代。减少此目录不会减少主 Pal 的 151 项。"
+      "reason": "36 项只在获授权的 worker 角色中挂载；涉及账本、冻结合同、证据和提交，与主 Pal 工具数量分开计，本轮不改角色工具。"
     },
     "channel": {
-      "reason": "hub 库存/发布状态与指定 endpoint 的生命周期/auth/health/backlog 分层，目录保留摘要。"
+      "reason": "7 个间接入口；五个同参数的端点控制合为 manage_channel_endpoint；hub、目录、单 endpoint 诊断分层，发送和凭据入口保留。"
     },
     "checklist": {
       "reason": "read_checklist 为唯一清单快照；upsert/complete/close 保留。"
@@ -26,37 +26,40 @@
       "reason": "一个 core 检查同时返回 workload 和 cache deadline；配置由 CLI 维护，label setter 不再公开。"
     },
     "execution": {
-      "reason": "模块状态含 registry/native/search-only 数量；文件缓存诊断已撤出工具表面。"
+      "reason": "撤下 delete_path/list_tools 和外部 native shell 的会话超级入口；保留八个简单会话动作。"
     },
     "failure": {
-      "reason": "保留近期回复投递故障的结构化信息；汇总与最近 16 条并不相同，可在单一接口中保留两个 view。日志不是完整替代。"
+      "reason": "1 个无参数 inspect_failure：统计与最近 16 条有界诊断摘要合一；完整报告/证据以只读结果快照文件返回并携带 L1 引用，落盘失败显式降级、不内联原文；并非全局错误历史或健康证明，待统一测试。"
     },
     "identity": {
       "reason": "人类维护入口；LLM 工具已撤，CLI 支持在线 projection 刷新。"
     },
     "llm": {
-      "reason": "运行态检查 active/think/process usage；单 endpoint 检查能力、限制和 scoped usage。"
+      "reason": "1 个无参数 inspect_llm：运行态选择、thinking、所有已加载启用 endpoint 的能力/限制和用量摘要一次返回，列表 label 标 (active)，不重复 active 能力；修复 thinking 字典读取，待统一测试。"
     },
     "lsp": {
-      "reason": "保留代码导航、诊断、workspace 准备和 server 恢复。host 进程状态与 workspace/server 状态不同，合并需保留 sidecar 失联时的被动诊断。"
+      "reason": "10 个间接入口；hub 被动诊断、指定 server 主动诊断；位置类型和调用方向使用简单枚举。"
     },
     "mcp": {
-      "reason": "保留 server 管理、动态工具投影和图像转码；host 被动状态与 server RPC 清单不同，sidecar 失联时仍需可诊断。prepare_mcp_image 是外部工具输入准备能力。"
+      "reason": "5 个宿主管理入口：server attach/detach 合为 manage_mcp_server；图片/附件转换下沉到按本地参数映射配置的调用适配层，独立 prepare_mcp_image 撤下。查询分层保留；待统一测试。"
     },
     "memory": {
-      "reason": "hub 检查选择和 L1/L2；单 provider 检查库存、挂载、索引与 embedding；四组 SQLite/mock 同名声明去重。"
+      "reason": "日常 CRUD 与 hub 健康摘要保留；六个后端维护入口迁入 pal memory CLI。"
     },
     "plugins": {
-      "reason": "hub 状态、摘要目录、单 plugin 完整诊断分层；异步 package job 检查保留。"
+      "reason": "8 个入口：生命周期枚举、hub/单体 inspection、摘要目录、扫描模式和四个包工具。"
     },
     "proactive": {
-      "reason": "hub 状态与单 task 配置/latest outcome 分层；多次运行历史继续独立查询。"
+      "reason": "8 个入口：hub/task/history 分层；目的地统一为 set_proactive_destination；启用/停用/删除合为 manage_proactive_task(name, operation)，调度修改独立。控制合并待与其他模块统一测试。"
     },
     "skill": {
-      "reason": "保留搜索/读取/上下文注入、候选准备/提交及更新/停用；read 与 inject 的上下文效果不同。pending 候选状态用于提交前检查和不确定结果恢复。"
+      "reason": "7 个入口：保留独立 hub 检查、搜索、读取、上下文注入、候选准备/提交；停用并入 update_skill，统一文件/数据库/版本路径，待与其他模块统一测试。"
     },
     "web_search": {
-      "reason": "hub 选择与指定 provider 的配置/auth/health 各一个入口；保留 search_web，健康能力合并到 provider 检查。"
+      "reason": "2 个入口：search_web 常驻；无参数 inspect_web_search 一次返回 hub 和所有 provider 的公开配置/auth/最近请求健康，错误摘要有界；维护仍走 CLI，待统一测试。"
+    },
+    "emotion": {
+      "reason": "独立协调插件统一情绪广播，渲染端注册词表并集、各自处理别名和时长。"
     }
   },
   "tools": {
@@ -65,37 +68,84 @@
       "reason": "管理器策略与当前对话资源计数一起返回；没有 scope 时明确表示 inventory 不可取得。",
       "replacement": "",
       "prerequisite": ""
-    },
-    "set_proactive_output_target": {
-      "disposition": "consolidate_after_contract_change",
-      "reason": "目的地可归一为一次原子更新，但 target-only 目前保留当前 channel，channel setter 会重新解析缺省目标。",
-      "replacement": "统一 destination setter，明确 unchanged/set/clear。",
-      "prerequisite": "保留局部目标更新及跨 channel 不继承语义；不要用先读取再全量覆盖引入并发竞态。"
-    },
-    "rescan_and_attach_first_party_plugins": {
-      "disposition": "consolidate_after_contract_change",
-      "reason": "可变成 rescan 的显式 attach_new 选项，而非两个 alias。",
-      "replacement": "rescan_plugins(attach_new=true)，默认 false。",
-      "prerequisite": "保持默认只更新 metadata；显式附带 attach 才加载新 first-party 实例，不能伪装成 reload。"
     }
   },
   "retired_tools": {
     "inspect_channel_endpoint_auth": "inspect_channel_endpoint",
     "inspect_channel_endpoint_health": "inspect_channel_endpoint",
     "inspect_channel_endpoint_backlog": "inspect_channel_endpoint",
-    "inspect_active_web_search_provider": "inspect_web_search_state",
-    "inspect_web_search_provider_auth": "inspect_web_search_provider",
-    "inspect_web_search_provider_health": "inspect_web_search_provider",
+    "inspect_active_web_search_provider": "inspect_web_search",
+    "inspect_web_search_provider_auth": "inspect_web_search",
+    "inspect_web_search_provider_health": "inspect_web_search",
     "inspect_active_memory_provider": "inspect_memory_state",
-    "inspect_memory_provider_state": "inspect_memory_provider_inventory",
-    "inspect_llm_thinking_level": "inspect_active_llm",
-    "inspect_llm_usage": "inspect_active_llm / inspect_llm_endpoint",
+    "inspect_memory_provider_state": "pal memory CLI",
+    "inspect_llm_thinking_level": "inspect_llm",
+    "inspect_llm_usage": "inspect_llm",
     "inspect_core_cache_warm_deadline": "observe_core",
     "inspect_checklist_state": "read_checklist",
     "read_latest_proactive_run": "read_proactive_task",
     "inspect_control_state": "pal control status",
     "refresh_identity": "pal identity show/refresh",
     "configure_core": "internal label only",
-    "inspect_file_cache": "read_file recovery / internal diagnostics"
+    "inspect_file_cache": "read_file recovery / internal diagnostics",
+    "list_tools": "search_tools(domain=...)",
+    "delete_path": "run_shell (authorized deletion)",
+    "manage_shell_session": "eight independent shell session tools",
+    "inspect_plugin_host": "inspect_plugin()",
+    "attach_plugin": "manage_plugin(operation=attach)",
+    "reload_plugin": "manage_plugin(operation=reload)",
+    "detach_plugin": "manage_plugin(operation=detach)",
+    "enable_plugin": "manage_plugin(operation=enable)",
+    "disable_plugin": "manage_plugin(operation=disable)",
+    "rescan_and_attach_first_party_plugins": "rescan_plugins(mode=scan_and_attach_new_first_party)",
+    "navigate_browser": "read_browser_page(url=...)",
+    "fetch_browser_url": "run_shell curl / evaluate_browser_script (browser authentication)",
+    "inspect_browser_extensions": "inspect_browser_status(extension_id?)",
+    "close_browser": "manage_browser_session(operation=close)",
+    "clear_browser_cache": "manage_browser_session(operation=clear_cache)",
+    "reset_browser": "manage_browser_session(operation=reset, confirm=true)",
+    "inspect_lsp_provider": "inspect_lsp_status()",
+    "diagnose_lsp_server": "inspect_lsp_status(workspace_root, name or file)",
+    "find_lsp_definitions": "find_lsp_symbol_locations(kind=definition)",
+    "find_lsp_implementations": "find_lsp_symbol_locations(kind=implementation)",
+    "prepare_lsp_call_hierarchy": "internal LSP workflow",
+    "find_lsp_incoming_calls": "find_lsp_calls(direction=callers)",
+    "find_lsp_outgoing_calls": "find_lsp_calls(direction=callees)",
+    "show_panel_emotion": "show_emotion",
+    "show_expression": "show_emotion",
+    "attach_memory_provider": "pal memory CLI",
+    "detach_memory_provider": "pal memory CLI",
+    "set_active_memory_provider": "pal memory CLI",
+    "refresh_memory_provider_indexes": "pal memory CLI",
+    "list_memory_providers": "pal memory CLI",
+    "inspect_memory_provider_inventory": "pal memory CLI",
+    "attach_channel_endpoint": "manage_channel_endpoint(operation=attach)",
+    "detach_channel_endpoint": "manage_channel_endpoint(operation=detach)",
+    "restart_channel_endpoint": "manage_channel_endpoint(operation=restart)",
+    "enable_channel_endpoint": "manage_channel_endpoint(operation=enable)",
+    "disable_channel_endpoint": "manage_channel_endpoint(operation=disable)",
+    "set_proactive_output_channel": "set_proactive_destination",
+    "set_proactive_output_target": "set_proactive_destination",
+    "enable_proactive_task": "manage_proactive_task",
+    "disable_proactive_task": "manage_proactive_task",
+    "delete_proactive_task": "manage_proactive_task",
+    "disable_skill": "update_skill",
+    "attach_mcp_server": "manage_mcp_server",
+    "detach_mcp_server": "manage_mcp_server",
+    "prepare_mcp_image": "MCP 调用适配层 artifact_inputs（不再有独立工具）",
+    "resume_bunshin_workflow": "control_bunshin_workflow(operation=resume)",
+    "archive_bunshin_workflow": "control_bunshin_workflow(operation=archive)",
+    "list_artifacts": "search_artifacts(query omitted)",
+    "read_artifact": "read_file / run_shell on normalized file paths",
+    "grep_artifact": "run_shell(rg) on file paths",
+    "select_artifact": "runtime reference leases (no model tool)",
+    "inspect_web_search_state": "inspect_web_search",
+    "list_web_search_providers": "inspect_web_search",
+    "inspect_web_search_provider": "inspect_web_search",
+    "inspect_active_llm": "inspect_llm",
+    "list_llm_endpoints": "inspect_llm",
+    "inspect_llm_endpoint": "inspect_llm",
+    "inspect_failure_state": "inspect_failure",
+    "list_failure_reports": "inspect_failure"
   }
 }

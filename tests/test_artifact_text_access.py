@@ -68,13 +68,14 @@ def test_long_text_is_readable_beyond_artifact_preview_with_file_tool(manager, a
         runtime.shutdown()
 
 
-def test_duplicate_representation_hits_keep_one_body_and_all_locations(manager):
+def test_normalized_text_search_has_one_body_without_chunks(manager):
     ref = register(manager, 'unique.txt', 'a' * 6000 + ' UNIQUE_NEEDLE ' + 'b' * 30000)
     hits = manager.content_search(ref.artifact_id, 'scope', query='UNIQUE_NEEDLE', top_k=1)
     assert len(hits) == 1
-    assert {item['representation'] for item in hits[0].locations} == {'text', 'chunk_text'}
+    assert {item['representation'] for item in hits[0].locations} == {'text'}
     assert 'UNIQUE_NEEDLE' in hits[0].text
-    assert any(item['selector'].get('chunk') == 1 for item in hits[0].locations)
+    assert not any(item['selector'].get('chunk') for item in hits[0].locations)
+    assert not (Path(ref.text_file['file_path']).parent / 'chunks').exists()
 
 
 def test_short_text_is_a_file_handle_without_inline_body(manager):
@@ -102,8 +103,8 @@ def test_pdf_keeps_page_access_and_imports_pixels_on_demand(manager, text):
     ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
     exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {'supports_vision': True})
     assert exposure.inline_parts == ()
-    assert 'PDF pixels are not attached' in exposure.text
-    assert 'import_artifact' in exposure.text
+    assert 'Page images are not attached automatically' in exposure.text
+    assert 'Import a selected page image' in exposure.text
     assert 'page_index_file_path' in exposure.text
     assert 'page_file_pattern' in exposure.text
     record = manager.repository.get_record(ref.artifact_id)
@@ -115,7 +116,7 @@ def test_pdf_keeps_page_access_and_imports_pixels_on_demand(manager, text):
     assert pages[1]['has_text'] is False
 
 
-def test_pdf_full_text_preserves_original_page_locations(manager):
+def test_pdf_page_files_and_index_preserve_original_page_locations_without_copies(manager):
     fitz = pytest.importorskip('fitz')
     path = manager.runtime_root / 'pages.pdf'
     doc = fitz.open()
@@ -125,17 +126,20 @@ def test_pdf_full_text_preserves_original_page_locations(manager):
     doc.save(path)
     doc.close()
     ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
-    lines = Path(ref.text_file['file_path']).read_text().splitlines()
-    pages = json.loads(Path(ref.text_file['page_index_file_path']).read_text())['pages']
+    assert ref.text_file == {}
+    pages = json.loads(Path(manager.describe(ref.artifact_id, 'scope')['pdf']['page_index_file_path']).read_text())['pages']
     assert [entry['page'] for entry in pages] == [1, 2, 3]
-    assert lines[pages[0]['start_line'] - 1] == 'First page line'
-    assert lines[pages[0]['end_line'] - 1] == 'Second line'
-    assert lines[pages[2]['start_line'] - 1] == 'Third page text'
-    assert pages[1]['has_text'] is False and pages[1]['start_line'] is None
-    assert Path(ref.text_file['page_file_pattern'].format(page=2)).read_text() == ''
-    assert Path(ref.text_file['page_file_pattern'].format(page=3)).read_text() == 'Third page text'
+    assert Path(pages[0]['file_path']).read_text() == 'First page line\nSecond line'
+    assert Path(pages[2]['file_path']).read_text() == 'Third page text'
+    assert pages[1]['has_text'] is False
+    assert all('start_line' not in page and 'end_line' not in page for page in pages)
+    representations = Path(pages[0]['file_path']).parent.parent
+    assert not (representations / 'normalized.txt').exists()
+    assert not (representations / 'chunks').exists()
+    assert Path(manager.describe(ref.artifact_id, 'scope')['pdf']['page_file_pattern'].format(page=2)).read_text() == ''
+    assert Path(manager.describe(ref.artifact_id, 'scope')['pdf']['page_file_pattern'].format(page=3)).read_text() == 'Third page text'
     exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {})
-    assert ref.text_file['page_index_file_path'] in exposure.text
+    assert manager.describe(ref.artifact_id, 'scope')['pdf']['page_index_file_path'] in exposure.text
     assert 'start_line' not in exposure.text
     selected = manager.read(ref.artifact_id, 'scope', page=3)
     assert selected.text_file['selector'] == {'page': 3}
@@ -152,14 +156,14 @@ def test_pdf_index_discloses_unprocessed_pages(manager):
     doc.save(path)
     doc.close()
     ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
-    assert ref.text_file['extraction_truncated'] is True
-    assert ref.text_file['page_count'] == 2 and ref.text_file['extracted_pages'] == 1
-    index = json.loads(Path(ref.text_file['page_index_file_path']).read_text())
+    assert manager.describe(ref.artifact_id, 'scope')['pdf']['extraction_truncated'] is True
+    assert manager.describe(ref.artifact_id, 'scope')['pdf']['page_count'] == 2 and manager.describe(ref.artifact_id, 'scope')['pdf']['extracted_pages'] == 1
+    index = json.loads(Path(manager.describe(ref.artifact_id, 'scope')['pdf']['page_index_file_path']).read_text())
     assert [entry['page'] for entry in index['pages']] == [1, 2]
     assert index['pages'][1]['status'] == 'not_processed'
     assert 'image_file_path' not in index['pages'][1]
     assert manager.repository.get_record(ref.artifact_id).status == 'partial'
-    assert not Path(ref.text_file['page_file_pattern'].format(page=2)).exists()
+    assert not Path(manager.describe(ref.artifact_id, 'scope')['pdf']['page_file_pattern'].format(page=2)).exists()
 
 
 def test_pdf_page_image_import_uses_existing_injection_path(manager):
@@ -174,7 +178,7 @@ def test_pdf_page_image_import_uses_existing_injection_path(manager):
     doc.save(path)
     doc.close()
     ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
-    pages = json.loads(Path(ref.text_file['page_index_file_path']).read_text())['pages']
+    pages = json.loads(Path(manager.describe(ref.artifact_id, 'scope')['pdf']['page_index_file_path']).read_text())['pages']
     from tests.turn_fakes import TurnIOFixture
     runtime = SimpleNamespace(turn_io=TurnIOFixture(scope='scope'))
     result = asyncio.run(ArtifactImportTool(manager).ainvoke({'path': pages[1]['image_file_path']}, runtime=runtime, turn_id='page-view'))
@@ -206,7 +210,7 @@ def test_pdf_image_failure_is_per_page_and_keeps_text(manager, monkeypatch):
     doc.save(path)
     doc.close()
     ref = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
-    pages = json.loads(Path(ref.text_file['page_index_file_path']).read_text())['pages']
+    pages = json.loads(Path(manager.describe(ref.artifact_id, 'scope')['pdf']['page_index_file_path']).read_text())['pages']
     assert [page['status'] for page in pages] == ['ready', 'partial', 'ready']
     assert Path(pages[1]['file_path']).read_text() == 'Page 2'
     assert 'image_file_path' not in pages[1]

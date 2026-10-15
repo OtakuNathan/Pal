@@ -49,6 +49,8 @@ class RuntimeConfig:
     embedding_ollama_remote_base_urls: tuple[str, ...] = ()
     embedding_ollama_local_base_url: str = "http://127.0.0.1:11434"
     embedding_ollama_model_name: str = "bge-m3"
+    embedding_model_revision: str = ""
+    embedding_text_processing_version: str = "search_text_v1"
     embedding_ollama_keep_alive: str = "5m"
     embedding_ollama_remote_timeout_seconds: float = 8.0
     embedding_ollama_local_timeout_seconds: float = 120.0
@@ -109,6 +111,8 @@ class RuntimeConfig:
         cls._apply_section(kwargs, raw, "memory", {
             "embedding_ollama_local_base_url": str,
             "embedding_ollama_model_name": str,
+            "embedding_model_revision": str,
+            "embedding_text_processing_version": str,
             "embedding_ollama_keep_alive": str,
             "embedding_ollama_remote_timeout_seconds": float,
             "embedding_ollama_local_timeout_seconds": float,

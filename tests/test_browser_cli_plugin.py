@@ -50,23 +50,22 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
     contracts = core._build_llm_tool_contracts()
     direct = {item["function"]["name"] for item in contracts}
     browser_aliases = {descriptor.aliases[0] for descriptor in core.context.capability_registry.descriptors.values() if descriptor.module_id == "web_fetch"}
-    assert direct & browser_aliases == {"navigate_browser"}
-    navigate = next(item["function"] for item in contracts if item["function"]["name"] == "navigate_browser")
-    for name in ("read_browser_page", "capture_browser_snapshot", "find_browser_text", "inspect_browser_status",
-                 "inspect_browser_extensions", "manage_browser_extension"):
+    assert direct & browser_aliases == {"read_browser_page"}
+    navigate = next(item["function"] for item in contracts if item["function"]["name"] == "read_browser_page")
+    for name in ("capture_browser_snapshot", "find_browser_text", "inspect_browser_status", "manage_browser_extension"):
         assert name in navigate["description"]
-    assert "`read_browser_page` (indirect)" in navigate["description"]
-    assert "A separate browser read is unnecessary" in navigate["description"]
+    assert "separate read is unnecessary" in navigate["description"]
+
     assert "text_file" in navigate["description"]
     assert "click_browser_target" not in direct
     assert "capture_browser_screenshot" not in direct
 
     descriptors = core.context.capability_registry.descriptors
-    assert all(name in descriptors for name in ("click_browser_target", "capture_browser_screenshot", "reset_browser"))
+    assert all(name in descriptors for name in ("click_browser_target", "capture_browser_screenshot", "manage_browser_session"))
     assert descriptors["read_browser_page"].InputModel.__module__ == "pal.web_fetch.tool_models"
     assert not any(name.startswith("web_fetch_provider_") for name in descriptors)
     assert not {"read_web", "inspect_web_layout", "screenshot_web"} & set(descriptors)
-    for query, expected in (("navigate browser", "navigate_browser"),
+    for query, expected in (("browser open url", "read_browser_page"),
                             ("find browser text", "find_browser_text"),
                             ("check browser state", "inspect_browser_status")):
         found = core.context.execution_runtime.execute_tool(
@@ -76,10 +75,9 @@ def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
     assert descriptors["click_browser_target"].execution.invocation_mode == InvocationMode.INDIRECT
     assert descriptors["click_browser_target"].execution.effect_kind == EffectKind.EXTERNAL_WRITE
     assert descriptors["click_browser_target"].execution.retry_policy == RetryPolicy.RECONCILE_FIRST
-    fetch = descriptors["fetch_browser_url"]
-    assert fetch.execution.effect_kind == EffectKind.EXTERNAL_WRITE
-    assert fetch.execution.retry_policy == RetryPolicy.RECONCILE_FIRST
-    assert fetch.execution.idempotency.value == "non_idempotent"
+    assert len(browser_aliases) == 23
+    for retired in ("navigate_browser", "fetch_browser_url", "inspect_browser_extensions", "clear_browser_cache", "close_browser", "reset_browser"):
+        assert retired not in descriptors
     assert descriptors["capture_browser_screenshot"].execution.effect_kind == EffectKind.LOCAL_WRITE
 
 
@@ -408,7 +406,7 @@ def test_failed_restore_reports_new_url_recovery_without_reset(tmp_path: Path) -
     with pytest.raises(BrowserServiceError) as error:
         worker._execute_ready(key=key, action="read", args={}, persistent=True, timeout_ms=1000)
     assert error.value.code == "page_restore_failed"
-    assert "navigate_browser" in str(error.value)
+    assert "read_browser_page" in str(error.value)
     assert "offline" in str(error.value)
     assert closed == [key]
     assert key not in worker.sessions

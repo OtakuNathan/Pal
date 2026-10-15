@@ -250,7 +250,7 @@ def test_pre_dispatch_browser_errors_have_truthful_model_metadata(core, code, re
         "request not dispatched", code=code, retryable=code == "cli_unavailable", diagnostic=exception_report(failure()))))
     register_browser(core.context, WebFetchService(manager))
     core.publish_module_capabilities("web_fetch")
-    result = core.context.execution_runtime.execute_tool(new_tool_call(name="navigate_browser", args={"url": "https://unused.test"}), turn_id="web-audit")
+    result = core.context.execution_runtime.execute_tool(new_tool_call(name="read_browser_page", args={"url": "https://unused.test"}), turn_id="web-audit")
     assert not result.ok
     assert metadata(result)["effect"] == "not_started"
     assert metadata(result)["retry"] == retry
@@ -446,7 +446,7 @@ def sidecar(tmp_path, monkeypatch, request):
 def test_real_sidecar_transport_keeps_root_cause_in_model_tool_result(core, sidecar, request):
     register_browser(core.context, WebFetchService(sidecar))
     core.publish_module_capabilities("web_fetch")
-    result = core.context.execution_runtime.execute_tool(new_tool_call(name="navigate_browser", args={"url": "https://unused.test"}), turn_id="web-audit")
+    result = core.context.execution_runtime.execute_tool(new_tool_call(name="read_browser_page", args={"url": "https://unused.test"}), turn_id="web-audit")
     assert not result.ok
     failure_kind = request.node.callspec.params["sidecar"]
     if failure_kind == "serialization":

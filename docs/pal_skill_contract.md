@@ -91,11 +91,22 @@ Raw external source is not injected. `inject_skill` only reads normalized skill 
 
 - `prepare_skill_candidate`: creates a sanitized skill candidate and does not commit.
 - `commit_skill_candidate`: commits a candidate, writes normalized skill storage, without creating a separate routing record.
-- `update_skill`: updates a normalized skill or manual text.
-- `disable_skill`: disables a skill without deleting history.
+- `update_skill`: updates a normalized skill's content, metadata or availability.
+  Disable with `patch={"status":"disabled","enabled":false}`; reactivate with
+  `patch={"status":"active","enabled":true}`. Set both fields; omitted patch
+  fields retain their values. Availability updates use the same file mirror,
+  database and version path as content updates. Repeating an already applied
+  patch does not advance its version.
+- `inspect_skill_state`: reads module statistics and bounded pending-candidate
+  summaries. It remains separate from `read_skill`.
 - `search_skills`: searches active skills for the current scenario or explicit skill name, without returning manuals.
 - `read_skill`: reads normalized skill metadata and optionally manual text.
 - `inject_skill`: injects an active normalized skill manual and never executes capabilities.
+
+`disable_skill` is no longer a discoverable or callable tool. Its internal
+service compatibility method delegates to the common update path. File and
+database writes are not a cross-store transaction; after an uncertain update,
+inspect the record and stored file before retrying.
 
 `inject_skill` returns structured failure for missing, disabled, deprecated, or over-budget skills.
 

@@ -47,6 +47,8 @@ def _build_parser() -> argparse.ArgumentParser:
     configure_web_search_parser(subparsers.add_parser("web-search", help="Configure web search backends"))
     from pal.core.cli import configure_core_parser
     configure_core_parser(subparsers.add_parser("core", help="Configure resident core settings"))
+    from pal.memory.cli import configure_memory_parser
+    configure_memory_parser(subparsers.add_parser("memory", help="Maintain memory backends and embedding indexes"))
     from pal.identity.cli import configure_identity_parser
     configure_identity_parser(subparsers.add_parser("identity", help="Inspect and refresh human-configured identity"))
     from pal.control.cli import configure_control_parser
@@ -115,6 +117,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _run_async(args: argparse.Namespace) -> int:
+    if args.command == "memory":
+        from pal.memory.cli import run_memory_cli_async
+        return await run_memory_cli_async(args)
     if args.command == "identity":
         from pal.identity.cli import run_identity_cli_async
         return await run_identity_cli_async(args)

@@ -30,7 +30,7 @@ def build_inventory() -> dict:
     trees = {}
     for declaration in declarations:
         path = ROOT / declaration.source
-        if declaration.role_scoped:
+        if declaration.role_scoped or declaration.module_id == "emotion":
             native_opt_in = False
         else:
             if path not in trees:

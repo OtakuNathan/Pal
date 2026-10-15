@@ -47,7 +47,7 @@ def test_archive_preserves_task_hides_workflow_and_reports_archived_status(provi
     task_id, workflow_id = cancel(provider)
     before = call(provider, "search_tasks")
     assert len(before.structured["tasks"][0]["workflows"]) == 1
-    archived = call(provider, "archive_workflow", task=TITLE)
+    archived = call(provider, "control_workflow", task=TITLE, operation="archive")
     assert archived.status == RuntimeStatus.OK, archived.llm_text
     assert archived.structured["archived"] is True
     assert archived.structured["archive_scope"] == "workflow"
@@ -66,7 +66,7 @@ def test_archive_preserves_task_hides_workflow_and_reports_archived_status(provi
     assert '"archived":true' in status.llm_text
     task = provider.service.repository.snapshots.read_snapshot(AggregateType.TASK, task_id)
     assert task.state == "ACTIVE"
-    again = call(provider, "archive_workflow", task=TITLE)
+    again = call(provider, "control_workflow", task=TITLE, operation="archive")
     assert again.status == RuntimeStatus.OK, again.llm_text
     assert again.structured["archived"] is True
     assert again.structured["already_archived"] is True
@@ -74,7 +74,7 @@ def test_archive_preserves_task_hides_workflow_and_reports_archived_status(provi
 
 
 def test_active_workflow_archive_refusal_keeps_search_and_state(provider):
-    result = call(provider, "archive_workflow", task=TITLE)
+    result = call(provider, "control_workflow", task=TITLE, operation="archive")
     assert result.status != RuntimeStatus.OK
     assert "only terminal V2 workflows" in result.llm_text
     search = call(provider, "search_tasks")
@@ -86,7 +86,7 @@ def test_active_workflow_archive_refusal_keeps_search_and_state(provider):
 
 def test_archived_workflow_does_not_prevent_reusing_its_task(provider):
     task_id, old_workflow_id = cancel(provider)
-    assert call(provider, "archive_workflow", task=TITLE).status == RuntimeStatus.OK
+    assert call(provider, "control_workflow", task=TITLE, operation="archive").status == RuntimeStatus.OK
     service = provider.service
     service.start_workflow({"task_id": task_id, "actor": "nathan", "goal": "Run the next revision",
                             "task_spec": {"objective": "Run the next revision"}})

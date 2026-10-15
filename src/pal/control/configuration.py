@@ -23,6 +23,7 @@ class CoreConfigurationService:
     cache_reminder: Any
     identity_service: Any = None
     control_plane: Any = None
+    memory_owner: Any = None
     _server: Any = field(default=None, init=False, repr=False)
     _clients: dict[asyncio.Task, asyncio.StreamWriter] = field(default_factory=dict, init=False, repr=False)
     _closing: bool = field(default=True, init=False)
@@ -58,6 +59,10 @@ class CoreConfigurationService:
     async def _call_method(self, method: str, params: dict) -> dict:
         if self._closing:
             raise RuntimeError("Core configuration service is stopping")
+        if method.startswith("memory."):
+            if self.memory_owner is None:
+                raise RuntimeError("Memory maintenance owner is unavailable")
+            return await self.memory_owner.dispatch(method.removeprefix("memory."), params)
         if method in {"identity.inspect", "identity.refresh", "control.inspect"}:
             if params:
                 raise ValueError("inspection and refresh take no arguments")

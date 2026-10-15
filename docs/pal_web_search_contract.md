@@ -73,27 +73,29 @@ class WebSearchProviderPort(Protocol):
 
 `web_search` 通过 `IntrospectionProvider` 注册到 capability forest。
 
-### 模块级能力（SINGLETON_TARGET）
+### 模型工具面
 
-| canonical_path | 作用 |
-|----------------|------|
-| `${1}_show` | 模块概览 |
-| `${1}_providers` | 列出所有 provider |
-| `${1}_provider` | 当前活跃 provider |
-| `web_search` | 执行搜索 |
-| `op_web_search_mgmt_set_active_provider` | 切换活跃 provider |
+| 工具 | 入口 | 作用 |
+|------|------|------|
+| `search_web(query, limit?, region?, safe_search?)` | 常驻直调 | 搜索；由 service 选择 provider 并执行 fallback |
+| `inspect_web_search()` | 间接只读 | 无参数，一次返回 Hub 与全部 provider 的诊断 |
 
-### Provider 实例级能力
+诊断始终采用同一个返回结构，不根据参数切换语义，也不分页或截取 provider：
 
-每个注册的 provider 会自动生成实例级能力：
+- Hub：mounted/degraded、provider 数量、启用数量、配置首选和有效首选。
+- `providers`：每个 provider 的公开配置、认证是否齐全、最近请求健康度。
+- `diagnostics`：观测时间、来源、部分不可用的 section；单 provider 的独立
+  auth/health 读取失败不会丢失其他已知信息。
 
-- `${1}_provider_health::<provider_id>`
-- `${1}_provider_show::<provider_id>`
-- `${1}_provider_state::<provider_id>`
-- `op_web_search_mgmt_enable::<provider_id>`
-- `op_web_search_mgmt_disable::<provider_id>`
-- `op_web_search_mgmt_set_config::<provider_id>`
-- `op_web_search_mgmt_set_auth_material::<provider_id>`
+这是配置和最近请求的被动观测，不发起联网探测。有效首选表示当前候选顺序
+中的首位，不保证该 provider 的网络或认证可用；搜索结果报告实际执行的后端。
+认证材料值不返回。模型可见的错误报告去除 traceback，并限制每条 600 字符；
+完整最近请求报告继续保留在 resident service，不被摘要覆盖。
+
+旧 `inspect_web_search_state`、`list_web_search_providers` 和
+`inspect_web_search_provider` 不再发布。原 provider 维护 handler 可供内部
+兼容调用；配置、认证、启停和首选切换通过 `pal web-search` CLI 完成，模型
+工具不提供这些写操作。
 
 ## 插件集成
 

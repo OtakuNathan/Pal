@@ -34,17 +34,17 @@ def runtime(tmp_path):
 @pytest.mark.parametrize('query,expected', [
     ('read file', 'read_file'), ('read files', 'read_file'), ('files read', 'read_file'),
     ('write files', 'write_file'), ('edit files', 'edit_file'),
-    ('delete directories', 'delete_path'),
+    ('delete directories', 'run_shell'),
     ('lsp find reference', 'find_lsp_references'),
     ('lsp find references', 'find_lsp_references'),
-    ('lsp find definition', 'find_lsp_definitions'),
-    ('lsp find implementation', 'find_lsp_implementations'),
+    ('lsp find definition', 'find_lsp_symbol_locations'),
+    ('lsp find implementation', 'find_lsp_symbol_locations'),
     ('lsp search symbol', 'search_lsp_workspace_symbols'),
     ('lsp search symbols', 'search_lsp_workspace_symbols'),
     ('lsp read diagnostic', 'read_lsp_diagnostics'),
-    ('lsp find caller', 'find_lsp_incoming_calls'),
-    ('lsp find callees', 'find_lsp_outgoing_calls'),
-    ('reload plugins', 'reload_plugin'), ('install providers', 'install_package'),
+    ('lsp find caller', 'find_lsp_calls'),
+    ('lsp find callees', 'find_lsp_calls'),
+    ('reload plugins', 'manage_plugin'), ('install providers', 'install_package'),
 ])
 def test_real_tools_recall_declared_object_forms(runtime, query, expected):
     result = runtime.execute_tool(new_tool_call(name='search_tools', args={'query': query}))
@@ -118,7 +118,8 @@ def test_all_owned_guidance_declarations_explicitly_review_object_vocabulary():
                     for alias in ast.literal_eval(aliases):
                         assert alias.split('_')[0] not in objects, (alias, objects)
             found += 1
-    assert found > 150
+    # Sanity-check the scan while allowing approved tool consolidation.
+    assert found > 100
 
 
 def test_workflow_specs_keep_object_forms_in_the_worker_registry():
@@ -181,19 +182,14 @@ def test_object_variants_rank_like_alias_words_over_incidental_purpose_words(que
     ('web_fetch/capabilities.py', 'read_browser_page', 'browser read text', ['read_browser_page']),
     ('web_fetch/capabilities.py', 'read_browser_page', 'browser read link', ['read_browser_page']),
     ('web_fetch/capabilities.py', 'read_browser_page', 'browser read links', ['read_browser_page']),
-    ('web_fetch/capabilities.py', 'navigate_browser', 'browser navigate url', ['navigate_browser']),
-    ('web_fetch/capabilities.py', 'navigate_browser', 'browser navigate urls', ['navigate_browser']),
-    ('artifact/capabilities.py', 'read_artifact', 'artifact read text', ['read_artifact']),
-    ('artifact/capabilities.py', 'read_artifact', 'artifact read representation', ['read_artifact']),
-    ('artifact/capabilities.py', 'read_artifact', 'artifact read representations', ['read_artifact']),
+    ('web_fetch/capabilities.py', 'read_browser_page', 'browser read url', ['read_browser_page']),
+    ('web_fetch/capabilities.py', 'read_browser_page', 'browser read urls', ['read_browser_page']),
     ('artifact/capabilities.py', 'import_artifact', 'artifact import image', ['import_artifact']),
     ('artifact/capabilities.py', 'import_artifact', 'artifact import images', ['import_artifact']),
-    ('llm/capabilities.py', 'inspect_active_llm', 'llm inspect token', ['inspect_active_llm']),
-    ('llm/capabilities.py', 'inspect_active_llm', 'llm inspect tokens', ['inspect_active_llm']),
-    ('web_fetch/capabilities.py', 'clear_browser_cache', 'browser clear cookies', []),
-    ('artifact/capabilities.py', 'read_artifact', 'read image pixels', []),
-    ('execution/file_capabilities.py', 'delete_path', 'delete link target', []),
-    ('artifact/capabilities.py', 'inspect_artifact_info', 'artifact inspect representations', ['inspect_artifact_info']),
+    ('llm/capabilities.py', 'inspect_llm', 'llm inspect token', ['inspect_llm']),
+    ('llm/capabilities.py', 'inspect_llm', 'llm inspect tokens', ['inspect_llm']),
+    ('web_fetch/capabilities.py', 'manage_browser_session', 'browser clear cookies', []),
+    ('artifact/capabilities.py', 'inspect_artifact_info', 'artifact inspect file paths', ['inspect_artifact_info']),
 ])
 def test_keyword_objects_are_searchable_but_negative_purpose_clauses_are_not(path, alias, query, expected):
     source = Path(__file__).resolve().parents[1] / 'src' / 'pal' / path

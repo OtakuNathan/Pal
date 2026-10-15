@@ -37,7 +37,8 @@ from pal.skill.builtin_skills import PAL_SELF_MAINTENANCE_MANUAL
 from pal.web_search.repository import WebSearchProviderRepository
 from pal.web_search.models import WebSearchProviderModel
 from pal.web_search.service import WebSearchService
-from pal.web_search.cli import provider_payload
+from pal.web_search.capabilities import WebSearchIntrospectionProvider
+from pal.shared import IntrospectionCall
 from pal.tool_efficiency_benchmark import endpoint_snapshot, build_llm
 from pal.llm.conversions import message_ir_from_dict, tool_definition_ir_from_dict
 from pal.llm.ir import GenerationPolicyIR, LLMRequestIR
@@ -194,18 +195,12 @@ async def one(llm, values, case_id, root, records, generation):
                         elif call.name == 'read_tool':
                             data = tool_contract(records[args['name']])
                         elif call.name == 'call_tool':
-                            alias, target = args['name'], args.get('args', {}).get('name')
-                            if alias == 'list_web_search_providers':
-                                data = {'items': [{'name': p.provider_id, 'enabled': p.enabled} for p in repo.list_all()]}
-                            elif alias == 'inspect_web_search_state':
-                                data = {'provider_count': len(repo.list_all()), 'enabled_provider_count': len(repo.list_enabled()),
-                                    'configured_active_provider_id': search_service.configured_active_provider_id(),
-                                    'effective_active_provider_id': search_service.effective_active_provider_id()}
-                            elif alias == 'inspect_web_search_provider':
-                                record = repo.get(target)
-                                if record is None: raise ValueError('Unknown provider; supply args.name')
-                                data = {**provider_payload(record), 'auth': search_service.provider_auth_state(record),
-                                    'health': search_service.provider_health(record)}
+                            alias = args['name']
+                            if alias == 'inspect_web_search':
+                                if args.get('args'):
+                                    raise ValueError('inspect_web_search takes no arguments')
+                                data = WebSearchIntrospectionProvider(search_service).show(
+                                    IntrospectionCall(name=alias)).structured
                             elif alias == 'observe_core': data = {'cache_reminder': owner.inspect()}
                             elif alias == 'read_bunshin_catalog': data = catalog.snapshot(include_definitions=True)
                             elif alias == 'read_file':
@@ -229,7 +224,7 @@ async def one(llm, values, case_id, root, records, generation):
             successful_cli = [c for c in row['calls'] if c['name'] == 'run_shell' and c['result'].get('exit_code') == 0 and '--help' not in c['args']['command']]
             checks = {
                 'search-settings': repo.get('brave').settings_blob == {'keep': 'original', 'region': 'GB'},
-                'search-auth': repo.get('brave').auth_material_blob.get('api_key') == 'fixture-only-credential' and any(c['name'] == 'call_tool' and c['args']['name'] == 'inspect_web_search_provider' and 'health' in c['result'] and 'auth' in c['result'] for c in row['calls']),
+                'search-auth': repo.get('brave').auth_material_blob.get('api_key') == 'fixture-only-credential' and any(c['name'] == 'call_tool' and c['args']['name'] == 'inspect_web_search' and any(p['name'] == 'brave' and 'health' in p and 'auth' in p for p in c['result'].get('providers', [])) for c in row['calls']),
                 'search-selection': search_service.configured_active_provider_id() == 'ddg' and repo.get('ddg').enabled,
                 'core-disable': not owner.settings().enabled and not owner.inspect()['timer_scheduled'],
                 'profile-patch': BunshinProfileRegistry(runtime_root=root).get('software_engineering.v2_coder').preferred_endpoint_id == 'test-endpoint',
@@ -251,12 +246,6 @@ async def main(args):
     args.output.mkdir(parents=True)
     values = endpoint_snapshot(args.runtime_root, args.endpoint)
     records, _, generations = build_flow_catalog()
-    # Static flow catalogs do not reconstruct provider selectors. Match the
-    # actual runtime's name-parameterized provider contracts for this fixture.
-    for alias in ('inspect_web_search_provider',):
-        contract = records[alias]['input_contract']
-        contract.setdefault('properties', {})['name'] = {'type': 'string', 'description': 'Provider name from list_web_search_providers.'}
-        contract['required'] = ['name']
     llm = build_llm(args.runtime_root, values)
     (args.output/'manifest.json').write_text(json.dumps({'scope': __doc__, 'model': values['model_id'],
         'endpoint': values['endpoint_id'], 'cases': CASES, 'temperature': 0, 'think_level': 'medium',

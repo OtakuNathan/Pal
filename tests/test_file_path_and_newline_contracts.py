@@ -24,7 +24,7 @@ def test_delete_unlinks_final_symlink_and_preserves_target(runtime, tmp_path, ki
         target = tmp_path.anchor
     link.symlink_to(target, target_is_directory=kind in {"directory", "root"})
 
-    result = invoke(runtime, "delete_path", {"file_path": str(link), "recursive": recursive})
+    result = invoke(runtime, "test_delete_path", {"file_path": str(link), "recursive": recursive})
 
     assert result.ok, result.llm_text
     assert not link.is_symlink()
@@ -48,7 +48,7 @@ def test_delete_resolves_parent_symlinks_but_unlinks_final_entry(runtime, tmp_pa
     link = directory / "child"
     link.symlink_to(target)
 
-    result = invoke(runtime, "delete_path", {"file_path": str(parent_link / "child")})
+    result = invoke(runtime, "test_delete_path", {"file_path": str(parent_link / "child")})
 
     assert result.ok, result.llm_text
     assert not link.is_symlink()
@@ -62,7 +62,7 @@ def test_symlink_digest_is_rejected_without_reading_or_deleting_target(runtime, 
     link = tmp_path / "link"
     link.symlink_to(target)
 
-    result = invoke(runtime, "delete_path", {"file_path": str(link), "expected_sha256": "0" * 64})
+    result = invoke(runtime, "test_delete_path", {"file_path": str(link), "expected_sha256": "0" * 64})
 
     assert not result.ok
     info = metadata(result)
@@ -116,14 +116,14 @@ def test_external_snapshot_link_can_be_unlinked_but_snapshot_entries_are_protect
     ref = snapshots.capture("snapshot content", call_id="audit", lifetime="audit")
     link = tmp_path / "snapshot-link"
     link.symlink_to(ref.path)
-    result = invoke(runtime, "delete_path", {"file_path": str(link)})
+    result = invoke(runtime, "test_delete_path", {"file_path": str(link)})
     assert result.ok, result.llm_text
     assert not link.is_symlink()
     assert snapshots.lookup_path(ref.path) == ref
 
     protected = snapshots.root / "protected-link"
     protected.symlink_to(tmp_path / "absent")
-    result = invoke(runtime, "delete_path", {"file_path": str(protected)})
+    result = invoke(runtime, "test_delete_path", {"file_path": str(protected)})
     assert not result.ok
     assert metadata(result)["error_code"] == "immutable_result_snapshot"
     assert protected.is_symlink()

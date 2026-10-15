@@ -1,0 +1,5 @@
+kind = "plugin"
+id = "st7789_face"
+version = "0.1.1"
+python = "host"
+host_files = ["plugin.toml", "st7789_face_runtime.py", "face_introspection.py", "face_art.py", "panel.py", "sidecar.py", "build_assets.py", "assets"]

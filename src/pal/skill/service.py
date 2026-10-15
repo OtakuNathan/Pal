@@ -151,7 +151,14 @@ class SkillService:
         return stored
 
     def disable_skill(self, skill_id: str) -> SkillDescriptor | None:
-        return self.repository.disable_skill(skill_id)
+        # Internal compatibility callers use the same file/version/storage path
+        # as the public update tool; there is no separate model-facing action.
+        if self.repository.get_skill(skill_id) is None:
+            return None
+        return self.update_skill({
+            "skill_id": skill_id,
+            "patch": {"status": "disabled", "enabled": False},
+        })
 
     def register_declared_module(self, handle: Any) -> None:
         provider = getattr(handle, "introspection_provider", None)

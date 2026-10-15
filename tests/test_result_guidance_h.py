@@ -17,8 +17,8 @@ from pal.lsp import build_lsp_plugin
 from pal.lsp.plugin import LspManagerPluginProvider
 from pal.shared.tool_protocol import new_tool_call
 
-READY_FORBIDDEN = ("diagnose_lsp_server", "inspect_lsp_status", "rescan_lsp_servers", "read_tool", "call_tool",
-                   "read_lsp_hover", "find_lsp_definitions", "find_lsp_references", "read_lsp_diagnostics",
+READY_FORBIDDEN = ("inspect_lsp_status", "rescan_lsp_servers", "read_tool", "call_tool",
+                   "read_lsp_hover", "find_lsp_symbol_locations", "find_lsp_references", "read_lsp_diagnostics",
                    "list_lsp_document_symbols", "next_tools")
 
 
@@ -93,8 +93,8 @@ class TestProviderLevel:
         provider = self._provider([_payload_partial("/w/B", server="clangd")])
         result = self._prepare(provider, "/w/B")
         tools = {item.tool: item for item in result.affordances}
-        assert set(tools) <= {"diagnose_lsp_server", "inspect_lsp_status"}
-        doctor = tools.get("diagnose_lsp_server")
+        assert set(tools) <= {"inspect_lsp_status"}
+        doctor = tools.get("inspect_lsp_status")
         if doctor is not None:
             assert doctor.arguments.get("workspace_root") == "/w/B"
             assert doctor.arguments.get("name") == "clangd"
@@ -167,20 +167,20 @@ class TestProviderLevel:
         assert not result.affordances
         assert result.recovery_hint == ""
 
-    def test_call_hierarchy_single_item_binds_position_continuation(self):
+    def test_call_hierarchy_single_item_does_not_repeat_tool_menu(self):
         payload = {
             "status": "ok",
             "items": [{"name": "handle", "kind": "function"}],
         }
         provider = self._provider([payload])
-        result = provider.prepare_call_hierarchy(
+        result = provider.calls(
             CapabilityCall(
-                name="prepare_lsp_call_hierarchy",
-                args={"file": "/w/A/src.py", "line": 10, "character": 4},
+                name="find_lsp_calls",
+                args={"file": "/w/A/src.py", "line": 10, "character": 4, "direction": "callers"},
             )
         )
         tools = sorted(item.tool for item in result.affordances)
-        assert tools == ["find_lsp_incoming_calls", "find_lsp_outgoing_calls"]
+        assert tools == []
         for item in result.affordances:
             assert item.arguments["file"] == "/w/A/src.py"
             assert item.arguments["line"] == 10
@@ -188,10 +188,10 @@ class TestProviderLevel:
 
     def test_call_hierarchy_empty_does_not_fabricate(self):
         provider = self._provider([{"status": "ok", "items": []}])
-        result = provider.prepare_call_hierarchy(
+        result = provider.calls(
             CapabilityCall(
-                name="prepare_lsp_call_hierarchy",
-                args={"file": "/w/A/src.py", "line": 10, "character": 4},
+                name="find_lsp_calls",
+                args={"file": "/w/A/src.py", "line": 10, "character": 4, "direction": "callers"},
             )
         )
         assert not result.affordances
@@ -206,10 +206,10 @@ class TestProviderLevel:
             ],
         }
         provider = self._provider([payload])
-        result = provider.prepare_call_hierarchy(
+        result = provider.calls(
             CapabilityCall(
-                name="prepare_lsp_call_hierarchy",
-                args={"file": "/w/A/src.py", "line": 10, "character": 4},
+                name="find_lsp_calls",
+                args={"file": "/w/A/src.py", "line": 10, "character": 4, "direction": "callers"},
             )
         )
         assert len(result.structured["items"]) == 2
@@ -249,16 +249,12 @@ class TestEndToEndSequence:
         try:
             budget = ToolCallBudget(max_output_chars=4000)
             ready_a = runtime.execute_tool(
-                new_tool_call(
-                    name="prepare_lsp_workspace", args={"workspace_root": "/w/A"}, call_id="h1"
-                ),
+                new_tool_call(name='call_tool', args={'name': 'prepare_lsp_workspace', 'args': {'workspace_root': '/w/A'}}, call_id='h1'),
                 budget=budget,
                 turn_id="t",
             )
             ready_b = runtime.execute_tool(
-                new_tool_call(
-                    name="prepare_lsp_workspace", args={"workspace_root": "/w/B"}, call_id="h2"
-                ),
+                new_tool_call(name='call_tool', args={'name': 'prepare_lsp_workspace', 'args': {'workspace_root': '/w/B'}}, call_id='h2'),
                 budget=budget,
                 turn_id="t",
             )
@@ -272,16 +268,12 @@ class TestEndToEndSequence:
                 assert "next_tools" not in (ready.structured or {})
 
             partial_b = runtime.execute_tool(
-                new_tool_call(
-                    name="prepare_lsp_workspace", args={"workspace_root": "/w/B"}, call_id="h3"
-                ),
+                new_tool_call(name='call_tool', args={'name': 'prepare_lsp_workspace', 'args': {'workspace_root': '/w/B'}}, call_id='h3'),
                 budget=budget,
                 turn_id="t",
             )
             partial_a = runtime.execute_tool(
-                new_tool_call(
-                    name="prepare_lsp_workspace", args={"workspace_root": "/w/A"}, call_id="h4"
-                ),
+                new_tool_call(name='call_tool', args={'name': 'prepare_lsp_workspace', 'args': {'workspace_root': '/w/A'}}, call_id='h4'),
                 budget=budget,
                 turn_id="t",
             )
@@ -297,8 +289,8 @@ class TestEndToEndSequence:
             # The static descriptor never changed and still advertises the
             # conditional diagnostic relation (H10).
             assert runtime.registry_generation.generation_hash == generation_hash_before
-            record = runtime.registry_generation.direct_aliases["prepare_lsp_workspace"]
-            assert "diagnose_lsp_server" in record.compiled_description
+            record = runtime.registry_generation.indirect_aliases["prepare_lsp_workspace"]
+            assert "inspect_lsp_status" in record.compiled_description
             assert "Failure next steps" not in record.compiled_description
         finally:
             core.close()
@@ -313,7 +305,6 @@ class TestEndToEndSequence:
                 ),
                 turn_id="t",
             )
-            assert "diagnose_lsp_server" in read.llm_text
             assert "inspect_lsp_status" in read.llm_text
             assert "Failure next steps" not in read.llm_text
             assert "before retrying" not in read.llm_text
@@ -328,14 +319,10 @@ class TestEndToEndSequence:
         provider._request_or_error = lambda _m, p=None: dict(_payload_ready("/w/A"))  # type: ignore[method-assign]
         runtime = core.context.execution_runtime
         try:
-            record = runtime.registry_generation.direct_aliases["prepare_lsp_workspace"]
+            record = runtime.registry_generation.indirect_aliases["prepare_lsp_workspace"]
             assert record.guidance.next_tool_hints
             result = runtime.execute_tool(
-                new_tool_call(
-                    name="prepare_lsp_workspace",
-                    args={"workspace_root": "/w/A"},
-                    call_id="h21",
-                ),
+                new_tool_call(name='call_tool', args={'name': 'prepare_lsp_workspace', 'args': {'workspace_root': '/w/A'}}, call_id='h21'),
                 turn_id="t",
             )
             assert result.ok
@@ -354,11 +341,7 @@ class TestEndToEndSequence:
             seen: list[tuple] = []
             for index in range(3):
                 result = runtime.execute_tool(
-                    new_tool_call(
-                        name="prepare_lsp_workspace",
-                        args={"workspace_root": "/w/A"},
-                        call_id=f"h20-{index}",
-                    ),
+                    new_tool_call(name='call_tool', args={'name': 'prepare_lsp_workspace', 'args': {'workspace_root': '/w/A'}}, call_id=f'h20-{index}'),
                     turn_id="t",
                 )
                 invocation = result.invocation_result

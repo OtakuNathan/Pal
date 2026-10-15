@@ -69,6 +69,7 @@ def _endpoint(endpoint_id: str = "primary"):
         model_id="test-model",
         display_name="Test model",
         wire_shape="openai_completion",
+        transport="http",
         base_url="https://example.test/v1",
         auth_kind="api_key_ref",
         credential_ref="TEST_LLM_API_KEY",
@@ -212,12 +213,12 @@ class LLMUsageLedgerTests(unittest.TestCase):
 
         provider = LLMIntrospectionProvider(runtime=runtime)
         result = provider.think_level(IntrospectionCall(name="inspect_llm_thinking_level"))
-        active = provider.active(IntrospectionCall(name="inspect_active_llm"))
+        active = provider.inspect(IntrospectionCall(name="inspect_llm"))
 
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.structured["endpoint_id"], "primary")
         self.assertEqual(active.status, "ok")
-        self.assertEqual(active.structured["endpoint_id"], "primary")
+        self.assertEqual(active.structured["effective_primary_endpoint_id"], "primary")
 
     def test_runtime_ledger_and_status_expose_cache_statistics(self) -> None:
         outcome = generation_result_from_values(

@@ -139,6 +139,17 @@ class BrowserServiceError(RuntimeError):
         }
 
 
+def _configured_inspection(paths: BrowserRuntimePaths, key: str, persistent: bool, extension_id: str = "") -> dict[str, Any]:
+    items = read_extensions(paths.profiles / key) if persistent else []
+    if extension_id:
+        item = next((item for item in items if item["id"] == extension_id), None)
+        if item is None:
+            raise BrowserServiceError("Extension is not configured in this conversation", code="unknown_extension")
+        return {"extension": item, "observed_service_workers": [], "workers_observed": False,
+                "note": "Configuration and worker observations do not establish extension behavior; verify it on the target page."}
+    return {"extensions": [{field: item[field] for field in ("id", "name", "version")} for item in items]}
+
+
 @dataclass
 class _SessionRecord:
     key: str
@@ -356,6 +367,18 @@ class _PlaywrightCliWorker:
                 self.in_flight += 1
                 self.last_activity_at = time.monotonic()
             try:
+                if normalized_action == "inspect":
+                    extension_id = str(args.get("extension_id") or "")
+                    payload = _configured_inspection(self.paths, key, persistent, extension_id)
+                    record = self.sessions.get(key)
+                    payload["session"] = self._session_payload(record)
+                    if extension_id and record is not None:
+                        script = "async page => ({workers: page.context().serviceWorkers().map(w => w.url())})"
+                        raw = self._run(record, _cli_args("run-code", script), timeout_ms=timeout_ms, raw=True)
+                        workers = _parse_json_object(raw, "extension workers").get("workers", [])
+                        payload.update(workers_observed=True, observed_service_workers=[
+                            url for url in workers if str(url).startswith(f"chrome-extension://{extension_id}/")])
+                    return payload
                 if normalized_action in {"extensions", "extension_manage"}:
                     return self._extension_action(key, normalized_action, dict(args or {}), persistent, timeout_ms)
                 if normalized_action == "reset":
@@ -981,7 +1004,7 @@ class _PlaywrightCliWorker:
             except BrowserServiceError as exc:
                 raise BrowserServiceError(
                     "The browser restarted, but restoring its page failed. Provide a new URL to "
-                    "navigate_browser or read_browser_page; inspect state before retrying an interaction.",
+                    "read_browser_page or read_browser_page; inspect state before retrying an interaction.",
                     code="page_restore_failed", state_unknown=exc.state_unknown,
                 ) from exc
             record.last_url = restored_url
@@ -1006,7 +1029,7 @@ class _PlaywrightCliWorker:
                     exc.add_note("Browser cleanup also failed:\n" + exception_report(cleanup))
                 raise BrowserServiceError(
                     "The browser started, but restoring the saved page failed. "
-                    "Provide a new HTTP(S) URL to navigate_browser or read_browser_page to continue; "
+                    "Provide a new HTTP(S) URL to read_browser_page or read_browser_page to continue; "
                     "the new URL will skip saved-page restoration. "
                     "Do not edit last_url or reset the profile; login data is retained. "
                     f"Restore error ({exc.code}): {exc}",
@@ -1047,7 +1070,7 @@ class _PlaywrightCliWorker:
         elif operation in {"unmount", "reload"}:
             extension_id = str(args.get("extension_id") or "")
             if not any(item['id'] == extension_id for item in items):
-                raise ValueError("Unknown extension_id; use inspect_browser_extensions first")
+                raise ValueError("Unknown extension_id; use inspect_browser_status first")
             if operation == "unmount":
                 items = [item for item in items if item['id'] != extension_id]
             else:
@@ -1561,7 +1584,14 @@ class BrowserServiceManager:
         self, *, session_key: str, action: str, args: dict[str, Any] | None = None,
         persistent: bool = True, timeout_ms: int = 15000,
     ) -> dict[str, Any]:
-        resource = self._ensure_started()
+        if action == "inspect":
+            resource = self._process
+            if not self._process_running(resource):
+                payload = _configured_inspection(BrowserRuntimePaths(Path(self.runtime_root)),
+                    _validate_session_key(session_key), persistent, str((args or {}).get("extension_id") or ""))
+                return {**payload, "session": {"running": None, "reason": "sidecar_not_running"}}
+        else:
+            resource = self._ensure_started()
         try:
             payload = self._request_json(
                 "POST", "/action",

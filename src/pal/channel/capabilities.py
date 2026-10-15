@@ -8,11 +8,7 @@ from pal.execution.tool_semantics import (
 )
 
 from pal.execution.generated_tool_models import (
-    ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
-    ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
-    ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
-    ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
-    ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput,
+    ChannelCapabilitiesChannelIntrospectionProviderManageEndpointInput,
     ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
     ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput,
     ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput,
@@ -223,7 +219,7 @@ class ChannelIntrospectionProvider:
             purpose="List configured channel endpoints and their usable names.",
             use_when='Need to discover available endpoint names, their channel kind, enabled/attached/paired status. An empty list means no endpoints are configured or discovered; inspect the channel provider configuration.',
             do_not_use_when="You already know the endpoint name. If endpoints exist, use inspect_channel_endpoint for an in-depth diagnosis; endpoint-specific tools are available only while endpoints exist.",
-            failure_next_steps="Read-only. If empty, no endpoints are configured — check channel provider configuration.",
+            failure_next_steps="Read-only. If empty, inspect the channel hub and provider plugin discovery; an empty live directory does not prove persisted configuration is absent.",
         ),
         aliases=("list_channel_endpoints",),
     )
@@ -439,77 +435,46 @@ class ChannelIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="management",
-        action_name="enable",
+        action_name="manage_endpoint",
         guidance=ToolGuidance(
             search_objects=('endpoint', 'endpoints'),
-            purpose="Enable a channel endpoint so it accepts incoming messages.",
-            use_when="An endpoint was disabled and needs to resume receiving messages.",
-            do_not_use_when="The endpoint runtime is disconnected (use attach_channel_endpoint). The endpoint is already enabled.",
-            failure_next_steps="If the endpoint is not found, verify its name with list_channel_endpoints. If durable state commit fails, inspect the endpoint's enabled state in list_channel_endpoints before retrying; the runtime rolls back to the previous value.",
+            search_terms=('connect', 'disconnect', 'reconnect', 'connection', 'session', 'transport'),
+            search_enum_fields=('operation',),
+            search_intents=('reconnect channel endpoint transport', 'restart disconnected endpoint connection', '重新连接掉线的通道端点'),
+            purpose="Attach, detach, restart, enable or disable one channel endpoint through its lifecycle owner.",
+            use_when=(
+                "Choose attach to restore an explicitly detached endpoint or missing runtime instance; an already attached transport is preserved. "
+                "Choose restart for an attached but broken or stuck connection: it replaces that endpoint's transport session. "
+                "Choose detach to disconnect while retaining configuration. "
+                "Choose enable or disable to persist message-acceptance state without rebuilding or removing the runtime instance. "
+                "Every operation takes the same exact endpoint name from list_channel_endpoints."
+            ),
+            do_not_use_when="Provider implementation or provider-wide resources changed (use manage_plugin operation=reload). Sending messages or editing credentials. The recovery socket cannot be detached or disabled.",
+            failure_next_steps="Inspect the named endpoint's state and result-specific affordances before retrying. Attach is not a connection-health check. If a durable enabled-state update fails, the previous runtime value is restored; reconcile durable state. Provider discovery uses rescan_plugins.",
         ),
-        InputModel=ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
-        aliases=("enable_channel_endpoint",),
-        execution=INDIRECT_LOCAL_WRITE,
+        aliases=("manage_channel_endpoint",),
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderManageEndpointInput,
+        execution=INDIRECT_CONTROL,
+        examples=({"name": "telegram-main", "operation": "restart"},),
     )
+    def manage_endpoint(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
+        # Keep provider ownership, persistence/rollback and recovery protection
+        # in the existing operation handlers. This facade only selects one.
+        handler = {
+            "attach": self.attach, "detach": self.detach, "restart": self.restart_endpoint,
+            "enable": self.enable, "disable": self.disable,
+        }[call.args["operation"]]
+        return handler(call)
+
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="disable",
-        guidance=ToolGuidance(
-            search_objects=('endpoint', 'endpoints'),
-            purpose="Disable a channel endpoint so it stops accepting incoming messages.",
-            use_when="Temporarily stopping an endpoint without removing its configuration.",
-            do_not_use_when="Fully disconnecting the runtime (use detach_channel_endpoint). Recovery socket endpoints are protected and cannot be disabled.",
-            failure_next_steps="If endpoint not found, verify its name with list_channel_endpoints. Recovery socket endpoints cannot be disabled.",
-        ),
-        InputModel=ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
-        aliases=("disable_channel_endpoint",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="attach",
-        guidance=ToolGuidance(
-            search_objects=('endpoint', 'endpoints'),
-            search_terms=('connect',),
-            purpose="Attach a detached channel endpoint; preserve an already attached transport.",
-            use_when="The endpoint was explicitly detached or has no runtime instance. An already attached endpoint is an idempotent no-op. A dropped network connection does not imply that the endpoint was detached; inspect attachment state when unknown.",
-            do_not_use_when="An already attached endpoint has a broken or stuck connection (use restart_channel_endpoint for a fresh transport session). Just toggling message acceptance (use enable_channel_endpoint).",
-            failure_next_steps="If provider not found, run rescan_plugins first. If already attached, no-op.",
-        ),
-        InputModel=ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
-        aliases=("attach_channel_endpoint",),
-        execution=INDIRECT_CONTROL,
-    )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._attach_endpoint_provider(str(call.args.get("name") or "").strip())
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="detach",
-        guidance=ToolGuidance(
-            search_objects=('endpoint', 'endpoints'),
-            search_terms=('disconnect',),
-            purpose="Detach a channel endpoint — disconnect its runtime instance without removing configuration.",
-            use_when="Temporarily disconnecting an endpoint's runtime (e.g. maintenance, restart). Use attach_channel_endpoint when the disconnected endpoint should resume delivery.",
-            do_not_use_when="Just stopping message acceptance (use disable_channel_endpoint — keeps runtime alive).",
-            failure_next_steps="If endpoint not found, verify its name with list_channel_endpoints. Detached endpoints can be re-attached with attach_channel_endpoint.",
-        ),
-        InputModel=ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
-        aliases=("detach_channel_endpoint",),
-        execution=INDIRECT_CONTROL,
-    )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_attached(call, attached=False)
 
@@ -543,23 +508,6 @@ class ChannelIntrospectionProvider:
         self._republish_capabilities()
         return result
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="restart_endpoint",
-        guidance=ToolGuidance(search_intents=('reconnect channel endpoint transport', 'restart disconnected endpoint connection', '重新连接掉线的通道端点'),
-            search_objects=('endpoint', 'endpoints'),
-            search_terms=('reconnect', 'connection', 'session', 'transport'),
-            purpose="Rebuild a channel endpoint's transport session without reloading provider code.",
-            use_when="An endpoint is still attached but its network connection dropped, is stuck, or needs a fresh transport session. Unlike attach, restart replaces an existing transport.",
-            do_not_use_when="Restoring an explicitly detached endpoint (use attach_channel_endpoint). Provider source or provider-wide resources changed (use reload_plugin).",
-            failure_next_steps="If the endpoint is missing, verify it with list_channel_endpoints. If restart fails, use inspect_channel_endpoint.",
-        ),
-        aliases=("restart_channel_endpoint",),
-        InputModel=ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput,
-        execution=INDIRECT_CONTROL,
-    )
     def restart_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._restart_endpoint(str(call.args.get("name") or "").strip())
 

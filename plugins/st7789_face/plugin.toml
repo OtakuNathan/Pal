@@ -1,0 +1,9 @@
+plugin_id = "st7789_face"
+entrypoint = "st7789_face_runtime"
+version = "0.1.1"
+enabled_by_default = true
+lifecycle_protocol = "raii.v1"
+module_id = "st7789_face"
+requires_plugins = ["emotion"]
+requires_ports = ["emotion:emotion"]
+subscribed_events = ["turn.start", "turn.tool_call_before", "turn.tool_call_after", "turn.tool_call_failed", "turn.end", "memory.sleep", "failure.started", "failure.finished", "failure.safe_mode_started", "failure.safe_mode_finished"]

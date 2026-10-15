@@ -20,7 +20,6 @@ from pal.artifact.contracts import (
     ArtifactPolicy,
     ArtifactRecord,
     ArtifactRepresentation,
-    REPRESENTATION_CHUNK_TEXT,
     REPRESENTATION_METADATA,
     REPRESENTATION_NORMALIZED_IMAGE,
     REPRESENTATION_PAGE_IMAGE,
@@ -156,8 +155,14 @@ class TextArtifactProcessor:
         record = context.record
         raw = context.original_path.read_bytes()
         text = _decode_text(raw)
-        text_path = context.representations_dir() / "normalized.txt"
-        text_path.write_text(text, encoding="utf-8")
+        # Reuse UTF-8 source bytes when no encoding conversion is needed.
+        try:
+            unchanged = raw.decode("utf-8") == text
+        except UnicodeDecodeError:
+            unchanged = False
+        text_path = context.original_path if unchanged else context.representations_dir() / "normalized.txt"
+        if not unchanged:
+            text_path.write_text(text, encoding="utf-8")
         preview = _preview(text)
         context.put_representation(
             ArtifactRepresentation(
@@ -172,7 +177,6 @@ class TextArtifactProcessor:
                 status=ARTIFACT_STATUS_READY,
             )
         )
-        _write_text_chunks(context, record.artifact_id, text)
         return replace(
             record,
             normalized_path=str(text_path),
@@ -232,8 +236,6 @@ class PdfArtifactProcessor:
         doc = fitz.open(str(context.original_path))
         try:
             page_locations = []
-            blocks = []
-            next_line = 1
             page_count = len(doc)
             max_pages = min(max(0, int(context.policy.pdf.max_pages)), page_count)
             pages_dir = context.representations_dir() / "pages"
@@ -250,12 +252,8 @@ class PdfArtifactProcessor:
                     text = str(doc.load_page(index).get_text("text") or "").strip()
                     page_path = pages_dir / f"page_{index + 1:04d}.txt"
                     page_path.write_text(text, encoding="utf-8")
-                    block = f"=== Page {index + 1} ===\n{text}\n\n"
-                    location.update(file_path=str(page_path), has_text=bool(text),
-                        start_line=next_line + 1 if text else None,
-                        end_line=next_line + 1 + text.count("\n") if text else None)
-                    blocks.append(block)
-                    next_line += block.count("\n")
+                    location.update(file_path=str(page_path), extension=".txt", has_text=bool(text),
+                                    text_line_count=text.count("\n") + 1 if text else 0)
                     text_chars += len(text)
                     context.put_representation(ArtifactRepresentation(
                         representation_id=_representation_id(record.artifact_id, REPRESENTATION_PAGE_TEXT, str(index + 1)),
@@ -269,29 +267,22 @@ class PdfArtifactProcessor:
                 try:
                     images = _render_pdf_page_images(context, record, doc, page_indices=(index,))
                     location["image_file_path"] = images[index + 1]
+                    location["image_extension"] = Path(images[index + 1]).suffix.lower()
                 except Exception as exc:
                     errors.append("image: " + exception_report(exc))
                 location["status"] = "partial" if errors else "ready"
                 if errors:
                     location["errors"] = errors
-            combined = "".join(blocks)
             index_path = context.representations_dir() / "page_index.json"
-            full_path = context.representations_dir() / "normalized.txt"
-            full_path.write_text(combined, encoding="utf-8")
             partial = any(page["status"] != "ready" for page in page_locations)
             page_access = {"page_index_file_path": str(index_path),
                            "page_file_pattern": str(pages_dir / "page_{page:04d}.txt"),
-                           "page_count": page_count, "extracted_pages": sum("file_path" in page for page in page_locations),
+                           "page_image_file_pattern": str(context.representations_dir() / "page_images" / "page_{page:04d}.jpg"),
+                           "page_count": page_count, "processed_pages": max_pages,
+                           "extracted_pages": sum("file_path" in page for page in page_locations),
                            "extraction_truncated": max_pages < page_count}
-            context.put_representation(ArtifactRepresentation(
-                representation_id=_representation_id(record.artifact_id, REPRESENTATION_TEXT, "full"),
-                artifact_id=record.artifact_id, representation_kind=REPRESENTATION_TEXT,
-                path=str(full_path), mime_type="text/plain", size_bytes=full_path.stat().st_size,
-                text_preview=_preview(combined), summary=_preview(combined), metadata=page_access,
-                status=ARTIFACT_STATUS_PARTIAL if partial else ARTIFACT_STATUS_READY,
-            ))
-            _write_text_chunks(context, record.artifact_id, combined)
-            index_path.write_text(json.dumps({**page_access, "pages": page_locations},
+            index_path.write_text(json.dumps({"source_file_name": record.file_name, "source_extension": ".pdf",
+                                             **page_access, "pages": page_locations},
                                              ensure_ascii=False, indent=2), encoding="utf-8")
         finally:
             doc.close()
@@ -427,32 +418,6 @@ def _render_pdf_page_images(context: ArtifactProcessingContext, record: Artifact
 
         images[index + 1] = str(normalized)
     return images
-
-
-def _write_text_chunks(context: ArtifactProcessingContext, artifact_id: str, text: str) -> None:
-    chunk_size = int(context.policy.text.chunk_chars)
-    chunks_dir = context.representations_dir() / "chunks"
-    chunks_dir.mkdir(parents=True, exist_ok=True)
-    if not text:
-        return
-    for index, start in enumerate(range(0, len(text), chunk_size), start=1):
-        chunk = text[start:start + chunk_size]
-        path = chunks_dir / f"chunk_{index:04d}.txt"
-        path.write_text(chunk, encoding="utf-8")
-        context.put_representation(
-            ArtifactRepresentation(
-                representation_id=_representation_id(artifact_id, REPRESENTATION_CHUNK_TEXT, str(index)),
-                artifact_id=artifact_id,
-                representation_kind=REPRESENTATION_CHUNK_TEXT,
-                selector={"chunk": index},
-                path=str(path),
-                mime_type="text/plain",
-                size_bytes=path.stat().st_size,
-                text_preview=_preview(chunk),
-                summary=_preview(chunk),
-                status=ARTIFACT_STATUS_READY,
-            )
-        )
 
 
 def _representation_id(artifact_id: str, representation_kind: str, selector: str) -> str:

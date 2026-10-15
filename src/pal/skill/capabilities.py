@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_READ_UNPAGED,
-    INDIRECT_LOCAL_WRITE,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
 from pal.execution.tool_facade import ToolGuidance, NextToolHint
@@ -12,8 +11,6 @@ from pal.execution.generated_tool_models import (
     SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
     SkillCapabilitiesSkillIntrospectionProviderCommitInput,
     SkillCapabilitiesSkillIntrospectionProviderCommitOutput,
-    SkillCapabilitiesSkillIntrospectionProviderDisableInput,
-    SkillCapabilitiesSkillIntrospectionProviderDisableOutput,
     SkillCapabilitiesSkillIntrospectionProviderInjectInput,
     SkillCapabilitiesSkillIntrospectionProviderInjectOutput,
     SkillCapabilitiesSkillIntrospectionProviderReadInput,
@@ -53,7 +50,6 @@ from pal.skill.service import SkillService
 from pal.skill.tools import (
     SkillAssimilateTool,
     SkillCommitTool,
-    SkillDisableTool,
     SkillInjectTool,
     SkillReadTool,
     SkillSearchTool,
@@ -91,12 +87,13 @@ class SkillIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            search_terms=('status', 'show', 'get',),
-            purpose="Show skill management state and pending assimilation candidates.",
+            search_objects=('state', 'states', 'candidate', 'candidates'),
+            search_terms=('status', 'show', 'get', 'health', 'pending', 'assimilation', 'recover', 'count', 'counts'),
+            search_intents=('recover a pending skill candidate after an uncertain preparation',),
+            purpose="Inspect skill library counts and bounded pending assimilation candidate summaries.",
             use_when='Diagnosing skill system health, or recovering a candidate_id after an uncertain prepare_skill_candidate result. If no applicable skill is present, use search_skills to discover active references.',
             do_not_use_when="Searching for a specific skill (use search_skills). Checking memory state (use inspect_memory_state).",
-            failure_next_steps="Read-only diagnostic. If no skills are active, use search_skills to find relevant ones.",
+            failure_next_steps="Read-only diagnostic. Use search_skills with status=all to include disabled skills; reactivate a known skill with update_skill when requested.",
         ),
         aliases=("inspect_skill_state",),
     )
@@ -185,11 +182,11 @@ class SkillIntrospectionProvider:
         action_name="update",
         guidance=ToolGuidance(
             search_objects=('skill', 'skills'),
-            search_terms=('edit', 'modify', 'manual',),
-            purpose="Update a normalized skill's metadata or manual text.",
-            use_when="Editing an existing skill's content, activation terms, or metadata.",
+            search_terms=('edit', 'modify', 'manual', 'disable', 'deactivate', 'enable', 'reactivate', 'restore'),
+            purpose="Update a normalized skill's content, metadata or availability, including disabling and reactivating it.",
+            use_when="Editing content or activation terms. Disable with patch={'status': 'disabled', 'enabled': false}; reactivate with patch={'status': 'active', 'enabled': true}. Both fields establish the intended availability; other omitted fields remain unchanged.",
             do_not_use_when="Updating a durable fact (use update_memory). Creating a new skill (use prepare_skill_candidate + commit_skill_candidate).",
-            failure_next_steps="If the skill name is not found, verify it with search_skills. If the update outcome is uncertain, read the skill by name and compare the intended patch before retrying; every applied update advances its version.",
+            failure_next_steps="If the skill name is not found, verify it with search_skills (status=all includes disabled skills). If the update outcome is uncertain, read the skill by name and compare the intended patch before retrying; every applied update advances its version.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateOutput,
@@ -198,26 +195,6 @@ class SkillIntrospectionProvider:
     )
     def update(self, call: CapabilityCall):
         return SkillUpdateTool(service=self.service).invoke(_skill_name_args(call.args))
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="skill",
-        action_name="disable",
-        guidance=ToolGuidance(
-            search_objects=('skill', 'skills'),
-            purpose="Disable a normalized skill so it stops matching scenarios, without deleting its history.",
-            use_when='A skill is no longer relevant or is producing false-positive activations. Reactivation requires update_skill with both status=active and enabled=true; setting only one does not reactivate a disabled entry.',
-            do_not_use_when="Forgetting a durable fact (use forget_memory). Permanently deleting skill data (this only disables).",
-            failure_next_steps="If the skill name is not found, verify it with search_skills. Re-enable with update_skill using patch={'status': 'active', 'enabled': true}; both fields are required to restore availability.",
-        ),
-        InputModel=SkillCapabilitiesSkillIntrospectionProviderDisableInput,
-        OutputModel=SkillCapabilitiesSkillIntrospectionProviderDisableOutput,
-        aliases=("disable_skill",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    def disable(self, call: CapabilityCall):
-        return SkillDisableTool(service=self.service).invoke(_skill_name_args(call.args))
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,

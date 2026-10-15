@@ -140,10 +140,10 @@ class FixtureExecution:
             (self.root / 'fixture-output.txt').write_bytes(('    row\r\n' * 100 + 'FINAL_MARKER\n \t').encode())
         alias = call.args.get('name') if call.name == 'call_tool' else call.name
         args = call.args.get('args', {}) if call.name == 'call_tool' else call.args
-        allowed = {'search_tools','read_tool','inspect_execution_state','list_tools','read_file',
-                   'prepare_lsp_workspace','inspect_lsp_status','diagnose_lsp_server','read_lsp_diagnostics','list_lsp_document_symbols'}
+        allowed = {'search_tools','read_tool','inspect_execution_state','read_file',
+                   'prepare_lsp_workspace','inspect_lsp_status','read_lsp_diagnostics','list_lsp_document_symbols'}
         if self.case_id.startswith('affordance-'):
-            allowed.update({'navigate_browser', 'capture_browser_screenshot', 'upsert_proactive_task'})
+            allowed.update({'read_browser_page', 'capture_browser_screenshot', 'upsert_proactive_task'})
         blocked = alias not in allowed and self.registry_generation.record_for_alias(alias) is not None
         if alias == 'read_file':
             target = (self.root / str(args.get('file_path') or '')).resolve()

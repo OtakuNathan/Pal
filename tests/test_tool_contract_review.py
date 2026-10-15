@@ -16,7 +16,7 @@ from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import EmptyToolInput, StrictToolModel, ToolGuidance
 from pal.shared import RuntimeStatus
 from pal.shared.tool_protocol import ToolAffordance, new_tool_call
-from tests.capability_fixture import mount_test_capability
+from tests.capability_fixture import mount_test_capability, mount_internal_path_delete_adapter
 
 
 @pytest.fixture
@@ -25,6 +25,7 @@ def runtime():
     register_with_core(core.context)
     core.publish_module_capabilities("execution")
     core.context.execution_runtime.begin_tool_result_turn(turn_id="review", scope_key="contract-review")
+    mount_internal_path_delete_adapter(core.context.execution_runtime)
     yield core.context.execution_runtime
     core.context.execution_runtime.shutdown()
 
@@ -51,7 +52,7 @@ def test_write_failure_retains_cause_and_commit_uncertainty(runtime, tmp_path, m
 def test_delete_reports_directory_digest_rule_without_format_misdirection(runtime, tmp_path):
     directory = tmp_path / "dir"
     directory.mkdir()
-    result = invoke(runtime, "delete_path", {"file_path": str(directory), "recursive": True, "expected_sha256": "0" * 64})
+    result = invoke(runtime, "test_delete_path", {"file_path": str(directory), "recursive": True, "expected_sha256": "0" * 64})
     assert not result.ok
     assert "only for regular files" in result.llm_text
     assert "64-character" not in result.llm_text
@@ -61,13 +62,13 @@ def test_delete_reports_directory_digest_rule_without_format_misdirection(runtim
 def test_delete_io_failure_and_digest_recovery_reach_model(runtime, tmp_path, monkeypatch):
     file = tmp_path / "data"
     file.write_text("retained")
-    mismatch = invoke(runtime, "delete_path", {"file_path": str(file), "expected_sha256": "0" * 64})
+    mismatch = invoke(runtime, "test_delete_path", {"file_path": str(file), "expected_sha256": "0" * 64})
     assert "Observed SHA-256:" in mismatch.llm_text
     assert "identity and content" in mismatch.llm_text
     def fail(*args, **kwargs):
         raise PermissionError(errno.EACCES, "unlink permission denied")
     monkeypatch.setattr(Path, "unlink", fail)
-    result = invoke(runtime, "delete_path", {"file_path": str(file)})
+    result = invoke(runtime, "test_delete_path", {"file_path": str(file)})
     assert "unlink permission denied" in result.llm_text
     assert "Deletion may be partial" in result.llm_text
     assert file.exists()
@@ -195,21 +196,20 @@ def test_dynamic_mcp_aliases_are_stable_bounded_and_do_not_collide_after_truncat
 
 
 @pytest.mark.parametrize('module,owner,method,expected', [
-    ('pal.llm.capabilities', 'LLMIntrospectionProvider', 'list_endpoints', 'empty'),
-    ('pal.web_search.capabilities', 'WebSearchIntrospectionProvider', 'show_provider', 'last-request health'),
+    ('pal.llm.capabilities', 'LLMIntrospectionProvider', 'inspect', 'passive snapshot'),
+    ('pal.web_search.capabilities', 'WebSearchIntrospectionProvider', 'show', 'last-request health'),
     ('pal.mcp.plugin', 'McpManagerPluginProvider', 'list_servers', 'rescan_mcp_servers'),
     ('pal.memory.capabilities', 'MemoryIntrospectionProvider', 'show', 'provider'),
-    ('pal.channel.capabilities', 'ChannelIntrospectionProvider', 'attach', 'no-op'),
+    ('pal.channel.capabilities', 'ChannelIntrospectionProvider', 'manage_endpoint', 'already attached transport is preserved'),
     ('pal.plugins.capabilities', 'PluginsIntrospectionProvider', 'rescan', 'scan_errors'),
-    ('pal.plugins.l3.sqlite_vec', 'SQLiteVecL3Plugin', 'inventory', 'Missing embeddings'),
     ('pal.execution.capabilities', 'ExecutionIntrospectionProvider', 'show', 'observe_core'),
     ('pal.core.capabilities', 'CoreIntrospectionProvider', 'observe', 'busy'),
-    ('pal.failure.capabilities', 'FailureIntrospectionProvider', 'show', 'list_failure_reports'),
-    ('pal.skill.capabilities', 'SkillIntrospectionProvider', 'disable', 'enabled=true'),
+    ('pal.failure.capabilities', 'FailureIntrospectionProvider', 'show', 'file containing full report details'),
+    ('pal.skill.capabilities', 'SkillIntrospectionProvider', 'update', "'enabled': true"),
     ('pal.proactive.capabilities', 'ProactiveIntrospectionProvider', 'show_task', 'never executed'),
-    ('pal.artifact.capabilities', 'ArtifactIntrospectionProvider', 'search', 'not proof of expiry'),
+    ('pal.artifact.capabilities', 'ArtifactIntrospectionProvider', 'search', 'does not establish expiry'),
     ('pal.checklist.capabilities', 'ChecklistIntrospectionProvider', 'clear', 'no-op'),
-    ('pal.web_fetch.capabilities', 'WebFetchIntrospectionProvider', 'close', 'no-op'),
+    ('pal.web_fetch.capabilities', 'WebFetchIntrospectionProvider', 'manage_session', 'retaining cookies'),
     ('pal.web_fetch.capabilities', 'WebFetchIntrospectionProvider', 'network', 'installed=true'),
 ])
 def test_success_guidance_is_visible_in_compiled_contract(module, owner, method, expected):

@@ -165,16 +165,62 @@ Prompt render results preserve MCP messages in structured output. Non-text conte
 
 ## Introspection And Operations
 
-The MCP plugin exposes:
+The MCP plugin exposes five management tools (external server tools are counted separately):
 
-- module status
-- configured server list
-- per-server metadata/snapshot read
-- manager attach/detach/rescan
-- per-server attach/detach
-- `prepare_mcp_image`
+- `inspect_mcp_state`: resident host process/projection health; remains usable when the sidecar is unavailable.
+- `list_mcp_servers`: configured-server summaries.
+- `read_mcp_server(name)`: one server's configuration, discovery snapshot and diagnostics.
+- `rescan_mcp_servers`: reread configuration and refresh the projection.
+- `manage_mcp_server(name, operation=attach|detach)`: control one current server connection.
 
-`prepare_mcp_image` prepares image artifact/path/url inputs for MCP tool arguments as URL, local path, base64, or data URL. It is a bridge helper for external MCP tools; it is not a general OCR or image-understanding capability.
+Attach/detach do not persistently change configured `enabled`. Rescan can attach
+an enabled server again, but does not retry quarantined servers. After correcting
+the cause and reconciling any prior external write, explicitly attach that server.
+Already attached servers retain their discovery snapshot. Whole-plugin lifecycle
+remains with `manage_plugin`; the old individual attach/detach tool aliases and
+`prepare_mcp_image` are withdrawn.
+
+## Artifact Inputs In External Tools
+
+Artifact conversion belongs to the call adapter, not a separate model tool. The
+server's original schema often says only `string`, which cannot determine whether
+it expects a local path, a URL or encoded data. Declare the representation in the
+local server TOML, using exact external tool and top-level parameter names:
+
+```toml
+[artifact_inputs.analyze_image]
+image = "path"
+```
+
+The projected tool accepts the original string or `{"artifact_id":"..."}` at
+that parameter. Original strings pass through. For a reference, the host obtains
+the calling turn's conversation scope and resolves it through the Artifact owner;
+unknown, expired, retired or other-conversation artifacts fail before external
+dispatch. The model cannot provide a scope override or a fallback path in the
+reference. Missing artifact service or turn binding fails without guessing.
+
+Representations are `path`, `base64`, `data_url`, and `url`. `path` is the owned
+local preferred representation; it is useful only to servers able to read this
+host's filesystem. `url` uses a data URL from the same local bytes, as does
+`data_url`: it neither hosts files over HTTP nor forwards credential-bearing
+source URLs. A server requiring HTTP(S) exclusively needs a separate explicit
+hosting integration; incompatible resolved values are rejected by its schema.
+No network fetching is performed by this adapter.
+
+Only declared top-level string parameters are adapted. Unknown tools/parameters
+or non-string target properties reject configuration/projection; unconfigured
+parameters, nested structures and prompt rendering keep their existing behavior.
+The adapter preserves the original external schema and validates the resolved
+arguments against it before dispatch. Conversion failures have a not-started
+receipt. Converted arguments go directly to the server and are not returned as
+an intermediate tool result. External results remain external data and may
+include whatever the server returns.
+
+Inline encoding reads at most 8 MiB per source, and the total adapted arguments
+must fit within the sidecar frame budget. Larger files need a path-capable tool.
+The mapping participates in configuration comparison and snapshot identity;
+rescan applies mapping changes through the existing server lifecycle. Configuration
+in the running runtime is not changed merely by editing this source repository.
 
 ## Safety
 

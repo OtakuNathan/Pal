@@ -126,19 +126,14 @@ def _leading_fact_block(text: str) -> str | None:
 def _is_plugin_lifecycle_tool(name: object) -> bool:
     normalized = str(name or "").strip()
     aliases = {
-        "attach_plugin",
-        "reload_plugin",
-        "detach_plugin",
-        "enable_plugin",
-        "disable_plugin",
+        "manage_plugin",
         "rescan_plugins",
-        "rescan_and_attach_first_party_plugins",
     }
     if normalized in aliases:
         return True
     return normalized in {
         f"op_plugin_mgmt_{action}" for action in (
-            "attach", "reattach", "detach", "enable", "disable", "rescan", "rescan_and_attach_new_first_party"
+            "manage", "rescan"
         )
     }
 
@@ -148,12 +143,11 @@ def _is_lifecycle_mutation_tool(name: object) -> bool:
     if _is_plugin_lifecycle_tool(normalized):
         return True
     return normalized in {
-        "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
-        "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
+        "manage_channel_endpoint", "reload_channel_provider",
         "rescan_channel_providers",
     } | {
         f"op_channel_mgmt_{action}" for action in (
-            "attach", "detach", "enable", "disable", "restart_endpoint", "reload_provider"
+            "manage_endpoint", "reload_provider"
         )
     } | {"op_channel_provider_rescan"}
 
@@ -1346,7 +1340,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "Each includes its full callable contract. Compare it with the original request, including unmatched terms; "
                 "invoke directly if it supports that request. Do not silently discard requirements. "
                 "Use read_tool only if contract information is missing or changed. "
-                "If still unresolved, check list_tools when available before falling back; use read_tool only for a known alias."
+                "If still unresolved, browse a relevant search_tools domain directory before falling back; use read_tool only for a known alias."
             )
         if not hits and not result.get('suggestions') and domain and domain in available_domains and directory_records:
             # Navigation is independent of query matching. Only the visible,
@@ -2531,8 +2525,7 @@ def _target_discovery_alias(descriptor: CapabilityDescriptor) -> str:
         return "list_proactive_tasks"
     if descriptor.target_kind == "provider":
         return {
-            "memory": "list_memory_providers",
-            "web_search": "list_web_search_providers",
+            "web_search": "inspect_web_search",
         }.get(descriptor.module_id, "")
     return ""
 

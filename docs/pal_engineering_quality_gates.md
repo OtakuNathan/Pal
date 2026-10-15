@@ -58,14 +58,10 @@ V1 operations:
 
 ```text
 inspect_lsp_status
-diagnose_lsp_server
 read_lsp_hover
-find_lsp_definitions
-find_lsp_implementations
+find_lsp_symbol_locations (kind=definition|implementation)
 find_lsp_references
-prepare_lsp_call_hierarchy
-find_lsp_incoming_calls
-find_lsp_outgoing_calls
+find_lsp_calls (direction=callers|callees)
 list_lsp_document_symbols
 search_lsp_workspace_symbols
 read_lsp_diagnostics
@@ -152,7 +148,7 @@ workspace_markers = ["compile_commands.json", ".clangd", ".git"]
 install_hint = "Install clangd and provide compile_commands.json for best C/C++ results."
 ```
 
-`diagnose_lsp_server` should check:
+`inspect_lsp_status(name=...)` should check:
 
 - binary availability
 - workspace root detection

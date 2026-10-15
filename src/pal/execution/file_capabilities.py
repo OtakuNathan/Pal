@@ -367,25 +367,6 @@ class FileCapabilityMixin:
             hints=_WRITE_RECOVERY_HINTS,
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="path",
-        action_name="delete",
-        guidance=ToolGuidance(
-            search_objects=('path', 'paths', 'file', 'files', 'directory', 'directories', 'link', 'links'),
-            search_terms=('folder', 'folders', 'remove', 'unlink',),
-            purpose="Delete the file, directory, or symbolic link at the given path; deleting a link preserves its target.",
-            use_when="Removing unwanted filesystem entries. Symbolic links, including links to directories and dangling links, are unlinked without following their targets; recursive=true is required only for real directories.",
-            do_not_use_when="Moving or renaming files (use run_shell mv).",
-            failure_next_steps="For DELETE_FAILED, deletion may be partial: inspect the remaining path before deciding whether to retry.",
-        ),
-        aliases=("delete_path",),
-        InputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
-        OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteOutput,
-        execution=INDIRECT_LOCAL_WRITE,
-        metadata={"canonical_path": "op_path_delete"},
-    )
     def path_delete(self, call: IntrospectionCall) -> IntrospectionResult:
         snapshots = getattr(call.meta.get("execution_runtime"), "result_snapshots", None)
         path = str(call.args.get("file_path") or "")

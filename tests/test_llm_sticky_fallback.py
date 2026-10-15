@@ -38,6 +38,7 @@ def _fake_endpoint(endpoint_id: str, model_id: str):
         provider="openai",
         display_name=model_id,
         wire_shape="openai_completion",
+        transport="http",
         base_url="https://example.test/v1",
         auth_kind="api_key_ref",
         credential_ref=f"{endpoint_id.upper()}_API_KEY",
@@ -97,16 +98,16 @@ class PalLLMNoFallbackTests(unittest.TestCase):
         execution = core.context.execution_runtime
         try:
             queries = {
-                "llm_status": "inspect_active_llm",
-                "llm status": "inspect_active_llm",
-                "show llm status": "inspect_active_llm",
-                "current llm endpoint": "inspect_active_llm",
-                "active llm endpoint": "inspect_active_llm",
-                "check llm model": "inspect_active_llm",
-                "inspect_active_llm": "inspect_active_llm",
-                "list llm models": "list_llm_endpoints",
-                "show llm endpoint": "inspect_llm_endpoint",
-                "llm endpoint details": "inspect_llm_endpoint",
+                "llm_status": "inspect_llm",
+                "llm status": "inspect_llm",
+                "show llm status": "inspect_llm",
+                "current llm endpoint": "inspect_llm",
+                "active llm endpoint": "inspect_llm",
+                "check llm model": "inspect_llm",
+                "inspect_llm": "inspect_llm",
+                "list llm models": "inspect_llm",
+                "show llm endpoint": "inspect_llm",
+                "llm endpoint details": "inspect_llm",
             }
             for query, expected in queries.items():
                 with self.subTest(query=query):
@@ -114,14 +115,14 @@ class PalLLMNoFallbackTests(unittest.TestCase):
                     self.assertEqual(search.status, "ok")
                     hits = {hit["alias"]: hit for hit in search.structured["hits"]}
                     self.assertIn(expected, hits)
-                    if query in ("llm_status", "llm status", "current llm endpoint", "inspect_active_llm"):
+                    if query in ("llm_status", "llm status", "current llm endpoint", "inspect_llm"):
                         self.assertEqual(list(hits), [expected])
                     self.assertTrue(hits[expected]["input_contract"])
             active = execution.execute(CapabilityCall(name="op_tool_call", args={
-                "name": "inspect_active_llm", "args": {},
+                "name": "inspect_llm", "args": {},
             }))
             self.assertEqual(active.status, "ok")
-            self.assertEqual(active.structured["active_endpoint_id"], "alpha")
+            self.assertEqual(active.structured["configured_active_endpoint_id"], "alpha")
             for query in ("git status", "llm switch endpoint", "llm send attachment"):
                 with self.subTest(query=query):
                     self.assertEqual(execution._search_keywords(execution.registry_generation, {"query": query})["hits"], [])

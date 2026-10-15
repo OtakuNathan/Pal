@@ -82,9 +82,9 @@ def test_crud_facade_and_recovery_surface(memory_runtime):
         assert alias not in generation.provider_specs
         result = runtime.invoke_indirect_tool(new_tool_call(name=alias, args={"name": provider.provider_id}))
         assert result.kind == "rejected" and result.error_code == "unknown_tool"
-    for alias in ("inspect_memory_provider_inventory", "inspect_memory_provider_inventory",
+    for alias in ("inspect_memory_provider_inventory", "list_memory_providers", "set_active_memory_provider",
                   "attach_memory_provider", "detach_memory_provider", "refresh_memory_provider_indexes"):
-        assert generation.record_for_alias(alias) is not None
+        assert generation.record_for_alias(alias) is None
     result = runtime.invoke_indirect_tool(new_tool_call(name="remember_memory", args={
         "kind": "fact", "summary": "Prefer explicit interfaces", "search_text": "explicit interfaces"}))
     assert result.kind == "complete", result
@@ -165,7 +165,7 @@ def test_native_memory_schema_routes_with_original_semantics_and_gates(memory_ru
     assert result.kind == "complete", result
     assert provider.recall(MemoryQuery(mem_ref=result.output["mem_ref"])).hits
     # Explicit opt-ins must not enable guessed, deferred tools.
-    assert invoke(new_tool_call(name="attach_memory_provider", args={"name": provider.provider_id})).error_code == "wrong_invocation_mode"
+    assert invoke(new_tool_call(name="attach_memory_provider", args={"name": provider.provider_id})).error_code == "unknown_tool"
     executed = (asyncio.run(runtime.execute_tool_async(call, allow_tools=False)) if asynchronous
                 else runtime.execute_tool(call, allow_tools=False))
     assert not executed.ok and executed.structured["error_code"] == "finalization_only"
@@ -233,3 +233,18 @@ def test_empty_indirect_name_rejects_before_dispatch(name):
         assert result.effect == "not_started"
     finally:
         runtime.shutdown()
+
+
+def test_hub_health_keeps_counts_without_backend_network_probe(memory_runtime, monkeypatch):
+    runtime, provider, _ = memory_runtime
+    monkeypatch.setattr(provider, 'inspect', lambda: (_ for _ in ()).throw(AssertionError('full backend probe forbidden')))
+    if provider.provider_id == 'mock_l3':
+        # The fixture's passive stub delegates locally; replace it with an
+        # explicit local summary to make a full inspect call observable here.
+        monkeypatch.setattr(provider, 'inspect_summary', lambda: {'record_count': len(provider.records)})
+    result = runtime.invoke_indirect_tool(new_tool_call(name='inspect_memory_state', args={}))
+    assert result.kind == 'complete'
+    state = result.output['active_provider']
+    assert state['mounted']
+    assert 'counts' in state and 'inspection_error' not in state
+    assert not {'embedding_identity', 'generation_id', 'embedding_transport', 'vector_backend_detail'}.intersection(state)

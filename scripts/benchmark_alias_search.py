@@ -21,12 +21,12 @@ CASES = (
     ('remember', '记住我偏好简短的中文回答。', 'remember_memory'),
     ('recall', '查一下你记得我对回答风格有什么偏好。', 'recall_memory'),
     ('memory-update', '将现有记忆 mem_fixture 更新为：用户希望详细回答。', 'update_memory'),
-    ('lsp-callers', '用 LSP 查找 /fixture/sample.py 中第 1 行第 5 列函数的调用者，项目根是 /fixture。', 'find_lsp_incoming_calls'),
+    ('lsp-callers', '用 LSP 查找 /fixture/sample.py 中第 1 行第 5 列函数的调用者，项目根是 /fixture。', 'find_lsp_calls'),
     ('lsp-prepare', '为 /fixture 这个 Python 工作区配置并预热 LSP 环境。', 'prepare_lsp_workspace'),
-    ('reload-plugin', '重新加载已附加的 lsp 插件，让刚改的插件代码生效。', 'reload_plugin'),
+    ('reload-plugin', '重新加载已附加的 lsp 插件，让刚改的插件代码生效。', 'manage_plugin'),
     ('install-provider', '在运行中的 Pal 安装本地频道 provider 包 /fixture/provider.palpkg。', 'install_package'),
     ('screenshot', '给当前已打开的浏览器页面截一张图。', 'capture_browser_screenshot'),
-    ('read-artifact', '读取这次会话里 artifact_id 为 art_fixture 的文本附件。', 'read_artifact'),
+    ('inspect-artifact', '查看当前会话附件 art_fixture 的文件类型、处理状态和可用路径。', 'inspect_artifact_info'),
     ('read-file', '读取本地 /fixture/sample.py 的第 1 到第 20 行。', 'read_file'),
 )
 
@@ -125,6 +125,8 @@ async def run_case(llm, values, fx, case, repetition):
         route_ok = (call.name == 'call_tool') == (mode == 'indirect')
         validated = runtime._validate_invocation_input(record, args)
         valid = route_ok and getattr(validated, 'kind', None) != 'rejected'
+    required = {'reload-plugin': {'operation': 'reload'}, 'lsp-callers': {'direction': 'callers'}}.get(case_id, {})
+    valid = valid and all(args.get(key) == value for key, value in required.items())
     row.update(selected_alias=name, selected_args=args, selection_route=call.name, selected=name == expected,
                valid=name == expected and valid)
     return row

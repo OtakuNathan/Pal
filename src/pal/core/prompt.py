@@ -40,7 +40,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "browser = browser pages and interaction; web = web search; "
                     "file = local files; shell = shell commands; artifact = imported content; "
                     "plugin = plugin lifecycle, including channel provider code reload; "
-                    "mcp = external tool servers; lsp = code intelligence; "
+                    "mcp = external tool servers; lsp = code intelligence; emotion = broadcast expressions; "
                     "checklist = task steps; failure = failure reports. "
                     "Identity/persona and human control commands are maintained through settings and the official CLI. "
                     "For diagnosis, inspect the hub itself or one named internal object. Object inspection returns "

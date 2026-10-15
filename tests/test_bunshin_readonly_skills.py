@@ -109,13 +109,15 @@ def test_full_slim_runtime_skill_publication_and_withdrawal(tmp_path, monkeypatc
         )
         assert scoped.get_capability_spec("inject_skill") is not None
         assert scoped.get_capability_spec("disable_skill") is None
-        assert scoped.get_capability_spec("find_lsp_definitions") is None
+        assert scoped.get_capability_spec("update_skill") is None
+        assert scoped.get_capability_spec("find_lsp_symbol_locations") is None
         injected = asyncio.run(scoped.execute_tool_async(
             new_tool_call(name="inject_skill", args={"name": skill.skill_id}),
         ))
         assert injected.status == "ok"
         assert scoped.get_capability_spec("disable_skill") is None
-        assert scoped.get_capability_spec("find_lsp_definitions") is None
+        assert scoped.get_capability_spec("update_skill") is None
+        assert scoped.get_capability_spec("find_lsp_symbol_locations") is None
         if readonly:
             assert tuple(s.to_dict() for s in durable.list_skills()) == before
             for mutate in (service.repository.disable_skill, service.repository.mark_deprecated):

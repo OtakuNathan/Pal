@@ -79,7 +79,7 @@ class ExecutionIntrospectionProvider(
             search_terms=('status', 'show', 'get', 'count', 'counts', 'tool', 'tools', 'capability', 'capabilities',),
             purpose="Show execution runtime state — capability count and tool count.",
             use_when='Diagnosing whether all expected capabilities are mounted. Checking if a capability generation swap occurred. If counts differ from expectations, inspect observe_core for module lifecycle state and search_tools for the current registry; counts alone do not identify a missing capability.',
-            do_not_use_when="Listing specific tools (use list_tools). Searching for a capability (use search_tools).",
+            do_not_use_when="Browsing or searching capabilities (use search_tools; supply domain alone for its directory).",
             failure_next_steps="Read-only diagnostic. If counts look wrong, a module may have failed to mount — check observe_core for detached modules.",
         ),
         aliases=("inspect_execution_state",),

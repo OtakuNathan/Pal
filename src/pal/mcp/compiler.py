@@ -4,10 +4,11 @@ import hashlib
 import json
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
-from pal.execution.contracts import CapabilityCall, CapabilityDescriptor
-from pal.execution.tool_facade import McpToolOutput
+from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
+from pal.execution.tool_facade import McpToolOutput, EffectOutcome, EffectReceipt
+from pal.mcp.artifact_inputs import McpArtifactInputs, McpArtifactInputError, artifact_input_config
 from pal.execution.tool_facade import (
     EffectKind,
     Idempotency,
@@ -26,7 +27,7 @@ from pal.mcp.normalize import (
     prompt_arguments_schema,
     sanitize_name,
 )
-from pal.shared import BoundCapabilityAction, MountedSubtreeHandle, OPERATION_NAMESPACE, SINGLETON_TARGET
+from pal.shared import BoundCapabilityAction, MountedSubtreeHandle, OPERATION_NAMESPACE, SINGLETON_TARGET, RuntimeStatus
 from pal.skill.contracts import SKILL_SOURCE_DECLARED, SKILL_STATUS_ACTIVE, SkillApplicabilitySTAR, SkillDescriptor
 
 
@@ -55,6 +56,7 @@ class McpCompiler:
         module_id: str,
         snapshots: tuple[McpDiscoverySnapshot, ...],
         invoker: McpProjectionInvoker,
+        artifact_resolver: Callable[[str, str, CapabilityCall], str] | None = None,
     ) -> McpCompiledProjection:
         subtree = MountedSubtreeHandle(module_id=module_id)
         skills: list[SkillDescriptor] = []
@@ -70,6 +72,7 @@ class McpCompiler:
                     snapshot=snapshot,
                     invoker=invoker,
                     tool=tool,
+                    artifact_resolver=artifact_resolver,
                     used_paths=used_paths,
                     public_aliases=public_aliases,
                 )
@@ -109,10 +112,13 @@ class McpCompiler:
         snapshot: McpDiscoverySnapshot,
         invoker: McpProjectionInvoker,
         tool: McpToolSpec,
+        artifact_resolver: Callable[[str, str, CapabilityCall], str] | None,
         used_paths: set[str],
         public_aliases: dict[tuple[str, str, str], str],
     ):
-        schema = tool.input_schema
+        configured = artifact_input_config(snapshot.server_info.get("pal_artifact_inputs", {}))
+        inputs = McpArtifactInputs(tool.input_schema, configured.get(tool.name, {}))
+        schema = inputs.exposed_schema()
         server_key = sanitize_name(snapshot.server_id, fallback="server")
         tool_key = sanitize_name(tool.name, fallback="tool")
         canonical_path = _unique_path(f"op_mcp_{server_key}_tool_{tool_key}", used_paths)
@@ -157,7 +163,17 @@ class McpCompiler:
 
         def call_mcp_tool(call: CapabilityCall, *, server_id: str = snapshot.server_id, raw_tool_name: str = tool.name):
             try:
-                result = invoker.call_tool(server_id, raw_tool_name, dict(call.args))
+                arguments = inputs.resolve(dict(call.args), call, artifact_resolver) if inputs.fields else dict(call.args)
+            except McpArtifactInputError as exc:
+                return CapabilityResult(
+                    status=RuntimeStatus.INVALID, text=str(exc),
+                    structured={"kind": "rejected", "error_code": "mcp_artifact_input_invalid",
+                                "error": str(exc), "retry": "correct_input"},
+                    llm_text=str(exc), effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
+                    recovery_hint="Use search_artifacts in this conversation to recover an available artifact_id; read the called tool schema for its accepted input.",
+                )
+            try:
+                result = invoker.call_tool(server_id, raw_tool_name, arguments)
             except Exception as exc:
                 return normalize_protocol_error(exc, server_id=server_id, name=raw_tool_name, kind="tool")
             return normalize_tool_result(result, server_id=server_id, tool_name=raw_tool_name)

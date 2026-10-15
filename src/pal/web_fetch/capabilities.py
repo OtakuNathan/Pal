@@ -8,21 +8,20 @@ from pal.skill.decorators import skill
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.web_fetch.tool_models import (
     BrowserActionOutput,
+    BrowserInspectionInput,
+    BrowserSessionManageInput,
     BrowserCheckInput,
     BrowserClickInput,
     BrowserDialogInput,
     BrowserDragInput,
     BrowserEvaluateInput,
-    BrowserFetchInput,
     BrowserFillInput,
     BrowserFindInput,
     BrowserHistoryInput,
     BrowserInspectLayoutInput,
-    BrowserNavigateInput,
     BrowserNetworkInput,
     BrowserPressInput,
     BrowserReadInput,
-    BrowserResetInput,
     BrowserExtensionManageInput,
     BrowserResizeInput,
     BrowserScreenshotInput,
@@ -71,7 +70,7 @@ _BROWSER_SKILL_MANUAL = """# Stateful Browser Use
 
 Use the browser capabilities for JavaScript-rendered pages and interactive UI work.
 
-1. Use `navigate_browser` to open a URL and read its rendered text and links in one call.
+1. Use `read_browser_page` to open a URL and read its rendered text and links in one call.
    Read beyond the preview using rg/read_file on text_file.file_path. Reuse the captured
    content; do not follow it with read_browser_page unless content is missing
    or has changed. Use read_browser_page without url to reread the current page after interaction.
@@ -84,9 +83,9 @@ Use the browser capabilities for JavaScript-rendered pages and interactive UI wo
 5. Use `capture_browser_screenshot` when pixel evidence is useful. It registers the image for core
    to attach automatically when the selected model supports vision; do not import it again.
 
-The browser profile belongs to the current conversation. `close_browser` releases live
-processes but keeps login state; `clear_browser_cache` clears HTTP cache while retaining
-cookies and site storage; `reset_browser` deliberately deletes the profile. If browser
+The browser profile belongs to the current conversation. `manage_browser_session(operation=close)` releases live
+processes but keeps login state; `manage_browser_session(operation=clear_cache)` clears HTTP cache while retaining
+cookies and site storage; `manage_browser_session(operation=reset, confirm=true)` deliberately deletes the profile. If browser
 navigation or reading fails and raw HTTP is sufficient, the main Pal may use `run_shell`
 with curl. Curl cannot replace clicks, JavaScript state, dialogs, or rendered layout.
 
@@ -98,12 +97,12 @@ fetch/XHR traffic via an injected hook: start it after navigation (hooks reset o
 navigation), interact with the page, then read entries. For local extension development, use manage_browser_extension to mount/reload/unmount
 an unpacked Manifest V3 directory. Changes close current tabs but preserve profile data;
 navigate afterward and verify content scripts or a mounted chrome-extension:// page.
-Use inspect_browser_extensions to inspect configuration and observed service workers.
+Use inspect_browser_status to inspect configuration and observed service workers.
 `drag_browser_target` supports inspected element refs or viewport coordinates; after a
-failed drag, inspect the page before deciding whether to repeat it. `fetch_browser_url`
-requests a URL with the current page's login context. It also accepts write methods,
-so authorize the requested operation and reconcile uncertain outcomes before retrying.
-Read complete response bodies through the returned response.text_file snapshot.
+failed drag, inspect the page before deciding whether to repeat it. For ordinary HTTP/API
+requests use run_shell with curl. To reuse browser login state, evaluate_browser_script
+can execute fetch within the page; browser origin/CORS rules still apply. Write requests
+require authorized intent; reconcile uncertain server outcomes before retrying.
 After browser recovery, refresh refs and focus before retrying an interaction.
 Uploads, cookie/storage editing,
 request interception or modification, traces, videos, PDF and the Playwright dashboard
@@ -128,14 +127,14 @@ class WebFetchModuleSnapshot:
         "screenshot website", "inspect layout", "playwright",
     ),
     capability_refs=(
-        "navigate_browser", "read_browser_page", "capture_browser_snapshot", "find_browser_text",
+        "read_browser_page", "capture_browser_snapshot", "find_browser_text",
         "click_browser_target", "fill_browser_field", "type_browser_text", "press_browser_key",
         "hover_browser_target", "select_browser_option", "set_browser_checked_state", "scroll_browser",
         "resize_browser_viewport", "navigate_browser_history", "manage_browser_tabs", "handle_browser_dialog",
         "evaluate_browser_script", "manage_browser_network_capture", "inspect_browser_layout",
-        "capture_browser_screenshot", "inspect_browser_status", "close_browser", "clear_browser_cache", "reset_browser",
-        "inspect_browser_extensions", "manage_browser_extension",
-        "drag_browser_target", "fetch_browser_url",
+        "capture_browser_screenshot", "inspect_browser_status", "manage_browser_session",
+        "manage_browser_extension",
+        "drag_browser_target",
     ),
     metadata={"internal": True, "plugin_id": "web_fetch"},
 )
@@ -166,51 +165,34 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
-            search_objects=('status',),
-            search_terms=('state', 'health', 'show', 'check', 'session',),
-            purpose="Show Playwright CLI, sidecar, profile, and browser-session health.",
-            use_when="Diagnosing browser startup, dependency installation, or session failures.",
+            search_objects=('status', 'session', 'extension', 'extensions'),
+            search_terms=('state', 'health', 'show', 'check', 'configuration', 'capabilities', 'worker', 'workers'),
+            search_intents=('inspect browser extension configuration and observed workers',),
+            purpose="Inspect browser host and current session health, extension summaries, or one selected extension's complete configured state and observed workers.",
+            use_when="Omit extension_id for passive host/session health and extension summaries. Supply extension_id for that extension's complete state. Inspection does not start the sidecar or browser. Configuration and worker observations do not prove extension behavior.",
             do_not_use_when="Reading or interacting with a page.",
             failure_next_steps="If dependencies are installing, continue with other work and retry later.",
         ),
         aliases=("inspect_browser_status",),
+        InputModel=BrowserInspectionInput,
         execution=INDIRECT_LOCAL_READ,
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        payload = self.service.health()
-        payload.update({"mounted": self.mounted, "degraded": self.degraded})
-        payload = inspection_snapshot(payload, source="browser_host")
-        return _result(RuntimeStatus.OK, "Browser status", payload)
+        payload = {**self.service.health(), "mounted": self.mounted, "degraded": self.degraded}
+        sections = {}
+        try:
+            key, persistent = self._scope(call)
+        except ValueError:
+            if call.args.get("extension_id"):
+                raise ToolRejectedError("Extension inspection requires a conversation scope", error_code="missing_execution_scope")
+        else:
+            sections["session"] = lambda: self.service.execute(
+                session_key=key, action="inspect", args=dict(call.args), persistent=persistent, timeout_ms=15000)
+        payload = inspection_snapshot(payload, sections=sections, source="browser_host")
+        failed = bool(call.args.get("extension_id") and payload["diagnostics"]["partial"])
+        return _result(RuntimeStatus.ERROR if failed else RuntimeStatus.OK, "Browser inspection", payload)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        action_name="navigate",
-        guidance=ToolGuidance(
-            search_objects=('page', 'pages', 'url', 'urls'),
-            search_terms=('open', 'visit', 'web', 'fetch', 'get', 'webpage', 'webpages', 'website', 'websites'),
-            search_term_rules=({'terms': ('read', 'rendered', 'text', 'metadata', 'links'),
-                'requires_any': ('url', 'urls', 'webpage', 'webpages', 'website', 'websites')},),
-            purpose="Open and read a webpage URL in this conversation's Chromium browser, returning rendered text, metadata and links. Supports interactive pages and local Manifest V3 extensions.",
-            use_when="Reading a new webpage or starting an interactive browser workflow. Reuse the returned document and text_file snapshot; use rg/read_file for text beyond the preview. A separate browser read is unnecessary unless content changed or extraction failed.",
-            do_not_use_when="Only raw HTTP/API content is needed.",
-            failure_next_steps="An explicit URL skips saved-page restoration. For page_restore_failed, provide a new HTTP(S) URL; do not edit last_url or reset login data. For startup failures use inspect_browser_status. For target-page failures check the URL/network; the main Pal may use run_shell with curl when raw HTTP content suffices.",
-            next_tool_hints=(
-                NextToolHint(name="read_browser_page", use_when="Page content changed or navigation returned content_status=unavailable; omit url to read the current page."),
-                NextToolHint(name="capture_browser_snapshot", use_when="Inspect controls and obtain element refs before interacting."),
-                NextToolHint(name="find_browser_text", use_when="Locate specific text or controls without a full snapshot."),
-                NextToolHint(name="inspect_browser_status", use_when="Inspect browser health or diagnose startup failures."),
-                NextToolHint(name="manage_browser_extension", use_when="Mount, reload, or unmount a local Manifest V3 extension you are developing or using."),
-                NextToolHint(name="inspect_browser_extensions", use_when="Inspect configured extensions and observed service workers."),
-            ),
-        ),
-        InputModel=BrowserNavigateInput,
-        OutputModel=BrowserActionOutput,
-        aliases=("navigate_browser",),
-        metadata={"canonical_path": "op_browser_navigate", "omit_family_in_canonical": True},
-        execution=DIRECT_EXTERNAL_READ,
-    )
+
     def navigate(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._action(call, "navigate", "Browser navigated")
 
@@ -219,18 +201,24 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="read",
         guidance=ToolGuidance(
-            search_objects=('page', 'pages', 'text', 'link', 'links'),
-            search_terms=('show', 'get', 'fetch', 'web', 'content', 'webpage', 'webpages'),
-            purpose="Read rendered text, metadata, and links from the current conversation's browser page.",
-            use_when="Rereading the current page after content changed or navigation returned content_status=unavailable; omit url to reuse the page. A url is also accepted for tool surfaces without navigate_browser.",
-            do_not_use_when="Reading beyond a preview: use rg/read_file on the returned text_file. Reading a new URL when navigate_browser is available: it opens the page and returns content directly. Searching the web (use search_web), reading local files, or calling an API that curl can handle directly.",
-            failure_next_steps="For page_restore_failed, supply a new HTTP(S) url here or use navigate_browser; this skips the saved page without clearing login data. Do not edit last_url. For readable non-JavaScript content, the main Pal may use run_shell with curl. Bunshin roles must report the bounded web evidence gap instead.",
+            search_objects=('page', 'pages', 'text', 'link', 'links', 'url', 'urls'),
+            search_terms=('show', 'get', 'fetch', 'web', 'content', 'webpage', 'webpages', 'open', 'visit', 'navigate', 'url', 'urls', 'website', 'websites'),
+            purpose="Open a webpage URL and read rendered text, metadata and links, or read the current conversation browser page.",
+            use_when="Supply url to open and read a webpage in one call. Omit url to reread the current page after interaction or content_status=unavailable. Reuse returned text_file and links_file snapshots for content beyond the preview; a separate read is unnecessary unless content changed or is missing.",
+            do_not_use_when="Reading beyond a preview: use rg/read_file on the returned text_file. Searching the web (use search_web), reading local files, or calling an API that curl can handle directly.",
+            failure_next_steps="For page_restore_failed, supply a new HTTP(S) url to skip the saved page without clearing login data. Do not edit last_url. For readable non-JavaScript content, the main Pal may use run_shell with curl. Bunshin roles must report the bounded web evidence gap instead.",
+            next_tool_hints=(
+                NextToolHint(name="capture_browser_snapshot", use_when="Current controls and element refs are needed before interaction."),
+                NextToolHint(name="find_browser_text", use_when="Locate particular page text or controls."),
+                NextToolHint(name="inspect_browser_status", use_when="Browser startup, session or extension diagnosis is needed."),
+                NextToolHint(name="manage_browser_extension", use_when="Mount, reload or unmount a local Manifest V3 extension."),
+            ),
         ),
         InputModel=BrowserReadInput,
         OutputModel=BrowserActionOutput,
         aliases=("read_browser_page",),
         metadata={"canonical_path": "op_browser_read", "omit_family_in_canonical": True},
-        execution=INDIRECT_EXTERNAL_READ,
+        execution=DIRECT_EXTERNAL_READ,
     )
     def read(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         if self.read_delegate is not None:
@@ -324,7 +312,7 @@ class WebFetchIntrospectionProvider:
     def resize(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "resize", "Browser resized")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="history", guidance=ToolGuidance(search_enum_fields=("operation",), search_terms=("page", "pages", "refresh"), search_objects=('page', 'pages'), purpose="Go back, go forward, or reload the current browser page.", use_when='Navigating browser history without a new URL. Capture a fresh browser snapshot after history navigation before using old element refs.', do_not_use_when="A specific URL is known (use navigate_browser).", failure_next_steps="Inspect the current URL and snapshot after navigation."), InputModel=BrowserHistoryInput, OutputModel=BrowserActionOutput, aliases=("navigate_browser_history",), metadata={"canonical_path": "op_browser_history", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="history", guidance=ToolGuidance(search_enum_fields=("operation",), search_terms=("page", "pages", "refresh"), search_objects=('page', 'pages'), purpose="Go back, go forward, or reload the current browser page.", use_when='Navigating browser history without a new URL. Capture a fresh browser snapshot after history navigation before using old element refs.', do_not_use_when="A specific URL is known (use read_browser_page).", failure_next_steps="Inspect the current URL and snapshot after navigation."), InputModel=BrowserHistoryInput, OutputModel=BrowserActionOutput, aliases=("navigate_browser_history",), metadata={"canonical_path": "op_browser_history", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_READ)
     def history(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "history", "Browser history updated")
 
@@ -348,7 +336,6 @@ class WebFetchIntrospectionProvider:
     def network(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "network", "Browser network")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="fetch", guidance=ToolGuidance(search_intents=('call api endpoint with the logged-in browser session', '带页面登录态请求接口拿 JSON 数据', 'pull json from the current page origin with cookies'), search_objects=('url', 'urls', 'response', 'responses', 'body', 'status'), search_terms=('fetch', 'http', 'json', 'api', 'cookie', 'cookies', 'session', 'get', 'post', 'xhr'), purpose="Fetch a URL from the current page's browser context, carrying the page session's cookies, and return status plus body.", use_when="Authorized API requests that need the logged-in page session; prefer same-origin relative URLs so cookies and origin apply.", do_not_use_when="Public pages readable via navigate_browser, or plain HTTP that curl can fetch without page cookies.", failure_next_steps="Relative URLs resolve against the current page; navigate to the right origin first if the fetch rejects or returns 404. For write methods, inspect server state before retrying an uncertain outcome."), InputModel=BrowserFetchInput, examples=({"url": "/api/problems/all/"}, {"url": "/graphql/", "method": "POST", "headers": {"Content-Type": "application/json"}, "body": "{\"query\": \"{ user { name } }\"}"}), OutputModel=BrowserActionOutput, aliases=("fetch_browser_url",), metadata={"canonical_path": "op_browser_fetch", "omit_family_in_canonical": True}, execution=INDIRECT_EXTERNAL_WRITE)
     def fetch(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._action(call, "fetch", "Browser fetch")
 
@@ -367,18 +354,6 @@ class WebFetchIntrospectionProvider:
             turn_id=str(call.meta.get("turn_id") or "manual"),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="extensions",
-        guidance=ToolGuidance(
-            search_objects=('extension', 'extensions'),
-            purpose="Inspect configured local browser extensions and observed extension service workers.",
-            use_when='Developing an extension or checking its configuration, ID, permissions, and manifest URL. Configured entries or missing workers do not establish extension behavior. Verify content scripts on the target page and inspect the mounted manifest URL.',
-            do_not_use_when="Treating a configured entry or missing worker as proof of extension success or failure.",
-            failure_next_steps="Use inspect_browser_status for browser health. Verify content scripts on the target page and open the mounted extension's manifest URL to check loading.",
-        ),
-        OutputModel=BrowserActionOutput, aliases=("inspect_browser_extensions",),
-        execution=INDIRECT_LOCAL_READ,
-    )
     def extensions(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "extensions", "Browser extensions")
 
@@ -387,7 +362,7 @@ class WebFetchIntrospectionProvider:
         guidance=ToolGuidance(search_enum_fields=("operation",),
             search_objects=('extension', 'extensions'),
             purpose="Mount, reload, or unmount an unpacked local Manifest V3 extension for this conversation's browser.",
-            use_when='The user requests extension development or installation. For mount supply a directory containing manifest.json; for reload/unmount supply extension_id from inspect_browser_extensions. Unmount remains available after the source directory is deleted. After mount/reload, navigate to a test page and verify behavior.',
+            use_when='The user requests extension development or installation. For mount supply a directory containing manifest.json; for reload/unmount supply extension_id from inspect_browser_status. Unmount remains available after the source directory is deleted. After mount/reload, navigate to a test page and verify behavior.',
             do_not_use_when="Installing Chrome Web Store packages, using temporary Bunshin browser scopes, or assuming configuration proves the extension works. This closes current browser tabs; persistent login data is retained.",
             failure_next_steps="Correct manifest/path errors before retrying. After success navigate to a test page to launch with the new configuration, then verify behavior. Unmount remains available if the source directory was deleted.",
         ),
@@ -399,27 +374,30 @@ class WebFetchIntrospectionProvider:
         return self._action(call, "extension_manage", "Browser extension configuration updated")
 
     @capability_action(
-        namespace=OPERATION_NAMESPACE, scope="module", action_name="clear_cache",
-        guidance=ToolGuidance(search_intents=('clear browser http cache', 'remove cached network responses'),
-            search_objects=('cache', 'caches'),
-            search_terms=('http',),
-            purpose="Clear the current conversation browser's HTTP cache, retaining cookies and site storage.",
-            use_when='The user requests browser cache cleanup or stale cached resources need to be discarded. Reload only if the task needs fresh page content; cache cleanup does not itself navigate.',
-            do_not_use_when="Logging out, deleting cookies, removing service-worker CacheStorage, or resetting the profile. Cache clearing does not fix an unreachable URL.",
-            failure_next_steps="Use inspect_browser_status on failure. A failed result does not confirm cleanup; do not reset the profile. Navigate or reload afterward only when the task needs it.",
-        ),
-        OutputModel=BrowserActionOutput, aliases=("clear_browser_cache",),
-        metadata={"canonical_path": "op_browser_clear_cache", "omit_family_in_canonical": True},
-        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
+        namespace=OPERATION_NAMESPACE, scope="module", action_name="manage_session",
+        guidance=ToolGuidance(
+            search_objects=('session', 'sessions', 'cache', 'profile'),
+            search_terms=('close', 'shutdown', 'clear', 'http', 'reset', 'cookies', 'login'),
+            search_enum_fields=('operation',),
+            purpose="Close the conversation browser, clear its HTTP cache, or explicitly reset its profile.",
+            use_when="Choose close to release the browser while keeping login/profile; clear_cache to clear HTTP cache while retaining cookies and site storage; reset to close and delete the profile, with confirm=true. No operation is chosen implicitly.",
+            do_not_use_when="Ordinary page navigation or failure recovery. Cache clearing does not log out or delete service-worker CacheStorage. Reset is only for intentional profile deletion.",
+            failure_next_steps="Inspect browser health and the actual outcome before retrying; never escalate cache cleanup to profile reset automatically.",
+        ), InputModel=BrowserSessionManageInput, OutputModel=BrowserActionOutput,
+        aliases=("manage_browser_session",), execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
+    def manage_session(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
+        operation = call.args["operation"]
+        if operation == "reset":
+            return self.reset(call)
+        return self._action(call, operation, "Browser session maintenance")
+
     def clear_cache(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "clear_cache", "Browser HTTP cache cleared")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="close", guidance=ToolGuidance(search_intents=('close live browser instance', 'release browser process and session'), search_objects=('session', 'sessions'), search_terms=('session', 'shutdown',), purpose="Close the current conversation's live browser while retaining its profile.", use_when='The live browser is no longer needed but login state should remain. Closing an already closed browser is an idempotent no-op.', do_not_use_when="The profile must also be removed (use reset_browser).", failure_next_steps="Closing an already closed session is harmless."), OutputModel=BrowserActionOutput, aliases=("close_browser",), metadata={"canonical_path": "op_browser_close", "omit_family_in_canonical": True}, execution=INDIRECT_CONTROL)
     def close(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._action(call, "close", "Browser closed")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="reset", guidance=ToolGuidance(search_objects=('profile', 'profiles'), purpose="Close the current browser and permanently delete its conversation profile.", use_when='The user explicitly wants cookies, login state, and browser profile data cleared. After resetting, navigate to the required URL before using the browser again.', do_not_use_when="Only live resources need releasing (use close_browser).", failure_next_steps="A deleted profile cannot be recovered; navigate again to create a clean one."), InputModel=BrowserResetInput, OutputModel=BrowserActionOutput, aliases=("reset_browser",), metadata={"canonical_path": "op_browser_reset", "omit_family_in_canonical": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     def reset(self, call: IntrospectionCall) -> IntrospectionResult:
         if call.args.get("confirm") is not True:
             raise ToolRejectedError("confirm must be true", error_code="confirmation_required",

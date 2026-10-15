@@ -516,21 +516,8 @@ class McpPluginSidecarTests(unittest.TestCase):
             self.assertIn("mcp_demo_prompt_brief", str(SkillSearchTool(service=skill_service).invoke({"query": "brief", "top_k": 5}).structured))
             show = core.context.execution_runtime.execute(CapabilityCall(name="inspect_mcp_state", args={}))
             self.assertEqual(show.status, RuntimeStatus.OK)
-            image = core.context.execution_runtime.execute(CapabilityCall(name="prepare_mcp_image", args={"url": "https://example.test/a.png"}))
-            self.assertEqual(image.structured["kind"], "url")
-            image_path = self.root / "image.png"
-            image_path.write_bytes(b"not really an image")
-            path_image = core.context.execution_runtime.execute(
-                CapabilityCall(name="prepare_mcp_image", args={"path": str(image_path), "mode": "path"})
-            )
-            self.assertEqual(path_image.structured["kind"], "path")
-            self.assertEqual(Path(path_image.structured["path"]), image_path.resolve())
-            image_record = core.context.execution_runtime.registry_generation.indirect_aliases[
-                "prepare_mcp_image"
-            ]
-            self.assertEqual(image_record.execution.effect_kind, EffectKind.LOCAL_WRITE)
-            self.assertEqual(image_record.execution.idempotency, Idempotency.IDEMPOTENT)
-            self.assertEqual(image_record.execution.retry_policy, RetryPolicy.AUTOMATIC)
+            self.assertIn("manage_mcp_server", core.context.capability_registry.descriptors)
+            self.assertNotIn("prepare_mcp_image", core.context.capability_registry.descriptors)
         finally:
             self.assertEqual(host.detach("mcp")["status"], RuntimeStatus.OK)
         missing = core.context.execution_runtime.execute(CapabilityCall(name="call_mcp_demo_alpha", args={}))
@@ -569,7 +556,7 @@ class McpPluginSidecarTests(unittest.TestCase):
             self.assertTrue(mcp_record["enabled"])
             self.assertTrue(mcp_record["attached"])
             self.assertIn("inspect_mcp_state", core.context.capability_registry.descriptors)
-            self.assertIn("prepare_mcp_image", core.context.capability_registry.descriptors)
+            self.assertNotIn("prepare_mcp_image", core.context.capability_registry.descriptors)
         finally:
             host.detach("mcp")
 
@@ -599,7 +586,8 @@ class McpPluginSidecarTests(unittest.TestCase):
 
         self.assertEqual(attached["status"], RuntimeStatus.FORBIDDEN)
         self.assertEqual(attached["reason"], "plugin_disabled")
-        self.assertEqual(attached["next_action"], "enable_plugin")
+        self.assertEqual(attached["next_action"], "manage_plugin")
+        self.assertEqual(attached["next_arguments"], {"name": "mcp", "operation": "enable"})
 
 
 if __name__ == "__main__":

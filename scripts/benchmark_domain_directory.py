@@ -26,8 +26,8 @@ from pal.tool_efficiency_benchmark import build_llm, endpoint_snapshot
 
 
 HELD_OUT = [
-    ('attach', '插件 browser 已经启用但还没挂载，把它挂回来；已有实例应当保留。', 'attach_plugin'),
-    ('enable', '插件 web_fetch 被禁用了，把它启用并加载起来。', 'enable_plugin'),
+    ('attach', '插件 browser 已经启用但还没挂载，把它挂回来；已有实例应当保留。', 'manage_plugin'),
+    ('enable', '插件 web_fetch 被禁用了，把它启用并加载起来。', 'manage_plugin'),
     ('plugin', '检查 browser 插件为什么加载失败，看看它的代次、依赖和最近错误。', 'inspect_plugin'),
     ('references', '找项目里这个函数都在哪里被引用，不需要调用链。', 'find_lsp_references'),
     ('hover', '看看源码这个位置的符号类型、签名和文档说明。', 'read_lsp_hover'),
@@ -35,12 +35,12 @@ HELD_OUT = [
     ('fill', '把网页输入框 ref=e20 的内容替换成 hello，不是追加输入。', 'fill_browser_field'),
     ('type', '光标已经在网页输入框里，逐键输入 hello，保留原有文字。', 'type_browser_text'),
     ('select', '网页下拉框 ref=e21 选择 option value 为 pro 的那一项。', 'select_browser_option'),
-    ('close', '关闭当前对话的浏览器实例，保留配置和登录数据。', 'close_browser'),
-    ('cache', '清掉浏览器 HTTP 缓存，保留 cookies 和站点存储。', 'clear_browser_cache'),
-    ('pause', '暂时暂停 morning-report 定时任务，保留任务定义和运行历史。', 'disable_proactive_task'),
+    ('close', '关闭当前对话的浏览器实例，保留配置和登录数据。', 'manage_browser_session'),
+    ('cache', '清掉浏览器 HTTP 缓存，保留 cookies 和站点存储。', 'manage_browser_session'),
+    ('pause', '暂时暂停 morning-report 定时任务，保留任务定义和运行历史。', 'manage_proactive_task'),
     ('schedule', '把 morning-report 的执行计划改成每周一十点，其他任务配置保持不变。', 'update_proactive_schedule'),
     ('history', '列出 morning-report 最近几次执行的历史，不是只看最后一次。', 'list_proactive_runs'),
-    ('grep', '在收到的附件内容中查找付款条款，给出匹配片段。', 'grep_artifact'),
+    ('grep', '附件逐页文本在 /fixture/pages/page_*.txt，用本地命令查找付款条款并给出匹配片段。', 'run_shell'),
     ('forget', '忘掉 mem_ref=m1 这条持久记忆，不要卸载记忆存储后端。', 'forget_memory'),
     ('negative-git', '找专用的 Git 状态工具；没有就说明没有，不要用 shell 替代。', None),
     ('negative-cluster', '找专用的 Kubernetes 集群健康工具，不要用网页浏览器或者 shell 替代。', None),

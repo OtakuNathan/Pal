@@ -377,14 +377,14 @@ class PluginHost:
                 result.update(
                     cleanup_pending=True, cleanup_plugin_id=failed_id, retry="reconcile_first",
                     recovery_hint=(f"Plugin {failed_id!r} failed to attach and still owns cleanup work. "
-                                   "Retry detach_plugin for that plugin before attaching or replacing it."),
+                                   "Retry manage_plugin operation=detach for that plugin before attaching or replacing it."),
                 )
             if generation is not None and generation.cleanup_started:
                 result.update(
                     logical_unload_committed=True, cleanup_pending=True,
                     cleanup_plugin_id=failed_id, retry="reconcile_first",
                     recovery_hint=(f"Plugin {failed_id!r} is logically detached and its entry remains closed. "
-                                   "Resource cleanup is incomplete; inspect the error and retry detach_plugin "
+                                   "Resource cleanup is incomplete; inspect the error and retry manage_plugin operation=detach "
                                    "for that plugin before attaching or replacing it."),
                 )
                 result["error"] = f"Resource cleanup incomplete for logically detached plugin {failed_id!r}.\n" + result["error"]
@@ -1285,7 +1285,8 @@ def _plugin_disabled_result(plugin_id: str) -> dict[str, Any]:
         "attached": False,
         "reason": "plugin_disabled",
         "summary": f"plugin is disabled: {plugin_id}",
-        "next_action": "enable_plugin",
+        "next_action": "manage_plugin",
+        "next_arguments": {"name": plugin_id, "operation": "enable"},
         "recoverable": True,
-        "hint": f"Call enable_plugin with name={plugin_id} to enable and attach it.",
+        "hint": f"Call manage_plugin operation=enable with name={plugin_id} to enable and attach it.",
     }

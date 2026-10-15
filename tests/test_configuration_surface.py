@@ -14,6 +14,10 @@ from tests.test_configuration_cli import runtime_root
 
 
 REMOVED = {
+    'list_tools', 'delete_path', 'manage_shell_session',
+    'inspect_failure_state', 'list_failure_reports',
+    'inspect_active_llm', 'inspect_llm_endpoint', 'list_llm_endpoints',
+    'inspect_web_search_state', 'inspect_web_search_provider', 'list_web_search_providers',
     'configure_web_search_provider', 'set_web_search_provider_auth_material',
     'enable_web_search_provider', 'disable_web_search_provider', 'set_active_web_search_provider',
     'configure_core_cache_warm_deadline', 'configure_core', 'inspect_core_cache_warm_deadline',
@@ -36,14 +40,12 @@ def test_configuration_writes_are_absent_and_live_observations_remain(runtime_ro
         for module in ('execution', 'core', 'web_search', 'bunshin'):
             core.publish_module_capabilities(module)
         generation = runtime.registry_generation
-        expected = {'search_web', 'inspect_web_search_provider', 'inspect_web_search_state',
-                    'list_web_search_providers', 'observe_core', 'read_bunshin_catalog', 'start_bunshin_workflow'}
+        expected = {'search_web', 'inspect_web_search', 'observe_core', 'read_bunshin_catalog', 'start_bunshin_workflow'}
         assert expected <= set(generation.search_records)
-        listing = runtime.invoke_indirect_tool(new_tool_call(name='list_tools', args={}))
-        assert listing.kind == 'complete'
+        listing = runtime.list_tool_specs()
         for alias in REMOVED:
             assert generation.record_for_alias(alias) is None
-            assert alias not in json.dumps(listing.output)
+            assert alias not in json.dumps(listing)
             searched = runtime._search_generation(generation, {'query': alias})
             assert alias not in [h['alias'] for h in searched['hits'] + searched.get('suggestions', [])]
             contract = runtime.invoke_direct_tool(new_tool_call(name='read_tool', args={'name': alias}))
@@ -53,7 +55,9 @@ def test_configuration_writes_are_absent_and_live_observations_remain(runtime_ro
         for record in generation.search_records.values():
             prose = ' '.join(str(record.get(k, '')) for k in ('purpose', 'use_when', 'do_not_use_when', 'failure_next_steps'))
             assert not any(alias in prose for alias in REMOVED)
-        health = runtime.invoke_indirect_tool(new_tool_call(name='inspect_web_search_provider', args={'name': 'brave'}))
-        assert health.kind == 'complete' and health.output['health']['healthy'] is False
+        health = runtime.invoke_indirect_tool(new_tool_call(name='inspect_web_search', args={}))
+        assert health.kind == 'complete'
+        brave = next(item for item in health.output['providers'] if item['name'] == 'brave')
+        assert brave['health']['healthy'] is False
     finally:
         runtime.shutdown()

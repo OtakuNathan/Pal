@@ -1,0 +1,23 @@
+{
+  "source": "installed st7789_face snapshot; original repository not located",
+  "date": "2026-10-15",
+  "sha256_before_migration": {
+    "panel.py": "958640077d2259f5aece041921bc0092ea980c9d949fb2828260c1dd6b68ec0e",
+    "face_introspection.py": "d7b5c740f65cf6da48bacf3a0c06c8243db0cbdb3cae76b691bbd126aa4bdf20",
+    "face_art.py": "eccef4f0bfb71d18de862dd363f8bbe629e660ccf57d1d3463cf03ee2ea43d1c",
+    "build_assets.py": "4789a870171258ba5b06c67431889afa4a9e957c4e0503fd77ca2dca38adc0d2",
+    "sidecar.py": "82a735868114a566a7eff8dec88e88d298df20188528475b46d7499bce31fd39",
+    "st7789_face_runtime.py": "59a1a202c9858036f241453c01b0fbcf030cd70481efab7220a9ed658a201878",
+    "plugin.toml": "8efe814a54348f960bcdec5c5005929538577918e56753b64385306718cd225a",
+    "assets/pal-arm-forearm.svg": "2475d1c991f579d1d7aa1ced02f4bd5ebf547e08f208e4662e0b5ff365cd72f0",
+    "assets/pal-arm-upper.svg": "be65509f77010ccb74863a053fc4724cd3baebbab94159a95d1c65f3253f5688",
+    "assets/pal-arms.svg": "2bf097a62ec59f6b9cc3d09757bd5751d0ac03523b6950cffcacac5ea5656041",
+    "assets/pal-body.svg": "42e2a86eea13e185e39897c2eddbc4748b10935586acd8af07868b4a08f2c7b8",
+    "assets/pal-cola-hand.svg": "054c245b39af1e798f27d3d6ca97cbedcdb3c36f49364c81e4b6df7d6ac2bea6",
+    "assets/pal-hand-ok.svg": "ec27731711433cdc790a7a52a36f6cf179d8e4f4a04c4b5467c7ba363c9ea054",
+    "assets/pal-hand-pinch.svg": "91c48982603910ee7fdf2297e9686c86ae4a09c9dc1ee1cd12e6a3aaef2177a6",
+    "assets/pal-hand-rest.svg": "c756854bab00ee18e44bf6566aa21d91f1e8cad996faabcf00ea4c6216c57c5c",
+    "assets/pal-hand-scratch.svg": "13dd2523b82c457bb2a00df161353c59613a84a215f5cb818c45676a4f57a0e0",
+    "assets/pal-hand-wave.svg": "dc781bf7dd9b94852d07f7483f4b227a09d1b32e5b2ce24c5581ae88763af5dd"
+  }
+}

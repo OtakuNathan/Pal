@@ -9,18 +9,10 @@ from pal.execution.tool_facade import StrictToolModel, ToolGuidance
 from pydantic import Field
 
 from pal.execution.generated_tool_models import (
-    ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
     ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput,
     ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderListInput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderListOutput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
     ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput,
     ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput,
-    ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
 )
 
 from dataclasses import dataclass
@@ -28,13 +20,9 @@ from typing import TYPE_CHECKING, Any
 
 from pal.artifact.service import ArtifactManager
 from pal.artifact.tools import (
-    ArtifactContentSearchTool,
     ArtifactInfoTool,
     ArtifactImportTool,
-    ArtifactListTool,
-    ArtifactReadTool,
     ArtifactSearchTool,
-    ArtifactSelectTool,
     _scope_from_runtime,
 )
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
@@ -87,10 +75,11 @@ class ArtifactIntrospectionProvider:
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts', 'image', 'images'),
             search_terms=('file', 'files', 'screenshot', 'screenshots', 'pdf', 'document', 'documents', 'audio', 'attach', 'load',),
+            search_intents=('register a local file as a conversation attachment', 'show a local image to the model', 'normalize a pdf into page files'),
             purpose="Import a local file or screenshot into the current conversation and attach its artifact reference for model input.",
-            use_when='A local image or screenshot path must become visible to Pal, or a local PDF/audio/document needs artifact processing. Extracted OCR or transcript text is not proof of visual inspection; pixels are inspected only when actually attached to a vision-capable model.',
+            use_when='Registering a local image, screenshot, PDF, audio or document for this conversation. Unsupported formats are retained as files with metadata; only images may attach pixels automatically. Extracted OCR or transcript text is not proof of visual inspection; pixels are inspected only when actually attached to a vision-capable model.',
             do_not_use_when="The same image is already inline. A PDF artifact_id does not mean its page images are inline; import an image_file_path from its page index when pixels are needed. Reading ordinary source text (use read_file).",
-            failure_next_steps="Check the local path, image validity and size. Registration works without vision; core attaches pixels only when the selected model supports vision and image budgets permit. If pixels are not attached, discover a suitable OCR/image-analysis capability when needed; OCR is text extraction, not full visual inspection. If a processing failure includes an artifact_id, inspect it with inspect_artifact_info. Reconcile uncertain outcomes with list_artifacts before retrying.",
+            failure_next_steps="Check the local path, image validity and size. Registration works without vision; core attaches pixels only when the selected model supports vision and image budgets permit. If pixels are not attached, discover a suitable OCR/image-analysis capability when needed; OCR is text extraction, not full visual inspection. If a processing failure includes an artifact_id, inspect it with inspect_artifact_info. Reconcile uncertain outcomes with search_artifacts before retrying.",
         ),
         InputModel=ArtifactImportInput,
         metadata={"async_required": True},
@@ -111,7 +100,7 @@ class ArtifactIntrospectionProvider:
             search_terms=('status', 'show', 'get', 'health', 'lifecycle', 'limits', 'count'),
             purpose="Inspect artifact manager policy and conversation-scoped resource and lifecycle counts.",
             use_when="Diagnosing artifact lifecycle issues — checking hot TTL, hard cap, or max size limits.",
-            do_not_use_when="Looking for specific artifacts (use list_artifacts or search_artifacts). Reading artifact content (use read_artifact).",
+            do_not_use_when="Looking for specific attachments (use search_artifacts). Reading their contents (use the provided file paths with read_file/rg or a suitable processor).",
             failure_next_steps="Read-only diagnostic tool. If limits look wrong, check ArtifactPolicy configuration in the runtime.",
         ),
         aliases=("inspect_artifact_state",),
@@ -138,37 +127,15 @@ class ArtifactIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="artifact",
-        action_name="list",
-        guidance=ToolGuidance(
-            search_objects=('artifact', 'artifacts'),
-            purpose="List recent tagged conversation artifacts visible to the current turn.",
-            use_when='A file was received or imported into this conversation and you need to discover what is available. An empty list can mean no artifact has been received in this scope or available references have expired. Inspect scope and filters; ask for resend only when the needed artifact is unavailable.',
-            do_not_use_when="Looking for local filesystem files (use run_shell rg or read_file). No files were received or imported in this conversation.",
-            failure_next_steps="If empty, artifacts may have expired (hot state TTL exceeded) or none were sent. Ask the user to resend.",
-        ),
-        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListInput,
-        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListOutput,
-        metadata={"async_required": True},
-        aliases=("list_artifacts",),
-        execution=INDIRECT_LOCAL_READ,
-    )
-    async def list_artifacts(self, call: CapabilityCall) -> CapabilityResult:
-        return await ArtifactListTool(service=self.service).ainvoke(
-            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
-        )
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="artifact",
         action_name="info",
         guidance=ToolGuidance(
-            search_objects=('artifact', 'artifacts', 'metadata', 'representation', 'representations'),
-            search_terms=('show', 'get', 'details',),
-            purpose="Inspect metadata and available representations for one artifact id.",
-            use_when="Inspecting artifact metadata, choosing a specific representation, or diagnosing a representation_unavailable result.",
-            do_not_use_when="Ordinary text reading with a known artifact_id: call read_artifact directly; its auto mode selects a representation. Importing local images/documents (use import_artifact).",
-            failure_next_steps="If artifact_not_found, recover a current artifact_id with list_artifacts or search_artifacts. If artifact_handler_retired, its managed bytes were deleted; ask the user to attach it again.",
+            search_objects=('artifact', 'artifacts', 'attachment', 'attachments', 'file', 'files', 'metadata', 'path', 'paths', 'index'),
+            search_terms=('show', 'get', 'details', 'processing', 'normalization', 'filename', 'extension', 'mime', 'pdf', 'page'),
+            search_intents=('inspect attachment file type and original paths', 'find pdf page text and image index'),
+            purpose="Inspect one attachment's file type, normalization status, original/processed file paths and PDF page index.",
+            use_when="Recovering file paths or diagnosing attachment processing when its automatic file description is missing or insufficient. This returns file information, not document contents or image pixels.",
+            do_not_use_when="File paths are already available: use read_file/rg or a tool suited to the file type. Importing a new local file (use import_artifact).",
+            failure_next_steps="If artifact_not_found, recover a current artifact_id with search_artifacts. If artifact_handler_retired, its managed bytes were deleted; ask the user to attach it again.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput,
@@ -185,38 +152,14 @@ class ArtifactIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="artifact",
-        action_name="read",
-        guidance=ToolGuidance(
-            search_objects=('artifact', 'artifacts', 'text', 'representation', 'representations'),
-            search_terms=('content', 'transcript',),
-            purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
-            use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). With a known artifact_id, call directly: representation defaults to auto, so inspect_artifact_info is unnecessary. Supports page/chunk selection and max_chars. The result supplies text_file for complete rg/read_file access.",
-            do_not_use_when="A text_file.file_path is already supplied: use rg/read_file directly. Reading local source text (use read_file); importing local images/documents (use import_artifact). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without a transcript: use the supplied local file with a separately discovered transcription tool.",
-            failure_next_steps="If representation_unavailable, use inspect_artifact_info to inspect the available representations. If not_text_readable, inspect an already-inline image directly with a vision-capable model; there is no separate vision tool. If artifact_handler_retired, ask the user to attach the source again.",
-        ),
-        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
-        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
-        metadata={"async_required": True},
-        aliases=("read_artifact",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    async def read(self, call: CapabilityCall) -> CapabilityResult:
-        return await ArtifactReadTool(service=self.service).ainvoke(
-            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
-        )
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="artifact",
         action_name="search",
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts'),
-            search_terms=('find', 'lookup', 'filename', 'caption',),
-            purpose="Search currently available conversation artifacts by filename, kind, caption, or summary. Results use relevance and recency ranking, not a date filter.",
-            use_when='You know roughly what file the user means by name, type, or content but lack the exact artifact_id. An empty result is not proof of expiry. Broaden the query or use list_artifacts to inspect current references before asking for a resend.',
-            do_not_use_when="Searching local filesystem or codebase (use run_shell rg or read_file). You already have the artifact_id.",
-            failure_next_steps="If no results, try list_artifacts for a broader view, widen the query, or check if the artifact expired.",
+            search_terms=('find', 'lookup', 'list', 'recent', 'filename', 'caption'),
+            purpose="Find or list available attachments in the current conversation, returning file metadata and paths without body contents.",
+            use_when='Find attachments by filename, kind, caption or summary; omit query to list recent attachments. Results are paginated: use next_offset while has_more=true. An empty filtered result does not establish expiry; broaden or omit query before asking for a resend.',
+            do_not_use_when="Searching inside document contents or a local codebase: use rg on the supplied paths. You already have the needed file description.",
+            failure_next_steps="Omit query for the unfiltered conversation inventory; follow next_offset to see remaining results. Inspect a known artifact with inspect_artifact_info if its processing or availability is uncertain.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput,
@@ -226,54 +169,6 @@ class ArtifactIntrospectionProvider:
     )
     async def search(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactSearchTool(service=self.service).ainvoke(
-            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
-        )
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="artifact",
-        action_name="select",
-        guidance=ToolGuidance(
-            search_objects=('artifact', 'artifacts'),
-            search_terms=('activate',),
-            purpose="Select an artifact search result and refresh its short-lived hot state when the runtime has write authority.",
-            use_when="You want to keep a specific artifact's hot state alive across multiple tool calls. Use after search_artifacts when you've identified the right artifact.",
-            do_not_use_when="You just need to read an artifact once (read_artifact already refreshes hot state).",
-            failure_next_steps="Check ttl_refreshed in the result; a read-only runtime can validate selection but cannot extend TTL. If artifact_not_found, recover a current artifact_id with list_artifacts or search_artifacts. If artifact_handler_retired, ask the user to attach it again.",
-        ),
-        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput,
-        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
-        metadata={"async_required": True},
-        aliases=("select_artifact",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    async def select(self, call: CapabilityCall) -> CapabilityResult:
-        return await ArtifactSelectTool(service=self.service).ainvoke(
-            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
-        )
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="artifact",
-        action_name="grep",
-        guidance=ToolGuidance(search_intents=('search attachment content snippets', 'find text inside artifact representation'),
-            search_objects=('artifact', 'artifacts'),
-            search_terms=('search', 'find', 'content', 'text', 'transcript',),
-            purpose="Search inside existing text representations of a known artifact.",
-            use_when="For text files, PDF page text/chunks, or existing transcripts.",
-            do_not_use_when="Does not inspect image pixels or create transcripts from audio.",
-            failure_next_steps="Queries use case-insensitive word matching, not regex. Use run_shell with rg on text_file.file_path when regex or line-oriented search is needed; correct an invalid artifact_id.",
-        ),
-        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
-        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
-        metadata={"async_required": True},
-        aliases=("grep_artifact",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    async def content_search(self, call: CapabilityCall) -> CapabilityResult:
-        return await ArtifactContentSearchTool(service=self.service).ainvoke(
             dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
         )
 

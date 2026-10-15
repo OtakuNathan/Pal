@@ -23,6 +23,7 @@ class McpServerConfig:
     kill_on_close: bool = True
     trust_level: str = "unknown"
     tool_guidance: dict[str, dict[str, Any]] = field(default_factory=dict)
+    artifact_inputs: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

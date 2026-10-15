@@ -1,0 +1,9 @@
+plugin_id = "emotion"
+entrypoint = "pal.plugins_builtin.emotion.runtime"
+version = "0.1.0"
+enabled_by_default = true
+lifecycle_protocol = "raii.v1"
+module_id = "emotion"
+requires_plugins = []
+requires_ports = []
+reload_modules = ["pal.emotion"]

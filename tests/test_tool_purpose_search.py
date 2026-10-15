@@ -57,7 +57,7 @@ def test_purpose_ranking_is_stable_under_registry_and_query_order():
 
 
 def test_limitation_suffix_preserves_operation_but_not_excluded_capability():
-    record = dict(alias='restart_channel_endpoint', domain='channel',
+    record = dict(alias='manage_channel_endpoint', domain='channel',
                   purpose='Restart one channel endpoint runtime instance without reloading provider code.')
     records = {record['alias']: record}
     assert aliases(lookup('restart endpoint runtime instance', domain='channel', records=records)) == [record['alias']]

@@ -194,3 +194,22 @@ Interaction rule:
   deliverables solely by the first-path-component predicate
   `is_bound_input_path`; worker-authored paths that merely contain an `inputs`
   component elsewhere are ordinary content and are never excluded
+
+## Public workflow control
+
+`control_bunshin_workflow(task?, operation, reason?)` provides `pause`, `resume`,
+`cancel`, and `archive`. The task selector keeps its existing unambiguous-Task
+resolution; archive includes terminal workflows, the other operations do not.
+Pause/cancel remain asynchronous requests. Resume retains paused-workflow recovery
+and orphaned-work normalization into triage; it does not resolve blockers.
+Archive requires a completed/rejected/cancelled workflow, preserves its Task, and
+reports no effect when already archived. Internal owner methods and state-machine
+transitions are unchanged. The old public resume/archive tool aliases are retired;
+the former public `command` parameter is replaced by `operation`.
+
+`restart_bunshin_execution` and `resolve_bunshin_triage` remain separate, as do
+architecture decisions and Architect answers. `start_bunshin_workflow` remains
+direct. `rebind_bunshin_task_delivery` is now indirect: discover/read its contract
+and invoke through `call_tool`; its destination selection and Manager binding
+validation are unchanged. Main Pal now has 11 authored Bunshin aliases with one
+direct tool. The 36 role-only aliases are outside this change.

@@ -50,8 +50,8 @@ def test_generic_word_hits_do_not_substitute_for_missing_domain(runtime):
     result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "git status"}))
     assert result.ok
     assert result.structured["hits"] == []
-    assert "list_tools" in result.llm_text
-    directory = runtime.execute_tool(new_tool_call(name="call_tool", args={"name": "list_tools", "args": {}}))
+    assert "search_tools" in result.llm_text and "domain" in result.llm_text
+    directory = runtime.execute_tool(new_tool_call(name="search_tools", args={"domain": "browser"}))
     assert directory.ok
     assert "inspect_browser_status" in directory.llm_text
     precise = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "inspect_browser_status"}))
@@ -126,14 +126,12 @@ def test_discovery_exposes_plugin_reattach_and_provider_install():
         core.publish_module_capabilities(module)
     runtime = core.context.execution_runtime
     try:
-        for query, expected in (("reload plugin", "reload_plugin"), ("install provider", "install_package")):
+        for query, expected in (("reload plugin", "manage_plugin"), ("install provider", "install_package")):
             result = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": query}))
             hit = result.structured["hits"][0]
             assert hit["alias"] == expected
             assert hit["input_contract"]
-        result = runtime.execute_tool(new_tool_call(name="call_tool", args={
-            "name": "reload_plugin", "args": {"name": "lsp"},
-        }))
+        result = runtime.execute_tool(new_tool_call(name="call_tool", args={'name': 'manage_plugin', 'args': {'name': 'lsp', 'operation': 'reload'}}))
         assert result.ok
         assert calls == ["lsp"]
     finally:
@@ -309,25 +307,25 @@ def test_domain_partial_alias_and_declared_object_form(tmp_path):
         def hits(query):
             return [item['alias'] for item in runtime.execute_tool(
                 new_tool_call(name='search_tools', args={'query': query})).structured['hits']]
-        assert set(hits('lsp prepare')) == {'prepare_lsp_workspace', 'prepare_lsp_call_hierarchy'}
+        assert set(hits('lsp prepare')) == {'prepare_lsp_workspace'}
         assert hits('workspace prepare lsp') == ['prepare_lsp_workspace']
-        assert hits('lsp callers') == ['find_lsp_incoming_calls']
-        assert hits('find_lsp_incoming_calls') == ['find_lsp_incoming_calls']
+        assert hits('lsp callers') == ['find_lsp_calls']
+        assert hits('find_lsp_calls') == ['find_lsp_calls']
     finally:
         runtime.shutdown()
 
 
 def test_inventory_is_compact_but_exact_schema_remains_available(runtime):
-    result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name': 'list_tools', 'args': {}}))
+    result = runtime.execute_tool(new_tool_call(name='search_tools', args={'domain': 'file'}))
     assert result.ok
     compact, _ = json.JSONDecoder().raw_decode(result.llm_text)
-    assert compact['tools']
-    for tool in compact['tools']:
-        assert set(tool) == {'name', 'purpose', 'module', 'invocation_mode'}
+    assert compact['directory']['tools']
+    for tool in compact['directory']['tools']:
+        assert {'alias', 'purpose'} <= set(tool) <= {'alias', 'purpose', 'purpose_truncated'}
     full = runtime.execute_tool(new_tool_call(name='read_tool', args={'name': 'read_file'}))
     assert full.ok
     assert 'file_path' in full.llm_text
-    assert len(result.llm_text) < len(json.dumps(result.structured))
+    assert 'input_schema' not in compact['directory']
 
 
 def test_model_list_contains_selection_capabilities_without_credentials():
@@ -335,12 +333,16 @@ def test_model_list_contains_selection_capabilities_without_credentials():
     from pal.llm.capabilities import LLMIntrospectionProvider
     from pal.shared import IntrospectionCall
     endpoints = [SimpleNamespace(endpoint_id=name, model_id=name, provider='test',
-        supports_vision=vision, supports_tools=True, context_window=64000, api_key='SECRET')
+        transport='http', supports_vision=vision, supports_tools=True, context_window=64000, api_key='SECRET')
         for name, vision in [('text', False), ('vision', True)]]
-    runtime = SimpleNamespace(endpoint_resolver=SimpleNamespace(enabled=lambda: endpoints))
-    result = LLMIntrospectionProvider(runtime).list_endpoints(IntrospectionCall(name='list_llm_endpoints'))
-    assert [item['name'] for item in result.structured['items'] if item['supports_vision']] == ['vision']
-    assert all(item['context_window'] == 64000 for item in result.structured['items'])
+    runtime = SimpleNamespace(active_endpoint_id='text',
+        endpoint_resolver=SimpleNamespace(enabled=lambda: endpoints, primary=lambda **kwargs: endpoints[0]),
+        thinking_status=lambda: {'available': False, 'current': None},
+        usage_snapshot=lambda: {'scope': 'resident_process', 'by_endpoint': []})
+    result = LLMIntrospectionProvider(runtime).inspect(IntrospectionCall(name='inspect_llm'))
+    assert [item['endpoint_id'] for item in result.structured['endpoints'] if item['supports_vision']] == ['vision']
+    assert all(item['context_window'] == 64000 for item in result.structured['endpoints'])
+    assert all(item['transport'] == 'http' for item in result.structured['endpoints'])
     assert 'SECRET' not in result.llm_text
 
 

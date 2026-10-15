@@ -123,8 +123,8 @@ def test_lsp_rpc_failure_keeps_cause_and_remote_payload(runtime, tmp_path, monke
         except RuntimeError as cause:
             raise LspManagerRpcError("LSP wrapper", payload={"stage": "open transport"}) from cause
     monkeypatch.setattr(provider, "_ensure_manager_started", fail)
-    mount(runtime, "lsp_failure_probe", lambda _: provider.definition(CapabilityCall(
-        name="probe", args={"file": "test.py", "line": 0, "character": 0})))
+    mount(runtime, "lsp_failure_probe", lambda _: provider.symbol_locations(CapabilityCall(
+        name="probe", args={"kind": "definition", "file": "test.py", "line": 0, "character": 0})))
     result = invoke(runtime, "lsp_failure_probe", {})
     assert not result.ok and "underlying cause" in result.llm_text
     assert "open transport" in result.llm_text
@@ -260,14 +260,13 @@ def test_plugin_manifest_scan_reports_nested_cause(host, monkeypatch):
     assert "underlying cause" in "\n".join(result["scan_errors"])
 
 
-@pytest.mark.parametrize("action", ["read_server", "rescan", "image_prepare"])
+@pytest.mark.parametrize("action", ["read_server", "rescan"])
 def test_mcp_management_error_cannot_be_overwritten_by_cached_success(runtime, tmp_path, monkeypatch, action):
     from pal.mcp.plugin import McpManagerPluginProvider
     provider = McpManagerPluginProvider(runtime_root=tmp_path, core_context=SimpleNamespace())
     provider.last_health = {"status": "ok", "error": "old error", "manager_running": True, "result": "OLD_RESULT"}
     monkeypatch.setattr(provider, "_ensure_manager_started", lambda: chained_failure("current MCP failure"))
     monkeypatch.setattr(provider.client, "request_sync", lambda *a, **kw: chained_failure("current MCP failure"))
-    monkeypatch.setattr(provider, "_prepare_image_payload", lambda *a, **kw: chained_failure("current MCP failure"))
     def handler(_):
         raw = getattr(provider, action)(CapabilityCall(name="probe", args={"name": "server"}))
         return _attach_effect_receipt(raw, DIRECT_LOCAL_READ)
@@ -277,7 +276,7 @@ def test_mcp_management_error_cannot_be_overwritten_by_cached_success(runtime, t
     assert "current MCP failure" in result.llm_text and "underlying cause" in result.llm_text
     assert "OLD_RESULT" not in result.llm_text
     assert "hidden-token" not in result.llm_text
-    assert metadata(result)["error_code"] == ("mcp_image_prepare_failed" if action == "image_prepare" else "mcp_manager_failed")
+    assert metadata(result)["error_code"] == "mcp_manager_failed"
     shown = provider._status_payload()
     assert shown["manager_running"] is False
     assert "result" not in shown["cached_snapshot"]

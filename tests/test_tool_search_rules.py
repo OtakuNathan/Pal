@@ -171,8 +171,11 @@ def test_fuzzy_recovery_preserves_domains_actions_and_unknown_constraints(runtim
     for query in ('git check status', 'database check status', 'git delete memory',
                   'database delete memory', 'browser status frobnication',
                   'browzer inspect status', 'browser delete status', 'browser memory inspect status'):
+        lexical = runtime._search_keywords(runtime.registry_generation, {'query': query})
+        assert not lexical['hits'], query
         result = search(runtime, query)
-        assert not result['hits'], query
+        # Purpose fallback may return a partial candidate such as run_shell;
+        # it must not turn incompatible domain/action words into fuzzy matches.
         assert not result.get('suggestions'), query
     for query in ('browser inspectt status', 'browser insepct status', 'browser details status'):
         result = search(runtime, query)
@@ -238,8 +241,8 @@ def test_registered_builtin_operation_domains():
     with tempfile.TemporaryDirectory() as root:
         fx = make_fixture(Path(root))
         try:
-            expected = {'set_browser_checked_state': 'browser', 'reload_plugin': 'plugin',
-                        'inspect_active_llm': 'llm', 'send_channel_attachment': 'channel',
+            expected = {'set_browser_checked_state': 'browser', 'manage_plugin': 'plugin',
+                        'inspect_llm': 'llm', 'send_channel_attachment': 'channel',
                         'read_file': 'file', 'run_shell': 'shell'}
             for alias, domain in expected.items():
                 record = fx.runtime.registry_generation.search_records[alias]

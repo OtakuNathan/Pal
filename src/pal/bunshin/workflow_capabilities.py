@@ -9,12 +9,10 @@ from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolGuidance
 
 from pal.execution.generated_tool_models import (
     BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderArchiveWorkflowInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderReadInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderResumeWorkflowInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput,
     BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput,
@@ -427,8 +425,8 @@ class BunshinPublicProvider:
         action_name="submit_artifact",
         guidance=ToolGuidance(
             search_objects=('artifact', 'artifacts'),
-            search_terms=('publish',),
-            purpose="Publish a durable artifact under a natural-language name for the current actor.",
+            search_terms=('publish', 'specification', 'design', 'architecture'),
+            purpose="Publish a named durable Bunshin workflow artifact for later task calls.",
             use_when="When the user has a named architecture or design to reference in later workflow calls.",
             do_not_use_when="This does not execute the artifact. Not for unnamed or ad-hoc content.",
             failure_next_steps="Correct invalid input; the Manager owns content hash and internal identity.",
@@ -515,9 +513,10 @@ class BunshinPublicProvider:
         scope="bunshin_task",
         action_name="status",
         guidance=ToolGuidance(
-            search_objects=('task', 'tasks'),
-            search_terms=('inspect', 'show', 'get', 'workflow', 'progress', 'phase',),
-            purpose="Read a Task by natural-language title, then mechanically attach its single current workflow when one exists.",
+            search_objects=('task', 'tasks', 'workflow', 'workflows'),
+            search_terms=('inspect', 'show', 'get', 'progress', 'phase', 'blocker', 'blockers', 'liveness', 'review', 'architecture'),
+            search_intents=('read workflow liveness and blockers', 'read the pending human architecture review'),
+            purpose="Read a named Bunshin Task and its current workflow progress, blockers, liveness and available next actions.",
             use_when=(
                 "Checking workflow phase, module Coder/Verifier state, blockers, next legal actions, timings, or liveness. "
                 "When workflow.human_review_available is true, call with view=human_review to read the durable review."
@@ -557,21 +556,6 @@ class BunshinPublicProvider:
         except Exception as exc:
             return _error("bunshin V2 workflow status failed", exc)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="bunshin",
-        action_name="resume_workflow",
-        guidance=ToolGuidance(
-            search_objects=('workflow', 'workflows'),
-            purpose="Resume a deliberately paused V2 workflow, or normalize orphaned worker-owned work into TRIAGE_REQUIRED items.",
-            use_when="When a workflow was deliberately paused, or after an interrupted worker disappears.",
-            do_not_use_when="Not for triage resolution (use resolve_bunshin_triage after addressing blockers).",
-            failure_next_steps="Correct invalid input; reconcile with read_bunshin_task_status before retrying.",
-        ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderResumeWorkflowInput,
-        aliases=("resume_bunshin_workflow",),
-        execution=INDIRECT_CONTROL,
-    )
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
@@ -732,7 +716,7 @@ class BunshinPublicProvider:
             do_not_use_when="Do not use merely because the user contacted Pal from another channel; ordinary conversation never moves Task delivery.",
             failure_next_steps="Use list_channel_endpoints to find endpoint names or correct the exact Task title; never edit workflow state to repair delivery.",
         ),
-        execution=DIRECT_CONTROL,
+        execution=INDIRECT_CONTROL,
     )
     def rebind_task_delivery(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -807,18 +791,30 @@ class BunshinPublicProvider:
         scope="bunshin",
         action_name="control_workflow",
         guidance=ToolGuidance(
-            search_enum_fields=("command",), search_terms=('stop', 'task', 'async'),
+            search_enum_fields=("operation",),
+            search_terms=('stop', 'task', 'async', 'pause', 'resume', 'cancel', 'archive', 'recover'),
             search_objects=('workflow', 'workflows'),
-            purpose="Request asynchronous pause or cancel for a V2 workflow.",
-            use_when="The user wants to stop a running workflow.",
-            do_not_use_when="Starting a workflow (use start_bunshin_workflow). Checking status (use read_bunshin_task_status).",
-            failure_next_steps="If task not found, verify title with search_bunshin_tasks.",
+            purpose="Pause, resume, cancel or archive the named Task's current Bunshin workflow.",
+            use_when="Pause/cancel request an asynchronous stop. Resume continues a deliberately paused workflow or moves orphaned worker-owned work into TRIAGE_REQUIRED; it does not resolve blockers. Archive hides only a completed/rejected/cancelled workflow from default search while keeping its reusable Task active; include_archived=true finds its history.",
+            do_not_use_when="Starting a workflow (use start_bunshin_workflow), discarding an execution attempt (use restart_bunshin_execution), or resolving a specific blocker (use resolve_bunshin_triage). Read progress with read_bunshin_task_status.",
+            failure_next_steps="Verify the Task title with search_bunshin_tasks and current state with read_bunshin_task_status before retrying. Active workflows must finish cancellation before archive; repeated archive reports no change.",
         ),
         InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput,
         aliases=("control_bunshin_workflow",),
         execution=INDIRECT_CONTROL,
     )
     def control_workflow(self, call: CapabilityCall) -> CapabilityResult:
+        operation = call.args.get("operation")
+        if operation == "resume":
+            return self.resume_workflow(call)
+        if operation == "archive":
+            return self.archive_workflow(call)
+        if operation not in ("pause", "cancel"):
+            return _invalid("bunshin V2 workflow control invalid", ValueError(
+                "operation must be pause, resume, cancel or archive"))
+        return self._pause_or_cancel_workflow(call)
+
+    def _pause_or_cancel_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
             _, workflow_id = self.service.resolve_task_workflow_selector(
@@ -830,7 +826,7 @@ class BunshinPublicProvider:
                 raise ValueError("Task has no active workflow to control")
             payload = self.service.control_workflow(
                 workflow_id=workflow_id,
-                command=str(call.args.get("command") or ""),
+                command=str(call.args.get("operation") or ""),
                 actor=actor,
                 source_channel=channel,
                 reason=str(call.args.get("reason") or ""),
@@ -842,21 +838,6 @@ class BunshinPublicProvider:
         except Exception as exc:
             return _error("bunshin V2 workflow control failed", exc)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="bunshin",
-        action_name="archive_workflow",
-        guidance=ToolGuidance(
-            search_objects=('workflow', 'workflows'),
-            purpose="Archive a terminal V2 workflow.",
-            use_when="Hide a completed, rejected, or cancelled Workflow from default search results. Its reusable Task remains active; include_archived=true includes archived Workflow history. read_bunshin_task_status reports the archive flag.",
-            do_not_use_when="Active workflows must be cancelled first (use control_bunshin_workflow).",
-            failure_next_steps="If task not found or not terminal, verify status with read_bunshin_task_status.",
-        ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderArchiveWorkflowInput,
-        aliases=("archive_bunshin_workflow",),
-        execution=INDIRECT_CONTROL,
-    )
     def archive_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)

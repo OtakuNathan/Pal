@@ -4819,14 +4819,12 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     "op_bunshin_submit_artifact",
                     "intro_bunshin_task_search",
                     "intro_bunshin_task_status",
-                    "op_bunshin_resume_workflow",
                     "op_bunshin_restart_execution",
                     "op_bunshin_resolve_triage",
                     "op_bunshin_submit_human_decision",
                     "op_bunshin_rebind_task_delivery",
                     "op_bunshin_answer_question",
                     "op_bunshin_control_workflow",
-                    "op_bunshin_archive_workflow",
                     "intro_bunshin_catalog_read",
                 },
             )
@@ -4857,6 +4855,8 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             generation = core.context.execution_runtime.registry_generation
             self.assertIn("start_bunshin_workflow", generation.direct_aliases)
             self.assertNotIn("start_bunshin_workflow", generation.indirect_aliases)
+            self.assertNotIn("rebind_bunshin_task_delivery", generation.direct_aliases)
+            self.assertIn("rebind_bunshin_task_delivery", generation.indirect_aliases)
             start_schema = start_descriptor.InputModel.model_json_schema(mode="validation")
             self.assertIn("task_spec", start_schema["properties"])
             self.assertIn("task_spec_file", start_schema["properties"])

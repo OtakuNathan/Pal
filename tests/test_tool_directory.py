@@ -8,25 +8,25 @@ from tests.test_tool_search_rules import runtime, mount, search
 
 
 def test_miss_returns_navigation_without_changing_hit_or_suggestion_counts(runtime):
-    mount(runtime, 'restart_channel_endpoint', search_objects=('endpoint',))
+    mount(runtime, 'manage_channel_endpoint', search_objects=('endpoint',))
     result = search(runtime, 'reconnect endpoint', domain='channel')
     assert not result['hits'] and not result.get('suggestions')
     assert result['returned_count'] == result['total_count'] == 0
-    assert result['directory']['tools'] == [{'alias': 'restart_channel_endpoint', 'purpose': 'Set a checkbox'}]
+    assert result['directory']['tools'] == [{'alias': 'manage_channel_endpoint', 'purpose': 'Set a checkbox'}]
     assert 'not matches' in result['usage_hint']
     SearchOutput.model_validate(result, strict=True)
-    assert 'directory' not in search(runtime, 'restart_channel_endpoint', domain='channel')
+    assert 'directory' not in search(runtime, 'manage_channel_endpoint', domain='channel')
 
 
 def test_directory_keeps_domains_filters_and_old_visible_generations(runtime):
-    mount(runtime, 'restart_channel_endpoint', search_objects=('endpoint',))
+    mount(runtime, 'manage_channel_endpoint', search_objects=('endpoint',))
     old = runtime.registry_generation
     mount(runtime, 'reload_plugin', search_objects=('plugin',))
     for kwargs in ({'domain': 'plugin'}, {'domain': 'channel', 'module_name': 'absent'},
                    {'domain': 'channel', 'family': 'absent'}, {'domain': 'channel', 'tags': ['absent']}):
         result = search(runtime, 'unmatched words', **kwargs)
         aliases = [x['alias'] for x in result.get('directory', {}).get('tools', [])]
-        assert 'restart_channel_endpoint' not in aliases
+        assert 'manage_channel_endpoint' not in aliases
     result = ExecutionRuntime._search_generation(old, {'domain': 'plugin', 'query': 'unmatched'})
     assert 'directory' not in result
     assert 'plugin' not in result['available_domains']
@@ -64,10 +64,10 @@ def test_directory_pagination_is_complete_deterministic_and_distinct_from_hit_li
 
 
 def test_browse_mode_ignores_words_but_keeps_filters(runtime):
-    mount(runtime, 'restart_channel_endpoint', search_objects=('endpoint',))
-    result = search(runtime, 'restart_channel_endpoint', domain='channel', directory_offset=0)
+    mount(runtime, 'manage_channel_endpoint', search_objects=('endpoint',))
+    result = search(runtime, 'manage_channel_endpoint', domain='channel', directory_offset=0)
     assert result['hits'] == []
-    assert result['directory']['tools'][0]['alias'] == 'restart_channel_endpoint'
+    assert result['directory']['tools'][0]['alias'] == 'manage_channel_endpoint'
     assert 'directory' not in search(runtime, '', domain='channel', directory_offset=0, namespace='introspection')
     result = search(runtime, '', directory_offset=0)
     assert not result['hits'] and 'directory' not in result
@@ -75,13 +75,13 @@ def test_browse_mode_ignores_words_but_keeps_filters(runtime):
 
 
 def test_domain_alone_returns_names_instead_of_full_contracts(runtime):
-    mount(runtime, 'restart_channel_endpoint', search_objects=('endpoint',))
+    mount(runtime, 'manage_channel_endpoint', search_objects=('endpoint',))
     result = search(runtime, '', domain='channel')
     assert result['hits'] == []
-    assert result['directory']['tools'] == [{'alias': 'restart_channel_endpoint', 'purpose': 'Set a checkbox'}]
+    assert result['directory']['tools'] == [{'alias': 'manage_channel_endpoint', 'purpose': 'Set a checkbox'}]
     assert 'Domain directory requested' in result['usage_hint']
     SearchOutput.model_validate(result, strict=True)
-    assert search(runtime, 'restart_channel_endpoint', domain='channel')['hits']
+    assert search(runtime, 'manage_channel_endpoint', domain='channel')['hits']
 
 
 def test_directory_summaries_are_bounded_and_do_not_change_full_contracts(runtime):

@@ -22,14 +22,14 @@ from pal.tool_efficiency_benchmark import endpoint_snapshot, build_llm
 from types import SimpleNamespace
 
 CASES = [
- ('reload-code', '我改了 Telegram channel provider 的 Python 实现，需要重新载入代码，让已有连接使用新实现。provider 的 plugin_id 是 telegram_demo。', 'reload_plugin'),
- ('reload-resources', 'channel provider 的公共资源和实现改了，请卸载旧实例并加载新的，再恢复原来的 endpoints。plugin_id 是 demo_provider。', 'reload_plugin'),
+ ('reload-code', '我改了 Telegram channel provider 的 Python 实现，需要重新载入代码，让已有连接使用新实现。provider 的 plugin_id 是 telegram_demo。', 'manage_plugin'),
+ ('reload-resources', 'channel provider 的公共资源和实现改了，请卸载旧实例并加载新的，再恢复原来的 endpoints。plugin_id 是 demo_provider。', 'manage_plugin'),
  ('discover-add', '我刚把一个新的 channel provider 包放进 runtime root，先扫描一下发现它。', 'rescan_plugins'),
  ('discover-remove', '一个 channel provider 包已经从磁盘删除了，重新扫描目录，让运行时发现这个变化。', 'rescan_plugins'),
- ('endpoint-reconnect', 'endpoint_id=demo_endpoint 仍然 attached，运行实例还在，但网络连接已经断了。请重建它的 transport session，不需要重新载入 Python 代码。', 'restart_channel_endpoint'),
- ('endpoint-detached', 'endpoint_id=demo_endpoint 已被明确 detach，现在没有运行实例。请恢复这个 endpoint 的收发连接。', 'attach_channel_endpoint'),
+ ('endpoint-reconnect', 'endpoint_id=demo_endpoint 仍然 attached，运行实例还在，但网络连接已经断了。请重建它的 transport session，不需要重新载入 Python 代码。', 'manage_channel_endpoint'),
+ ('endpoint-detached', 'endpoint_id=demo_endpoint 已被明确 detach，现在没有运行实例。请恢复这个 endpoint 的收发连接。', 'manage_channel_endpoint'),
  ('attachment', '请把本地文件 /fixture/report.pdf 作为附件发到当前聊天 channel。', 'send_channel_attachment'),
- ('llm', '查看你当前正在使用的 LLM endpoint 信息。', 'inspect_active_llm'),
+ ('llm', '查看你当前正在使用的 LLM endpoint 信息。', 'inspect_llm'),
  ('checkbox', '把当前浏览器页面 ref=e12 的复选框勾选上。', 'set_browser_checked_state'),
  ('absent-channel-delete', '找一个专门删除 channel 附件的工具；如果只有发送附件工具就说明没有找到，不要用别的工具代替。', None),
  ('absent-plugin-backup', '找一个专门备份 plugin 数据的工具；如果没有就说明没有找到，不要用安装、卸载或重载代替。', None),
@@ -37,8 +37,8 @@ CASES = [
 ]
 
 RECOVERY_PROBES = [
- ('mode-recovery', '先通过 call_tool(name="list_plugins", args={}) 查看插件；如果返回调用错误，请按工具反馈纠正，然后重载 demo_provider 的代码。', 'reload_plugin'),
- ('attach-recovery', 'endpoint_id=demo_endpoint 仍然 attached，但连接坏了。先尝试 attach_channel_endpoint；如果结果说没有重建 transport，再根据反馈修复连接，不重新载入 Python 代码。', 'restart_channel_endpoint'),
+ ('mode-recovery', '先通过 call_tool(name="list_plugins", args={}) 查看插件；如果返回调用错误，请按工具反馈纠正，然后重载 demo_provider 的代码。', 'manage_plugin'),
+ ('attach-recovery', 'endpoint_id=demo_endpoint 仍然 attached，但连接坏了。先尝试 manage_channel_endpoint(operation=attach)；如果结果说没有重建 transport，再根据反馈修复连接，不重新载入 Python 代码。', 'manage_channel_endpoint'),
 ]
 
 
@@ -79,7 +79,7 @@ def summarize(rows):
     return dict(runs=len(rows), errors=sum(bool(r.get('error')) for r in rows),
         positive_runs=len(positives), correct_selected=sum(bool(r.get('selected')) for r in positives),
         correct_valid=sum(bool(r.get('valid')) for r in positives),
-        wrong_selections=sum('selected_alias' in r and r['selected_alias'] != r['expected'] for r in rows),
+        wrong_selections=sum('selected_alias' in r and (r['selected_alias'] != r['expected'] or r.get('operation_correct') is False) for r in rows),
         negative_runs=len(negatives), correct_abstentions=sum(bool(r.get('valid')) for r in negatives),
         negative_selections=sum('selected_alias' in r for r in negatives),
         directory_seen=sum(any(s.get('directory') for s in r.get('searches', [])) for r in rows),
@@ -142,13 +142,13 @@ async def main(args):
                         function['description'] = ('Find callable tools using an optional strict domain bucket and '
                             'short action/object keywords or an alias. Positive purpose text supplies relevance. '
                             'Separate fuzzy suggestions require contract review. On a miss shorten the query, '
-                            'remove guessed filters, or check list_tools. An empty result does not prove unavailability.')
+                            'remove guessed filters, or browse search_tools(domain=...). An empty result does not prove unavailability.')
                     row = await run_case(llm, values, fx,
                         'prior_prompt' if variant == 'before' else 'candidate', case, rep,
                         prior_fragments, candidate_fragments, tool_specs=specs,
                         max_output_tokens=args.max_output_tokens,
                         recover_errors=args.recover_affordances,
-                        intercepted_results={'attach_channel_endpoint': manager.attach_endpoint('demo_endpoint')}
+                        intercepted_results={('manage_channel_endpoint', 'attach'): manager.attach_endpoint('demo_endpoint')}
                             if args.recover_affordances and attached else None,
                         intercepted_introspection={
                             'list_plugins': {'items': [{'name': p, 'plugin_id': p, 'enabled': True, 'attached': True}

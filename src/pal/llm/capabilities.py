@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from pal.execution.tool_facade import StrictToolModel, ToolGuidance
-from pydantic import Field
-
-from pal.execution.generated_tool_models import (
-    LlmCapabilitiesLLMIntrospectionProviderShowInput,
-)
+from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_semantics import INDIRECT_LOCAL_READ
+from pal.foundation.diagnostics import diagnostic_summary, diagnostic_text
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.llm.models import LLMEndpointModel
@@ -29,11 +26,6 @@ if TYPE_CHECKING:
     from pal.core.main_context import MainContext
 
 
-class LLMUsageInput(StrictToolModel):
-    view: Literal["summary", "detail"] = Field("summary", description="Summary of process-lifetime usage by default; detail includes accounting diagnostics and latest-request fields. Not a current-turn report.")
-    endpoint_id: str | None = Field(None, description="Exact endpoint ID returned by list_llm_endpoints to restrict usage to that endpoint; omit for process totals.")
-
-
 @dataclass(frozen=True)
 class LLMModelListItem:
     model_id: str
@@ -45,6 +37,7 @@ class LLMModelListItem:
     supports_vision: bool | None = None
     supports_tools: bool | None = None
     context_window: int | None = None
+    transport: str = "http"
 
 
 @dataclass(frozen=True)
@@ -63,6 +56,7 @@ class LLMModelSnapshot:
     supports_vision: bool
     priority: int
     enabled: bool
+    transport: str = "http"
 
 
 @dataclass(frozen=True)
@@ -83,6 +77,7 @@ class LLMActiveModelSnapshot:
     supports_vision: bool | None
     priority: int | None
     enabled: bool | None
+    transport: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,16 +106,68 @@ class LLMIntrospectionProvider:
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
-        action_name="list",
-        guidance=ToolGuidance(search_intents=('list available model connections', 'enumerate enabled endpoints'),
-            search_objects=('endpoint', 'endpoints', 'model', 'models'),
-            purpose="List enabled LLM endpoints ordered by priority.",
-            use_when='Discovering available model endpoints, their provider, wire shape, priority, vision/tools support, and context window. An empty list means no enabled endpoints are available; it does not prove the endpoint configuration is absent.',
-            do_not_use_when="Checking the current active model (use inspect_active_llm). Inspecting one endpoint in depth (use inspect_llm_endpoint).",
-            failure_next_steps="Read-only. If empty, no endpoints are configured or enabled.",
+        action_name="inspect",
+        guidance=ToolGuidance(
+            search_intents=('view current model and endpoint', 'list available model connections',
+                            'inspect endpoint model capabilities and limits', 'check active model token usage',
+                            '查看当前模型和所有端点'),
+            search_objects=('model', 'models', 'endpoint', 'endpoints', 'connection', 'connections',
+                            'token', 'tokens', 'usage', 'cost', 'cache', 'level', 'levels'),
+            search_terms=('list', 'status', 'state', 'current', 'active', 'selected', 'show', 'get',
+                          'check', 'info', 'information', 'metadata', 'thinking', 'reasoning', 'effort',
+                          'details', 'capabilities', 'context', 'window', 'limit', 'limits', 'health'),
+            purpose="Inspect the LLM runtime and all loaded enabled endpoints, their capabilities, limits, current thinking and process usage in one call. The selected endpoint is labelled (active).",
+            use_when="Checking the current model, listing endpoints, or diagnosing model capabilities and token/cost/cache accounting. Takes no arguments and always returns the same snapshot. Statistics cover the resident process, not the current turn or account balance.",
+            do_not_use_when="Switching endpoints or changing thinking settings; selection is user-controlled through /model. This passive snapshot does not probe endpoint connectivity.",
+            failure_next_steps="An empty endpoint list means none are loaded and enabled, not that configuration files are absent. Missing selection or usage is reported explicitly; unavailable accounting is not a zero-cost measurement. Use the official LLM CLI for configuration inspection and repairs.",
         ),
-        aliases=("list_llm_endpoints",),
+        execution=INDIRECT_LOCAL_READ,
+        aliases=("inspect_llm",),
     )
+    def inspect(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        endpoints = self.iter_endpoints()
+        active = self.runtime.endpoint_resolver.primary(preferred_endpoint_id=self.runtime.active_endpoint_id)
+        active_id = active.endpoint_id if active is not None else None
+        payload = inspection_snapshot({
+            "configured_active_endpoint_id": self.runtime.active_endpoint_id,
+            "effective_primary_endpoint_id": active_id,
+            "endpoint_count": len(endpoints),
+            "endpoints": [
+                {**_model_snapshot(endpoint).__dict__,
+                 "label": endpoint.endpoint_id + (" (active)" if endpoint.endpoint_id == active_id else "")}
+                for endpoint in endpoints
+            ],
+        }, sections={
+            "thinking": lambda: {
+                key: value for key, value in self.runtime.thinking_status().items()
+                if key in {"available", "current"}
+            },
+            "usage": lambda: llm_status_payload(self)["usage"],
+        })
+        usage = payload["usage"]
+        if usage.get("status") == "unavailable":
+            for endpoint in payload["endpoints"]:
+                endpoint["usage"] = {"scope": "resident_process", "status": "unavailable",
+                                     "reason": "usage_source_unavailable"}
+        else:
+            by_endpoint = {row["endpoint_id"]: row for row in usage.get("by_endpoint", ())}
+            for endpoint in payload["endpoints"]:
+                row = by_endpoint.get(endpoint["endpoint_id"])
+                endpoint["usage"] = _usage_summary(row) if row is not None else {
+                    "scope": "resident_process", "status": "not_recorded", "reason": "no_recorded_usage",
+                }
+            payload["usage"] = _usage_summary(usage)
+        for section in ("thinking", "usage"):
+            if "error" in payload[section]:
+                payload[section]["error"] = diagnostic_text(diagnostic_summary(payload[section]["error"]), limit=560)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="llm runtime snapshot",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("LLM runtime", payload),
+        )
+
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = [
@@ -131,6 +178,7 @@ class LLMIntrospectionProvider:
                 display_name=getattr(endpoint, "display_name", None),
                 provider=endpoint.provider,
                 wire_shape=str(getattr(endpoint, "wire_shape", "") or ""),
+                transport=getattr(endpoint, "transport", "http"),
                 priority=int(getattr(endpoint, "priority", 0) or 0),
                 supports_vision=getattr(endpoint, "supports_vision", None),
                 supports_tools=getattr(endpoint, "supports_tools", None),
@@ -147,20 +195,6 @@ class LLMIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("LLM models", {"items": payload}),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="active",
-        guidance=ToolGuidance(search_intents=('view current model and endpoint', 'check active model token usage', '查看当前模型和端点'),
-            search_objects=('model', 'models', 'endpoint', 'endpoints', 'token', 'tokens', 'usage', 'cost', 'cache', 'level', 'levels'),
-            search_terms=('status', 'state', 'current', 'selected', 'show', 'get', 'check', 'info', 'information', 'metadata', 'thinking', 'reasoning', 'effort', 'level', 'usage', 'tokens', 'token', 'cost', 'cache'),
-            purpose="Inspect the active LLM runtime, current thinking selection, process token usage, cost and cache statistics together.",
-            use_when='Checking which model endpoint is currently selected for requests. If no endpoint is active, use list_llm_endpoints to inspect enabled choices; endpoint selection is user-controlled through /model.',
-            do_not_use_when="Listing all endpoints (use list_llm_endpoints). Switching endpoints (the user must use /model).",
-            failure_next_steps="Read-only. If no active model, check list_llm_endpoints for available endpoints.",
-        ),
-        aliases=("inspect_active_llm",),
-    )
     def active(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_llm(self)
@@ -168,7 +202,7 @@ class LLMIntrospectionProvider:
             "configured_active_endpoint_id": self.runtime.active_endpoint_id,
             "effective_primary_endpoint_id": snapshot.endpoint_id,
         }, sections={
-            "thinking": lambda: self.runtime.thinking_status().__dict__,
+            "thinking": lambda: self.runtime.thinking_status(),
             "usage": lambda: {key: value for key, value in llm_status_payload(self)["usage"].items() if key != "by_endpoint"},
         })
         return IntrospectionResult(
@@ -178,22 +212,6 @@ class LLMIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("LLM runtime", payload),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="show",
-        guidance=ToolGuidance(search_intents=('inspect endpoint model capabilities and limits', 'view named model endpoint configuration', '查看单个模型端点能力'),
-            search_objects=('endpoint', 'endpoints', 'connection', 'connections', 'model', 'models'),
-            search_terms=('show', 'get', 'info', 'information', 'metadata', 'details', 'capabilities', 'context', 'window', 'limit', 'limits'),
-            search_term_rules=({'terms': ('status', 'usage', 'tokens', 'cost', 'health'), 'requires_any': ('endpoint', 'endpoints', 'connection', 'connections')},),
-            purpose="Inspect one enabled LLM endpoint's public capabilities, limits, activation and process usage together.",
-            use_when="Inspecting one endpoint's context window, max output, thinking levels, capabilities.",
-            do_not_use_when="Checking the active model (use inspect_active_llm). Listing all endpoints (use list_llm_endpoints).",
-            failure_next_steps="If NOT_FOUND, verify the endpoint name with list_llm_endpoints.",
-        ),
-        InputModel=LlmCapabilitiesLLMIntrospectionProviderShowInput,
-        aliases=("inspect_llm_endpoint",),
-    )
     def show_model(self, call: IntrospectionCall) -> IntrospectionResult:
         endpoint_id = str(call.args.get("name") or "").strip()
         if not endpoint_id:
@@ -260,7 +278,7 @@ class LLMIntrospectionProvider:
             if usage is None:
                 return IntrospectionResult(status=RuntimeStatus.NOT_FOUND,
                     text="No usage recorded for this endpoint in the current process.",
-                    llm_text="No usage recorded for this endpoint in the current process. Check its ID with list_llm_endpoints; this is not a zero-cost measurement.",
+                    llm_text="No usage recorded for this endpoint in the current process. Check its ID with inspect_llm; this is not a zero-cost measurement.",
                     structured={"endpoint_id": endpoint_id, "scope": "resident_process", "reason": "no_recorded_usage"})
             usage = {"scope": "resident_process", **usage}
         if call.args.get("view", "summary") == "summary":
@@ -300,6 +318,20 @@ class LLMIntrospectionProvider:
         )
 
 
+def _usage_summary(usage: dict[str, Any]) -> dict[str, Any]:
+    """Project process accounting without request internals or cache policy state."""
+    keys = (
+        "scope", "started_at", "request_count", "successful_request_count", "failed_request_count",
+        "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_tokens",
+        "cost", "cost_complete", "cost_unknown_attempt_count", "usage_reporting_rate", "reported",
+        "token_cache_ratio", "cache_partition_unknown_attempt_count", "usage_anomaly",
+    )
+    result = {key: usage[key] for key in keys if key in usage}
+    result.setdefault("scope", "resident_process")
+    result.setdefault("cost_complete", False)
+    return result
+
+
 def _model_snapshot(endpoint: LLMEndpointModel) -> LLMModelSnapshot:
     return LLMModelSnapshot(
         model_id=endpoint.model_id,
@@ -307,6 +339,7 @@ def _model_snapshot(endpoint: LLMEndpointModel) -> LLMModelSnapshot:
         display_name=getattr(endpoint, "display_name", None),
         provider=endpoint.provider,
         wire_shape=str(getattr(endpoint, "wire_shape", "") or ""),
+        transport=getattr(endpoint, "transport", "http"),
         context_window=getattr(endpoint, "context_window", None),
         max_output_tokens=getattr(endpoint, "max_output_tokens", None),
         thinking_levels=tuple(str(item) for item in (getattr(endpoint, "thinking_levels_blob", None) or ())),
@@ -349,6 +382,7 @@ def inspect_llm(provider: LLMIntrospectionProvider) -> LLMActiveModelSnapshot:
         display_name=snapshot.display_name,
         provider=active.provider,
         wire_shape=snapshot.wire_shape,
+        transport=snapshot.transport,
         context_window=snapshot.context_window,
         max_output_tokens=snapshot.max_output_tokens,
         thinking_levels=snapshot.thinking_levels,

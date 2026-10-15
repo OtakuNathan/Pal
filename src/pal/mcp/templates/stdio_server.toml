@@ -14,3 +14,10 @@ kill_on_close = true
 
 [env]
 # API_KEY = "..."
+
+# Optional local adaptation for exact discovered tool/parameter names. Each
+# mapped parameter must be an explicit top-level string in the external schema.
+# [artifact_inputs.analyze_image]
+# image = "path"  # path | url | data_url | base64
+# The model may pass image = {artifact_id = "..."}; Pal resolves it internally.
+# url uses a data URL from owned local bytes, never a private ingestion URL.

@@ -153,7 +153,7 @@ class ArtifactInfoTool:
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
         try:
             scope_key = _scope_from_runtime(kwargs.get("runtime"), kwargs.get("turn_id"))
-            structured = self.service.info(str(args.get("artifact_id") or ""), scope_key)
+            structured = self.service.describe(str(args.get("artifact_id") or ""), scope_key)
             return _result(RuntimeStatus.OK, "Artifact info", structured)
         except KeyError as exc:
             return _result(RuntimeStatus.NOT_FOUND, "Artifact info failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
@@ -203,14 +203,11 @@ class ArtifactSearchTool:
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
         try:
             scope_key = _scope_from_runtime(kwargs.get("runtime"), kwargs.get("turn_id"))
-            results = self.service.artifact_search(
-                scope_key,
-                query=str(args.get("query") or ""),
-                kind=str(args.get("kind") or "") or None,
-                limit=_optional_int(args.get("limit")) or 5,
-            )
-            structured = {"results": [item.to_dict() for item in results], "ttl_refreshed": False}
-            return _result(RuntimeStatus.OK, "Artifact search results", structured, text=f"{len(results)} artifact candidate(s)")
+            structured = self.service.discover(scope_key,
+                query=str(args.get("query") or ""), kind=str(args.get("kind") or "") or None,
+                limit=_optional_int(args.get("limit")) or 5, offset=_optional_int(args.get("offset")) or 0)
+            return _result(RuntimeStatus.OK, "Available attachments", structured,
+                text=f"{structured['count']} of {structured['total']} attachment(s)")
         except KeyError as exc:
             return _result(RuntimeStatus.NOT_FOUND, "Artifact search failed", {"reason": _key_error_reason(exc), "error": exception_report(exc)})
 

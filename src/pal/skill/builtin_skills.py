@@ -79,6 +79,10 @@ accepts `plugin`, `provider`, or `builtin`.
 | `pal web-search enable/disable/set-active NAME` | Update backend enabled state or configured selection. A disabled backend cannot become active. Subsequent searches read the new configuration; success does not prove network recovery. |
 | `pal core cache-reminder show/configure` | Show or change enabled, lead_seconds and min_prefix_tokens. Configure accepts --enabled/--no-enabled, --lead-seconds (>=30), --min-prefix-tokens (>=1024). Online calls reach the resident owner; disabling cancels its current timer immediately. Lead/min changes apply to subsequent scheduling. |
 | `pal identity show/refresh` | Show the resident projection (persisted identity when offline), or refresh it online after an authorized external edit. Language/tone/preferences update in subsequent prompt assembly. System name/core policy remain startup-pinned. Refresh requires a running host; owner failure is not an offline fallback. |
+| `pal memory providers/inspect [NAME]` | Inspect the resident memory owner; offline reads inspect the published SQLite memory generation. Online failures never fall back to direct database changes. |
+| `pal memory attach/detach/select NAME` | Resident backend lifecycle controls, rejected while Pal is busy. Selection lasts until host restart; this is not an embedding-space migration. |
+| `pal memory refresh-indexes [NAME] --limit N [--retry-failed]` | Refresh a bounded index batch through its resident owner; inspect health to confirm completion. |
+| `pal memory embedding plan/migrate --patch-file FILE`, `resume`, `status` | Offline embedding migration under the host lease. Rebuild an unpublished generation when identity changes, verify, publish and update only declared config fields. Pending migration blocks startup; retain source generation/config backup and use resume after interruption. |
 | `pal control status` | Read the running human control registry, including registered command and alias counts. It does not send a conversation or expose arbitrary tool invocation. |
 | `pal bunshin catalog show/refresh` | Read effective definitions or reload/validate catalog data. This does not reload Python or restart workflows. |
 | `pal bunshin profile patch/reset NAME`, `pal bunshin family patch/reset NAME` | Patch via --patch-file FILE, or remove an override. Online commands use the sidecar owner; offline commands require the stopped-host lease. --if-generation optionally protects a reviewed catalog generation. Changes apply to future Tasks; existing Task snapshots remain frozen. |
@@ -147,7 +151,7 @@ the same approval again. `pal client` can deliver the slash command to the selec
 runtime when that is the available authorized path. A fresh process also loads it.
 Do not claim this command reloads all config.toml settings or Python implementation.
 
-Use `list_llm_endpoints`, `inspect_llm_endpoint`, and `inspect_active_llm` to verify running endpoint metadata.
+Use `inspect_llm` to verify running endpoint metadata; the selected endpoint is labelled (active).
 `/model ENDPOINT` starts a user-controlled switch to a loaded enabled endpoint.
 Switching requires an idle conversation and may require confirmed compaction; `/think LEVEL` changes the supported thinking choice. These affect future
 requests, not a request already in flight. `/control` lists available controls;
@@ -174,27 +178,27 @@ and web integrations belong to plugins. Check actual availability before use.
 | Resident Python implementation, shared contracts, core system prompt | Update the actual installed source/package, test, and hand off a full host restart. | Hot-loading a plugin does not reload its resident dependencies. Reconnect and verify after the external restart. |
 | Identity in durable storage | Setup exposes name, language, vibe, tone, core policy, timezone. After an authorized external edit, `pal identity refresh` refreshes the resident projection. | Language/tone/preferences update in subsequent prompt assembly; system name and core policy are captured at startup and require host restart. There is no identity-write CLI subcommand. |
 | config.toml `[read]`, `[budget]`, `[stagnation]`, `[llm]` | File configuration covers read/output limits, prompt/tool budgets, stagnation thresholds, LLM retry/timeouts/wait notices. Resident consumers load at startup; hand off restart. | Validate TOML and supported keys/types: the loader can silently fall back to defaults or ignore invalid fields. Endpoint refresh does not reload this file for the resident core. |
-| config.toml `[memory]` embedding settings | Configure remote/local Ollama URLs, model, keep-alive, timeouts and fallback cooldown. Setup exposes remote URLs and model. Reattach `sqlite_vec_l3` to rebuild its embedding provider from the file. | Inspect the active memory provider and embedding health; changing a model does not prove existing embeddings were rebuilt. Index refresh is a distinct operation, not a config reload. |
-| Existing plugin source | `reload_plugin` replaces an enabled plugin's generation in one call; inspect declared reload_modules and ownership. `attach_plugin` preserves an already loaded instance. | Check load errors, attached state and the affected capabilities; dependencies may be suspended/reloaded. Do not promise zero interruption. |
-| New plugin / manifest changes | `rescan_plugins` discovers metadata; then attach a new enabled plugin or reattach an existing loaded plugin. `enable_plugin` enables and attaches a disabled plugin. | Rescan alone does not reload existing code. Verify discovery, lifecycle result, and a representative operation. |
+| config.toml `[memory]` embedding settings | Use `pal memory embedding plan/migrate --patch-file FILE` with Pal stopped for provider/model/revision/text-processing or transport changes. Other timeout/keep-alive settings remain config-owned; do not hand-edit model identity and reload around the migration. | Verify migration completion, published generation and representative retrieval before host startup. Dimension equality alone does not establish vector-space compatibility. |
+| Existing plugin source | `manage_plugin operation=reload` replaces an enabled plugin's generation in one call; inspect declared reload_modules and ownership. `manage_plugin operation=attach` preserves an already loaded instance. | Check load errors, attached state and the affected capabilities; dependencies may be suspended/reloaded. Do not promise zero interruption. |
+| New plugin / manifest changes | `rescan_plugins` discovers metadata; then attach a new enabled plugin or reattach an existing loaded plugin. `manage_plugin operation=enable` enables and attaches a disabled plugin. | Rescan alone does not reload existing code. Verify discovery, lifecycle result, and a representative operation. |
 | Online package installation | Prefer `install_package`; it briefly waits, then reports completion-notice availability. Use `inspect_package_status` only when no notice is available or diagnostics are needed; `prepare_package` repairs dependencies. The installer coordinates the relevant lifecycle owner. | Inspect both preparation and activation results. Preserve intentionally inactive state and avoid another attach/reload if installation already performed it. |
-| New/removed channel provider plugin | `rescan_plugins` discovers packages; `attach_plugin` activates an enabled package. Use `enable_plugin`/`disable_plugin` for plugin settings. | Inspect scan/load errors, provider mapping, endpoint health/auth/backlog. A provider without configured usable endpoint rows is not a working channel. |
-| Existing channel provider code/manifest/resources | `reload_plugin` explicitly stops transports, unloads code, loads and reattaches that provider. | Failure leaves code unloaded and capabilities withdrawn while hubs retain queued delivery; fix and retry. Do not promise automatic rollback to the old generation. |
-| One channel connection or authorization | `restart_channel_endpoint` rebuilds the connection without code reload. Use channel enable/disable/attach/detach and set_auth_material capabilities for their named operations. | Inspect endpoint state, authorization, health and backlog. The recovery socket has a resident boundary. |
-| MCP server configuration | Edit TOML/JSON under `plugins/mcp/`, then `rescan_mcp_servers`; use attach_mcp_server/detach_mcp_server for configured server connections. | Rescan reconnects changed enabled server configurations and updates tool discovery; inspect list_mcp_servers/read. Editing manager implementation requires plugin reload. |
+| New/removed channel provider plugin | `rescan_plugins` discovers packages; `manage_plugin operation=attach` activates an enabled package. Use `manage_plugin operation=enable`/`manage_plugin operation=disable` for plugin settings. | Inspect scan/load errors, provider mapping, endpoint health/auth/backlog. A provider without configured usable endpoint rows is not a working channel. |
+| Existing channel provider code/manifest/resources | `manage_plugin operation=reload` explicitly stops transports, unloads code, loads and reattaches that provider. | Failure leaves code unloaded and capabilities withdrawn while hubs retain queued delivery; fix and retry. Do not promise automatic rollback to the old generation. |
+| One channel connection or authorization | `manage_channel_endpoint(operation=restart)` rebuilds the connection without code reload. Use manage_channel_endpoint for enable/disable/attach/detach and the endpoint auth tool for credentials. | Inspect endpoint state, authorization, health and backlog. The recovery socket has a resident boundary. |
+| MCP server configuration | Edit TOML/JSON under `plugins/mcp/`, then `rescan_mcp_servers`; use manage_mcp_server(operation=attach|detach) for configured server connections. | Rescan reconnects changed enabled server configurations and updates tool discovery; inspect list_mcp_servers/read. Editing manager implementation requires plugin reload. |
 | LSP server configuration | Runtime overrides under `plugins/lsp/servers/`, then `rescan_lsp_servers`; prepare/doctor the target workspace. | Rescan updates config and invalidates changed sessions; workspace preparation/use starts the needed server. Templates have their own development skill. |
 | Bunshin profile/family customization | Use `pal bunshin catalog`, `pal bunshin profile`, and `pal bunshin family` commands. `read_bunshin_catalog` remains the workflow-discovery tool. | Online operations reach the sidecar; offline mutation requires the stopped-host lease. Overrides affect future Tasks, not existing snapshots. Refresh validates catalog data, not Python implementation. |
 | Core status and cache reminder | `observe_core` reports workload and cache deadline together. Use `pal core cache-reminder show/configure` for reminder settings. | Online configuration reaches the owner outside the conversation queue; disabling cancels the timer immediately. Other values apply at subsequent scheduling. Offline configuration reports on_start. |
 | Search / browser settings | Use `pal web-search` for backend config/auth/enable/active changes. Browser extension development still uses manage_browser_extension. | Health/auth tools report current configuration and last request observations. Verify repaired connectivity with a subsequent request; do not treat persisted settings as proof of network success. |
-| Memory provider and skills | Use their live management tools. `recall_memory(mem_ref=...)` reads an exact durable reference without waiting for indexing; use it for uncertain outcomes, not as mandatory verification of successful writes. Facts, preferences and experience belong to memory; reusable procedures belong to skills. | Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
+| Memory provider and skills | Backend maintenance uses `pal memory` through the resident owner or offline migration; skills retain their live tools. `recall_memory(mem_ref=...)` reads an exact durable reference without waiting for indexing; use it for uncertain outcomes, not as mandatory verification of successful writes. Facts, preferences and experience belong to memory; reusable procedures belong to skills. | Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
 | Host environment / OS service | Prepare the actual systemd/launchd/manual-service change and external restart instructions. | Daemon-reload alone does not replace a running process. Never stop, restart, kill, or schedule a delayed restart of Pal's own host from its active turn. |
 
 ### Publish new plugin tools and verify discovery
 
-Adding an alias to an existing plugin uses the same `reload_plugin` path as
+Adding an alias to an existing plugin uses the same `manage_plugin operation=reload` path as
 changing its implementation, including builtins. For browser tools the owner is
 `web_fetch`, whose manifest declares `reload_modules = ["pal.web_fetch"]`.
-After updating the actual installed source, discover and call `reload_plugin`
+After updating the actual installed source, discover and call `manage_plugin operation=reload`
 with `name="web_fetch"`; inspect load/cleanup errors and attached state, then
 use `search_tools`, `read_tool`, and a representative `call_tool` to verify the
 new alias and its input contract. Reload republishes the plugin's capabilities
@@ -238,7 +242,7 @@ Observations are best effort, not a durable completion or delivery protocol.
 
 Read `docs/pal_core_events.md` and the matching channel/plugin manual for routing,
 snapshots and lifecycle details. Plugin changes, including channel provider code,
-use `reload_plugin`. Confirm the loaded
+use `manage_plugin operation=reload`. Confirm the loaded
 runtime supports these hooks; adding/changing resident bus implementation still
 requires an external host restart.
 
@@ -279,8 +283,8 @@ future_tasks catalog changes. Never use these CLIs to restart Pal's host.
 For tool output, distinguish a captured snapshot from current state and a content
 component from a complete result. Use returned files with rg/read_file for omitted
 text; do not repeat side effects to recover output. Short statuses remain inline.
-PDF parsing provides a flat text file plus an index of original page numbers,
-page text and full-page images. Check page processing status; import the indexed
+PDF normalization provides per-page text and images plus an index of original
+page numbers and processing status; it does not create a duplicate flat text file. Check page processing status; import the indexed
 image_file_path with import_artifact when that page's pixels are needed. A PDF
 artifact_id alone does not mean any page image is attached.
 
@@ -288,14 +292,14 @@ For screenshot-based self-inspection, use the appropriate browser/desktop capabi
 `capture_browser_screenshot` registers a current-conversation artifact and returns its
 reference; reuse it without another `import_artifact`. If only a local file was
 saved and registration is confirmed absent, follow the result's recovery to import
-it. If registration is uncertain, reconcile with list_artifacts before importing;
+it. If registration is uncertain, reconcile with search_artifacts before importing;
 if an error includes an artifact_id, inspect that artifact instead. The screenshot
 source path is `artifact.local_cached_path`.
 Core attaches the image inline when the active model supports vision and projection
 limits allow it; otherwise the artifact remains available without inline pixels.
 Import does not require vision support. A path or stored_artifact_id alone is not
 pixel input. Inspect pixels only when the model request includes the inline image;
-read_artifact is text-only. When pixels cannot be inspected, discover an OCR or
+Attachment descriptions expose file paths; read_file/rg read text. When pixels cannot be inspected, discover an OCR or
 image-analysis tool with search_tools if needed and verify its accepted input. OCR extracts text;
 it does not establish full visual inspection. If no suitable tool exists, explain
 the limitation and the concrete endpoint-switching steps. Missing vision support,
@@ -575,21 +579,21 @@ Attach, detach, and reattach must be clean:
 2. Return a `ModuleHandle` whose module ID is stable.
 3. Let core/plugin host publish and withdraw capabilities; do not manually mutate the compiled index.
 4. Put external resources in `cleanup_callbacks` or provider `detach` methods.
-5. After code changes, call `reload_plugin` to reload the enabled plugin in one operation. Rescan first if manifest metadata changed. Use `detach_plugin` to take it offline; `attach_plugin` loads it without replacing an already attached instance.
+5. After code changes, call `manage_plugin operation=reload` to reload the enabled plugin in one operation. Rescan first if manifest metadata changed. Use `manage_plugin operation=detach` to take it offline; `manage_plugin operation=attach` loads it without replacing an already attached instance.
 
 Useful operations:
 
 - `rescan_plugins`: discover plugin manifests.
-- `attach_plugin`: load a plugin, preserving an already attached instance.
-- `reload_plugin`: unload and reload an enabled plugin and restore affected dependents.
-- `detach_plugin`: temporarily detach a plugin.
-- `disable_plugin`: persistently disable startup and detach, including builtins.
+- `manage_plugin operation=attach`: load a plugin, preserving an already attached instance.
+- `manage_plugin operation=reload`: unload and reload an enabled plugin and restore affected dependents.
+- `manage_plugin operation=detach`: temporarily detach a plugin.
+- `manage_plugin operation=disable`: persistently disable startup and detach, including builtins.
 - `uninstall_plugin`: remove a community installation through a package job; retain data by default. Await a scheduled completion notice; use `inspect_package_status` if notification is unavailable or cleanup diagnostics are needed. Explicit purge requires declared `[uninstall] data_paths`; builtins and providers are not supported.
-- `enable_plugin`: enable and attach a disabled plugin.
+- `manage_plugin operation=enable`: enable and attach a disabled plugin.
 - `search_tools`: find capabilities after attach.
 - `call_tool`: call a capability by discovered name.
 
-New aliases in an existing plugin appear after successful `reload_plugin`;
+New aliases in an existing plugin appear after successful `manage_plugin operation=reload`;
 builtin plugins follow the same path. For `web_fetch`, reload the plugin named
 `web_fetch`, then search for the intended operation, read its current schema with
 `read_tool`, and call its discovered alias. The host publishes the replacement
@@ -636,7 +640,7 @@ execution policy, or receiver-side output handling.
 Before calling the plugin done:
 
 1. `rescan_plugins` sees the manifest with no scan errors.
-2. `attach_plugin` returns ok and the plugin record is attached.
+2. `manage_plugin operation=attach` returns ok and the plugin record is attached.
 3. `search_tools` finds the new capability or prompt/source surface.
 4. A representative capability call returns structured data and useful `llm_text`.
 5. Detach removes the capability from discovery.
@@ -965,7 +969,7 @@ The provider id equals the plugin id; endpoint bindings and hubs remain owned by
 the resident channel runtime.
 
 `rescan_plugins` discovers metadata without reloading existing code. Then use
-`attach_plugin` for a newly discovered enabled package. Native channel manifests
+`manage_plugin operation=attach` for a newly discovered enabled package. Native channel manifests
 establish hubs without importing provider code. Legacy
 `channel/providers/*/provider.toml` packages are adapted in place; their endpoint
 contract is discovered on first plugin activation. Plugin detach or disable keeps
@@ -973,11 +977,11 @@ hubs and durable endpoint bindings. Physical removal cleans up the generation
 before transferring queued delivery to the recovery socket and removing hubs.
 Malformed manifests are errors, not removals. Enable/disable uses plugin settings.
 
-Use `reload_plugin` for an existing provider's source, manifest, or provider-wide resource changes. It withdraws endpoint capabilities, stops transports, unloads the old provider, loads the replacement, and restores previously attached endpoints. On failure the provider stays unloaded and capabilities stay withdrawn; endpoint hubs retain queued delivery. Fix the reported problem and retry. This path does not promise an atomic switch or automatic rollback to the old provider.
+Use `manage_plugin operation=reload` for an existing provider's source, manifest, or provider-wide resource changes. It withdraws endpoint capabilities, stops transports, unloads the old provider, loads the replacement, and restores previously attached endpoints. On failure the provider stays unloaded and capabilities stay withdrawn; endpoint hubs retain queued delivery. Fix the reported problem and retry. This path does not promise an atomic switch or automatic rollback to the old provider.
 
 Provider build code may call `context.register_cleanup(callback)` and expose optional `attach(context)` / `detach(context)` hooks. Own resources through that lifecycle so load failure and unload can release them.
 
-Use `restart_channel_endpoint` to rebuild one connection through its already loaded provider. It does not reload provider modules or discover new providers. Do not add a redundant endpoint restart after a successful provider reload.
+Use `manage_channel_endpoint(operation=restart)` to rebuild one connection through its already loaded provider. It does not reload provider modules or discover new providers. Do not add a redundant endpoint restart after a successful provider reload.
 
 For installation, `pal provider install WHEEL --runtime-root ROOT` and `pal package install PATH --runtime-root ROOT` are offline commands guarded by the runtime lock. In a running Pal use `install_package`, await its result or scheduled completion notice (use `inspect_package_status` if unavailable), and inspect the owner's activation result before adding any rescan/reload. A successful package installation can already perform the provider load.
 
@@ -986,14 +990,14 @@ Never stop, restart, or kill your own hosting service or process from inside the
 Useful operations:
 
 - `rescan_plugins`: discover plugin metadata and physical removals; leave unchanged code loaded.
-- `attach_plugin` / `enable_plugin` / `disable_plugin`: manage provider plugin generations.
+- `manage_plugin operation=attach` / `manage_plugin operation=enable` / `manage_plugin operation=disable`: manage provider plugin generations.
 - `list_channel_endpoints`: list configured channel endpoints and provider ids.
 - `inspect_channel_state`: inspect the resident hub's inventory and publication state.
 - `inspect_channel_endpoint`: inspect one endpoint's lifecycle, authorization, connection health and queue sizes together.
-- `attach_channel_endpoint`: attach one endpoint through its provider.
-- `detach_channel_endpoint`: detach one endpoint through its provider.
-- `reload_plugin`: explicitly unload and reload one known runtime-root provider by provider id.
-- `restart_channel_endpoint`: restart one endpoint runtime instance without reloading provider code.
+- `manage_channel_endpoint(operation=attach)`: attach one endpoint through its provider.
+- `manage_channel_endpoint(operation=detach)`: detach one endpoint through its provider.
+- `manage_plugin operation=reload`: explicitly unload and reload one known runtime-root provider by provider id.
+- `manage_channel_endpoint(operation=restart)`: restart one endpoint runtime instance without reloading provider code.
 
 ## Verification Workflow
 
@@ -1004,7 +1008,7 @@ Before calling a channel provider done:
 3. Compile provider source with `python -m py_compile`.
 4. Test provider loading in isolation or with a temporary runtime root first.
 5. Add or preview the `channel_endpoints` row for the provider's endpoint type.
-6. For a new provider use `rescan_plugins` then `attach_plugin`; for in-place code changes use `reload_plugin`. Skip a duplicate load if package installation already performed it. Check load errors and the operation result; do not restart the Pal service.
+6. For a new provider use `rescan_plugins` then `manage_plugin operation=attach`; for in-place code changes use `manage_plugin operation=reload`. Skip a duplicate load if package installation already performed it. Check load errors and the operation result; do not restart the Pal service.
 7. Verify `list_channel_endpoints` shows `provider_id`.
 8. Verify endpoint `inspect`, `auth_state`, `health`, and `backlog`.
 9. Dogfood through the real channel if safe; for socket, send `/control` before sending LLM-consuming messages.
@@ -1073,15 +1077,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "capability_action",
                 "hot refresh",
             ),
-            capability_refs=(
-                "rescan_plugins",
-                "attach_plugin",
-                "reload_plugin",
-                "detach_plugin",
-                "enable_plugin",
-                "search_tools",
-                "call_tool",
-            ),
+            capability_refs=('rescan_plugins', 'manage_plugin', 'search_tools', 'call_tool'),
             applicability_star=SkillApplicabilitySTAR(
                 situation="Pal needs to extend itself through a plugin or understand an existing plugin boundary.",
                 task="Create or repair a detachable plugin with capabilities and clean lifecycle behavior.",
@@ -1114,8 +1110,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "refresh_llm_endpoint",
             ),
             capability_refs=(
-                "list_llm_endpoints",
-                "inspect_llm_endpoint",
+                "inspect_llm",
             ),
             applicability_star=SkillApplicabilitySTAR(
                 situation="Pal needs to tune one exact model or add validated endpoint metadata.",
@@ -1160,10 +1155,8 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "rescan_plugins",
                 "list_channel_endpoints",
                 "inspect_channel_endpoint",
-                "attach_channel_endpoint",
-                "detach_channel_endpoint",
-                "reload_plugin",
-                "restart_channel_endpoint",
+                "manage_channel_endpoint",
+                "manage_plugin",
             ),
             applicability_star=SkillApplicabilitySTAR(
                 situation="Pal needs to add or repair a channel integration without pushing transport details into core.",

@@ -424,3 +424,41 @@ References:
 - [Accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
 - [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
 - [Preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+
+## Model-facing LLM inspection
+
+`inspect_llm()` is the single indirect, parameterless LLM inspection tool. It
+always returns configured/effective endpoint IDs, a complete list of loaded
+enabled endpoints, current thinking, and process accounting summaries. Each
+endpoint includes public model/provider/transport, capability and limit fields;
+only the selected endpoint's display label carries `(active)`. Endpoint IDs stay
+unchanged. No separate active-model capability object repeats that information.
+
+This is passive resident state, not a connectivity or credential probe. If the
+configured selection is missing, its ID remains visible, the effective ID is
+null, and no row is labelled active. An empty loaded endpoint list does not prove
+there are no disabled or persisted configurations; `pal llm list --all` inspects
+configuration. Selection and thinking changes remain user-controlled through
+`/model`; inspection neither refreshes configuration nor activates a connection.
+
+Usage is read once per inspection and projected into process totals plus each
+listed endpoint's summary. It is not a current-turn report or an account balance.
+Reporting coverage, unknown-cost counts and cost completeness remain visible;
+missing endpoint accounting is `not_recorded`, not a zero-cost measurement.
+Process totals may include previously loaded endpoints absent from the current
+list. Latest-request accounting fields, raw cache policy and internal bookkeeping
+are omitted. Existing human `/status` and internal status payloads retain their
+established detail. Authentication material and credential references are not
+part of the model-facing endpoint projection.
+
+Thinking and usage sections fail independently: known endpoint configuration is
+retained, unavailable sections are identified, and model-visible error summaries
+remove traceback frames and remain within 600 characters. Original owner
+diagnostics are not overwritten. Thinking status is consumed as its dictionary
+contract, without attempting to access `.__dict__`.
+
+`list_llm_endpoints`, `inspect_active_llm` and `inspect_llm_endpoint` are withdrawn
+from model discovery and invocation. Internal readers and the human status
+control handler remain available; no model-facing selector/view parameters or
+configuration write tools are introduced. Source implementation awaits the
+combined regression batch and does not activate a running Pal host.

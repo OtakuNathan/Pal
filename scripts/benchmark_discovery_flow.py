@@ -17,18 +17,18 @@ from scripts.benchmark_alias_search import fixture
 from pal.tool_efficiency_benchmark import endpoint_snapshot, build_llm
 
 CASES = [
-    ('llm', '查看你当前正在使用的 LLM endpoint 信息。', 'inspect_active_llm'),
+    ('llm', '查看你当前正在使用的 LLM endpoint 信息。', 'inspect_llm'),
     ('attachment', '把本地文件 /fixture/report.pdf 作为附件发回当前对话即可，不需要定向到其他会话。', 'send_channel_attachment'),
     ('checkbox', '把当前浏览器页面 ref=e12 的复选框勾选上。', 'set_browser_checked_state'),
-    ('reload', '重新加载已经附加的 lsp 插件，让刚改的插件代码生效。', 'reload_plugin'),
+    ('reload', '重新加载已经附加的 lsp 插件，让刚改的插件代码生效。', 'manage_plugin'),
     ('screenshot', '给当前浏览器页面截一张图。', 'capture_browser_screenshot'),
-    ('usage', '看看 LLM 的 token 用量和花费。', 'inspect_active_llm'),
+    ('usage', '看看 LLM 的 token 用量和花费。', 'inspect_llm'),
     ('wrong-domain', '只查找专用的 Git 状态工具；若工具目录没有就说明没有找到。不要用浏览器、LSP 或 shell 工具代替。', None),
 ]
 
 # Controlled recovery probes, reported separately from model-authored queries.
 SEEDED_CASES = [
-    ('llm-fuzzy', '查看当前使用的 LLM endpoint。请先用 llm endpoint inspectt 作为搜索词；之后可按结果继续发现并调用正确工具。', 'inspect_active_llm'),
+    ('llm-fuzzy', '查看当前使用的 LLM endpoint。请先用 llm endpoint inspectt 作为搜索词；之后可按结果继续发现并调用正确工具。', 'inspect_llm'),
     ('screenshot-fuzzy', '给当前浏览器页面截图。请先用 browser page screenshot 作为搜索词；之后可按结果继续发现并调用正确工具。', 'capture_browser_screenshot'),
     ('wrong-domain', '请先用 git check status 搜索专用 Git 状态工具。没有就说明没找到，不要用 browser、LSP 或 shell 代替。', None),
 ]
@@ -36,8 +36,8 @@ SEEDED_CASES = [
 PARAPHRASE_CASES = [
     ('checkbox-off', '请确保浏览器页面上 ref=e27 的复选框处于未选中状态，目前是否勾选未知。', 'set_browser_checked_state'),
     ('checkbox-on', '网页表单里 ref=e31 是复选框，把它设为选中，不要根据当前状态盲目切换。', 'set_browser_checked_state'),
-    ('active-model', '现在真正负责回答我的模型连接是哪一个？查看正在生效的配置即可，不是列出全部配置。', 'inspect_active_llm'),
-    ('plugin-code', 'browser 插件已加载，我修改了它的实现，请让这个插件重新载入代码。', 'reload_plugin'),
+    ('active-model', '现在真正负责回答我的模型连接是哪一个？查看正在生效的配置即可，不是列出全部配置。', 'inspect_llm'),
+    ('plugin-code', 'browser 插件已加载，我修改了它的实现，请让这个插件重新载入代码。', 'manage_plugin'),
 ]
 
 
@@ -78,7 +78,7 @@ def prompt_messages(variant, task, prior_fragments=None, candidate_fragments=Non
         grouped[f.metadata['prompt_target']].append(f'<{f.section}>\n{text}\n</{f.section}>')
     grouped['system'].append('This is an isolated discovery evaluation with synthetic inputs. '
         'Find the appropriate tool and issue its call; business execution is intercepted. '
-        'You may search again, list tools, or inspect tool contracts. If no suitable tool exists, say so. '
+        'You may search again, browse a domain directory, or inspect tool contracts. If no suitable tool exists, say so. '
         'Do not ask for confirmation: the synthetic operation is authorized. No live business tools execute.')
     return [message_ir_from_dict({'role': role, 'content': '\n'.join(texts)})
             for role, texts in grouped.items()] + [message_ir_from_dict({'role': 'user', 'content': task})]
@@ -101,7 +101,7 @@ async def run_case(llm, values, fx, variant, case, repetition, prior_fragments=N
     runtime = fx.runtime
     generation = runtime.registry_generation
     specs = tool_specs if tool_specs is not None else thaw_json(dict(generation.provider_specs))
-    discovery = {'search_tools', 'read_tool', 'list_tools'}
+    discovery = {'search_tools', 'read_tool'}
     available = {name: specs[name] for name in discovery | {'call_tool'} if name in specs}
     messages = prompt_messages(variant, task, prior_fragments, candidate_fragments)
     for _ in range(6):
@@ -178,11 +178,15 @@ async def run_case(llm, values, fx, variant, case, repetition, prior_fragments=N
                     messages.append(_eval_tool_result_message(call, SimpleNamespace(
                         ok=True, status='ok', structured=data, llm_text=json.dumps(data, ensure_ascii=False))))
                     continue
-            if record and alias in (intercepted_results or {}):
+            feedback_key = alias
+            operation = args.get('operation')
+            if record and isinstance(operation, str) and (alias, operation) in (intercepted_results or {}):
+                feedback_key = (alias, operation)
+            if record and feedback_key in (intercepted_results or {}):
                 validated = runtime._validate_invocation_input(record, args)
                 route_ok = (call.name == 'call_tool') == (record.execution.invocation_mode.value == 'indirect')
                 if route_ok and getattr(validated, 'kind', None) != 'rejected':
-                    raw = intercepted_results[alias]
+                    raw = intercepted_results[feedback_key]
                     normalized = runtime._normalize_invocation_result(record,
                         new_tool_call(name=alias, args=args), raw, budget=None,
                         turn_id=f'eval:{variant}:{key}:{repetition}')
@@ -201,6 +205,25 @@ async def run_case(llm, values, fx, variant, case, repetition, prior_fragments=N
                 validated = runtime._validate_invocation_input(record, args)
                 route_ok = (call.name == 'call_tool') == (record.execution.invocation_mode.value == 'indirect')
                 row['valid'] = alias == expected and route_ok and getattr(validated, 'kind', None) != 'rejected'
+                # A merged alias alone no longer establishes the requested action.
+                operations = {'reload': 'reload', 'plugin-code': 'reload', 'reload-code': 'reload',
+                              'reload-resources': 'reload', 'mode-recovery': 'reload',
+                              'attach': 'attach', 'enable': 'enable'}
+                expected_operation = operations.get(key) if expected == 'manage_plugin' else (
+                    {'close': 'close', 'cache': 'clear_cache'}.get(key) if expected == 'manage_browser_session' else
+                    {'restart': 'restart', 'reconnect': 'restart', 'transport': 'restart',
+                     'endpoint-reconnect': 'restart', 'endpoint-detached': 'attach',
+                     'attach-recovery': 'restart'}.get(key) if expected == 'manage_channel_endpoint' else
+                    {'pause': 'disable', 'resume': 'enable', 'enable': 'enable',
+                     'disable': 'disable', 'delete': 'delete', 'remove': 'delete'}.get(key)
+                    if expected == 'manage_proactive_task' else
+                    {'attach': 'attach', 'connect': 'attach', 'detach': 'detach',
+                     'disconnect': 'detach'}.get(key) if expected == 'manage_mcp_server' else
+                    {'pause': 'pause', 'resume': 'resume', 'cancel': 'cancel',
+                     'archive': 'archive'}.get(key) if expected == 'control_bunshin_workflow' else None)
+                if expected_operation is not None:
+                    row['operation_correct'] = args.get('operation') == expected_operation
+                    row['valid'] = row['valid'] and row['operation_correct']
             return row  # Never execute ANY business invocation, including shell/read_file.
     row['error'] = 'round_limit'
     return row

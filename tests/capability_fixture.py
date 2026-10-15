@@ -104,3 +104,23 @@ __all__ = [
     "mount_test_capability",
     "unmount_test_capability",
 ]
+
+
+def mount_internal_path_delete_adapter(runtime):
+    """Keep backend deletion regressions independent of the retired public tool."""
+    from pal.execution.capabilities import ExecutionIntrospectionProvider
+    from pal.execution.capability_compiler import _attach_effect_receipt
+    from pal.execution.generated_tool_models import (
+        ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput as Input,
+        ExecutionFileCapabilitiesFileCapabilityMixinDeleteOutput as Output,
+    )
+    from pal.execution.tool_semantics import INDIRECT_LOCAL_WRITE
+    from pal.shared import IntrospectionCall
+    provider = ExecutionIntrospectionProvider(runtime)
+    return mount_test_capability(
+        runtime, alias="test_delete_path", canonical_path="op_test_delete_path",
+        InputModel=Input, OutputModel=Output, execution=INDIRECT_LOCAL_WRITE,
+        examples=({"file_path": "/fixture/remove.txt"},),
+        handler=lambda args: _attach_effect_receipt(provider.path_delete(IntrospectionCall(
+            name="test_delete_path", args=args.model_dump(), meta={"execution_runtime": runtime})), INDIRECT_LOCAL_WRITE),
+    )

@@ -274,6 +274,7 @@ class ChannelRuntimePort(AgentOutputPort, Protocol):
         self, *, endpoint_id: str | None = None,
         reply_target: dict[str, Any] | None = None,
         current_binding: dict[str, Any] | None = None,
+        allow_empty_target: bool = False,
     ) -> dict[str, Any]:
         ...
 

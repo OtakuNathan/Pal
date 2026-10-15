@@ -64,7 +64,7 @@ def test_cancelled_worker_finishes_before_plugin_cleanup(runtime, caplog, entryp
 
     mount(runtime, "cancelled_worker", "op_test_cancelled_worker", worker,
           indirect=entrypoint == "indirect")
-    mount(runtime, "reload_plugin", "op_plugin_mgmt_reattach", cleanup, execution=DIRECT_LOCAL_WRITE)
+    mount(runtime, "manage_plugin", "op_plugin_mgmt_manage", cleanup, execution=DIRECT_LOCAL_WRITE)
 
     async def scenario():
         task = asyncio.create_task(invoke(runtime, entrypoint))
@@ -75,7 +75,7 @@ def test_cancelled_worker_finishes_before_plugin_cleanup(runtime, caplog, entryp
                 task.cancel(reason)
                 await asyncio.sleep(0)
             replacement = asyncio.create_task(runtime.execute_tool_async(
-                new_tool_call(name="reload_plugin", args={})))
+                new_tool_call(name='manage_plugin', args={})))
             await asyncio.to_thread(cleaned.wait, 0.1)
         finally:
             release.set()

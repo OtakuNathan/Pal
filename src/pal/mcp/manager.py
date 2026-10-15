@@ -307,7 +307,12 @@ class McpManager:
                 validate_discovery(tools, prompts)
                 from pal.execution.discovery_terms import discovery_vocabulary
                 from pal.execution.tool_facade import ToolGuidance
+                from pal.mcp.artifact_inputs import McpArtifactInputs
+                tool_names = {tool.name for tool in tools}
+                if state.config.artifact_inputs.keys() - tool_names:
+                    raise ValueError("artifact_inputs refers to tools absent from discovery")
                 for tool in tools:
+                    McpArtifactInputs(tool.input_schema, state.config.artifact_inputs.get(tool.name, {})).exposed_schema()
                     patch = state.config.tool_guidance.get(tool.name)
                     if patch:
                         guidance = ToolGuidance.model_validate({"purpose": "External tool",
@@ -317,7 +322,8 @@ class McpManager:
                     server_id=state.config.server_id,
                     transport=state.config.transport,
                     server_info={**dict(connector.server_info), "remote": _config_summary(state.config),
-                                 "pal_tool_guidance": state.config.tool_guidance},
+                                 "pal_tool_guidance": state.config.tool_guidance,
+                                 "pal_artifact_inputs": state.config.artifact_inputs},
                     server_capabilities=dict(connector.server_capabilities),
                     tools=tuple(tools),
                     prompts=tuple(prompts),
@@ -432,6 +438,7 @@ def _config_summary(config: McpServerConfig) -> dict[str, Any]:
         "command": list(config.command),
         "cwd": config.cwd,
         "trust_level": config.trust_level,
+        "artifact_inputs": config.artifact_inputs,
     }
 
 

@@ -658,8 +658,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("op_browser_read", canonical_paths)
         self.assertIn("op_browser_inspect_layout", canonical_paths)
         self.assertIn("op_browser_screenshot", canonical_paths)
-        self.assertIn("prepare_mcp_image", handle.core.context.capability_registry.descriptors)
-        self.assertIn("inspect_web_search_state", handle.core.context.capability_registry.descriptors)
+        self.assertNotIn("prepare_mcp_image", handle.core.context.capability_registry.descriptors)
+        self.assertIn("inspect_web_search", handle.core.context.capability_registry.descriptors)
         self.assertIn("inspect_browser_status", handle.core.context.capability_registry.descriptors)
         self.assertIn("inspect_mcp_state", handle.core.context.capability_registry.descriptors)
         self.assertFalse(
@@ -669,14 +669,17 @@ class PalV2BootstrapTests(unittest.TestCase):
             any(name.startswith("web_fetch_provider_") for name in handle.core.context.capability_registry.descriptors)
         )
         self.assertIn("search_web", tool_names)
-        self.assertIn("navigate_browser", tool_names)
-        for name in ("read_browser_page", "capture_browser_snapshot", "find_browser_text"):
+        self.assertIn("read_browser_page", tool_names)
+        for name in ("capture_browser_snapshot", "find_browser_text"):
             self.assertNotIn(name, tool_names)
             self.assertIn(name, descriptors)
-        navigate = next(item["function"] for item in handle.core._build_llm_tool_contracts()
-                        if item["function"]["name"] == "navigate_browser")
-        for name in ("read_browser_page", "capture_browser_snapshot", "find_browser_text"):
-            self.assertIn(name, navigate["description"])
+        read_page = next(item["function"] for item in handle.core._build_llm_tool_contracts()
+                        if item["function"]["name"] == "read_browser_page")
+        read_schema = descriptors["read_browser_page"].InputModel.model_json_schema()
+        self.assertIn("url", read_schema["properties"])
+        self.assertNotIn("url", read_schema.get("required", ()))
+        self.assertIn("current conversation browser page", read_page["description"])
+        self.assertNotIn("navigate_browser", descriptors)
         self.assertNotIn("capture_browser_screenshot", tool_names)
         self.assertNotIn("read_web", tool_names)
 
@@ -817,7 +820,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         sys.path.insert(0, str(builtin_root))
         try:
             result = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="rescan_and_attach_first_party_plugins")
+                CapabilityCall(name='rescan_plugins', args={'mode': 'scan_and_attach_new_first_party'})
             )
         finally:
             sys.path.remove(str(builtin_root))
@@ -845,7 +848,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         result = PluginsIntrospectionProvider(  # type: ignore[arg-type]
             host=FailingHost()
         ).rescan_and_attach_new_first_party(
-            CapabilityCall(name="rescan_and_attach_first_party_plugins")
+            CapabilityCall(name='rescan_plugins', args={'mode': 'scan_and_attach_new_first_party'})
         )
 
         self.assertEqual(result.status, "error")
@@ -941,7 +944,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         sys.path.insert(0, str(builtin_root))
         try:
             result = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="rescan_and_attach_first_party_plugins")
+                CapabilityCall(name='rescan_plugins', args={'mode': 'scan_and_attach_new_first_party'})
             )
             self.assertEqual(result.status, "ok", result.structured)
             first = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
@@ -951,13 +954,13 @@ class PalV2BootstrapTests(unittest.TestCase):
             write_impl("v2")
             write_runtime()
             attached = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="attach_plugin", args={"name": "demo_reload"})
+                CapabilityCall(name='manage_plugin', args={'name': 'demo_reload', 'operation': 'attach'})
             )
             self.assertEqual(attached.status, "ok")
             unchanged = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
             self.assertEqual(unchanged.text, "v1")
             reattached = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="reload_plugin", args={"name": "demo_reload"})
+                CapabilityCall(name='manage_plugin', args={'name': 'demo_reload', 'operation': 'reload'})
             )
             self.assertEqual(reattached.status, "ok")
             second = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
@@ -993,12 +996,12 @@ class PalV2BootstrapTests(unittest.TestCase):
         runtime = handle.core.context.execution_runtime
         initial_registry = handle.core.context.capability_registry
         expectations = {
-            "lsp": ("pal.lsp", "inspect_lsp_provider"),
+            "lsp": ("pal.lsp", "inspect_lsp_status"),
             "mcp": ("pal.mcp", "inspect_mcp_state"),
             "bunshin": ("pal.bunshin", "start_bunshin_workflow"),
-            "sqlite_vec_l3": ("pal.plugins.l3", "inspect_memory_provider_inventory"),
+            "sqlite_vec_l3": ("pal.plugins.l3", None),
             "web_fetch": ("pal.web_fetch", "inspect_browser_status"),
-            "web_search": ("pal.web_search", "inspect_web_search_state"),
+            "web_search": ("pal.web_search", "inspect_web_search"),
         }
         owned_prefixes = tuple(prefix for prefix, _ in expectations.values())
         wrapper_prefixes = tuple(f"pal.plugins_builtin.{plugin_id}" for plugin_id in expectations)
@@ -1011,24 +1014,34 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         try:
             for plugin_id, (reload_prefix, capability_name) in expectations.items():
-                self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                if capability_name is not None:
+                    self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                else:
+                    self.assertIsNotNone(runtime.l3_plugin_registry.get(plugin_id))
                 if plugin_id == "web_fetch":
                     skill_service = handle.core.context.require_port("skill:skill")
                     self.assertIsNotNone(skill_service.repository.get_skill("pal.web.browser"))
-                detached = runtime.execute(CapabilityCall(name="detach_plugin", args={"name": plugin_id}))
+                detached = runtime.execute(CapabilityCall(name='manage_plugin', args={'name': plugin_id, 'operation': 'detach'}))
                 self.assertEqual(detached.status, "ok", plugin_id)
-                self.assertIn(capability_name, initial_registry.descriptors, plugin_id)
-                self.assertNotIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                if capability_name is not None:
+                    self.assertIn(capability_name, initial_registry.descriptors, plugin_id)
+                if capability_name is not None:
+                    self.assertNotIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                else:
+                    self.assertIsNone(runtime.l3_plugin_registry.get(plugin_id))
                 if plugin_id == "web_fetch":
                     self.assertIsNone(skill_service.repository.get_skill("pal.web.browser"))
 
                 probe_name = f"{reload_prefix}.__pal_hot_reload_probe__"
                 sys.modules[probe_name] = types.ModuleType(probe_name)
-                attached = runtime.execute(CapabilityCall(name="attach_plugin", args={"name": plugin_id}))
+                attached = runtime.execute(CapabilityCall(name='manage_plugin', args={'name': plugin_id, 'operation': 'attach'}))
 
                 self.assertEqual(attached.status, "ok", plugin_id)
                 self.assertNotIn(probe_name, sys.modules, plugin_id)
-                self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                if capability_name is not None:
+                    self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
+                else:
+                    self.assertIsNotNone(runtime.l3_plugin_registry.get(plugin_id))
                 if plugin_id == "web_fetch":
                     self.assertIsNotNone(skill_service.repository.get_skill("pal.web.browser"))
                 record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == plugin_id)
@@ -1108,12 +1121,12 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         try:
-            self.assertIn("inspect_plugin_host", handle.core.context.capability_registry.descriptors)
-            self.assertIn("detach_plugin", handle.core.context.capability_registry.descriptors)
-            self.assertIn("inspect_memory_provider_inventory", handle.core.context.capability_registry.descriptors)
+            self.assertIn("inspect_plugin", handle.core.context.capability_registry.descriptors)
+            self.assertIn("manage_plugin", handle.core.context.capability_registry.descriptors)
+            self.assertNotIn("inspect_memory_provider_inventory", handle.core.context.capability_registry.descriptors)
 
             detached = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="detach_plugin", args={"name": "sqlite_vec_l3"})
+                CapabilityCall(name='manage_plugin', args={'name': 'sqlite_vec_l3', 'operation': 'detach'})
             )
 
             self.assertEqual(detached.status, "ok")
@@ -1133,7 +1146,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         module.cleanup_callbacks.append(lambda: calls.append("cleanup"))
 
         detached = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="detach_plugin", args={"name": "sqlite_vec_l3"})
+            CapabilityCall(name='manage_plugin', args={'name': 'sqlite_vec_l3', 'operation': 'detach'})
         )
 
         self.assertEqual(detached.status, "ok")
@@ -1261,7 +1274,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         # DETACH
         detached = runtime.execute(
-            CapabilityCall(name="detach_plugin", args={"name": "sqlite_vec_l3"})
+            CapabilityCall(name='manage_plugin', args={'name': 'sqlite_vec_l3', 'operation': 'detach'})
         )
         self.assertEqual(detached.status, "ok")
 
@@ -1279,7 +1292,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         # RE-ATTACH
         attached = runtime.execute(
-            CapabilityCall(name="attach_plugin", args={"name": "sqlite_vec_l3"})
+            CapabilityCall(name='manage_plugin', args={'name': 'sqlite_vec_l3', 'operation': 'attach'})
         )
         self.assertEqual(attached.status, "ok")
 
@@ -1387,12 +1400,9 @@ class PalV2BootstrapTests(unittest.TestCase):
                 },
             )
         )
-        inventory = handle.core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="inspect_memory_provider_inventory",
-                args={"name": "sqlite_vec_l3"},
-            )
-        )
+        from pal.memory.maintenance import MemoryBackendOwner
+        inventory = asyncio.run(MemoryBackendOwner(handle.core, handle.memory_service).dispatch(
+            "inspect", {"name": "sqlite_vec_l3"}))
 
         self.assertEqual(committed.status, "ok")
         self.assertEqual(recalled.status, "ok")
@@ -1415,8 +1425,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertNotIn("projected_entries", recalled_origin.structured)
         self.assertIn("Restarted the bunshin and reduced concurrency.", recalled_origin.llm_text)
         self.assertNotIn("projected_entries", recalled_origin.llm_text)
-        self.assertEqual(inventory.status, "ok")
-        self.assertEqual(inventory.structured["provider_id"], "sqlite_vec_l3")
+        self.assertEqual(inventory["status"], "ok")
+        self.assertEqual(inventory["state"]["provider_id"], "sqlite_vec_l3")
         successor = corrected.structured["mem_ref"]
         self.assertNotEqual(successor, mem_ref)
         self.assertNotIn(mem_ref, handle.memory_service.l2_store.items)
@@ -1947,8 +1957,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(old_endpoint)
         self.assertIsNotNone(old_aux_endpoint)
         self.assertIn("channel", handle.core.context.module_registry.modules)
-        self.assertIn("reload_plugin", handle.core.context.capability_registry.descriptors)
-        self.assertIn("restart_channel_endpoint", handle.core.context.capability_registry.descriptors)
+        self.assertIn("manage_plugin", handle.core.context.capability_registry.descriptors)
+        self.assertIn("manage_channel_endpoint", handle.core.context.capability_registry.descriptors)
 
         prefixes = ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
         original_modules = {
@@ -1961,7 +1971,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             sys.modules[probe_name] = types.ModuleType(probe_name)
 
             result = runtime.execute(
-                CapabilityCall(name="restart_channel_endpoint", args={"name": "socket_default"})
+                CapabilityCall(name='manage_channel_endpoint', args={'name': 'socket_default', 'operation': 'restart'})
             )
 
             self.assertEqual(result.status, "ok")
@@ -1972,10 +1982,10 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertIsNot(new_endpoint, old_endpoint)
             self.assertEqual(new_endpoint.endpoint.endpoint_id, "socket_default")
             self.assertIn("channel", handle.core.context.module_registry.modules)
-            self.assertIn("reload_plugin", handle.core.context.capability_registry.descriptors)
+            self.assertIn("manage_plugin", handle.core.context.capability_registry.descriptors)
 
             blocked = runtime.execute(
-                CapabilityCall(name="detach_channel_endpoint", args={"name": "socket_default"})
+                CapabilityCall(name='manage_channel_endpoint', args={'name': 'socket_default', 'operation': 'detach'})
             )
             self.assertEqual(blocked.status, "invalid")
             self.assertEqual(blocked.structured["reason"], "recovery_socket_control_channel")
@@ -1983,14 +1993,14 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertTrue(new_endpoint.attached)
 
             blocked_disable = runtime.execute(
-                CapabilityCall(name="disable_channel_endpoint", args={"name": "socket_default"})
+                CapabilityCall(name='manage_channel_endpoint', args={'name': 'socket_default', 'operation': 'disable'})
             )
             self.assertEqual(blocked_disable.status, "invalid")
             self.assertEqual(blocked_disable.structured["reason"], "recovery_socket_control_channel")
             self.assertTrue(new_endpoint.enabled)
 
             detached = runtime.execute(
-                CapabilityCall(name="detach_channel_endpoint", args={"name": "socket_aux"})
+                CapabilityCall(name='manage_channel_endpoint', args={'name': 'socket_aux', 'operation': 'detach'})
             )
             self.assertEqual(detached.status, "ok")
             detached_endpoint = handle.channel_runtime.get_endpoint("socket_aux")
@@ -1998,7 +2008,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertFalse(old_aux_endpoint.attached)
 
             attached = runtime.execute(
-                CapabilityCall(name="attach_channel_endpoint", args={"name": "socket_aux"})
+                CapabilityCall(name='manage_channel_endpoint', args={'name': 'socket_aux', 'operation': 'attach'})
             )
 
             self.assertEqual(attached.status, "ok")
@@ -2292,7 +2302,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("demo_runtime", handle.plugin_host.manifests)
         self.assertIsNone(handle.channel_runtime.get_endpoint("demo_runtime_main"))
         attached = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="attach_plugin", args={"name": "demo_runtime"}))
+            CapabilityCall(name='manage_plugin', args={'name': 'demo_runtime', 'operation': 'attach'}))
         self.assertEqual(attached.status, "ok")
         endpoint = handle.channel_runtime.get_endpoint("demo_runtime_main")
         self.assertIsNotNone(endpoint)
@@ -2329,10 +2339,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(lifecycle_path.read_text(encoding="utf-8").splitlines(), ["attach"])
 
         reloaded = handle.core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="reload_plugin",
-                args={"name": "demo_runtime"},
-            )
+            CapabilityCall(name='manage_plugin', args={'name': 'demo_runtime', 'operation': 'reload'})
         )
 
         self.assertEqual(reloaded.status, "ok")
@@ -2349,10 +2356,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             "attached",
         )
         blocked_core_reload = handle.core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="reload_plugin",
-                args={"name": "socket"},
-            )
+            CapabilityCall(name='manage_plugin', args={'name': 'socket', 'operation': 'reload'})
         )
         self.assertNotEqual(blocked_core_reload.status, "ok")
 
@@ -2372,10 +2376,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             encoding="utf-8",
         )
         drifted = handle.core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="reload_plugin",
-                args={"name": "demo_runtime"},
-            )
+            CapabilityCall(name='manage_plugin', args={'name': 'demo_runtime', 'operation': 'reload'})
         )
         self.assertEqual(drifted.status, "error")
         self.assertIn("identity changed", str(drifted.structured))
@@ -2802,7 +2803,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         service.browser_manager = fake_manager
 
         detached = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="detach_plugin", args={"name": "web_fetch"})
+            CapabilityCall(name='manage_plugin', args={'name': 'web_fetch', 'operation': 'detach'})
         )
 
         self.assertEqual(detached.status, "ok")

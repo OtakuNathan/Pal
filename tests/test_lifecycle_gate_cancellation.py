@@ -59,10 +59,8 @@ def test_repeated_cancel_before_acquisition_drains_and_balances(mode, monkeypatc
 
 
 @pytest.mark.parametrize("name", [
-    "attach_channel_endpoint", "detach_channel_endpoint", "enable_channel_endpoint",
-    "disable_channel_endpoint", "restart_channel_endpoint", "reload_channel_provider",
-    "rescan_channel_providers", "op_channel_mgmt_attach", "op_channel_mgmt_detach",
-    "op_channel_mgmt_enable", "op_channel_mgmt_disable", "op_channel_mgmt_restart_endpoint",
+    "manage_channel_endpoint", "op_channel_mgmt_manage_endpoint",
+    "reload_channel_provider", "rescan_channel_providers",
     "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
 ])
 def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):

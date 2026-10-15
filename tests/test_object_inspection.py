@@ -55,17 +55,18 @@ def test_channel_inspection_combines_one_object_and_preserves_partial_failure(ch
     assert len(calls) == 3
 
 
-def test_web_inspection_preserves_auth_request_failure_and_hub_boundary(runtime_root):
+def test_web_inspection_combines_hub_and_all_provider_diagnostics(runtime_root):
     service = WebSearchService(WebSearchProviderRepository(), RuntimeSettingRepository())
     service.last_errors["brave"] = "last request transport failure"
     provider = WebSearchIntrospectionProvider(service)
-    result = provider.show_provider(IntrospectionCall(name="inspect_web_search_provider", args={"target_id": "brave"}))
-    assert result.structured["auth"]["authorized"] is False
-    assert result.structured["health"]["last_error"] == "last request transport failure"
+    result = provider.show(IntrospectionCall(name="inspect_web_search"))
+    assert result.structured["provider_count"] == 2
+    providers = {item["name"]: item for item in result.structured["providers"]}
+    assert set(providers) == {"brave", "ddg"}
+    assert providers["brave"]["auth"]["authorized"] is False
+    assert providers["brave"]["health"]["last_error"] == "last request transport failure"
     assert "secret-keep" not in result.llm_text
-    hub = provider.show(IntrospectionCall(name="inspect_state"))
-    assert hub.structured["provider_count"] == 2
-    assert "auth" not in hub.structured and "items" not in hub.structured
+    assert result.structured["health_basis"] == "configuration_and_last_request"
 
 
 def test_plugin_directory_and_hub_do_not_expand_plugin_state(tmp_path, monkeypatch):
@@ -113,14 +114,14 @@ def test_llm_inspection_distinguishes_configured_selection_from_effective_primar
     runtime = LLMRuntime(endpoint_resolver=EndpointResolver(endpoints=(_endpoint("available"),)),
                          settings_repository=_Settings(active_endpoint_id="missing"))
     provider = LLMIntrospectionProvider(runtime)
-    hub = provider.active(IntrospectionCall(name="inspect_active_llm"))
-    assert hub.structured["configured_active_endpoint_id"] == "missing"
-    assert hub.structured["effective_primary_endpoint_id"] is None
-    assert hub.structured["has_active_model"] is False
-    endpoint = provider.show_model(IntrospectionCall(name="inspect_llm_endpoint", args={"name": "available"}))
-    assert endpoint.structured["active"] is False
-    assert endpoint.structured["configured_active"] is False
-    assert endpoint.structured["usage"]["status"] == "not_recorded"
+    result = provider.inspect(IntrospectionCall(name="inspect_llm"))
+    assert result.structured["configured_active_endpoint_id"] == "missing"
+    assert result.structured["effective_primary_endpoint_id"] is None
+    endpoint, = result.structured["endpoints"]
+    assert endpoint["endpoint_id"] == "available"
+    assert endpoint["label"] == "available"
+    assert endpoint["usage"]["status"] == "not_recorded"
+    assert result.structured["thinking"] == {"available": False, "current": None}
 
 
 def test_lsp_inspection_does_not_start_manager_or_expand_other_workspace(tmp_path):
@@ -130,7 +131,7 @@ def test_lsp_inspection_does_not_start_manager_or_expand_other_workspace(tmp_pat
         operation_sync=lambda method, params: {"status": "ok", "workspace": {"workspace_root": params["workspace_root"]}})
     provider._ensure_manager_started = lambda: pytest.fail("inspection started manager")
     provider.last_health = {"server_count": 2, "servers": [{"secret_workspace": "/other"}]}
-    hub = provider.show(IntrospectionCall(name="inspect_state"))
+    hub = provider.status(IntrospectionCall(name="inspect_state"))
     assert "servers" not in hub.structured["cached_snapshot"]
     result = provider.status(IntrospectionCall(name="inspect_lsp_status", args={"workspace_root": str(tmp_path)}))
     assert result.status == RuntimeStatus.OK

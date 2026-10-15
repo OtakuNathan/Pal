@@ -99,15 +99,15 @@ Interaction rule:
   management actions
 - channel root and the recovery socket endpoint are core runtime components and
   cannot be detached
-- `restart_channel_endpoint` refreshes one endpoint connection without evicting
-  provider modules; `reload_plugin` replaces the provider generation and restores
+- `manage_channel_endpoint(operation=restart)` refreshes one endpoint connection without evicting
+  provider modules; `manage_plugin(operation="reload")` replaces the provider generation and restores
   eligible endpoints; `rescan_plugins` discovers metadata and physical removals.
-  Use `attach_plugin` after discovering a newly installed inactive plugin.
-- `attach_channel_endpoint` restores an explicitly detached endpoint. Repeating
+  Use `manage_plugin(operation="attach")` after discovering a newly installed inactive plugin.
+- `manage_channel_endpoint(operation=attach)` restores an explicitly detached endpoint. Repeating
   attach on a stable attached transport preserves that instance and reports
   `changed=false` and `transport_restarted=false`; it does not prove connection
   health. Conditional health/restart affordances guide connection repair.
-  `restart_channel_endpoint` replaces the transport when an attached connection
+  `manage_channel_endpoint(operation=restart)` replaces the transport when an attached connection
   has failed. Core endpoint reload uses restart, while core attach preserves it.
 - EndpointHub is the internal registry and comes early/leaves late. It owns
   endpoint identity and ordered backpressure while transports and code are

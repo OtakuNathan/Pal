@@ -14,7 +14,6 @@ from pal.execution.tool_facade import NextToolHint, ToolGuidance
 from pal.execution.generated_tool_models import (
     MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
     MemoryCapabilitiesMemoryIntrospectionProviderRecallInput,
-    MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
     MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
     MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
 )
@@ -227,9 +226,9 @@ class MemoryIntrospectionProvider:
             search_objects=('state', 'states', 'hub', 'module', 'manager', 'backend', 'backends'),
             search_terms=('status', 'show', 'get', 'check', 'active', 'current', 'selected', 'provider', 'health'),
             purpose="Inspect memory hub state, L1/L2 counts and active provider availability together.",
-            use_when='Diagnosing memory system health — provider count, active provider, record counts. If there is no active backend, inspect list_memory_providers for installed and mounted providers.',
+            use_when='Diagnosing memory system health — provider count, active provider, record counts. Backend maintenance uses the official pal memory CLI; inspect providers there when no active backend is available.',
             do_not_use_when="Recalling specific memories (use recall_memory).",
-            failure_next_steps="Read-only diagnostic. If no active provider, check list_memory_providers.",
+            failure_next_steps="Read-only diagnostic. If no active provider, use pal memory providers and inspect through pal.self.maintenance.",
         ), aliases=("inspect_memory_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -244,19 +243,6 @@ class MemoryIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Memory hub", payload),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="list_providers",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="List registered L3 memory providers.",
-            use_when='Checking which memory backends are installed and mounted. An empty list means no L3 providers are registered; inspect list_plugins for their installation and attachment state.',
-            do_not_use_when="Checking the active provider (use inspect_memory_state). Recalling memories (use recall_memory).",
-            failure_next_steps="Read-only. If empty, no L3 plugins are installed.",
-        ),
-        aliases=("list_memory_providers",),
-    )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         items = []
@@ -268,6 +254,7 @@ class MemoryIntrospectionProvider:
                     "provider_id": provider_id,
                     "module_id": getattr(provider, "module_id", f"l3.{provider_id}") if provider is not None else f"l3.{provider_id}",
                     "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
+                    "last_error": str(getattr(provider, "last_embedding_error", "") or "")[:300],
                 }
             )
         return IntrospectionResult(
@@ -281,22 +268,28 @@ class MemoryIntrospectionProvider:
         _ = call
         provider_id = self.service.l3_selector.active_provider_id
         provider = self.context.execution_runtime.l3_plugin_registry.get(provider_id)
+        payload = {
+            "provider_id": provider_id,
+            "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
+            "read_only": bool(getattr(provider, "read_only", False)),
+            "last_error": str(getattr(provider, "last_embedding_error", "") or "")[:300],
+        }
+        if provider is not None:
+            try:
+                summary = getattr(provider, "inspect_summary", None)
+                inventory = summary() if callable(summary) else {}
+                keys = {"record_count", "fact_count", "case_count", "topic_count",
+                        "pending_embeddings", "failed_embeddings", "stale_embeddings", "ready_embeddings"}
+                payload["counts"] = {key: value for key, value in inventory.items() if key in keys}
+                for key in ("read_only", "embedding_configured"):
+                    if key in inventory:
+                        payload[key] = inventory[key]
+                payload["last_error"] = str(inventory.get("last_embedding_error") or payload["last_error"])[:300]
+            except Exception as exc:
+                payload["inspection_error"] = str(exc)[:300] or type(exc).__name__
         return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="memory active l3 provider",
-            structured={
-                "provider_id": provider_id,
-                "module_id": getattr(provider, "module_id", f"l3.{provider_id}") if provider is not None else f"l3.{provider_id}",
-                "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
-            },
-            llm_text=render_titled_structured_for_llm(
-                "Memory active L3 provider",
-                {
-                    "provider_id": provider_id,
-                    "module_id": getattr(provider, "module_id", f"l3.{provider_id}") if provider is not None else f"l3.{provider_id}",
-                    "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
-                },
-            ),
+            status=RuntimeStatus.OK, text="memory active l3 provider", structured=payload,
+            llm_text=render_titled_structured_for_llm("Memory active L3 provider", payload),
         )
 
     @capability_action(
@@ -316,7 +309,7 @@ class MemoryIntrospectionProvider:
             do_not_use_when=(
                 "Current context already provides sufficient evidence, including a first error with a clear recovery. "
                 "Current runtime state needs live introspection; current external facts need external verification."
-                " For backend record counts or index health, search for provider inventory/health inspection. "
+                " For backend record counts or health, use inspect_memory_state; detailed indexes and maintenance use pal memory CLI. "
                 "Semantic recall may refresh indexes and does not enumerate the whole store."
             ),
             failure_next_steps=(
@@ -469,8 +462,8 @@ class MemoryIntrospectionProvider:
         action_name="update",
         guidance=ToolGuidance(
             search_objects=('memory', 'memories', 'record', 'records'),
-            search_terms=('edit', 'modify', 'correct',),
-            purpose="Update an existing durable memory record.",
+            search_terms=('edit', 'modify', 'correct', 'replace', 'revise'),
+            purpose="Replace an existing durable memory record's current content while retaining prior revisions.",
             use_when=(
                 "Instead of remember_memory when a corresponding recalled record needs additional, corrected or superseding information. "
                 "If it already contains all the candidate information, no write is needed; recalling alone does not require an update. "
@@ -568,23 +561,6 @@ class MemoryIntrospectionProvider:
             llm_failure_details={},
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="set_active_provider",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            search_terms=('switch', 'select',),
-            purpose="Switch the active L3 memory provider.",
-            use_when="Changing which memory backend handles recall/remember/update/forget.",
-            do_not_use_when="Checking the active provider (use inspect_memory_state). Listing providers (use list_memory_providers).",
-            failure_next_steps="If the provider name is not found, verify it with list_memory_providers.",
-        ),
-        InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
-        aliases=("set_active_memory_provider",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:

@@ -32,7 +32,7 @@ MODULE_DOMAINS = {
     "control": "core",
 }
 ALIAS_DOMAINS = {
-    **{name: "file" for name in ("read_file", "write_file", "edit_file", "delete_path")},
+    **{name: "file" for name in ("read_file", "write_file", "edit_file")},
     "run_shell": "shell",
 }
 

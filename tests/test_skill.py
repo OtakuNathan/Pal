@@ -64,7 +64,17 @@ class SkillSubsystemTests(unittest.TestCase):
     def test_disable_reenable_and_read_expose_actual_availability(self):
         self.skill_repository.upsert_skill(SkillDescriptor(
             skill_id="test.restore", module_id="skill", title="Restore", summary="Test", manual_text="Do work"))
-        self.service.disable_skill("test.restore")
+        previous = self.skill_repository.get_skill("test.restore")
+        disabled = self.service.disable_skill("test.restore")
+        self.assertFalse(disabled.active)
+        self.assertEqual(disabled.version, previous.version + 1)
+        mirrored = json.loads((self.root / "SKILL" / "test.restore" / "skill.json").read_text())
+        self.assertEqual(mirrored["version"], disabled.version)
+        self.assertEqual(mirrored["status"], "disabled")
+        self.assertFalse(mirrored["enabled"])
+        again = self.service.disable_skill("test.restore")
+        self.assertEqual(again.version, disabled.version)
+        self.assertIsNone(self.service.disable_skill("missing.skill"))
         tool = SkillUpdateTool(self.service)
         tool.invoke({"skill_id": "test.restore", "patch": {"status": "active"}})
         read = SkillReadTool(self.service).invoke({"skill_id": "test.restore"})
@@ -494,7 +504,7 @@ Run the workflow.
         self.assertEqual(skill.module_id, "skill")
         self.assertTrue(skill.active)
         self.assertIn("build_plugin", skill.manual_text)
-        self.assertIn("attach_plugin", skill.capability_refs)
+        self.assertIn("manage_plugin", skill.capability_refs)
 
         search = SkillSearchTool(service=self.service).invoke({"query": "create plugin capability extension", "top_k": 3})
         self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.plugin.development")

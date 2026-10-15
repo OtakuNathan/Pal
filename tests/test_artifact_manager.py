@@ -32,7 +32,6 @@ from pal.llm.conversions import request_ir_from_prompt
 from pal.llm.ir import WireShape
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
-from pal.mcp.plugin import McpManagerPluginProvider
 from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
 
 
@@ -306,13 +305,12 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         ref = self._register_text()
         from pal.execution.generated_tool_models import (
             ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput as SearchInput,
-            ArtifactCapabilitiesArtifactIntrospectionProviderReadInput as ReadInput,
         )
         from pydantic import ValidationError
         with self.assertRaises(ValidationError):
             SearchInput(time_hint="last_week")
         with self.assertRaises(ValidationError):
-            ReadInput(artifact_id=ref.artifact_id, page=0)
+            SearchInput(offset=-1)
         with self.assertRaisesRegex(ValueError, "mutually exclusive"):
             self.manager.read(ref.artifact_id, self.scope_key, page=1, chunk=1)
 
@@ -405,10 +403,10 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         info = self.manager.info(ref.artifact_id, self.scope_key)
         local_file = info["artifact"]["metadata"]["local_file"]
 
-        self.assertEqual(local_file["preferred_path_kind"], "normalized")
+        self.assertEqual(local_file["preferred_path_kind"], "original")
         self.assertTrue(Path(local_file["preferred_path"]).is_file())
         self.assertTrue(Path(local_file["original_path"]).is_file())
-        self.assertTrue(Path(local_file["normalized_path"]).is_file())
+        self.assertNotIn("normalized_path", local_file)
 
         exposure = self.manager.select_prompt_exposure(
             self.scope_key,
@@ -416,8 +414,9 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             "look at the attachment",
             {"supports_vision": False},
         )
-        self.assertIn(local_file["normalized_path"], exposure.text)
-        self.assertNotIn(local_file["original_path"], exposure.text)
+        self.assertIn(local_file["original_path"], exposure.text)
+        self.assertEqual(local_file["preferred_path"], local_file["original_path"])
+        self.assertNotIn("invoice total is 42", exposure.text)
 
     def test_current_artifact_refs_prevent_empty_caption_from_falling_back_to_hot_history(self) -> None:
         old_ref = self._register_image(name="old_caption.jpg", turn_id="old-turn")
@@ -452,10 +451,10 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fresh.jpg", content)
         self.assertNotIn(old_ref.artifact_id, content)
         self.assertNotIn("old_caption.jpg", content)
-        self.assertIn("direct_content: unavailable", content)
-        self.assertIn("current capability/tool surface", content)
-        self.assertIn("local_file:", content)
-        self.assertIn("preferred_path:", content)
+        self.assertIn('"visual_content": "not_attached"', content)
+        self.assertIn('"files":', content)
+        self.assertIn('"original":', content)
+        self.assertIn('"file_path":', content)
         self.assertNotIn("source_url", content)
         self.assertNotIn("telegram_file_path", content)
         self.assertNotIn("FAKE_TOKEN", content)
@@ -503,7 +502,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(exposure.inline_parts), 1)
         self.assertEqual(exposure.inline_parts[0].artifact_id, ref.artifact_id)
-        self.assertIn("visual_content: attached_inline", exposure.text)
+        self.assertIn('"visual_content": "attached_inline"', exposure.text)
 
     def test_runtime_endpoint_capabilities_drive_image_inline_exposure(self) -> None:
         class _Settings:
@@ -560,7 +559,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(exposure.inline_parts), 1)
         self.assertEqual(exposure.inline_parts[0].artifact_id, ref.artifact_id)
-        self.assertIn("visual_content: attached_inline", exposure.text)
+        self.assertIn('"visual_content": "attached_inline"', exposure.text)
         self.assertNotIn("not directly attached or readable", exposure.text)
 
     def test_expired_artifact_retires_handler_and_reclaims_managed_files(self) -> None:
@@ -590,7 +589,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             artifact_ids=(ref.artifact_id,),
         )
 
-        self.assertIn("artifact handlers have retired", exposure.text)
+        self.assertIn("status: retired", exposure.text)
         self.assertIn(ref.artifact_id, exposure.text)
         self.assertIn("managed bytes and representations deleted", exposure.text)
         self.assertEqual(exposure.inline_parts, ())
@@ -990,7 +989,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ref.text_file)
         self.assertEqual(exposure.inline_parts, ())
         self.assertIn("This is an audio file, not a transcript", exposure.text)
-        self.assertIn('search_tools(query="audio transcribe")', exposure.text)
+        self.assertIn("transcription tool", exposure.text)
         self.assertIn("audio/mpeg", exposure.text)
         self.assertNotIn("transcribe_artifact", exposure.text)
         path = info["artifact"]["metadata"]["local_file"]["preferred_path"]
@@ -1009,7 +1008,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn(path, projected[0].text)
             self.assertIn("This is an audio file, not a transcript", projected[0].text)
-            self.assertIn('search_tools(query="audio transcribe")', projected[0].text)
+            self.assertIn("transcription tool", projected[0].text)
         finally:
             core.context.execution_runtime.shutdown()
 
@@ -1022,7 +1021,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
                 core.publish_module_capabilities(module)
             runtime = core.context.execution_runtime
             self.assertIsNone(runtime.registry_generation.record_for_alias("transcribe_artifact"))
-            self.assertIsNotNone(runtime.registry_generation.record_for_alias("read_artifact"))
+            self.assertIsNone(runtime.registry_generation.record_for_alias("read_artifact"))
+            self.assertIsNotNone(runtime.registry_generation.record_for_alias("inspect_artifact_info"))
         finally:
             core.context.execution_runtime.shutdown()
 
@@ -1077,9 +1077,9 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         merged_content = request.messages[0].parts
         merged_text = request.messages[0].text
         self.assertIn("Available Artifacts", merged_text)
-        self.assertIn("visual_content: attached_inline", merged_text)
-        self.assertIn("answer from those pixels directly", merged_text)
-        self.assertIn("optional_tools: inspect_artifact_info", merged_text)
+        self.assertIn('"visual_content": "attached_inline"', merged_text)
+        self.assertIn("Use attached pixels", merged_text)
+        self.assertIn("file_name", merged_text)
         self.assertNotIn("inspect_inline_image", merged_text)
         self.assertNotIn("actions: info, read, search", merged_text)
         self.assertIn("what do you see?", merged_text)
@@ -1141,7 +1141,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         kinds = {item["representation_kind"] for item in info["representations"]}
 
         self.assertIn("page_text", kinds)
-        self.assertIn("chunk_text", kinds)
+        self.assertNotIn("chunk_text", kinds)
+        self.assertNotIn("text", kinds)
 
     async def test_artifact_tools_are_discoverable_and_callable_when_not_resident(self) -> None:
         core = PalCore()
@@ -1166,7 +1167,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         }
 
         self.assertNotIn("list_artifacts", contracts)
-        for query, expected in (("search artifact", "search_artifacts"), ("read artifact", "read_artifact")):
+        for query, expected in (("search artifact", "search_artifacts"), ("inspect artifact files", "inspect_artifact_info")):
             search = await core.context.execution_runtime.execute_tool_async(
                 new_tool_call(name="search_tools", args={"query": query, "module_name": "artifact", "top_k": 5}),
                 turn_id=self.turn_id,
@@ -1175,20 +1176,21 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(expected, {hit["alias"] for hit in search.structured["hits"]})
 
         read_tool = await core.context.execution_runtime.execute_tool_async(
-            new_tool_call(name="read_tool", args={"name": "read_artifact"}),
+            new_tool_call(name="read_tool", args={"name": "inspect_artifact_info"}),
             turn_id=self.turn_id,
         )
         self.assertTrue(read_tool.ok, read_tool.text)
         schema = read_tool.structured["input_schema"]
         self.assertIn("artifact_id", schema["properties"])
-        self.assertIn("representation", schema["properties"])
+        self.assertEqual(set(schema["properties"]), {"artifact_id"})
 
         called = await core.context.execution_runtime.execute_tool_async(
-            new_tool_call(name="call_tool", args={"name": "read_artifact", "args": {"artifact_id": ref.artifact_id}}),
+            new_tool_call(name="call_tool", args={"name": "inspect_artifact_info", "args": {"artifact_id": ref.artifact_id}}),
             turn_id=self.turn_id,
         )
         self.assertEqual(called.status, RuntimeStatus.OK, called.text)
-        self.assertIn("refund terms", called.text)
+        self.assertIn("refund-policy.txt", called.llm_text)
+        self.assertNotIn("refund terms", called.llm_text)
 
     @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
     def test_remote_image_source_is_replaced_by_normalized_local_data_url(self) -> None:
@@ -1245,20 +1247,16 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("source_url", info["artifact"]["metadata"].get("source_metadata", {}))
         self.assertNotIn("source_url", exposure.text)
 
-        mcp_provider = McpManagerPluginProvider(
-            runtime_root=self.root,
-            core_context=SimpleNamespace(
-                port_registry={"artifact:artifact": self.manager},
-                execution_runtime=_ToolRuntime(self.scope_key),
-            ),
+        from pal.mcp.artifact_inputs import resolve_artifact_input
+        from pal.execution.contracts import CapabilityCall
+        context = SimpleNamespace(
+            port_registry={"artifact:artifact": self.manager},
+            execution_runtime=_ToolRuntime(self.scope_key),
         )
-        prepared = mcp_provider._prepare_image_payload(
-            {"artifact_id": ref.artifact_id, "mode": "url"},
-            turn_id=self.turn_id,
-        )
-        self.assertEqual(prepared["kind"], "data_url")
-        self.assertTrue(prepared["data_url"].startswith("data:image/jpeg;base64,"))
-        self.assertNotIn("FAKE_TOKEN", str(prepared))
+        prepared = resolve_artifact_input(context, ref.artifact_id, "url",
+            CapabilityCall(name="image_tool", meta={"turn_id": self.turn_id}))
+        self.assertTrue(prepared.startswith("data:image/jpeg;base64,"))
+        self.assertNotIn("FAKE_TOKEN", prepared)
 
     @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
     def test_image_without_source_url_falls_back_to_base64(self) -> None:

@@ -81,9 +81,14 @@ def test_read_tool_full_contract_is_retained_only_in_structured_channel():
             assert 'Failure next steps:' not in visible['description']
             assert 'Execution semantics:' in visible['description']
             assert 'Valid example:' not in visible['description']
-        result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name':'list_tools','args':{}}))
-        assert all('output_schema' in item for item in result.structured['tools'])
-        assert all('output_schema' not in item for item in json.loads(result.invocation_result.llm_text)['tools'])
+        inventory = runtime.list_tool_specs()
+        assert all('output_schema' in item for item in inventory)
+        result = runtime.execute_tool(new_tool_call(name='search_tools', args={'domain': 'file'}))
+        assert result.ok
+        directory = result.structured['directory']['tools']
+        assert {item['alias'] for item in directory} == {'read_file', 'edit_file', 'write_file'}
+        assert all('output_schema' not in item for item in directory)
+
     finally:
         runtime.shutdown()
 

@@ -43,23 +43,10 @@ def _strict_model(name: str, fields: dict[str, tuple[Any, Any]]):
     return create_model(name, __base__=StrictToolModel, **fields)
 
 
-ArtifactCapabilitiesArtifactIntrospectionProviderListInput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderListInput',
-    {
-        'query_context': (str, Field(None)),
-    },
-)
-
-ArtifactCapabilitiesArtifactIntrospectionProviderListOutput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderListOutput',
-    {
-    },
-)
-
 ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput',
     {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
+        'artifact_id': (str, Field(..., description='Artifact ID from an attachment description in the current context or search_artifacts.')),
     },
 )
 
@@ -69,63 +56,18 @@ ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput = _strict_model(
     },
 )
 
-ArtifactCapabilitiesArtifactIntrospectionProviderReadInput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderReadInput',
-    {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
-        'representation': (Literal['auto', 'text', 'page_text', 'chunk_text', 'transcript', 'metadata'], Field('auto', description='Defaults to automatic selection of a text-like representation; no prior inspect_artifact_info is needed. Does not inspect visual image pixels. page or chunk overrides this value.')),
-        'page': (int, Field(None, ge=1, description='1-based artifact page number; selects page_text. Use a known page directly, or inspect_artifact_info for metadata. Mutually exclusive with chunk; not a tool-result page.')),
-        'chunk': (int, Field(None, ge=1, description='1-based artifact chunk number; selects chunk_text. Use a known chunk directly, or inspect_artifact_info for metadata. Mutually exclusive with page.')),
-        'max_chars': (int, Field(12000, ge=1, description='Text preview character budget. Use page/chunk to focus on a representation.')),
-    },
-)
-
-ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput',
-    {
-    },
-)
-
 ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput',
     {
-        'query': (str, Field(None)),
-        'kind': (str, Field(None)),
-        'limit': (int, Field(5)),
+        'query': (str, Field('', description='Filename, type, caption or summary keywords. Omit or empty to list available attachments.')),
+        'kind': (str, Field(None, description='Optional attachment kind filter.')),
+        'limit': (int, Field(5, ge=1, le=20, description='Maximum descriptions per page.')),
+        'offset': (int, Field(0, ge=0, description='Use next_offset from the previous result while has_more=true.')),
     },
 )
 
 ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput',
-    {
-    },
-)
-
-ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput',
-    {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
-    },
-)
-
-ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput',
-    {
-    },
-)
-
-ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput',
-    {
-        'artifact_id': (str, Field(..., description='Artifact id from Available Artifacts or search_artifacts.')),
-        'query': (str, Field(..., description='Case-insensitive word matching, not regex. Use rg for regular expressions or line-oriented search.')),
-        'top_k': (int, Field(5)),
-        'max_chars_per_result': (int, Field(2000)),
-    },
-)
-
-ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput = _strict_model(
-    'ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput',
     {
     },
 )
@@ -168,31 +110,11 @@ ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput = _strict_model
     },
 )
 
-ChannelCapabilitiesChannelIntrospectionProviderEnableInput = _strict_model(
-    'ChannelCapabilitiesChannelIntrospectionProviderEnableInput',
+ChannelCapabilitiesChannelIntrospectionProviderManageEndpointInput = _strict_model(
+    'ChannelCapabilitiesChannelIntrospectionProviderManageEndpointInput',
     {
-        'name': (str, Field(..., description='Endpoint name returned by list_channel_endpoints.')),
-    },
-)
-
-ChannelCapabilitiesChannelIntrospectionProviderDisableInput = _strict_model(
-    'ChannelCapabilitiesChannelIntrospectionProviderDisableInput',
-    {
-        'name': (str, Field(..., description='Endpoint name returned by list_channel_endpoints.')),
-    },
-)
-
-ChannelCapabilitiesChannelIntrospectionProviderAttachInput = _strict_model(
-    'ChannelCapabilitiesChannelIntrospectionProviderAttachInput',
-    {
-        'name': (str, Field(..., description='Endpoint name returned by list_channel_endpoints.')),
-    },
-)
-
-ChannelCapabilitiesChannelIntrospectionProviderDetachInput = _strict_model(
-    'ChannelCapabilitiesChannelIntrospectionProviderDetachInput',
-    {
-        'name': (str, Field(..., description='Endpoint name returned by list_channel_endpoints.')),
+        'name': (str, Field(..., min_length=1, pattern=r'\S', description='Exact endpoint name returned by list_channel_endpoints. This is not a provider plugin name.')),
+        'operation': (Literal['attach', 'detach', 'restart', 'enable', 'disable'], Field(..., description='attach preserves an existing transport; restart replaces it. detach retains configuration. enable/disable persist acceptance state without replacing the runtime instance.')),
     },
 )
 
@@ -205,13 +127,6 @@ ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput = _strict_mod
     'ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput',
     {
         'name': (str, Field(..., description='Runtime-root provider id shown by list_channel_endpoints.')),
-    },
-)
-
-ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput = _strict_model(
-    'ChannelCapabilitiesChannelIntrospectionProviderRestartEndpointInput',
-    {
-        'name': (str, Field(..., description='Endpoint name returned by list_channel_endpoints.')),
     },
 )
 
@@ -509,13 +424,6 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadOutput = _strict_model(
     },
 )
 
-LlmCapabilitiesLLMIntrospectionProviderShowInput = _strict_model(
-    'LlmCapabilitiesLLMIntrospectionProviderShowInput',
-    {
-        'name': (str, Field(..., description='Endpoint name returned by list_llm_endpoints.')),
-    },
-)
-
 LspPluginLspManagerPluginProviderPrepareWorkspaceInput = _strict_model(
     'LspPluginLspManagerPluginProviderPrepareWorkspaceInput',
     {
@@ -534,17 +442,9 @@ LspPluginLspManagerPluginProviderPrepareWorkspaceInput = _strict_model(
 LspPluginLspManagerPluginProviderStatusInput = _strict_model(
     'LspPluginLspManagerPluginProviderStatusInput',
     {
-        'workspace_root': (str, Field(..., min_length=1, description='Exact project/worktree root to inspect. Module health is available through inspect_lsp_provider.')),
-    },
-)
-
-LspPluginLspManagerPluginProviderDoctorInput = _strict_model(
-    'LspPluginLspManagerPluginProviderDoctorInput',
-    {
-        'file': (str, Field(None)),
-        'path': (str, Field(None)),
-        'workspace_root': (str, Field(None)),
-        'name': (str, Field(None, description='Optional LSP server name returned by inspect_lsp_status or prepare_lsp_workspace. Supply name or file/path; workspace_root alone is insufficient. name selects the server; file takes precedence over path.')),
+        'workspace_root': (str, Field(None, min_length=1, pattern=r'\S', description='Optional project/worktree root. Without a server selector this reads recorded readiness without starting the manager.')),
+        'name': (str, Field(None, min_length=1, pattern=r'\S', description='Select one server for active binary, project-context and initialization diagnosis. Omit all selectors for passive host health.')),
+        'file': (str, Field(None, min_length=1, pattern=r'\S', description='Select a server by source file when its name is unknown. name pins the server when also supplied.')),
     },
 )
 
@@ -568,25 +468,15 @@ LspPluginLspManagerPluginProviderHoverInput = _strict_model(
     },
 )
 
-LspPluginLspManagerPluginProviderDefinitionInput = _strict_model(
-    'LspPluginLspManagerPluginProviderDefinitionInput',
+LspPluginLspManagerPluginProviderSymbolLocationsInput = _strict_model(
+    'LspPluginLspManagerPluginProviderSymbolLocationsInput',
     {
+        'kind': (Literal['definition', 'implementation'], Field(...)),
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'name': (str, Field(None, description='Optional LSP server name returned by inspect_lsp_status or prepare_lsp_workspace.')),
-        'line': (int, Field(..., description='0-based line number')),
-        'character': (int, Field(..., description='0-based UTF-16 character offset')),
-    },
-)
-
-LspPluginLspManagerPluginProviderImplementationInput = _strict_model(
-    'LspPluginLspManagerPluginProviderImplementationInput',
-    {
-        'file': (str, Field(...)),
-        'workspace_root': (str, Field(None)),
-        'name': (str, Field(None, description='Optional LSP server name returned by inspect_lsp_status or prepare_lsp_workspace.')),
-        'line': (int, Field(..., description='0-based line number')),
-        'character': (int, Field(..., description='0-based UTF-16 character offset')),
+        'name': (str, Field(None, description='Optional exact LSP server name.')),
+        'line': (int, Field(..., ge=0, description='0-based line number')),
+        'character': (int, Field(..., ge=0, description='0-based UTF-16 character offset')),
     },
 )
 
@@ -602,36 +492,15 @@ LspPluginLspManagerPluginProviderReferencesInput = _strict_model(
     },
 )
 
-LspPluginLspManagerPluginProviderPrepareCallHierarchyInput = _strict_model(
-    'LspPluginLspManagerPluginProviderPrepareCallHierarchyInput',
+LspPluginLspManagerPluginProviderCallsInput = _strict_model(
+    'LspPluginLspManagerPluginProviderCallsInput',
     {
+        'direction': (Literal['callers', 'callees'], Field(...)),
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'name': (str, Field(None, description='Optional LSP server name returned by inspect_lsp_status or prepare_lsp_workspace.')),
-        'line': (int, Field(..., description='0-based line number')),
-        'character': (int, Field(..., description='0-based UTF-16 character offset')),
-    },
-)
-
-LspPluginLspManagerPluginProviderIncomingCallsInput = _strict_model(
-    'LspPluginLspManagerPluginProviderIncomingCallsInput',
-    {
-        'file': (str, Field(...)),
-        'workspace_root': (str, Field(None)),
-        'name': (str, Field(None, description='Optional LSP server name returned by inspect_lsp_status or prepare_lsp_workspace.')),
-        'line': (int, Field(..., description='0-based line number')),
-        'character': (int, Field(..., description='0-based UTF-16 character offset')),
-    },
-)
-
-LspPluginLspManagerPluginProviderOutgoingCallsInput = _strict_model(
-    'LspPluginLspManagerPluginProviderOutgoingCallsInput',
-    {
-        'file': (str, Field(...)),
-        'workspace_root': (str, Field(None)),
-        'name': (str, Field(None, description='Optional LSP server name returned by inspect_lsp_status or prepare_lsp_workspace.')),
-        'line': (int, Field(..., description='0-based line number')),
-        'character': (int, Field(..., description='0-based UTF-16 character offset')),
+        'name': (str, Field(None, description='Optional exact LSP server name.')),
+        'line': (int, Field(..., ge=0, description='0-based line number')),
+        'character': (int, Field(..., ge=0, description='0-based UTF-16 character offset')),
     },
 )
 
@@ -660,34 +529,18 @@ McpPluginMcpManagerPluginProviderReadInput = _strict_model(
     },
 )
 
-McpPluginMcpManagerPluginProviderAttachInput = _strict_model(
-    'McpPluginMcpManagerPluginProviderAttachInput',
+McpPluginMcpManagerPluginProviderManageServerInput = _strict_model(
+    'McpPluginMcpManagerPluginProviderManageServerInput',
     {
-        'name': (str, Field(..., description='MCP server name returned by list_mcp_servers.')),
-    },
-)
-
-McpPluginMcpManagerPluginProviderDetachInput = _strict_model(
-    'McpPluginMcpManagerPluginProviderDetachInput',
-    {
-        'name': (str, Field(..., description='MCP server name returned by list_mcp_servers.')),
-    },
-)
-
-McpPluginMcpManagerPluginProviderImagePrepareInput = _strict_model(
-    'McpPluginMcpManagerPluginProviderImagePrepareInput',
-    {
-        'artifact_id': (str, Field(None, description='Opaque artifact handle returned by list_artifacts or search_artifacts.')),
-        'path': (str, Field(None)),
-        'url': (str, Field(None)),
-        'mode': (Literal['auto', 'url', 'path', 'base64', 'data_url'], Field(None, description='url takes precedence only for auto/url. Otherwise artifact_id overrides path. path/base64/data_url require a local file or artifact; URL is not downloaded. auto returns URL as-is, artifact as data URL, or path as base64.')),
+        'name': (str, Field(..., min_length=1, pattern=r"\S", description='Exact MCP server name returned by list_mcp_servers.')),
+        'operation': (Literal['attach', 'detach'], Field(..., description='Control the current server connection; does not persistently change configured enabled state.')),
     },
 )
 
 MemoryCapabilitiesMemoryIntrospectionProviderRecallInput = _strict_model(
     'MemoryCapabilitiesMemoryIntrospectionProviderRecallInput',
     {
-        'provider_id': (str | None, Field(None, min_length=1, pattern=r'\S', description='Optional exact provider id returned by a prior memory result or list_memory_providers. Omit for normal recall from the active provider. Supply the original provider when reconciling a mutation after a provider switch; this does not switch the active provider. Unknown providers fail without fallback.')),
+        'provider_id': (str | None, Field(None, min_length=1, pattern=r'\S', description='Optional exact provider ID from a prior memory result or the official pal memory providers CLI. Omit for normal recall from the active provider. Supply the original provider when reconciling a mutation after a provider switch; this does not switch the active provider. Unknown providers fail without fallback.')),
         'mem_ref': (str | None, Field(None, pattern=r'^(fact|case):.+$', description='Exact durable reference. When supplied, reads the record directly without semantic search or index refresh; queries/topic_scope/limit are not used. kind/task_id still constrain visibility.')),
         'queries': (list[str], Field(None, description='One to three focused natural-language search strings for the remembered fact, preference, project context, prior decision, repair lesson, failure case, or candidate memory. Include concrete names, modules, error text, symptoms, failed fixes, or user terms when known. Do not paste large raw context; summarize the lookup target.')),
         'topic_scope': (list[str], Field(None, description='Optional short topic keywords that narrow retrieval, such as a project, subsystem, user preference area, or failure domain. This is semantic narrowing, not the storage scope; do not use system/task here.')),
@@ -773,7 +626,7 @@ BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInputChanges = _st
         'identity_fragment': (str | None, Field(None)),
         'behavior_fragment': (str | None, Field(None)),
         'output_contract_fragment': (str | None, Field(None)),
-        'preferred_endpoint_name': (str | None, Field(None, description='LLM endpoint name returned by llm_list_endpoints.')),
+        'preferred_endpoint_name': (str | None, Field(None, description='LLM endpoint ID returned by inspect_llm.')),
         'capability_groups': (list[str] | None, Field(None)),
         'default_allowed_capabilities': (list[str] | None, Field(None)),
         'skill_refs': (list[str] | None, Field(None, description='Semantic skill names returned by search_skills.')),
@@ -885,13 +738,6 @@ BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput = _strict_model(
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderResumeWorkflowInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderResumeWorkflowInput',
-    {
-        'task': (str, Field(None, description='Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.')),
-    },
-)
-
 BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput = _strict_model(
     'BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput',
     {
@@ -921,15 +767,7 @@ BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput = _strict_model
     'BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput',
     {
         'task': (str, Field(None, description='Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.')),
-        'command': (Literal['pause', 'cancel'], Field(...)),
-        'reason': (str, Field(None)),
-    },
-)
-
-BunshinV2CapabilitiesBunshinV2PublicProviderArchiveWorkflowInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderArchiveWorkflowInput',
-    {
-        'task': (str, Field(None, description='Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.')),
+        'operation': (Literal['pause', 'resume', 'cancel', 'archive'], Field(..., description='Pause/cancel are asynchronous requests. Resume may report triage blockers; archive requires a completed, rejected or cancelled workflow and keeps its Task.')),
         'reason': (str, Field(None)),
     },
 )
@@ -1130,41 +968,20 @@ ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput = _strict_model(
     },
 )
 
-ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput = _strict_model(
-    'ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput',
+ProactiveCapabilitiesProactiveIntrospectionProviderManageTaskInput = _strict_model(
+    'ProactiveCapabilitiesProactiveIntrospectionProviderManageTaskInput',
     {
-        'name': (str, Field(..., description='Task name returned by list_proactive_tasks.')),
+        'name': (str, Field(..., min_length=1, pattern=r"\S", description='Task name returned by list_proactive_tasks.')),
+        'operation': (Literal['enable', 'disable', 'delete'], Field(..., description='enable resumes future scheduling; disable pauses it and retains the task/history; delete permanently removes the task definition.')),
     },
 )
 
-ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput = _strict_model(
-    'ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput',
+ProactiveCapabilitiesProactiveIntrospectionProviderSetDestinationInput = _strict_model(
+    'ProactiveCapabilitiesProactiveIntrospectionProviderSetDestinationInput',
     {
-        'name': (str, Field(..., description='Task name returned by list_proactive_tasks.')),
-    },
-)
-
-ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput = _strict_model(
-    'ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput',
-    {
-        'name': (str, Field(..., description='Task name returned by list_proactive_tasks.')),
-    },
-)
-
-ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput = _strict_model(
-    'ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput',
-    {
-        'name': (str, Field(..., description='Task name returned by list_proactive_tasks.')),
-        'out_channel_name': (str, Field(None, description='Endpoint name from list_channel_endpoints; omit or empty to clear output. Its unique default/current conversation target is resolved automatically.')),
-        'out_reply_target': (dict[str, Any], Field(None, description='Optional known destination within the new channel. Channel and target are updated together; the old channel target is never reused across channels. A nonempty target requires a nonempty out_channel_name; omit/empty both to clear output.')),
-    },
-)
-
-ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput = _strict_model(
-    'ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput',
-    {
-        'name': (str, Field(..., description='Task name returned by list_proactive_tasks.')),
-        'out_reply_target': (dict[str, Any], Field(None, description='Provider-specific destination from a known inbound reply_target or existing proactive task. Telegram uses chat_id and optional thread_id; fields differ across providers.')),
+        'name': (str, Field(..., min_length=1, pattern=r"\S", description='Task name returned by list_proactive_tasks.')),
+        'out_channel_name': (str | None, Field(None, min_length=1, pattern=r"\S", description='Omit to retain the task channel. Supply an endpoint name from list_channel_endpoints to change it; without a target, resolve the current/default destination. Explicit null clears both channel and target.')),
+        'out_reply_target': (dict[str, Any], Field(None, description='Known provider-specific destination, e.g. Telegram chat_id and optional thread_id. Omit when changing channel to resolve its current/default destination. Supply {} to clear only the target while retaining the selected channel.')),
     },
 )
 
@@ -1213,25 +1030,12 @@ SkillCapabilitiesSkillIntrospectionProviderUpdateInput = _strict_model(
     'SkillCapabilitiesSkillIntrospectionProviderUpdateInput',
     {
         'name': (str, Field(..., description='Skill name returned by search_skills.')),
-        'patch': (SkillPatch, Field(..., description='Only supplied fields change. Empty strings/lists clear optional content; title and manual_text must remain nonblank.')),
+        'patch': (SkillPatch, Field(..., description='Only supplied fields change. Disable with status=disabled and enabled=false; reactivate with status=active and enabled=true. Empty strings/lists clear optional content; title and manual_text must remain nonblank.')),
     },
 )
 
 SkillCapabilitiesSkillIntrospectionProviderUpdateOutput = _strict_model(
     'SkillCapabilitiesSkillIntrospectionProviderUpdateOutput',
-    {
-    },
-)
-
-SkillCapabilitiesSkillIntrospectionProviderDisableInput = _strict_model(
-    'SkillCapabilitiesSkillIntrospectionProviderDisableInput',
-    {
-        'name': (str, Field(..., description='Skill name returned by search_skills.')),
-    },
-)
-
-SkillCapabilitiesSkillIntrospectionProviderDisableOutput = _strict_model(
-    'SkillCapabilitiesSkillIntrospectionProviderDisableOutput',
     {
     },
 )
@@ -1290,7 +1094,7 @@ SkillCapabilitiesSkillIntrospectionProviderInjectOutput = _strict_model(
 WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput = _strict_model(
     'WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput',
     {
-        'name': (str, Field(..., description='Provider name returned by list_web_search_providers.')),
+        'name': (str, Field(..., description='Provider name returned by inspect_web_search.')),
     },
 )
 

@@ -209,6 +209,13 @@ class SQLiteVecL3Plugin:
     def resolve_provider_label(self, provider: "SQLiteVecL3Plugin") -> str:
         return provider.provider_id
 
+    def inspect_summary(self) -> dict[str, Any]:
+        """Passive hub facts: never probe embedding transport for a summary."""
+        return {**self.repository.inventory(), "mounted": self.mounted,
+                "read_only": bool(getattr(self.repository, "read_only", False)),
+                "embedding_configured": self.embedding_provider is not None,
+                "last_embedding_error": self.last_embedding_error}
+
     def inspect(self) -> dict[str, Any]:
         sqlite_vec_status = ensure_sqlite_vec_loaded(self.repository.database)
         inventory = self.repository.inventory()
@@ -238,15 +245,6 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("SQLite vec memory provider", payload),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory",
-        guidance=ToolGuidance(
-            search_objects=('inventory', 'inventories'),
-            search_terms=('index', 'indexes', 'indices', 'status', 'show', 'state', 'health', 'backend', 'embedding', 'counts', 'records'),
-            purpose="Inspect one sqlite-vec memory provider's lifecycle, inventory, indexes and embedding health together.",
-            use_when='Checking memory record counts, embedding coverage, or index health. Missing embeddings do not mean records are absent. Inspect the embedding provider and use refresh_memory_provider_indexes after correcting availability.',
-            do_not_use_when="Recalling specific memories (use recall_memory). Memory hub state (use inspect_memory_state).",
-            failure_next_steps="Read-only. If embeddings missing, run refresh_memory_provider_indexes.",
-        ), aliases=("inspect_memory_provider_inventory",))
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         from pal.shared.inspection import inspection_snapshot
@@ -387,15 +385,6 @@ class SQLiteVecL3Plugin:
         )
         return _provider_mutation_result("delete", result)
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers', 'backend', 'backends', 'store', 'stores'),
-            search_terms=('connect', 'reconnect', 'mount', 'sqlite', 'vec', 'l3'),
-            purpose="Attach the sqlite-vec memory provider.",
-            use_when="Reopening a detached memory backend's storage resources after its plugin is already loaded. Copy the provider name from memory provider inspection.",
-            do_not_use_when="Loading plugin code (use attach_plugin). Reloading changed code (use reload_plugin). Detaching (use detach_memory_provider). Switching providers (use set_active_memory_provider).",
-            failure_next_steps="If attach fails, check database file and sqlite-vec extension availability.",
-        ), aliases=("attach_memory_provider",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         if not self.mounted and self.repository.catalog is not None:
@@ -409,14 +398,6 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach",
-        guidance=ToolGuidance(
-            search_objects=('provider', 'providers'),
-            purpose="Detach the sqlite-vec memory provider.",
-            use_when='Temporarily disconnecting the memory backend. Use attach_memory_provider to reconnect this provider before storage or recall.',
-            do_not_use_when="Attaching (use attach_memory_provider).",
-            failure_next_steps="Re-attach with attach_memory_provider.",
-        ), aliases=("detach_memory_provider",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         if self.repository.frozen:
@@ -430,23 +411,6 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("Memory provider detached", {"mounted": False}),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="provider",
-        family="maintenance",
-        action_name="refresh_indexes",
-        guidance=ToolGuidance(
-            search_objects=('index', 'indexes', 'indices'),
-            purpose="Refresh sqlite-vec indexes and embedding state.",
-            use_when="After bulk data changes or when search results seem stale.",
-            do_not_use_when="Normal operation — indexes update incrementally. Provider state (use inspect_memory_provider_inventory).",
-            failure_next_steps="If refresh fails, check embedding model configuration.",
-        ),
-        metadata={"omit_family_in_canonical": True},
-        InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRefreshIndexesInput,
-        aliases=("refresh_memory_provider_indexes",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
     def refresh_indexes_action(self, call: IntrospectionCall) -> IntrospectionResult:
         limit = int(call.args.get("limit") or 8)
         retry_failed = bool(call.args.get("retry_failed", False))

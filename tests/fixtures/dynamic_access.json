@@ -2879,10 +2879,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/mcp/plugin.py:McpManagerPluginProvider._prepare_image_payload:getattr(artifact_manager, 'info', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/memory/capabilities.py:MemoryIntrospectionProvider.active_provider:getattr(provider, 'module_id', f'l3.{provider_id}')": {
     "count": 2,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3730,5 +3726,73 @@
   "src/pal/packages/integration.py:RuntimeActivation.switch_gate:getattr(self.host, 'generations', {})": {
     "count": 1,
     "reason": "Legacy provider ownership boundary: support both provider-manager-owned instances and PluginHost-owned channel adapters during package activation."
+  },
+  "src/pal/core/memory_maintenance.py:MemoryMaintenanceMixin.memory_maintenance_busy:getattr(channel, 'mailbox', None)": {
+    "count": 1,
+    "reason": "Resident maintenance admission tolerates a channel without a mailbox during bootstrap; this only determines whether work is pending."
+  },
+  "src/pal/emotion/runtime.py:EmotionRegistry.broadcast:getattr(renderer.scope, 'handle', None)": {
+    "count": 1,
+    "reason": "Renderer contributions may be outside a plugin generation; inspect the optional owner handle only to skip withdrawn contributions."
+  },
+  "src/pal/llm/capabilities.py:LLMIntrospectionProvider.list_endpoints:getattr(endpoint, 'transport', 'http')": {
+    "count": 1,
+    "reason": "Passive endpoint snapshots default an undeclared legacy HTTP transport without resolving credentials or changing endpoint selection."
+  },
+  "src/pal/llm/capabilities.py:_model_snapshot:getattr(endpoint, 'transport', 'http')": {
+    "count": 1,
+    "reason": "Passive endpoint snapshots default an undeclared legacy HTTP transport without resolving credentials or changing endpoint selection."
+  },
+  "src/pal/memory/capabilities.py:MemoryIntrospectionProvider.active_provider:getattr(provider, 'inspect_summary', None)": {
+    "count": 1,
+    "reason": "Internal backend inspection supports optional read-only and embedding-health projections from independently owned provider implementations."
+  },
+  "src/pal/memory/capabilities.py:MemoryIntrospectionProvider.active_provider:getattr(provider, 'last_embedding_error', '')": {
+    "count": 1,
+    "reason": "Internal backend inspection supports optional read-only and embedding-health projections from independently owned provider implementations."
+  },
+  "src/pal/memory/capabilities.py:MemoryIntrospectionProvider.active_provider:getattr(provider, 'read_only', False)": {
+    "count": 1,
+    "reason": "Internal backend inspection supports optional read-only and embedding-health projections from independently owned provider implementations."
+  },
+  "src/pal/memory/capabilities.py:MemoryIntrospectionProvider.list_providers:getattr(provider, 'last_embedding_error', '')": {
+    "count": 1,
+    "reason": "Internal backend inspection supports optional read-only and embedding-health projections from independently owned provider implementations."
+  },
+  "src/pal/memory/cli.py:run_memory_cli_async:getattr(args, 'name', None)": {
+    "count": 2,
+    "reason": "Argparse subcommands have different optional target fields; absent name selects hub inspection."
+  },
+  "src/pal/memory/embedding.py:build_ollama_embedding_provider_from_config:getattr(config, 'embedding_model_revision', '')": {
+    "count": 1,
+    "reason": "Configuration compatibility defaults embedding revision and text processing when older config adapters omit these fields."
+  },
+  "src/pal/memory/embedding.py:build_ollama_embedding_provider_from_config:getattr(config, 'embedding_text_processing_version', 'search_text_v1')": {
+    "count": 1,
+    "reason": "Configuration compatibility defaults embedding revision and text processing when older config adapters omit these fields."
+  },
+  "src/pal/memory/embedding_migration.py:_identity:getattr(provider, 'model_revision', None)": {
+    "count": 1,
+    "reason": "Embedding identity includes optional provider model revision and text processing version; defaults identify legacy providers."
+  },
+  "src/pal/memory/embedding_migration.py:_identity:getattr(provider, 'text_processing_version', 'search_text_v1')": {
+    "count": 1,
+    "reason": "Embedding identity includes optional provider model revision and text processing version; defaults identify legacy providers."
+  },
+  "src/pal/memory/maintenance.py:MemoryBackendOwner.dispatch:getattr(provider, 'mounted', True)": {
+    "count": 3,
+    "reason": "Resident owner validates the CLI operation before dispatch; optional provider lifecycle flags preserve backend compatibility."
+  },
+  "src/pal/memory/maintenance.py:MemoryBackendOwner.dispatch:getattr(provider, 'read_only', False)": {
+    "count": 1,
+    "reason": "Resident owner validates the CLI operation before dispatch; optional provider lifecycle flags preserve backend compatibility."
+  },
+  "src/pal/memory/maintenance.py:MemoryBackendOwner.dispatch:getattr(provider, command)": {
+    "count": 1,
+    "reason": "Resident owner validates the CLI operation before dispatch; optional provider lifecycle flags preserve backend compatibility."
+  },
+  "src/pal/plugins/l3/sqlite_vec.py:SQLiteVecL3Plugin.inspect_summary:getattr(self.repository, 'read_only', False)": {
+    "count": 1,
+    "reason": "Passive SQLite provider health accepts a repository adapter without a read-only flag; it never starts embedding work."
   }
 }

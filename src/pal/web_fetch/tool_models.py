@@ -18,6 +18,19 @@ def _strict_model(name: str, fields: dict[str, tuple[Any, Any]]):
     return create_model(name, __base__=StrictToolModel, **fields)
 
 
+BrowserInspectionInput = _strict_model(
+    "BrowserInspectionInput",
+    {"extension_id": (str | None, Field(None, min_length=1, max_length=100,
+        description="Optional configured extension ID for its complete state. Omit for host/session health and extension summaries."))},
+)
+BrowserSessionManageInput = _strict_model(
+    "BrowserSessionManageInput",
+    {
+        "operation": (Literal["close", "clear_cache", "reset"], Field(...)),
+        "confirm": (bool, Field(False, description="Set true explicitly for reset, which deletes the conversation profile and login state.")),
+    },
+)
+
 BrowserNavigateInput = _strict_model(
     "BrowserNavigateInput",
     {
@@ -258,6 +271,8 @@ BrowserActionOutput = StructuredToolOutput
 
 __all__ = [
     "BrowserActionOutput",
+    "BrowserInspectionInput",
+    "BrowserSessionManageInput",
     "BrowserExtensionManageInput",
     "BrowserCheckInput",
     "BrowserClickInput",

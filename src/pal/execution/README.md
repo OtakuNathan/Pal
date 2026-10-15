@@ -79,7 +79,7 @@ Notes:
 - Alias translation applies to Pal routing prose and internal schema annotations.
   Schema literals, defaults, examples, references and external MCP descriptions
   retain their original values for discovery, validation and invocation
-- `delete_path` removes the final filesystem entry. Symbolic links are unlinked
+- The internal path-deletion adapter (not a public model tool) removes the final filesystem entry. Symbolic links are unlinked
   without following their targets, including dangling links and directory links.
   SHA-256 checks apply only to regular files; snapshot guards check the entry
   being removed and continue to protect snapshot storage

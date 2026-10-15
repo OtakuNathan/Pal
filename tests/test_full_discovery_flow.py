@@ -15,8 +15,8 @@ def test_full_catalog_contract_modes_and_visibility():
     assert len(positives)==len(records)
     assert len({c['alias'] for c in positives})==len(records)
     assert not set(gens['resident_union'].search_records)&set(gens['role_union'].search_records)
-    assert records['list_plugins']['invocation_mode']=='direct'
-    assert records['reload_plugin']['invocation_mode']=='indirect'
+    assert records['list_plugins']['invocation_mode']=='indirect'
+    assert records['manage_plugin']['invocation_mode']=='indirect'
     assert records['add_finding']['invocation_mode']=='direct'
     assert 'name' in records['inspect_channel_endpoint']['input_contract']['required']
     assert resolve_selection(gens['resident_union'],'add_finding','direct')['error_code']=='unknown_tool'
@@ -41,22 +41,23 @@ def test_verification_kind_tasks_are_distinct_and_retrieve_the_right_contract():
 
 def test_wrong_mode_returns_real_affordance_without_expected_label():
     _,_,gens=build_flow_catalog()
-    reply=resolve_selection(gens['resident_union'],'list_plugins','indirect')
+    reply=resolve_selection(gens['resident_union'],'list_plugins','direct')
     assert reply['error_code']=='wrong_invocation_mode'
     assert reply['effect']=='not_started'
-    assert reply['affordances'][0]['tool']=='list_plugins'
-    assert reply['selection_retry']=={'name':'list_plugins','invocation_mode':'direct'}
+    assert reply['affordances'][0]['tool']=='call_tool'
+    assert reply['affordances'][0]['arguments']['name']=='list_plugins'
+    assert reply['selection_retry']=={'name':'list_plugins','invocation_mode':'indirect'}
 
 
 def test_selection_flow_recovers_mode_and_never_has_a_business_handler():
     _,cases,gens=build_flow_catalog()
     case=next(c for c in cases if c['category']=='catalog' and c['alias']=='list_plugins')
     calls=[new_tool_call(name='search_tools',args={'query':'list plugins','domain':'plugin'}),
-           new_tool_call(name='select_tool',args={'name':'list_plugins','invocation_mode':'indirect'}),
-           new_tool_call(name='select_tool',args={'name':'list_plugins','invocation_mode':'direct'})]
+           new_tool_call(name='select_tool',args={'name':'list_plugins','invocation_mode':'direct'}),
+           new_tool_call(name='select_tool',args={'name':'list_plugins','invocation_mode':'indirect'})]
     class Model:
         async def agenerate(self,request):
-            assert {t.name for t in request.tools}=={'search_tools','read_tool','list_tools','select_tool'}
+            assert {t.name for t in request.tools}=={'search_tools','read_tool','select_tool'}
             if len(calls)==1:
                 assert request.messages[-1].parts[0].structured['error_code']=='wrong_invocation_mode'
             return generation_result_from_values(tool_calls=[calls.pop(0)],preferred_endpoint_id='fixture',preferred_model_id='fixture')
@@ -69,7 +70,7 @@ def test_selection_flow_recovers_mode_and_never_has_a_business_handler():
 
 def test_directory_visibility_is_distinct_from_keyword_recall():
     _, cases, generations = build_flow_catalog()
-    case = next(c for c in cases if c['category'] == 'catalog' and c['alias'] == 'inspect_active_llm')
+    case = next(c for c in cases if c['category'] == 'catalog' and c['alias'] == 'inspect_llm')
     calls = [new_tool_call(name='search_tools', args={'domain': 'llm'}),
              new_tool_call(name='read_tool', args={'name': case['alias']}),
              new_tool_call(name='select_tool', args={'name': case['alias'], 'invocation_mode': 'indirect'})]
@@ -107,11 +108,11 @@ def test_fused_contract_selection_needs_no_redundant_read():
 
 def test_valid_wrong_tool_stops_without_correctness_oracle():
     _,cases,gens=build_flow_catalog()
-    case=next(c for c in cases if c.get('alias')=='reload_plugin' and c['category']=='catalog')
+    case=next(c for c in cases if c.get('alias')=='manage_plugin' and c['category']=='catalog')
     class Model:
         async def agenerate(self,request):
             return generation_result_from_values(tool_calls=[new_tool_call(name='select_tool',
-                args={'name':'list_plugins','invocation_mode':'direct'})],preferred_endpoint_id='fixture',preferred_model_id='fixture')
+                args={'name':'list_plugins','invocation_mode':'indirect'})],preferred_endpoint_id='fixture',preferred_model_id='fixture')
     row=asyncio.run(run_case(Model(),{'model_id':'fixture','endpoint_id':'fixture'},case,
         gens['resident_union'],ExecutionRuntime._search_generation,SearchInput.model_json_schema(),[]))
     assert row['selected_name']=='list_plugins' and not row['correct']

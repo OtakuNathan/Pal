@@ -184,7 +184,7 @@ Channel provider 代码由 PluginHost 管理；ChannelRuntime 和 EndpointHub �
 插件或 endpoint detach 都保留 Hub 和 backlog；endpoint detach 不卸载所属插件。
 物理删除或卸载插件才移除 Hub，并把待投递内容转移到 recovery socket，持久化 row 保留。
 清理失败保留旧代次的所有权，阻止并行加载，允许重试。
-`restart_channel_endpoint(endpoint_id)` 只重建 transport，不重新导入 provider code。
+`manage_channel_endpoint(name=endpoint_id, operation="restart")` 只重建 transport，不重新导入 provider code。
 
 attach 用于恢复明确 detached 的 endpoint。稳定的已 attached transport 重复 attach
 保持原实例，返回 `changed=false` / `transport_restarted=false` 和无副作用 receipt；

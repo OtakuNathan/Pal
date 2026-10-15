@@ -223,9 +223,9 @@ def test_model_surface_has_only_plugin_code_lifecycle(setup):
     setup.host.publish_management_capabilities()
     setup.core.publish_module_capabilities('channel')
     names = setup.core.context.capability_registry.descriptors
-    assert 'reload_plugin' in names
+    assert 'manage_plugin' in names
     assert 'rescan_plugins' in names
-    assert 'restart_channel_endpoint' in names
+    assert 'manage_channel_endpoint' in names
     assert 'reload_channel_provider' not in names
     assert 'rescan_channel_providers' not in names
 

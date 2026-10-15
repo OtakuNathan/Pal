@@ -40,7 +40,8 @@ def upsert_memory_embedding_config(
     config_path.write_text(updated, encoding="utf-8")
 
 
-def _replace_memory_embedding_keys(existing: str, managed_lines: list[str]) -> str:
+def _replace_memory_embedding_keys(existing: str, managed_lines: list[str], *, managed_keys: set[str] | None = None) -> str:
+    managed_keys = _MANAGED_MEMORY_KEYS if managed_keys is None else managed_keys
     lines = existing.splitlines()
     output: list[str] = []
     in_memory = False
@@ -58,7 +59,7 @@ def _replace_memory_embedding_keys(existing: str, managed_lines: list[str]) -> s
             output.append(line)
             continue
 
-        if in_memory and _line_key(line) in _MANAGED_MEMORY_KEYS:
+        if in_memory and _line_key(line) in managed_keys:
             continue
         output.append(line)
 

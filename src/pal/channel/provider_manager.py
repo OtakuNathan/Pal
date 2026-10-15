@@ -1686,8 +1686,8 @@ def _already_attached_result(endpoint_id: str, provider_id: str, enabled: bool) 
         affordances=(
             ToolAffordance(tool="call_tool", arguments={"name": "inspect_channel_endpoint",
                 "args": {"name": endpoint_id}}, reason="If a connection problem is suspected, inspect health; attached does not mean healthy."),
-            ToolAffordance(tool="call_tool", arguments={"name": "restart_channel_endpoint",
-                "args": {"name": endpoint_id}}, reason="If the authorized goal requires a fresh transport session, explicitly restart; attach preserved the existing transport."),
+            ToolAffordance(tool="call_tool", arguments={"name": "manage_channel_endpoint",
+                "args": {"name": endpoint_id, "operation": "restart"}}, reason="If the authorized goal requires a fresh transport session, explicitly restart; attach preserved the existing transport."),
         ),
     )
 

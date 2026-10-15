@@ -95,6 +95,20 @@ def declared_tools() -> list[DeclaredTool]:
                                           else path.relative_to(ROOT / "src" / "pal").parts[0]),
                                          value(fields["namespace"]) if "namespace" in fields else "operation",
                                          value(fields["family"]) if "family" in fields else ""))
+    # Emotion's schema is generated from renderer declarations. Its base
+    # contract is safe to read without loading devices; live enums are covered
+    # by the registry lifecycle tests rather than an installed-plugin snapshot.
+    from pal.emotion.runtime import EMOTION_ALIASES, emotion_contract
+    model, guidance = emotion_contract()
+    dynamic_path = ROOT / "src/pal/emotion/runtime.py"
+    dynamic_line = next(node.lineno for node in ast.walk(ast.parse(dynamic_path.read_text()))
+                        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == "capability_action")
+    for alias in EMOTION_ALIASES:
+        vocabulary = discovery_vocabulary(guidance, model.model_json_schema())
+        validate_search_rules(alias, guidance, vocabulary)
+        rows.append(DeclaredTool(alias, "src/pal/emotion/runtime.py", dynamic_line,
+                                 guidance, vocabulary, False, "emotion", "operation"))
     # Literal AST dictionaries miss aliases expanded by comprehensions. The
     # assembled worker catalog is the authority for those role-only entries.
     from pal.bunshin.scoped_execution import _WORKSPACE_TOOL_SPECS
@@ -132,16 +146,20 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(("alias", "source", "line", "role_scoped", "generated_spec_key", "search_domain", "search_domain_aliases", "search_domain_description", "purpose", "search_objects", "search_terms",
-                         "search_enum_fields", "effective_vocabulary", "search_term_rules", "search_scope_terms"))
+        writer.writerow(("alias", "source", "line", "role_scoped", "generated_spec_key", "search_domain", "search_domain_aliases", "search_domain_description", "purpose", "use_when", "do_not_use_when", "failure_next_steps",
+                         "search_objects", "search_terms", "search_intents",
+                         "search_enum_fields", "effective_vocabulary", "search_term_rules", "search_scope_terms", "next_tool_hints"))
         for row in rows:
             writer.writerow((row.alias, row.source, row.line, row.role_scoped, row.generated_spec_key,
                              row.guidance.search_domain, " | ".join(row.guidance.search_domain_aliases),
                              row.guidance.search_domain_description, row.guidance.purpose,
+                             row.guidance.use_when, row.guidance.do_not_use_when, row.guidance.failure_next_steps,
                              " ".join(row.guidance.search_objects), " ".join(row.guidance.search_terms),
+                             json.dumps(row.guidance.search_intents, ensure_ascii=False),
                              " ".join(row.guidance.search_enum_fields), " ".join(row.vocabulary),
                              json.dumps([rule.model_dump(mode="json") for rule in row.guidance.search_term_rules]),
-                             " ".join(row.guidance.search_scope_terms)))
+                             " ".join(row.guidance.search_scope_terms),
+                             json.dumps([hint.model_dump(mode="json") for hint in row.guidance.next_tool_hints], ensure_ascii=False)))
     print(f"Exported {len(rows)} declarations ({len({row.alias for row in rows})} distinct aliases) to {args.output}")
 
 

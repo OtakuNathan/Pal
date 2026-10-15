@@ -1,180 +1,94 @@
-# Artifact Manager V1
+# Conversation artifact normalization
 
-## Boundary
+`pal.artifact` receives conversation attachments and explicitly imported local
+files. It preserves the original, produces useful normalized files, and describes
+what is actually available. It does not provide a separate document-reading API
+to the model. A scoped `artifact_id` identifies the managed resource; the file
+paths supplied after resolution are ordinary read-only inputs to suitable tools.
 
-`pal.artifact` is a built-in, detachable plugin for short-lived conversation attachments.
+## Input and storage
 
-An artifact is not:
+Channel ingress and `import_artifact(path)` use the same Artifact owner. Each
+attachment has a conversation scope, an original filename/extension/MIME/size,
+a processing status and managed files. Unknown formats such as spreadsheets
+remain usable originals with metadata; lack of a parser is not reception failure.
 
-- A local filesystem path exposed to the LLM.
-- Durable memory or an L3 document.
+- UTF-8 text reuses the managed original when no decoding change is required.
+  Other supported text encodings produce one UTF-8 file alongside the original.
+  New text artifacts do not create chunk files.
+- Images retain the original and the image representation selected by the image
+  normalization policy. Each path carries its actual filename, extension and MIME.
+- PDFs retain the original, per-page text and per-page images, plus a JSON page
+  index. There is no duplicate full-text file or chunk set for new PDFs. The
+  index identifies original page numbers, text/image paths, processing status,
+  limits and failures. Empty extracted text is not proof of a visually blank page.
+- Audio is retained without automatic transcription. A transcript produced by an
+  external processor or an earlier version is exposed as a file when available.
+- Unsupported binary formats retain the original and file information. The model
+  chooses an appropriate processor if the user's task requires one.
 
-An artifact is:
+Existing artifacts are not rewritten or deleted merely by updating this code.
+Internal owner APIs can still inspect legacy representations. New model-facing
+PDF descriptions use page/index navigation rather than legacy combined text.
 
-- A scoped conversation resource identified by `artifact_id`.
-- Stored and normalized under the runtime root.
-- Read through artifact tools or projected into model input as inline images.
-- Visible only inside the matching `control_scope_key`.
+## L1 and model-input rendering
 
-The `artifact` plugin uses `raii.v1` and reloads `pal.artifact` when attached again. Channel endpoints may receive bytes or local cached files; `PalCore` owns the channel-ingress handoff into `ArtifactManager`. Changes to the core/shared context protocol require an external host restart; reattaching this plugin alone cannot reload those layers.
+L1 stores `ArtifactRefPartIR` references with basic identity information, not
+rendered images, base64, expanded file manifests or document/transcript bodies.
+The model-input projection resolves only references present in the projected
+context (or the current input in the legacy fallback path). It does not inject
+all hot artifacts simply because they remain in storage.
 
-## Data Flow
+Rendering automatically provides a bounded description: filename, extension,
+MIME, size, processing status/notes, original and processed paths, and PDF page
+navigation. It uses the same description builder as explicit inspection; no
+model tool call is needed to obtain the initial description. Stored legacy
+text-preview summaries are not copied into this description.
 
-```mermaid
-flowchart LR
-    CH["Channel Endpoint"] --> CE["ChannelEnvelope payload.attachments"]
-    CE --> CORE["PalCore"]
-    CORE --> AM["ArtifactManager"]
-    AM --> DB["SQLite artifact tables"]
-    AM --> PROMPT["Available Artifacts user-context"]
-    LLM["LLM"] --> TOOLS["artifact tools by artifact_id"]
-    TOOLS --> AM
-    LOCAL["Local screenshot/file"] --> IMPORT["import_artifact(path)"]
-    IMPORT --> AM
-    IMPORT --> REF["ToolContextMessageIR.artifact_ids"]
-    REF --> L1["L1 user message with ArtifactRefPartIR"]
-    L1 --> PIXELS["Scoped prompt projection to inline pixels"]
-```
+Only image artifacts may attach pixels automatically, subject to the selected
+model's vision support and the existing image budget. PDF page images are not
+attached wholesale; import a specific indexed image when its pixels are needed.
+Text, PDF text, transcripts and spreadsheets are never automatically inlined.
+The model uses `read_file`, `run_shell`/`rg`, or a suitable external tool based on
+the task. Paths alone do not establish visual inspection.
 
-The channel layer only normalizes incoming attachment metadata. `PalCore` passes attachments to the artifact port and replaces raw `attachments` with prompt-safe `artifact_refs`.
+Projection produces request-only content and does not replace the durable L1
+reference. Local image data URLs are generated from owned bytes; private channel
+source URLs are not forwarded to the model provider. Provider codecs translate
+the rendered image part to their own wire format.
 
-`artifact_refs` in the current event payload are authoritative for that turn. If they are present, prompt exposure must show only those artifacts in payload order and must not fall back to old hot artifacts.
+## Model tools
 
-## Lifecycle
+Four indirect tools remain:
 
-Default lifecycle:
+- `import_artifact(path)`: receive/normalize a local file and emit a reference.
+- `search_artifacts(query?, kind?, limit?, offset?)`: find or list available
+  attachments in the current conversation. Blank query lists recent files;
+  follow `next_offset` while `has_more` is true. Counts distinguish a returned
+  page from the total matching inventory. Discovery does not refresh every TTL.
+- `inspect_artifact_info(artifact_id)`: recover the current bounded file description
+  or diagnose normalization. It returns file information, not body contents.
+- `inspect_artifact_state()`: inspect owner policy and scoped resource counts.
 
-- Hot TTL: `2h`.
-- Refresh amount: `2h`.
-- Hard cap: `24h`.
-- `info`, `read`, `content_search`, and `select` refresh hot state in the
-  writable main runtime. Read-only bunshins validate the current lease without
-  extending it and report `ttl_refreshed: false` where that field is exposed.
-- `artifact_search` does not refresh every returned candidate.
-- Stable artifact references in L1 project as tombstones after their handler
-  expires. Reads report `artifact_handler_retired` and ask for the source to be
-  attached again.
-- Physical retirement is crash-recoverable: `retiring` marks pending cleanup;
-  `retired` is written only after owned bytes, representations, and hot state
-  have been reclaimed.
-- Retirement deletes ArtifactManager-owned originals and representations under
-  `artifacts/managed`. A `StoredArtifact` explicitly owned by Pal transfers its
-  source-cache ownership to the handler and is reclaimed with it; borrowed
-  workspace or external paths are never deleted.
-- An in-process channel that wants to transfer source-cache ownership must keep
-  the trusted `StoredArtifact` typed value intact until core ingress. Serialized
-  attachment dictionaries are deliberately treated as borrowed, regardless of
-  any ownership-looking fields they contain.
+`list_artifacts`, `read_artifact`, `grep_artifact` and `select_artifact` are retired
+from model discovery and invocation. Lifecycle selection/read helpers remain
+internal for leases and compatibility. In particular, withdrawing the select tool
+does not remove pending-event, L1 or compaction reference renewal.
 
-A minimal identity tombstone may remain in SQLite, but artifact bytes are
-physically reclaimed and do not retire to memory/L3.
+## Scope, lifecycle and activation
 
-## Processing
+Artifact IDs resolve only within their original conversation scope. Foreign,
+missing or retired references do not expose paths or pixels. The default hot TTL
+is two hours, renewal is two hours, and the hard cap is 24 hours. Read-only worker
+owners validate the existing lease without renewing it. Runtime-held references
+continue through the existing lease machinery.
 
-Processing is registry-driven:
+Retirement remains crash recoverable: owned bytes and representations are
+reclaimed before a record becomes a completed tombstone. Borrowed workspace
+sources are not deleted. Retired manifests explain unavailability without stale
+paths. Copy managed inputs to a regular workspace before editing them.
 
-- `ArtifactProcessorRegistry` resolves an artifact kind from MIME, extension, or declared kind.
-- `ArtifactRepresentationRegistry` defines readable representation kinds and auto-read priority.
-- `ArtifactExposurePolicy` lives in typed policy dataclasses and decides prompt exposure without hardcoding file branches in `PromptCompiler`.
-
-Default representations:
-
-- Image: original preserved, normalized image generated after EXIF transpose/strip, resize, and quality ladder.
-- Text: UTF-8 text representation and chunks.
-- PDF: per-page text and chunks; low-text PDFs render capped page images when PyMuPDF is available.
-- Audio: original metadata; transcript only if an ASR port is registered.
-- Unknown binary: metadata only.
-
-## Prompt Exposure
-
-`Available Artifacts` is rendered as user-context, not system prompt.
-
-Rules:
-
-- Do not expose raw source secrets such as Telegram bot-token URLs, `telegram_file_path`, or raw `source_url`.
-- Prefer explicit current-event `artifact_refs`.
-- If no explicit refs exist, show same-turn records.
-- If no current records exist and user text is empty, show no historical hot artifacts.
-- Historical hot artifacts are shown only for explicit artifact/file/image/audio references, not weak deictic phrases such as "this" or "that".
-- URLs are ignored when checking whether user text references a historical artifact, so a URL path segment like `file` or `photos` cannot trigger hot artifact fallback.
-- Vision-capable endpoints receive normalized image/page-image parts under
-  budget as data URLs produced from the manager-owned local representation.
-  Remote channel URLs are never forwarded to the LLM provider.
-- If image pixels are attached inline, the manifest marks `visual_content: attached_inline` and Pal should answer from vision directly.
-- Non-vision endpoints receive an LLM-safe manifest with artifact metadata, representations, and `local_file.preferred_path` when available.
-- `local_file.preferred_path` may be used only with a capability that explicitly accepts local paths. It is a bridge for path-capable processors, not a general filesystem permission.
-- Managed artifact paths are read-only inputs. Copy an input to an ordinary
-  workspace path before editing it; the copied/output file is not governed by
-  artifact TTL.
-- Tool-generated files (for example, web screenshots) stay ordinary stored
-  files until explicitly imported with `import_artifact(path=...)`.
-
-For self-inspection, call `capture_browser_screenshot`, then pass its
-`artifact.local_cached_path` to `import_artifact`. The import copies the file
-into managed storage and emits a user-authority context message containing a
-stable artifact reference. On the next model request, core resolves that
-reference using the current conversation scope, live lease, vision capability,
-and image budget. Only prompt projection contains image data URLs; L1 and the
-tool result keep references and metadata. A stored-file ID or local path alone
-does not mean Pal has seen pixels. Text-only models receive metadata, and
-retired or foreign-scope references never expose images. Importing a borrowed
-local path does not transfer ownership of the source file.
-
-Local image import first asks the existing `core:turn_io` port for
-`llm_capabilities_for_turn(turn_id)`. Core resolves the current turn's selected
-endpoint using the same resolver as prompt projection; the artifact plugin
-does not inspect LLM configuration or use a global default independently.
-Unsupported or unknown vision capability returns `unsupported` before creating
-an artifact or context reference, with guidance to discover a local-path OCR or
-image-analysis tool. Text document import remains available. The metadata-only
-projection above still applies to channel attachments and previously imported
-images when the model changes.
-
-Prompt projection resolves internal image references to normalized local data
-URLs. Provider codecs then encode that same payload in their native image-part
-shape; no provider fetch of a channel URL is required.
-
-## Tools
-
-Artifact capabilities:
-
-- `import_artifact`: import a local image, screenshot, or document into the current conversation and emit its reference for the next model request.
-- `artifact_list`: list hot artifacts visible to the current turn.
-- `inspect_artifact_info`: inspect metadata and available representations for one artifact.
-- `artifact_read`: read text-like representations by `artifact_id`.
-- `artifact_search`: search artifact objects by filename, kind, time, caption, or summary.
-- `select_artifact`: mark one artifact as chosen and refresh TTL.
-- `grep_artifact`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
-
-Audio is stored without automatic transcription. The model receives its local file path, MIME type,
-and an explicit audio notice. When speech content is needed, discover a separate transcription tool
-with `search_tools`; prefer a remote service to a local speech-recognition model. Existing transcript
-representations remain readable through `read_artifact` or their supplied text file paths.
-
-Artifact capabilities are indirect: discover their current aliases with
-`search_tools` and invoke them through `call_tool`.
-
-Tool boundary:
-
-- Artifact tools accept `artifact_id`, never local paths.
-- Filesystem tools stay path-based and are separate.
-- `artifact_search` finds the object.
-- `artifact_content_search` searches inside a selected object.
-
-## Extension Points
-
-Future additions should register new behavior through tables/registries:
-
-- Add a processor for a MIME/extension/kind in `ArtifactProcessorRegistry`.
-- Add a representation kind in `ArtifactRepresentationRegistry`.
-- Adjust prompt exposure by policy, not by adding type branches to `PromptCompiler`.
-- Expose transcription as a separately discoverable tool that accepts an audio file; artifact ingestion does not run ASR.
-
-## Invariants
-
-- Artifact scope is `control_scope_key`.
-- Raw source secrets never appear in prompt exposure.
-- Local paths may appear only as LLM-safe `local_file` metadata and only for tools/capabilities that explicitly accept paths.
-- Artifact metadata is not memory and never automatically becomes L3.
-- Search does not refresh TTL; selection or actual use does.
-- LLM serialization is the only place internal image parts become provider wire format.
+This refactor does not modify an installed runtime or its configuration. Existing
+plugin code is activated by the established plugin reload path; resident core/L1
+protocol changes, when present, require a separate host activation plan. The
+current implementation reuses the existing typed-reference projection path.

@@ -214,8 +214,8 @@ def test_proactive_persistence_failure_preserves_registered_task(env, monkeypatc
     due_before = dict(manager.schedule_engine.next_due_by_proactive_id)
     method = "upsert_definition" if operation == "register" else "delete_definition"
     monkeypatch.setattr(manager.repository, method, lambda *a, **k: fail_with_cause("definition storage unavailable"))
-    alias = "disable_proactive_task" if operation == "register" else "delete_proactive_task"
-    result = proactive_invoke(runtime, alias, {"name": "job"})
+    action = "disable" if operation == "register" else "delete"
+    result = proactive_invoke(runtime, "manage_proactive_task", {"name": "job", "operation": action})
     assert not result.ok and "transport root cause" in result.llm_text
     assert manager.registered["job"] == before
     assert manager.schedule_engine.next_due_by_proactive_id == due_before
@@ -322,8 +322,9 @@ def test_delivery_failure_does_not_claim_retry_is_safe():
 
 @pytest.mark.parametrize("alias,args", [
     ("upsert_proactive_task", {"name": "invalid", "goal": "check", "schedule": {"cadence": "invalid"}}),
-    ("disable_proactive_task", {"name": "missing"}),
-    ("delete_proactive_task", {"name": "missing"}),
+    ("manage_proactive_task", {"name": "missing", "operation": "disable"}),
+    ("manage_proactive_task", {"name": "missing", "operation": "delete"}),
+    ("manage_proactive_task", {"name": "missing", "operation": "enable"}),
 ])
 def test_proactive_management_preconditions_report_not_started(env, alias, args):
     runtime, _, _ = env
@@ -334,12 +335,12 @@ def test_proactive_management_preconditions_report_not_started(env, alias, args)
     assert metadata(result)["retry"] == "correct_input"
 
 
-@pytest.mark.parametrize("alias", ["disable_channel_endpoint", "attach_channel_endpoint", "detach_channel_endpoint"])
-def test_channel_management_missing_endpoint_reports_not_started(channel_env, monkeypatch, alias):
+@pytest.mark.parametrize("operation", ["disable", "attach", "detach"])
+def test_channel_management_missing_endpoint_reports_not_started(channel_env, monkeypatch, operation):
     core, _, _ = channel_env
     provider = core.context.module_registry.get("channel").introspection_provider
     monkeypatch.setattr(provider.repository, "get", lambda *a: None)
-    result = invoke(core.context.execution_runtime, alias, {"name": "missing"})
+    result = invoke(core.context.execution_runtime, "manage_channel_endpoint", {"name": "missing", "operation": operation})
     assert not result.ok
     assert metadata(result)["kind"] == "rejected"
     assert metadata(result)["effect"] == "not_started"

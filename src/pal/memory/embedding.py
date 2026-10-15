@@ -58,6 +58,8 @@ class OllamaEmbeddingProvider:
     keep_alive: str | None = DEFAULT_OLLAMA_KEEP_ALIVE
     timeout_seconds: float = 120.0
     transport: str = "http"
+    model_revision: str | None = None
+    text_processing_version: str = "search_text_v1"
 
     def embed_query(self, text: str) -> list[float]:
         vectors = self.embed_documents([text])
@@ -161,6 +163,8 @@ class OllamaFallbackEmbeddingProvider:
     model_name: str
     providers: tuple[EmbeddingProviderPort, ...]
     retry_cooldown_seconds: float = DEFAULT_OLLAMA_FALLBACK_COOLDOWN_SECONDS
+    model_revision: str | None = None
+    text_processing_version: str = "search_text_v1"
     transport: str = "ollama-fallback"
     _failed_until: dict[int, float] = field(default_factory=dict)
     _last_provider_index: int | None = None
@@ -288,6 +292,8 @@ def build_ollama_embedding_provider_from_config(config: Any | None = None) -> Em
         base_url=local_base_url,
         keep_alive=keep_alive,
         timeout_seconds=local_timeout,
+        model_revision=str(getattr(config, "embedding_model_revision", "") or "") or None,
+        text_processing_version=str(getattr(config, "embedding_text_processing_version", "search_text_v1")),
     )
     if not remote_base_urls:
         return local_provider
@@ -301,15 +307,20 @@ def build_ollama_embedding_provider_from_config(config: Any | None = None) -> Em
                 base_url=base_url,
                 keep_alive=keep_alive,
                 timeout_seconds=remote_timeout,
+                model_revision=local_provider.model_revision,
+                text_processing_version=local_provider.text_processing_version,
             )
         )
     providers.append(local_provider)
-    return OllamaFallbackEmbeddingProvider(
+    result = OllamaFallbackEmbeddingProvider(
         provider_id=DEFAULT_OLLAMA_PROVIDER_ID,
         model_name=model_name,
         providers=tuple(providers),
         retry_cooldown_seconds=cooldown,
+        model_revision=local_provider.model_revision,
+        text_processing_version=local_provider.text_processing_version,
     )
+    return result
 
 
 def _coerce_base_urls(value: Any) -> tuple[str, ...]:

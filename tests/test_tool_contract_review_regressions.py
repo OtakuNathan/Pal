@@ -358,7 +358,7 @@ def test_mcp_attach_failure_reaches_public_facade(runtime, tmp_path, monkeypatch
         monkeypatch.setattr(provider, method, lambda: None)
     tree = compile_provider_subtree(provider, module_id='mcp', lifecycle_scope='detachable', detachable=True)
     runtime.mount_subtree(SimpleNamespace(mounted_subtree=tree))
-    result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name': 'attach_mcp_server', 'args': {'name': 'broken'}}))
+    result = runtime.execute_tool(new_tool_call(name='call_tool', args={'name': 'manage_mcp_server', 'args': {'name': 'broken', 'operation': 'attach'}}))
     assert not result.ok and result.invocation_result.effect.value == 'unknown'
     assert 'MCP server attach failed' in result.llm_text
     assert 'config root cause' in result.llm_text

@@ -88,7 +88,7 @@ def test_affordance_manifest_and_isolated_effects(tmp_path):
 
     fixture = FixtureExecution(tmp_path, 'affordance-navigate-content')
     try:
-        result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='navigate_browser', args={
+        result = asyncio.run(fixture.execute_tool_async(new_tool_call(name='read_browser_page', args={
             'url': 'https://example.com/',
         }), turn_id='eval:affordance-navigate-content:1'))
         assert result.ok, result.llm_text

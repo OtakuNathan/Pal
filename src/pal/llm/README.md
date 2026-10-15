@@ -74,3 +74,9 @@ defines accepted configuration vocabulary, per-shape `off` behavior, manual
 budget validation, and configuration/restart boundaries. Core owns compact's
 visible summary limit and total output allowance; see the
 [compact contract](../../../docs/pal_memory_contract.md#compact).
+
+Model-facing inspection uses one indirect `inspect_llm()` call without arguments.
+It returns all loaded enabled endpoint capabilities with `(active)` on the selected
+label, current thinking and process usage summaries. Configuration and human
+status controls keep their existing ownership; see the LLM contract for accounting
+scope, unavailable-state handling and activation boundaries.

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.mcp.model import McpServerConfig
+from pal.mcp.artifact_inputs import artifact_input_config
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ def _server_from_payload(*, server_id: str, payload: dict[str, Any]) -> McpServe
         shutdown_timeout_ms=int(payload.get("shutdown_timeout_ms") or payload.get("shutdownTimeoutMs") or 5_000),
         kill_on_close=bool(payload.get("kill_on_close", payload.get("killOnClose", True))),
         tool_guidance=_tool_guidance(payload.get("tool_guidance", {})),
+        artifact_inputs=artifact_input_config(payload.get("artifact_inputs", {})),
         trust_level=str(payload.get("trust_level") or payload.get("trustLevel") or "unknown"),
     )
     if config.transport != "stdio":

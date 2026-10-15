@@ -51,8 +51,9 @@ def test_repeated_attach_preserves_transport_and_explains_it_did_not_restart(env
     assert len(env.made) == 1 and env.runtime.get_endpoint('demo') is transport
     assert hub.transition_epoch == epoch
     assert [a.arguments['name'] for a in result.affordances] == [
-        'inspect_channel_endpoint', 'restart_channel_endpoint']
+        'inspect_channel_endpoint', 'manage_channel_endpoint']
     assert all(a.arguments['args']['name'] == 'demo' for a in result.affordances)
+    assert result.affordances[1].arguments['args']['operation'] == 'restart'
     assert 'does not establish' in result.llm_text
 
 
@@ -100,12 +101,12 @@ def test_public_facade_preserves_noop_facts_and_conditional_affordances(tmp_path
         manager = install_endpoint_state(fx, tmp_path, attached=True)
         old = manager.runtime.get_endpoint('demo_endpoint')
         result = asyncio.run(fx.runtime.execute_tool_async(new_tool_call(name='call_tool',
-            args={'name': 'attach_channel_endpoint', 'args': {'name': 'demo_endpoint'}})))
+            args={'name': 'manage_channel_endpoint', 'args': {'name': 'demo_endpoint', 'operation': 'attach'}})))
         assert result.ok, result
         assert result.structured['changed'] is False
         assert result.structured['transport_restarted'] is False
         assert manager.runtime.get_endpoint('demo_endpoint') is old
-        assert 'restart_channel_endpoint' in result.llm_text
+        assert 'manage_channel_endpoint' in result.llm_text
         assert 'inspect_channel_endpoint' in result.llm_text
         assert '"effect":"none"' in result.llm_text
     finally:

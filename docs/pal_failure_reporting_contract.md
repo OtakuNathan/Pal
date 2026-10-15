@@ -238,3 +238,33 @@ developer report 是结构化对象，不是随口自然语言抱怨。
 - 不在本文件定义日志存储实现
 - 不在本文件定义具体 UI 呈现
 - 不允许用一段自然语言替代 developer report
+
+## 模型查询入口
+
+模型通过唯一的无参数间接工具 `inspect_failure()` 查询。原
+`inspect_failure_state` 和 `list_failure_reports` 不再发布；内部报告生成、
+升级处理和用户反馈流程不变。查询不发起健康探测、修复或重试。
+
+固定快照包含 resident 的报告/失败计数、最近报告 ID、最近 16 条诊断摘要、
+返回和省略条数。每条保留模块/组件/严重度/故障类型、原因与卡点、影响、
+尝试过的动作、验证状态、重试是否安全、是否需要开发者处理和建议下一步。
+摘要文本有界，动作最多显示四项，截断字段通过 `truncated_fields` 标明。
+不在模型结果的 structured 或 llm_text 中内联原始 evidence。
+
+完整的本次报告窗口保存为一个 JSON 内容的只读结果快照，返回
+`reports_file.file_path`、格式、大小和校验值，可用 rg/read_file 按报告 ID
+查看证据、完整动作、文档、候选方案和关联 ID。文件沿用结果存储的 .txt
+后缀，内容格式明确为 JSON。复制时使用现有诊断脱敏规则，不修改 resident
+原报告。CapabilityResult 显式携带 snapshot_refs，沿用现有 L1/compact
+引用与回收机制；路径文本本身不构成租约，不新增独立的文件保留策略。
+
+诊断快照物化属于查询结果存储，工具仍按 local_read 声明。无报告时不
+写文件。没有执行存储上下文、序列化失败或写入失败时，报告摘要仍正常
+返回，reports_file 标记 unavailable，diagnostics.partial 为 true；不编造
+路径、不把原始报告塞回模型输入。完整记录仍保留在 resident owner。
+
+FailureRuntime 正常生成时最多保留最近 32 条报告，本工具展示其中最后
+16 条，不是全量持久化历史。并非每个工具或 LLM 错误都会生成报告；空
+列表只表示没有保留的报告，不能推导系统健康，也不能据此允许重试。
+
+本次实现和用例等待合并批次验证，源码修改不代表运行实例已经激活。

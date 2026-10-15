@@ -66,7 +66,7 @@ Pal sidecars already prepare PATH for common Node/nvm installs. Do not shell-wra
 3. Write the LSP runtime template to `<runtime_root>/plugins/lsp/servers/<server_id>.toml`.
 4. Validate the LSP template with `pal.lsp.config.load_lsp_server_file` or an isolated unit test.
 5. Run LSP rescan through `rescan_lsp_servers` when the running Pal runtime should see the new LSP template.
-6. Verify with `inspect_lsp_status`, `diagnose_lsp_server`, and a representative diagnostics/hover request when a sample file exists.
+6. Verify with `inspect_lsp_status`, `inspect_lsp_status`, and a representative diagnostics/hover request when a sample file exists.
 
 ## Safety
 
@@ -82,7 +82,7 @@ Before calling the language support done:
 1. Runtime template file exists at `<runtime_root>/plugins/lsp/servers/<server_id>.toml`.
 2. `load_lsp_server_file` parses it and preserves command, args, extensions, language_ids, markers, and timeouts.
 3. `rescan_lsp_servers` succeeds when the user wants the running runtime refreshed.
-4. `diagnose_lsp_server` reports ok, missing_binary, disabled, or another structured status instead of failing unstructured.
+4. `inspect_lsp_status` reports ok, missing_binary, disabled, or another structured status instead of failing unstructured.
 5. The handoff lists the template path, server id, language id, any code changes, tests run, and any dependency still missing.
 """
 
@@ -106,12 +106,7 @@ def lsp_declared_skills(*, module_id: str = "lsp") -> tuple[SkillDescriptor, ...
                 "rescan_lsp_servers",
                 "language server",
             ),
-            capability_refs=(
-                "rescan_lsp_servers",
-                "inspect_lsp_status",
-                "diagnose_lsp_server",
-                "read_lsp_diagnostics",
-            ),
+            capability_refs=('rescan_lsp_servers', 'inspect_lsp_status', 'read_lsp_diagnostics'),
             applicability_star=SkillApplicabilitySTAR(
                 situation="Pal needs to add or repair LSP support for a programming language.",
                 task="Create or update a runtime-root LSP server template.",

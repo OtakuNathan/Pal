@@ -108,8 +108,9 @@ class ChecklistIntrospectionProvider:
         action_name="upsert",
         guidance=ToolGuidance(
             search_objects=('checklist', 'checklists'),
-            search_terms=('create', 'update', 'edit', 'plan', 'steps',),
-            purpose="Create or replace Pal's active execution-cursor checklist, including multiple status updates in one call. A fully completed plan closes automatically.",
+            search_terms=('create', 'update', 'edit', 'mark', 'plan', 'steps'),
+            search_intents=('update checklist step statuses including pending and in progress', 'replace a plan or update several completed phases together'),
+            purpose="Create or replace Pal's full checklist, marking steps pending, in progress or completed. Fully completed plans close automatically.",
             use_when=(
                 "Unless the user specifies otherwise, use before the first mutation in work with multiple delivery phases, long execution, or resumption needs"
                 "; update when phases materially change. Batch creation or updates with independent useful calls. Routine edit-and-test work needs no checklist."
@@ -284,8 +285,8 @@ class ChecklistIntrospectionProvider:
         action_name="clear",
         guidance=ToolGuidance(
             search_objects=('checklist', 'checklists'),
-            search_terms=('finish', 'end', 'plan',),
-            purpose="Close Pal's checklist and return its recorded progress.",
+            search_terms=('finish', 'end', 'plan', 'cancel', 'clear', 'retire', 'discard'),
+            purpose="Close or cancel Pal's active checklist without marking unfinished steps completed.",
             use_when=(
                 'The task is complete, cancelled, replaced, or made stale. Closing adds no verification requirement; describe actual execution evidence and the verification scope already performed. Closing an inactive checklist is an idempotent no-op.'
             ),

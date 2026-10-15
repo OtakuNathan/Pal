@@ -74,14 +74,14 @@ def test_partial_prepare_offers_bound_doctor_not_a_menu() -> None:
     assert result.structured["status"] == "partial"
     assert "next_tools" not in result.structured
     tools = {item.tool: item for item in result.affordances}
-    assert set(tools) == {"diagnose_lsp_server"}
-    doctor = tools["diagnose_lsp_server"]
+    assert set(tools) == {"inspect_lsp_status"}
+    doctor = tools["inspect_lsp_status"]
     assert doctor.arguments["workspace_root"] == "/workspace"
     assert doctor.arguments["name"] == "clangd"
     assert "list_lsp_document_symbols" not in result.llm_text
 
 
-def test_prepare_workspace_is_only_resident_lsp_tool() -> None:
+def test_lsp_tools_are_discoverable_without_resident_schemas() -> None:
     core = PalCore()
     register_core_with_core(core)
     register_execution_with_core(core.context)
@@ -93,9 +93,9 @@ def test_prepare_workspace_is_only_resident_lsp_tool() -> None:
             contract["function"]["name"]
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
-        assert "prepare_lsp_workspace" in names
+        assert "prepare_lsp_workspace" not in names
         assert "read_lsp_diagnostics" not in names
-        assert "find_lsp_definitions" not in names
+        assert "find_lsp_symbol_locations" not in names
         assert "inspect_lsp_status" not in names
     finally:
         handle.shutdown_sync()
@@ -110,13 +110,13 @@ def test_failed_request_does_not_replay_cached_success(tmp_path, monkeypatch):
     }))
     provider._request_or_error("hover", {})
     monkeypatch.setattr(provider, "_ensure_manager_started", Mock(side_effect=RuntimeError("startup failed")))
-    result = provider.definition(CapabilityCall(name="find_lsp_definitions", args={"file": "a.py", "line": 0, "character": 0}))
+    result = provider.symbol_locations(CapabilityCall(name="find_lsp_symbol_locations", args={"kind": "definition", "file": "a.py", "line": 0, "character": 0}))
     assert result.status == "error"
     assert result.structured["operation"] == "definition"
     assert "result" not in result.structured
     assert "OLD_HOVER" not in result.llm_text
     assert "startup failed" in result.llm_text
-    shown = provider.show(CapabilityCall(name="inspect_lsp_provider", args={}))
+    shown = provider.status(CapabilityCall(name="inspect_lsp_status", args={}))
     assert shown.structured["manager_running"] is False
     assert "result" not in shown.structured["cached_snapshot"]
     assert provider.last_health["result"]["value"] == "OLD_HOVER"

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pal.artifact.capabilities import ArtifactIntrospectionProvider
 from pal.execution.tool_facade import EffectKind
-from pal.mcp.plugin import McpManagerPluginProvider
 from pal.memory.capabilities import MemoryIntrospectionProvider
 from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
 from pal.plugins.l3.stubs import _L3ProviderCapabilityMixin
@@ -19,12 +18,9 @@ def _declared_effect(provider_type: type, method_name: str) -> EffectKind:
 
 def test_artifact_effects_track_hot_state_and_content_mutations() -> None:
     expected = {
-        "list_artifacts": EffectKind.LOCAL_READ,
+        "import_file": EffectKind.LOCAL_WRITE,
         "info": EffectKind.LOCAL_WRITE,
-        "read": EffectKind.LOCAL_WRITE,
         "search": EffectKind.LOCAL_READ,
-        "select": EffectKind.LOCAL_WRITE,
-        "content_search": EffectKind.LOCAL_WRITE,
     }
 
     assert {
@@ -37,4 +33,3 @@ def test_stateful_query_tools_are_not_declared_as_reads() -> None:
     assert _declared_effect(MemoryIntrospectionProvider, "recall") is EffectKind.LOCAL_WRITE
     assert not getattr(SQLiteVecL3Plugin.recall_query, "__capability_action_blueprints__", ())
     assert not getattr(_L3ProviderCapabilityMixin.recall_query, "__capability_action_blueprints__", ())
-    assert _declared_effect(McpManagerPluginProvider, "image_prepare") is EffectKind.LOCAL_WRITE

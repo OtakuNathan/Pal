@@ -108,6 +108,8 @@ def compose_runtime(
     llm_repository = LLMEndpointRepository()
     runtime_settings_repository = RuntimeSettingRepository()
 
+    from pal.memory.embedding_migration import require_completed_migration
+    require_completed_migration(registration.runtime.runtime_root)
     config = RuntimeConfig.load(registration.runtime.runtime_root)
     from pal.memory.storage import MemoryStorage
     memory_storage = MemoryStorage(registration.runtime.runtime_root)
@@ -177,6 +179,7 @@ def compose_runtime(
     for module_id in ("core", "execution", "channel", "identity", "llm", "memory", "control", "failure"):
         core.publish_module_capabilities(module_id)
 
+    from pal.memory.maintenance import MemoryBackendOwner
     return StubRuntimeHandle(
         wizard=wizard,
         registration=registration,
@@ -191,7 +194,8 @@ def compose_runtime(
         control_plane=control_plane,
         failure_runtime=failure_runtime,
         configuration_service=CoreConfigurationService(registration.runtime.runtime_root, core.cache_warm_deadline,
-                                                      identity_service=identity_service, control_plane=control_plane),
+                                                      identity_service=identity_service, control_plane=control_plane,
+                                                      memory_owner=MemoryBackendOwner(core, memory_service)),
     )
 
 

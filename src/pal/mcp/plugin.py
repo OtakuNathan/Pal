@@ -2,21 +2,16 @@ from __future__ import annotations
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
-    INDIRECT_LOCAL_WRITE,
 )
-from pal.execution.tool_facade import ToolGuidance
+from pal.execution.tool_facade import ToolGuidance, ToolRejectedError
 from pal.shared.diagnostics import exception_report
 
 from pal.execution.generated_tool_models import (
-    McpPluginMcpManagerPluginProviderAttachInput,
-    McpPluginMcpManagerPluginProviderDetachInput,
-    McpPluginMcpManagerPluginProviderImagePrepareInput,
     McpPluginMcpManagerPluginProviderReadInput,
+    McpPluginMcpManagerPluginProviderManageServerInput,
 )
 
-import base64
 import contextlib
-import mimetypes
 import os
 import signal
 import subprocess
@@ -28,7 +23,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
-from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.execution.contracts import CapabilityCall
+from pal.mcp.artifact_inputs import resolve_artifact_input
 from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import python_subprocess_env
 from pal.mcp.compiler import McpCompiledProjection, McpCompiler
@@ -132,12 +128,12 @@ class McpManagerPluginProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
-            search_objects=('state', 'states'),
-            search_terms=('status', 'show', 'get',),
-            purpose="Show MCP manager status.",
+            search_objects=('state', 'states', 'hub', 'manager', 'projection'),
+            search_terms=('status', 'show', 'get', 'health', 'process', 'server', 'count', 'tools'),
+            purpose="Inspect MCP manager process health, server counts and tool projection state.",
             use_when="Diagnosing MCP system health — manager process, projection, server count.",
             do_not_use_when="Listing servers (use list_mcp_servers). Checking one server (use read_mcp_server).",
-            failure_next_steps="If the manager failed, reload the MCP plugin; attach_mcp_server only targets one configured server.",
+            failure_next_steps="If the manager failed, reload the MCP plugin; manage_mcp_server only targets one configured server.",
         ), aliases=("inspect_mcp_state",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -155,7 +151,7 @@ class McpManagerPluginProvider:
             purpose="List configured MCP servers.",
             use_when='Discovering which MCP servers are configured and their attach status. An empty list means no servers are currently discovered. After adding or correcting server configuration, use rescan_mcp_servers.',
             do_not_use_when="Checking manager health (use inspect_mcp_state). Reading one server's details (use read_mcp_server).",
-            failure_next_steps="If empty, no MCP servers are configured. Check MCP config files or run rescan_mcp_servers.",
+            failure_next_steps="If empty, no MCP servers are currently discovered. Check MCP config files and use rescan_mcp_servers after configuration changes.",
         ), aliases=("list_mcp_servers",))
     def list_servers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -168,9 +164,9 @@ class McpManagerPluginProvider:
         action_name="read",
         guidance=ToolGuidance(
             search_objects=('server', 'servers'),
-            search_terms=('inspect', 'show', 'info', 'metadata',),
-            purpose="Read one MCP server's metadata and tool discovery snapshot.",
-            use_when="Inspecting what tools a specific MCP server exposes.",
+            search_terms=('inspect', 'show', 'info', 'metadata', 'status', 'health', 'error', 'quarantine', 'quarantined', 'connection', 'capabilities', 'tools', 'prompts', 'discovery'),
+            purpose="Inspect one MCP server's observed connection, configuration, quarantine/errors and tool/prompt discovery snapshot.",
+            use_when="Diagnosing one configured server or inspecting its discovered tools and prompts. Reads observed state without starting the manager or probing a new connection.",
             do_not_use_when="Listing all servers (use list_mcp_servers). Manager health (use inspect_mcp_state).",
             failure_next_steps="If server not found, verify with list_mcp_servers.",
         ),
@@ -213,7 +209,7 @@ class McpManagerPluginProvider:
             search_terms=('discover', 'scan', 'refresh',),
             purpose="Rescan MCP server configs and refresh the tool projection.",
             use_when="After adding or modifying MCP server configuration files.",
-            do_not_use_when="Restarting the manager (use reload_plugin with name='mcp'). Attaching one server (use attach_mcp_server).",
+            do_not_use_when="Restarting the manager (use manage_plugin operation=reload with name='mcp'). Attaching one server (use manage_mcp_server operation=attach).",
             failure_next_steps="Use inspect_mcp_state and list_mcp_servers to reconcile current manager and server state. Correct config syntax or projection errors before retrying.",
         ), aliases=("rescan_mcp_servers",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -228,22 +224,27 @@ class McpManagerPluginProvider:
             return _error_result("mcp rescan failed", exc)
 
     @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="server",
-        action_name="attach",
+        namespace=OPERATION_NAMESPACE, scope="module", family="server", action_name="manage",
         guidance=ToolGuidance(
             search_objects=('server', 'servers'),
-            search_terms=('connect',),
-            purpose="Attach one configured MCP server inside the manager.",
-            use_when="Enabling a specific MCP server's tools without affecting others.",
-            do_not_use_when="Attaching the whole MCP plugin (use attach_plugin). Detaching a server (use detach_mcp_server).",
-            failure_next_steps="Inspect list_mcp_servers to reconcile whether the server attached. If absent, verify its name and run rescan_mcp_servers after config changes before retrying.",
+            search_terms=('connect', 'disconnect'),
+            search_enum_fields=('operation',),
+            purpose="Attach or detach one configured MCP server and refresh its published tools.",
+            use_when="Use operation=attach to connect one server, or operation=detach to disconnect it. This controls the current connection without changing configured enabled state; rescan can reconnect enabled servers. After correcting a quarantined server and reconciling prior writes, attach explicitly; rescan does not retry quarantined servers.",
+            do_not_use_when="Controlling the whole MCP plugin (use manage_plugin). Discovering changed configuration (use rescan_mcp_servers). Attach preserves an already attached server; it is not a forced restart.",
+            failure_next_steps="Inspect list_mcp_servers and read_mcp_server to reconcile current state before retrying. Use the exact configured server name; rescan first after configuration changes.",
         ),
-        InputModel=McpPluginMcpManagerPluginProviderAttachInput,
-        aliases=("attach_mcp_server",),
-        execution=INDIRECT_CONTROL,
+        InputModel=McpPluginMcpManagerPluginProviderManageServerInput,
+        aliases=("manage_mcp_server",), execution=INDIRECT_CONTROL,
     )
+    def manage_server(self, call: IntrospectionCall) -> IntrospectionResult:
+        operation = call.args.get("operation")
+        if operation == "attach":
+            return self.attach_server(call)
+        if operation == "detach":
+            return self.detach_server(call)
+        raise ToolRejectedError("operation must be attach or detach", error_code="invalid_operation")
+
     def attach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
             self._ensure_manager_started()
@@ -254,23 +255,6 @@ class McpManagerPluginProvider:
         except Exception as exc:
             return _error_result("mcp server attach failed", exc)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="server",
-        action_name="detach",
-        guidance=ToolGuidance(
-            search_objects=('server', 'servers'),
-            search_terms=('disconnect',),
-            purpose="Detach one MCP server inside the manager.",
-            use_when="Temporarily disabling one MCP server's tools.",
-            do_not_use_when="Detaching the whole MCP plugin (use detach_plugin). Attaching a server (use attach_mcp_server).",
-            failure_next_steps="Inspect list_mcp_servers to reconcile whether the server detached. Retry only if it is still attached; verify the exact server name first.",
-        ),
-        InputModel=McpPluginMcpManagerPluginProviderDetachInput,
-        aliases=("detach_mcp_server",),
-        execution=INDIRECT_CONTROL,
-    )
     def detach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
             result = self.client.detach_server_sync(str(call.args.get("name") or ""))
@@ -279,44 +263,6 @@ class McpManagerPluginProvider:
             return _introspection_from_rpc("MCP server detached", result)
         except Exception as exc:
             return _error_result("mcp server detach failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="mcp",
-        action_name="image_prepare",
-        guidance=ToolGuidance(
-            search_objects=('image', 'images'),
-            search_terms=('convert', 'encode', 'base64',),
-            purpose="Convert an image artifact or local file into the path, base64, or data-URL representation required by an external MCP tool.",
-            use_when="An MCP tool requires an image representation that differs from the artifact, local path, or URL already available.",
-            do_not_use_when="Reading artifact text content (use read_artifact). The MCP tool already accepts the available URL or path directly. The active model can inspect an inline image itself.",
-            failure_next_steps="For an unknown artifact, recover its current artifact_id with list_artifacts. For an invalid local path, use run_shell with a bounded existence/type check; read_file cannot validate binary images. Correct the source or mode and retry; preparation may write a local image representation.",
-        ),
-        InputModel=McpPluginMcpManagerPluginProviderImagePrepareInput,
-        aliases=("prepare_mcp_image",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    def image_prepare(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            payload = self._prepare_image_payload(
-                call.args,
-                turn_id=str(call.meta.get("turn_id") or "") or None,
-            )
-        except Exception as exc:
-            return CapabilityResult(
-                status=RuntimeStatus.ERROR,
-                text="Image preparation failed",
-                structured=_error_payload(exc, error_code="mcp_image_prepare_failed"),
-                llm_text="Image preparation failed:\n" + exception_report(exc),
-                recovery_hint=_mcp_recovery_hint(exc, image=True),
-            )
-        return CapabilityResult(
-            status=RuntimeStatus.OK,
-            text="image prepared for MCP tool argument",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("MCP image payload", payload),
-        )
 
     def build_mounted_subtree(self, *, module_id: str, lifecycle_scope: str, detachable: bool) -> MountedSubtreeHandle:
         _ = (module_id, lifecycle_scope, detachable)
@@ -462,7 +408,9 @@ class McpManagerPluginProvider:
             for item in list(payload.get("snapshots") or [])
             if isinstance(item, dict)
         )
-        self.projection = self.compiler.compile(module_id="mcp", snapshots=snapshots, invoker=_McpManagerInvoker(self.client, self._refresh_after_call_failure))
+        self.projection = self.compiler.compile(module_id="mcp", snapshots=snapshots, invoker=_McpManagerInvoker(self.client, self._refresh_after_call_failure),
+            artifact_resolver=lambda artifact_id, representation, call: resolve_artifact_input(
+                self.core_context, artifact_id, representation, call))
         self.last_health = dict(payload)
 
     def _refresh_after_call_failure(self) -> None:
@@ -498,74 +446,6 @@ class McpManagerPluginProvider:
         payload["cached_snapshot"] = {key: value for key, value in dict(self.last_health or {}).items()
                                       if key in {"ok", "health_source", "manager_pid", "started_at", "last_rescan_at", "last_error",
                                                  "server_count", "attached_count", "tool_count", "quarantined_count", "shutdown_requested", "config_root"}}
-        return payload
-
-    def _prepare_image_payload(
-        self,
-        args: dict[str, Any],
-        *,
-        turn_id: str | None = None,
-    ) -> dict[str, Any]:
-        mode = str(args.get("mode") or "auto").strip() or "auto"
-        url = str(args.get("url") or "").strip()
-        if url and mode in {"auto", "url"}:
-            return {"kind": "url", "url": url}
-        artifact_id = str(args.get("artifact_id") or "").strip()
-        path_text = str(args.get("path") or "").strip()
-        mime_type = ""
-        file_name = ""
-        if artifact_id:
-            artifact_manager = self.core_context.port_registry.get("artifact:artifact")
-            info = getattr(artifact_manager, "info", None)
-            if not callable(info):
-                raise ValueError("artifact service unavailable")
-            turn_io = self.core_context.execution_runtime.turn_io
-            scope_key = turn_io.artifact_scope_for_turn(turn_id) if turn_io is not None else None
-            if not scope_key:
-                raise ValueError("artifact_scope_unavailable")
-            artifact = dict(info(artifact_id, str(scope_key)).get("artifact") or {})
-            local_file = dict((artifact.get("metadata") or {}).get("local_file") or {})
-            path_text = str(local_file.get("preferred_path") or "")
-            mime_type = str(
-                local_file.get("preferred_mime_type")
-                or artifact.get("mime_type")
-                or ""
-            )
-            file_name = str(artifact.get("file_name") or "")
-        if not path_text:
-            raise ValueError("artifact_id, path, or url is required")
-        path = Path(path_text).expanduser()
-        if not path.is_file():
-            raise ValueError(f"image file not found: {path}")
-        path = path.resolve()
-        detected_mime = mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        if mode == "path":
-            payload = {
-                "kind": "path",
-                "path": str(path),
-                "mime_type": detected_mime,
-                "file_name": file_name or path.name,
-                "size_bytes": path.stat().st_size,
-            }
-            if artifact_id:
-                payload["artifact_id"] = artifact_id
-            return payload
-        raw = path.read_bytes()
-        encoded = base64.b64encode(raw).decode("ascii")
-        payload = {
-            "kind": (
-                "data_url"
-                if mode == "data_url" or (artifact_id and mode in {"auto", "url"})
-                else "base64"
-            ),
-            "base64": encoded,
-            "mime_type": detected_mime,
-            "file_name": file_name or path.name,
-            "size_bytes": len(raw),
-        }
-        payload["data_url"] = f"data:{detected_mime};base64,{encoded}"
-        if artifact_id:
-            payload["artifact_id"] = artifact_id
         return payload
 
 
@@ -651,20 +531,7 @@ def _error_result(text: str, exc: Exception) -> IntrospectionResult:
     )
 
 
-def _mcp_recovery_hint(exc: Exception, *, image: bool = False) -> str:
-    message = str(exc).lower()
-    if image:
-        if message.startswith("image file not found:") or isinstance(exc, OSError):
-            return "Use run_shell for a bounded existence/readability check of the image path, then correct the path; read_file is for text."
-        if "artifact_scope_unavailable" in message:
-            return "The artifact has no bound conversation scope. Use an accessible local image path, or invoke from the artifact's conversation."
-        if "artifact service unavailable" in message:
-            return "Use an accessible local image path, or inspect artifact service availability with search_tools(query='artifact show')."
-        if "artifact_not_found" in message or "artifact_handler_retired" in message:
-            return "Use list_artifacts to check current artifact availability; copy a returned artifact_id or use an accessible local image path."
-        if message == "artifact_id, path, or url is required":
-            return "Supply an image source; use read_tool(name='prepare_mcp_image') for the exact source and mode schema."
-        return "Inspect the reported cause and inspect_mcp_state for service health; for argument errors use read_tool(name='prepare_mcp_image')."
+def _mcp_recovery_hint(exc: Exception) -> str:
     return ("Use inspect_mcp_state for manager health and list_mcp_servers for server state; "
             "use read_mcp_server with the affected server name for details. "
             "Correct the reported cause. Reconcile any external write before retrying it.")

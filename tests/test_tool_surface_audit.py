@@ -37,8 +37,9 @@ def test_counts_deduplicate_providers_without_collapsing_visibility():
     assert counts["distinct_aliases"] == counts["resident_union"] + counts["role_only_union"]
     assert counts["resident_union"] == counts["resident_native"] + counts["resident_search_only"]
     assert counts["resident_native"] == counts["resident_direct"] + counts["resident_native_opt_ins"]
-    assert len(rows["inspect_memory_provider_inventory"]["sources"]) == 2
-    assert rows["inspect_memory_provider_inventory"]["module"] == "memory"
+    assert "inspect_memory_provider_inventory" not in rows
+    assert rows["inspect_memory_state"]["module"] == "memory"
+    assert rows["show_emotion"]["exposure"] == "native"
     assert rows["remember_memory"]["invocation_mode"] == "indirect"
     assert rows["remember_memory"]["exposure"] == "native"
     assert rows["read_file"]["exposure"] == "native"

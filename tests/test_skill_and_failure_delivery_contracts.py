@@ -16,6 +16,7 @@ from pal.skill.capabilities import register_with_core as register_skill
 from pal.skill.contracts import SkillDescriptor
 from pal.skill.models import SkillModel
 from pal.skill.service import SkillService
+from pal.shared.tool_protocol import new_tool_call
 from tests.test_tool_failure_affordances import invoke, metadata, read
 
 
@@ -119,8 +120,8 @@ def test_bunshin_handler_preserves_original_exception_chain(core, runtime, tmp_p
     core.context.register_module(ModuleHandle(module_id="bunshin", tier=MODULE_TIER_DETACHABLE,
         detachable=True, introspection_provider=provider))
     core.publish_module_capabilities("bunshin")
-    alias = "read_bunshin_catalog" if operation == "catalog" else "archive_bunshin_workflow"
-    result = invoke(runtime, alias, {} if operation == "catalog" else {"task": "audit"})
+    alias = "read_bunshin_catalog" if operation == "catalog" else "control_bunshin_workflow"
+    result = invoke(runtime, alias, {} if operation == "catalog" else {"task": "audit", "operation": "archive"})
     assert not result.ok
     assert "root cause: cannot read pinned family file" in result.llm_text
     assert "PermissionError" in result.llm_text
@@ -179,3 +180,58 @@ def test_directory_sync_failure_reports_applied_write(runtime, tmp_path, monkeyp
         assert result.invocation_result.details["failed_edits"][0]["edit_index"] == 1
         assert "NOT_FOUND_MATCH" in result.llm_text
         assert '"applied_edit_indices":[0]' in result.llm_text
+
+
+def test_skill_surface_keeps_separate_reads_and_retires_disable(runtime, skill_provider):
+    generation = runtime.registry_generation
+    names = {name for name, record in generation.search_records.items() if record['module_id'] == 'skill'}
+    assert names == {'inspect_skill_state', 'search_skills', 'read_skill', 'inject_skill',
+                     'prepare_skill_candidate', 'commit_skill_candidate', 'update_skill'}
+    assert generation.record_for_alias('disable_skill') is None
+    assert 'disable_skill' not in generation.provider_specs
+    assert not runtime.execute_tool(new_tool_call(
+        name='read_tool', args={'name': 'disable_skill'})).ok
+    assert not invoke(runtime, 'disable_skill', {'name': 'test.skill'}).ok
+
+
+def test_disable_and_reactivate_via_update_share_file_and_version_path(runtime, skill_provider):
+    service = skill_provider.service
+    skill = SkillDescriptor(skill_id='test.availability', module_id='audit', title='Availability',
+        summary='Keep this metadata.', manual_text='Perform the procedure.', activation_terms=('procedure',))
+    service.repository.upsert_skill(skill)
+    previous = service.repository.get_skill(skill.skill_id)
+    for patch, active in (({'status': 'disabled', 'enabled': False}, False),
+                          ({'status': 'active', 'enabled': True}, True)):
+        result = invoke(runtime, 'update_skill', {'name': skill.skill_id, 'patch': patch})
+        assert result.ok, result.llm_text
+        stored = service.repository.get_skill(skill.skill_id)
+        assert stored.active is active
+        assert stored.version == previous.version + 1
+        assert stored.manual_text == skill.manual_text
+        assert stored.activation_terms == skill.activation_terms
+        mirrored = json.loads((service.runtime_root / 'SKILL' / skill.skill_id / 'skill.json').read_text())
+        assert mirrored['status'] == stored.status
+        assert mirrored['enabled'] is stored.enabled
+        assert mirrored['version'] == stored.version
+        assert invoke(runtime, 'inject_skill', {'name': skill.skill_id}).ok is active
+        unchanged = invoke(runtime, 'update_skill', {'name': skill.skill_id, 'patch': patch})
+        assert unchanged.ok and unchanged.structured['changed'] is False
+        assert service.repository.get_skill(skill.skill_id).version == stored.version
+        previous = stored
+
+
+def test_disabling_update_reports_file_failure_without_changing_database(runtime, skill_provider, monkeypatch):
+    service = skill_provider.service
+    skill = SkillDescriptor(skill_id='test.disable_failure', module_id='audit', title='Failure',
+        summary='Test disabling.', manual_text='Perform the procedure.')
+    service.repository.upsert_skill(skill)
+    before = service.repository.get_skill(skill.skill_id)
+    def fail(*args, **kwargs):
+        raise OSError('skill mirror is unwritable')
+    monkeypatch.setattr(service, '_write_skill_file', fail)
+    result = invoke(runtime, 'update_skill', {'name': skill.skill_id,
+        'patch': {'status': 'disabled', 'enabled': False}})
+    assert not result.ok
+    assert 'skill mirror is unwritable' in result.llm_text
+    assert metadata(result)['retry'] == 'reconcile_first'
+    assert service.repository.get_skill(skill.skill_id) == before

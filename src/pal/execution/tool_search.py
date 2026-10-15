@@ -30,20 +30,6 @@ def inspect_tools(provider: object) -> list[dict[str, object]]:
 
 
 class ExecutionToolSearchMixin:
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="module",
-        action_name="tools",
-        guidance=ToolGuidance(
-            search_objects=('tool', 'tools', 'capability', 'capabilities'),
-            search_terms=('inventory', 'registry', 'available',),
-            purpose="List a compact directory of registered tool aliases, purposes, modules, and invocation modes.",
-            use_when="Browsing all available tools when you don't know what to search for. Checking tool inventory completeness.",
-            do_not_use_when="Searching for a specific capability (use search_tools). Reading one tool's contract (use read_tool).",
-            failure_next_steps="Read-only. Reuse unchanged inventory. If expected tools are missing, check inspect_execution_state for capability/tool counts. If reasonable checks still reveal no suitable callable, it may be unavailable; explain that possibility rather than repeating discovery indefinitely.",
-        ),
-        aliases=("list_tools",),
-    )
     def tools(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = {"tools": inspect_tools(self)}
@@ -133,7 +119,7 @@ class ExecutionDiscoveryCapabilityMixin:
             search_terms=('schema', 'definition', 'inspect',),
             purpose="Read the full capability contract for an execution capability by exact alias.",
             use_when="When the capability contract is absent, changed, or insufficient for correct arguments and execution semantics. Reuse a valid contract already in context; do not read it before every call.",
-            do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use list_tools).",
+            do_not_use_when="Searching for capabilities by query (use search_tools). Browsing a domain directory (use search_tools with domain only).",
             failure_next_steps="If alias not found, use search_tools to discover the correct alias.",
             next_tool_hints=(
                 NextToolHint(

@@ -8,12 +8,12 @@ def test_catalog_tasks_hide_aliases_and_keep_role_tools_separate():
     resident = generations['resident_union'].search_records
     role = generations['role_union'].search_records
     assert not set(resident).intersection(role)
-    assert 'inspect_active_llm' in resident
+    assert 'inspect_llm' in resident
     assert 'remember_memory' in resident
     assert 'write_provider_memory' not in records
     assert 'add_finding' in role
     assert records['set_browser_checked_state']['domain'] == 'browser'
-    assert records['reload_plugin']['domain'] == 'plugin'
+    assert records['manage_plugin']['domain'] == 'plugin'
     for case in cases:
         assert case['alias'] in generations[case['group']].search_records
         assert case['alias'] not in case['task']

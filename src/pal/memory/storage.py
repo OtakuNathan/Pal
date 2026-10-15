@@ -421,6 +421,28 @@ class MemoryStorage:
             connection.execute("UPDATE memory_head SET generation_id=? WHERE singleton=1", (generation,))
             connection.execute("UPDATE dreaming_runs SET status='completed',report_json=?,updated_at=? WHERE run_id=?", (json.dumps(report), now, run_id))
 
+    def publish_reindexed(self, repo: MemoryDurableRepository, *, source_generation: str) -> None:
+        """Publish a verified embedding-only candidate under the offline CLI lease.
+
+        Content and reference checks belong to embedding_migration before this
+        call; the durable catalog compare-and-swap preserves existing pins.
+        """
+        generation = repo.generation_id
+        if generation == source_generation:
+            raise ValueError("Embedding publication requires a distinct candidate")
+        self.seal(repo)
+        with self.connection(write=True) as connection:
+            head = connection.execute("SELECT generation_id FROM memory_head WHERE singleton=1").fetchone()[0]
+            if head != source_generation:
+                raise RuntimeError("Memory publication source changed")
+            candidate = connection.execute("SELECT published_at FROM generations WHERE generation_id=?", (generation,)).fetchone()
+            if candidate is None or candidate[0] is not None:
+                raise RuntimeError("Embedding candidate is absent or already published")
+            now = utc_now()
+            connection.execute("UPDATE generations SET published_at=? WHERE generation_id=?", (now, generation))
+            connection.execute("UPDATE generations SET retired_at=? WHERE generation_id=?", (now, source_generation))
+            connection.execute("UPDATE memory_head SET generation_id=? WHERE singleton=1", (generation,))
+
     def history(self, ref: str, *, repo=None) -> list[dict]:
         if self.is_deleted(ref):
             return []

@@ -90,18 +90,20 @@ def host_lsp(tmp_path, monkeypatch):
     kill.assert_not_called()
 
 
-@pytest.mark.parametrize("operation", ["status", "diagnostics", "definition", "prepare_workspace"])
+@pytest.mark.parametrize("operation", ["status", "diagnostics", "symbol_locations", "prepare_workspace"])
 def test_client_only_provider_queries_reuse_host_without_taking_ownership(tmp_path, host_lsp, operation):
     provider = LspManagerPluginProvider(runtime_root=tmp_path, client_only=True)
     args = {"file": "sample.py", "workspace_root": str(tmp_path), "name": "pyright"}
 
+    if operation == "symbol_locations":
+        args["kind"] = "definition"
     result = getattr(provider, operation)(CapabilityCall(name=operation, args=args))
 
     assert result.status == "ok"
-    assert result.structured["operation"] == operation
+    assert result.structured["operation"] == {"status": "doctor", "symbol_locations": "definition"}.get(operation, operation)
     assert host_lsp.calls == [
         ("health", {}),
-        (operation, {"file": "sample.py", "workspace_root": str(tmp_path), "server_id": "pyright"}),
+        ({"status": "doctor", "symbol_locations": "definition"}.get(operation, operation), {"file": "sample.py", "workspace_root": str(tmp_path), "server_id": "pyright"}),
     ]
     assert provider.process is None
     assert provider._status_payload()["manager_owned"] is False

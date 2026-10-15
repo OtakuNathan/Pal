@@ -96,9 +96,7 @@ class ToolSurface:
         elif signal.subsystem == "channel":
             include("intro_module_channel_show")
             include("intro_module_channel_list")
-            include("op_channel_mgmt_enable")
-            include("op_channel_mgmt_attach")
-            include("op_channel_mgmt_restart_endpoint")
+            include("op_channel_mgmt_manage_endpoint")
             endpoint_id = (
                 str(signal.related_ids.get("endpoint_id") or "").strip()
                 or str(signal.component or "").strip()
@@ -106,18 +104,12 @@ class ToolSurface:
             if endpoint_id:
                 include("intro_endpoint_channel_inspect", target_id=endpoint_id)
         elif signal.subsystem == "llm":
-            include("intro_module_llm_list")
-            include("intro_module_llm_active")
-            include("intro_module_llm_show")
+            include("intro_module_llm_inspect")
         elif signal.subsystem == "execution":
             include("intro_module_exec_show")
             include("intro_module_exec_tools")
         elif signal.subsystem == "web_search":
             include("intro_module_web_search_show")
-            include("intro_module_web_search_list_providers")
-            active_web_search_provider_id = self._get_setting("active_web_search_provider_id")
-            if active_web_search_provider_id:
-                include("intro_provider_web_search_show", target_id=active_web_search_provider_id)
         elif signal.subsystem == "web_fetch":
             include("intro_module_web_fetch_show")
         else:

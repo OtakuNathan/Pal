@@ -12,12 +12,9 @@ from pydantic import Field
 
 from pal.execution.generated_tool_models import (
     ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
-    ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
-    ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput,
-    ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderManageTaskInput,
     ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput,
-    ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput,
-    ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderSetDestinationInput,
     ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput,
 )
 
@@ -125,13 +122,15 @@ class ProactiveIntrospectionProvider:
     def _resolve_destination(
         self, call: IntrospectionCall, *, endpoint_id: str | None = None,
         reply_target: dict[str, object] | None = None,
+        allow_empty_target: bool = False,
     ) -> tuple[str, dict[str, object]]:
         current = self._current_delivery_binding(call)
         channel = self.context.port_registry.get("channel:channel") if self.context is not None else None
         resolve = getattr(channel, "resolve_output_destination", None)
         if not callable(resolve):
             raise ValueError("Channel destination resolver is unavailable; inspect list_channel_endpoints before creating or moving a scheduled output.")
-        result = resolve(endpoint_id=endpoint_id, reply_target=reply_target, current_binding=current)
+        result = resolve(endpoint_id=endpoint_id, reply_target=reply_target, current_binding=current,
+                         allow_empty_target=allow_empty_target)
         return str(result["channel_id"]), dict(result["reply_target"])
 
     def iter_proactive_tasks(self, *, include_history: bool = True) -> list[ProactiveTarget]:
@@ -169,7 +168,7 @@ class ProactiveIntrospectionProvider:
             purpose="Show proactive module status.",
             use_when="Diagnosing proactive system health — how many tasks registered, pending triggers, triggered runs.",
             do_not_use_when="Listing specific tasks (use list_proactive_tasks). Checking one task's details (use read_proactive_task).",
-            failure_next_steps="If absent, use attach_plugin with name='proactive'.",
+            failure_next_steps="If absent, use manage_plugin operation=attach with name='proactive'.",
         ),
         aliases=("inspect_proactive_status",),
     )
@@ -436,19 +435,28 @@ class ProactiveIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="management",
-        action_name="delete",
+        action_name="manage_task",
         guidance=ToolGuidance(
+            search_intents=('pause scheduled task', 'suspend task schedule', 'resume scheduled task', 'remove scheduled task'),
             search_objects=('task', 'tasks'),
-            search_terms=('remove', 'scheduled', 'automation', 'reminder',),
-            purpose="Permanently delete a proactive task and its definition.",
-            use_when="A scheduled/recurring task is no longer needed and should be fully removed.",
-            do_not_use_when="Temporarily stopping a task (use disable_proactive_task).",
-            failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks. Deletion is irreversible.",
+            search_terms=('pause', 'stop', 'suspend', 'resume', 'remove', 'scheduled', 'automation', 'reminder'),
+            search_enum_fields=('operation',),
+            purpose="Enable, disable or delete an existing proactive task.",
+            use_when="Use operation=disable to pause future scheduling while retaining the task and run history; operation=enable resumes scheduling. Use operation=delete to permanently remove the task definition. Pausing does not cancel a run already in progress.",
+            do_not_use_when="Creating or replacing a task (use upsert_proactive_task), changing timing (use update_proactive_schedule), or changing output (use set_proactive_destination).",
+            failure_next_steps="If NOT_FOUND, verify the name with list_proactive_tasks. Resume a disabled task with operation=enable; deletion cannot be undone through this tool.",
         ),
-        aliases=("delete_proactive_task",),
-        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
+        aliases=("manage_proactive_task",),
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderManageTaskInput,
         execution=INDIRECT_LOCAL_WRITE,
     )
+    def manage_task(self, call: IntrospectionCall) -> IntrospectionResult:
+        handlers = {"enable": self.enable, "disable": self.disable, "delete": self.delete}
+        operation = call.args.get("operation")
+        if not isinstance(operation, str) or operation not in handlers:
+            return _invalid_result("operation must be enable, disable or delete")
+        return handlers[operation](call)
+
     def delete(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
@@ -473,43 +481,9 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive task deleted", payload),
         )
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="enable",
-        guidance=ToolGuidance(
-            search_objects=('task', 'tasks'),
-            search_terms=('resume', 'scheduled', 'automation', 'reminder',),
-            purpose="Enable a proactive task so it resumes firing on schedule.",
-            use_when="Re-enabling a previously disabled task.",
-            do_not_use_when="Disabling a task (use disable_proactive_task). Creating a new task (use upsert_proactive_task).",
-            failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks.",
-        ),
-        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput,
-        aliases=("enable_proactive_task",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="disable",
-        guidance=ToolGuidance(search_intents=('pause scheduled task', 'suspend task schedule'),
-            search_objects=('task', 'tasks'),
-            search_terms=('pause', 'stop', 'scheduled', 'automation', 'reminder',),
-            purpose="Disable a proactive task so it stops firing without deleting it.",
-            use_when='Temporarily pausing a task (e.g. debugging, vacation, maintenance). Use enable_proactive_task to resume future scheduling; disabling does not erase the task or its run history.',
-            do_not_use_when="Permanently removing a task (use delete_proactive_task).",
-            failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks. Re-enable with enable_proactive_task.",
-        ),
-        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput,
-        aliases=("disable_proactive_task",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
 
@@ -517,27 +491,24 @@ class ProactiveIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="management",
-        action_name="set_output_channel",
+        action_name="set_destination",
         guidance=ToolGuidance(
-            search_objects=('channel', 'channels', 'destination', 'destinations'),
-            search_terms=('delivery', 'destination',),
-            purpose="Set a proactive task's channel and destination together, or clear output. Without an explicit target, use the current conversation on that channel or its unique default destination; never carry a target across channels.",
-            use_when="Routing a task's output to a different channel (e.g. Telegram, socket) or clearing it.",
-            do_not_use_when="Setting a specific reply target within a channel (use set_proactive_output_target).",
-            failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks. Verify the channel name with list_channel_endpoints.",
+            search_objects=('channel', 'target', 'destination'),
+            search_terms=('output', 'delivery', 'route', 'routing', 'chat', 'thread', 'scheduled', 'automation'),
+            search_intents=('change scheduled task output channel or chat', 'clear a scheduled task output destination'),
+            purpose="Set a proactive task's output destination: change its channel and target together, change only its target, or explicitly clear output.",
+            use_when="Moving scheduled output to another endpoint, chat or thread. Omit channel to retain it; explicit null clears channel and target. An explicit channel with no target resolves the current/default destination without inheriting the old target. An empty target object clears only the target.",
+            do_not_use_when="Changing task timing (use update_proactive_schedule). Sending a message immediately (use send_channel_message).",
+            failure_next_steps="Verify the task with list_proactive_tasks and the endpoint with list_channel_endpoints. Supply a known target if no unambiguous destination exists; failed validation leaves the task unchanged.",
         ),
-        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput,
-        aliases=("set_proactive_output_channel",),
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetDestinationInput,
+        aliases=("set_proactive_destination",),
         execution=INDIRECT_LOCAL_WRITE,
     )
-    def set_output_channel(self, call: IntrospectionCall) -> IntrospectionResult:
+    def set_destination(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
-            return _precondition_failure(
-                status=RuntimeStatus.INVALID,
-                text="name is required",
-                llm_text="name is required",
-            )
+            return _invalid_result("name is required")
         existing = self.manager.registered.get(proactive_id)
         if existing is None:
             return _precondition_failure(
@@ -546,22 +517,38 @@ class ProactiveIntrospectionProvider:
                 structured={"proactive_id": proactive_id},
                 llm_text="proactive task not found",
             )
-        out_channel_id = str(call.args.get("out_channel_name") or "").strip() or None
+        has_channel = "out_channel_name" in call.args
+        has_target = "out_reply_target" in call.args
+        if not has_channel and not has_target:
+            return _invalid_result("Supply out_channel_name or out_reply_target; explicit out_channel_name=null clears output")
+        raw_channel = call.args.get("out_channel_name")
         raw_target = call.args.get("out_reply_target")
-        if raw_target is not None and not isinstance(raw_target, dict):
-            return _invalid_result("out_reply_target must be an object")
-        if out_channel_id is None:
+        if has_target and not isinstance(raw_target, dict):
+            return _invalid_result("out_reply_target must be an object; use {} to clear only the target")
+        if has_channel and raw_channel is not None and (not isinstance(raw_channel, str) or not raw_channel.strip()):
+            return _invalid_result("out_channel_name must be a non-empty endpoint name or null to clear output")
+        if has_channel and raw_channel is None:
             if raw_target:
-                return _invalid_result("out_channel_name is required when setting an output target")
-            target = {}
+                return _invalid_result("Cannot set a target while clearing the output channel")
+            out_channel_id, target = None, {}
         else:
+            out_channel_id = raw_channel.strip() if has_channel else existing.out_channel_id
+            if not out_channel_id:
+                return _invalid_result("The task has no output channel; supply out_channel_name with the target")
             try:
                 out_channel_id, target = self._resolve_destination(
-                    call, endpoint_id=out_channel_id, reply_target=raw_target or None,
+                    call, endpoint_id=out_channel_id,
+                    reply_target=raw_target if has_target else None,
+                    allow_empty_target=has_target and not raw_target,
                 )
             except ValueError as exc:
                 return _invalid_result(str(exc), structured={"reason": "destination_unresolved"})
         updated = self.manager.set_output_destination(proactive_id, out_channel_id, target)
+        if updated is None:
+            return _precondition_failure(
+                status=RuntimeStatus.NOT_FOUND, text="proactive task not found",
+                structured={"proactive_id": proactive_id}, llm_text="proactive task not found",
+            )
         self._refresh_capabilities()
         payload = {
             "name": proactive_id,
@@ -571,55 +558,9 @@ class ProactiveIntrospectionProvider:
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="proactive output channel updated",
+            text="proactive output destination updated",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive output channel updated", payload),
-        )
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="module",
-        family="management",
-        action_name="set_output_target",
-        guidance=ToolGuidance(
-            search_objects=('target', 'targets'),
-            search_terms=('delivery', 'destination', 'chat', 'thread',),
-            purpose="Set or clear the specific reply target (e.g. chat ID, thread) within a channel for a proactive task.",
-            use_when="Fine-tuning where within a channel the task output goes (e.g. specific chat thread).",
-            do_not_use_when="Switching the channel itself (use set_proactive_output_channel).",
-            failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks.",
-        ),
-        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput,
-        aliases=("set_proactive_output_target",),
-        execution=INDIRECT_LOCAL_WRITE,
-    )
-    def set_output_target(self, call: IntrospectionCall) -> IntrospectionResult:
-        proactive_id = str(call.args.get("name") or "").strip()
-        if not proactive_id:
-            return _precondition_failure(
-                status=RuntimeStatus.INVALID,
-                text="name is required",
-                llm_text="name is required",
-            )
-        out_reply_target_raw = call.args.get("out_reply_target") or {}
-        if not isinstance(out_reply_target_raw, dict):
-            return _invalid_result("out_reply_target must be an object")
-        out_reply_target = dict(out_reply_target_raw)
-        updated = self.manager.set_output_target(proactive_id, out_reply_target)
-        if updated is None:
-            return _precondition_failure(
-                status=RuntimeStatus.NOT_FOUND,
-                text="proactive task not found",
-                structured={"proactive_id": proactive_id},
-                llm_text="proactive task not found",
-            )
-        self._refresh_capabilities()
-        payload = {"name": proactive_id, "proactive_id": proactive_id, "out_reply_target": dict(updated.out_reply_target)}
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="proactive output target updated",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive output target updated", payload),
+            llm_text=render_titled_structured_for_llm("Proactive output destination updated", payload),
         )
 
     @capability_action(
@@ -632,7 +573,7 @@ class ProactiveIntrospectionProvider:
             search_terms=('reschedule', 'cron', 'once', 'recurrence', 'timing', 'task', 'tasks', 'scheduled'),
             purpose="Update the schedule (cron, once, manual) for a proactive task.",
             use_when="Changing when a task fires — switching from manual to cron, updating cron expression, or setting a one-time trigger.",
-            do_not_use_when="Changing output destination (use set_proactive_output_channel). Creating a new task (use upsert_proactive_task).",
+            do_not_use_when="Changing output destination (use set_proactive_destination). Creating a new task (use upsert_proactive_task).",
             failure_next_steps="If NOT_FOUND, verify the task name with list_proactive_tasks. If schedule invalid, check cron syntax or run_at_utc format.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput,

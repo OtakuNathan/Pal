@@ -20,7 +20,7 @@ from pal.shared import RuntimeStatus, ToolExecutionResult
 from pal.shared.tool_protocol import new_tool_call
 from pal.web_fetch.browser_service import BrowserServiceError
 from pal.web_fetch.capabilities import WebFetchIntrospectionProvider
-from tests.capability_fixture import mount_test_capability
+from tests.capability_fixture import mount_test_capability, mount_internal_path_delete_adapter
 from tests.turn_fakes import continuation
 
 
@@ -30,6 +30,7 @@ def runtime(tmp_path):
     register_with_core(core.context)
     core.publish_module_capabilities("execution")
     runtime = core.context.execution_runtime
+    mount_internal_path_delete_adapter(runtime)
     runtime.configure_runtime_root(tmp_path / "runtime")
     runtime.begin_tool_result_turn(turn_id="review", scope_key="failure-review")
     yield runtime
@@ -171,7 +172,7 @@ def test_delete_refusal_preserves_path_and_explains_intent(runtime, tmp_path, di
         path.write_text("keep")
         args = {"file_path": str(path), "expected_sha256": "0" * 64}
         code = "SHA256_MISMATCH"
-    result = invoke(runtime, "delete_path", args)
+    result = invoke(runtime, "test_delete_path", args)
     assert path.exists()
     assert metadata(result)["error_code"] == code
     assert metadata(result)["effect"] == "not_started"
@@ -183,7 +184,7 @@ def test_delete_refusal_preserves_path_and_explains_intent(runtime, tmp_path, di
 @pytest.mark.parametrize("alias,args", [
     ("read_file", {"path": "wrong"}),
     ("read_file", {"file_path": "unused", "offset": 0}),
-    ("delete_path", {"path": "wrong"}),
+    ("test_delete_path", {"path": "wrong"}),
 ])
 def test_validation_is_compact_and_has_metadata_through_both_modes(runtime, asynchronous, alias, args):
     result = invoke(runtime, alias, args, asynchronous=asynchronous)
@@ -367,7 +368,7 @@ def test_delete_path_validation_does_not_claim_partial_deletion(runtime, monkeyp
     def fail(_):
         raise ValueError("invalid path")
     monkeypatch.setattr("pal.execution.path_delete.resolve_path_entry", fail)
-    result = invoke(runtime, "delete_path", {"file_path": "invalid"})
+    result = invoke(runtime, "test_delete_path", {"file_path": "invalid"})
     assert metadata(result)["effect"] == "not_started"
     assert "invalid path" in result.llm_text
     assert "Deletion may be partial" not in result.llm_text

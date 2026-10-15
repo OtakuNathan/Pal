@@ -39,10 +39,10 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
     search_terms=('execute', 'exec', 'terminal', 'bash', 'script', 'scripts', 'test', 'tests',
                   'build', 'builds', 'directory', 'directories', 'folder', 'folders', 'listing',
                   'list', 'file', 'files', 'local', 'filesystem', 'repository', 'repo', 'code',
-                  'search', 'find', 'tree', 'rg', 'grep'),
+                  'search', 'find', 'tree', 'rg', 'grep', 'delete', 'remove', 'unlink'),
     purpose=SHELL_EXEC_DESCRIPTION,
     use_when=(
-        "Use for tests, builds, scripts, package commands, process probes, and bounded directory listings. "
+        "Use for tests, builds, scripts, package commands, process probes, bounded directory listings and authorized path deletion. "
         "For shell-based repository discovery, prefer rg for text search and rg --files for file enumeration; "
         "fall back to find, grep, or ls only when rg is unavailable or unsuitable. "
         "Search saved output snapshots with rg. "
@@ -57,8 +57,7 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
         "To change your own state, configuration, or endpoints, use a dedicated capability or the official "
         "`pal` CLI when it supports the change; never bypass it by hand-editing runtime storage, the database, "
         "or config files. For unsupported changes, follow pal.self.maintenance and the mutation policy. "
-        "Use read_file for ordinary UTF-8 line/range reads, edit_file for focused edits, write_file for complete writes, and "
-        "delete_path for deletion. Repository text search remains a run_shell task: use rg, as described above. "
+        "Use read_file for ordinary UTF-8 line/range reads, edit_file for focused edits, write_file for complete writes. Repository text search remains a run_shell task: use rg, as described above. "
         "Do not pipe long-running tests or builds through head, tail, or grep merely to shorten their result; result "
         "budgeting handles large output, while such pipelines hide the command that is stalled."
     ),

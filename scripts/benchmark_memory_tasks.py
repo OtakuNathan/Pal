@@ -61,18 +61,17 @@ CASES = (
     Case('remember', 'development', '帮我记住：我希望每天 09:00 提醒我开始工作，这是长期偏好。', 'remember_memory', 'remember'),
     Case('correct', 'development', '把记忆 {preference} 中我喜欢的饮品改成红茶，原来的咖啡偏好过时了。保留其他记忆。', 'update_memory', 'correct'),
     Case('forget', 'development', '忘掉记忆 {preference} 这条饮品偏好，其余记忆保留。', 'forget_memory', 'forget'),
-    Case('inventory', 'development', '帮我看看 sqlite_vec_l3 记忆后端的记录数量和索引健康情况。只检查，不重建索引。', 'inspect_memory_provider_inventory', 'inventory'),
+    Case('inventory', 'development', '帮我看看记忆模块和当前记忆后端的记录数量及健康摘要。只检查，不重建索引。', 'inspect_memory_state', 'inventory'),
     Case('repair-experience', 'held_out', 'SQLite 记忆报 database is locked，以前有没有处理经验？找出当时有效的修复办法。', 'recall_memory', 'read_case'),
     Case('already-known', 'held_out', '当前上下文已经明确：我喜欢咖啡。只复述这句话，不用查询或保存任何记忆。', None, 'no_op'),
-    Case('save-case', 'held_out', '记下这次排障经验：browser 插件改代码后行为没变；目标是加载新代码；执行 reload_plugin；随后验证新行为成功。作为以后可复用的案例保存。', 'remember_memory', 'save_case'),
+    Case('save-case', 'held_out', '记下这次排障经验：browser 插件改代码后行为没变；目标是加载新代码；执行 manage_plugin；随后验证新行为成功。作为以后可复用的案例保存。', 'remember_memory', 'save_case'),
     Case('find-and-correct', 'held_out', '之前记过我爱喝咖啡，那条现在不对了，我改喝红茶了。找出并修正旧记录，别额外新增重复偏好，也别改项目记忆。', 'update_memory', 'correct'),
     Case('reconcile-original', 'held_out', '上次保存可能已经成功，返回 provider_id=sqlite_vec_l3、mem_ref={preference}。现在 active provider 已经切到 other_l3。先核实原库里那条的内容，不要再次写入，也不要切换 active provider。', 'recall_memory', 'reconcile'),
     Case('unknown-provider', 'held_out', '核实原 provider_id=missing_l3 的记忆 {preference}。如果原库不可用就明确告诉我；不要改查当前库，更不要写入或切换 provider。', 'recall_memory', 'unknown_provider'),
 )
-DISCOVERY = {'search_tools', 'read_tool', 'list_tools'}
+DISCOVERY = {'search_tools', 'read_tool'}
 WRITES = {'remember_memory', 'update_memory', 'forget_memory'}
-ALLOWED = WRITES | {'recall_memory', 'inspect_memory_provider_inventory',
-                   'inspect_memory_provider_state', 'inspect_active_memory_provider', 'list_memory_providers'}
+ALLOWED = WRITES | {'recall_memory', 'inspect_memory_state'}
 
 
 def corrected_drink_text(text: str) -> bool:
@@ -193,13 +192,13 @@ def grade(case: Case, fixture: MemoryFixture, calls: list[dict], final_text: str
         elif goal:
             doc = added[0]
             payload = doc['payload'] or {}
-            goal = (doc['document_kind'] == 'case' and 'reload_plugin' in json.dumps(doc, ensure_ascii=False)
+            goal = (doc['document_kind'] == 'case' and 'manage_plugin' in json.dumps(doc, ensure_ascii=False)
                     and all(str(payload.get(k) or '').strip() for k in ('situation', 'task', 'action', 'result')))
     elif case.goal == 'inventory':
         goal = (accepted and unchanged and not any(c['alias'] in WRITES for c in calls)
-                and any(c['alias'] == case.target and c['result'].get('output', {}).get('fact_count') == 2
-                        and c['result'].get('output', {}).get('case_count') == 1
-                        and 'pending_embeddings' in c['result'].get('output', {}) for c in successful))
+                and any(c['alias'] == case.target and c['result'].get('output', {}).get('active_provider', {}).get('counts', {}).get('fact_count') == 2
+                        and c['result'].get('output', {}).get('active_provider', {}).get('counts', {}).get('case_count') == 1
+                        and 'pending_embeddings' in c['result'].get('output', {}).get('active_provider', {}).get('counts', {}) for c in successful))
     elif case.goal == 'unknown_provider':
         goal = (schema_valid and bool(final_text.strip()) and unchanged and bool(targets)
                 and all(c['args'].get('provider_id') == 'missing_l3' and c['result'].get('kind') != 'complete'

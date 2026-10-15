@@ -79,7 +79,9 @@ Inspection is organized by object, not by individual fields. A hub inspection
 returns the hub's own lifecycle, selection, workload and availability information.
 Directories return discovery summaries. A named object inspection returns that
 object's configuration/lifecycle, health, latest errors and related diagnostics
-in one call; it does not recursively expand other objects.
+in one call; it does not recursively expand other objects. The small Web Search
+and LLM catalogs use one parameterless snapshot containing all configured search
+providers or loaded enabled model endpoints respectively.
 
 Independent diagnostic sections preserve known information if another source
 fails. `diagnostics` records the observation time, owner/source, partial coverage
@@ -87,17 +89,17 @@ and unavailable sections. Read success is separate from object health. Unknown
 or unavailable information is explicit; absence of an error does not prove a
 healthy service. Large histories and content remain separate business queries.
 
-The consolidation retires 17 existing aliases and adds two: `inspect_channel_state`
-and `inspect_plugin`. The retained entrypoints are:
+The earlier inspection consolidation retired 17 aliases and added two: `inspect_channel_state`
+and `inspect_plugin`. Including the subsequent 2026-10-15 tool consolidation, the retained entrypoints are:
 
 | Owner | Hub/runtime inspection | Named object inspection |
 | --- | --- | --- |
 | Channel | `inspect_channel_state` | `inspect_channel_endpoint(name)` combines lifecycle/auth/health/backlog. |
-| Web search | `inspect_web_search_state` includes configured/effective selection. | `inspect_web_search_provider(name)` includes public metadata/auth/last-request health. |
-| Memory | `inspect_memory_state` includes L1/L2 and active provider availability. | `inspect_memory_provider_inventory(name)` includes lifecycle/inventory/index/embedding diagnostics. |
-| LLM | `inspect_active_llm` includes current thinking and aggregate resident-process usage. | `inspect_llm_endpoint(name)` includes capabilities/limits and that endpoint's process usage. |
-| Plugins | `inspect_plugin_host` inspects the host; `list_plugins` contains summaries. | `inspect_plugin(name)` includes generation/dependencies/cleanup/installation and errors. |
-| LSP | `inspect_lsp_provider` inspects the host. | `inspect_lsp_status(workspace_root)` requires a workspace and reports only its readiness/server observations. |
+| Web search | Parameterless `inspect_web_search` includes selection and all providers' public metadata/auth/last-request health. | Included in the same fixed snapshot; no selector or pagination. |
+| Memory | `inspect_memory_state` includes L1/L2, active provider availability and bounded record/index counts. | Backend lifecycle, detailed indexes and embedding maintenance use `pal memory` CLI. |
+| LLM | Parameterless `inspect_llm` includes selection, current thinking and process usage summary. | All loaded enabled endpoints are included, with one `(active)` label; capabilities are not repeated in a separate active object. |
+| Plugins | `inspect_plugin()` inspects the host; `list_plugins` contains summaries. | `inspect_plugin(name)` includes generation/dependencies/cleanup/installation and errors. |
+| LSP | `inspect_lsp_status()` passively inspects the host. | Supply `workspace_root` for recorded readiness; add `name` or `file` to actively diagnose only the selected server. |
 | MCP | `inspect_mcp_state` inspects the host. | `read_mcp_server(name)` inspects one server and its discovery snapshot. |
 | Proactive | `inspect_proactive_status` inspects the scheduler/runner. | `read_proactive_task(name)` includes configuration and latest execution outcome; `list_proactive_runs` retains history. |
 | Artifact | `inspect_artifact_state` includes policy and caller-scoped resource counts. | `inspect_artifact_info` includes representations and hot/hard expiry information. |
@@ -105,15 +107,43 @@ and `inspect_plugin`. The retained entrypoints are:
 Core workload and cache deadlines share `observe_core`; the mode-label setter is
 internal. `read_checklist` is the single checklist snapshot. File-cache diagnostics
 are internal; file edit failures retain the read-before-edit recovery path.
-Failure inspection includes bounded recent diagnostic summaries; detailed reports
-remain available. Skill hub inspection bounds recent pending candidate summaries.
-Browser status remains separate from page/layout/extension/network business work.
+Parameterless `inspect_failure` combines counts and the latest 16 bounded report
+summaries. Complete returned reports and evidence use one read-only result snapshot
+file with L1 ownership; a failed save retains summaries and marks details unavailable.
+Skill hub inspection bounds recent pending candidate summaries.
+Browser status includes configured-extension summaries or one selected extension; page/layout/network business operations remain separate.
 
 LSP workspace and MCP server inspection do not start a sidecar. Host inspections
 retain passive process/errors/cached summaries when the RPC owner is unavailable.
-Active LSP diagnosis remains an explicit operation. Inspection may still perform
+Active LSP diagnosis requires an explicit server selector in `inspect_lsp_status`. Inspection may still perform
 its established bookkeeping (artifact hot-state refresh); this consolidation does
 not widen write authority or change artifact retention rules.
+
+Bunshin workflow control uses `control_bunshin_workflow(task?, operation, reason?)`
+with pause/resume/cancel/archive; lifecycle state checks stay with the existing
+owners. Delivery rebind is indirect; start remains direct. Restarting an execution
+attempt and resolving a specific blocker remain separate tools.
+
+MCP server connection control uses `manage_mcp_server(name, operation=attach|detach)`.
+Artifact inputs are resolved inside the external-tool adapter using local
+`artifact_inputs` parameter mappings and the calling conversation's visibility;
+there is no standalone `prepare_mcp_image` tool.
+
+Skill inspection, search, read and injection remain separate. Skill disabling
+uses `update_skill` with `patch={"status":"disabled","enabled":false}`;
+reactivation uses `patch={"status":"active","enabled":true}`. Both use the
+normal content-update file/database/version path. The old `disable_skill` tool
+is withdrawn.
+
+Proactive task control uses `manage_proactive_task(name, operation)` with
+`enable`, `disable` or `delete`. Disable retains the task and run history; delete
+removes its definition. Both parameters are required.
+
+Proactive destination changes use `set_proactive_destination`: omit channel to
+retain it, supply a channel to resolve a new destination, or pass explicit null
+to clear output. A supplied target is validated against the selected channel;
+`{}` deliberately clears only the target. A task name alone is rejected. The
+channel and target are persisted together; schedule updates remain independent.
 
 Control and identity expose no LLM tools. `pal control status` reads the live human
 control registry. `pal identity show` reads the resident projection online, or
@@ -124,38 +154,42 @@ system identity name and core policy retain their existing startup-pinned behavi
 which the CLI reports as `startup_pinned_fields`.
 
 Count public aliases once and separate the main Pal source union from role-only
-tools. After consolidation, 191 declarations produce **187 distinct aliases**:
+tools. After the Proactive, Skill, MCP, Bunshin, Artifact, Web Search, LLM and
+Failure consolidations, the 2026-10-15 declaration audit confirms **145 distinct
+aliases**. Declaration imports and AST exposure classification were checked without
+constructing a runtime. Compiled-registry behavior and regression tests remain
+deferred to the next module batch:
 
-- **151** belong to the main Pal authored union: **21 native** (18 direct plus
-  three indirect native opt-ins) and **130 search-only**. The preceding main
-  source union was 166, so the net reduction is 15.
+- **109** belong to the main Pal authored union: **19 native** (16 direct plus
+  three indirect native opt-ins) and **90 search-only**. Bunshin delivery rebind
+  no longer occupies a native slot.
 - **36** belong to the separate Bunshin role union. Each live role receives its
   allowed subset; these tools do not increase the main Pal count.
-- Four provider aliases have both SQLite and mock declarations and count once.
-  Unpublished backend adapters, external MCP tools and installed third-party
-  contributions are excluded.
+- Unpublished backend adapters, external MCP tools and installed third-party
+  contributions are excluded. This is not an online inventory.
 
 | Owning module | Main aliases | Native | Search-only |
 | --- | ---: | ---: | ---: |
-| Artifact | 8 | 0 | 8 |
-| Browser | 26 | 1 | 25 |
-| Bunshin | 13 | 2 | 11 |
-| Channel | 11 | 0 | 11 |
+| Artifact | 4 | 0 | 4 |
+| Browser | 23 | 1 | 22 |
+| Bunshin | 11 | 1 | 10 |
+| Channel | 7 | 0 | 7 |
 | Checklist | 4 | 3 | 1 |
 | Control | 0 | 0 | 0 |
 | Core | 1 | 0 | 1 |
-| Execution | 10 | 7 | 3 |
-| Failure | 2 | 0 | 2 |
+| Emotion | 1 | 1 | 0 |
+| Execution | 8 | 7 | 1 |
+| Failure | 1 | 0 | 1 |
 | Identity | 0 | 0 | 0 |
-| LLM | 3 | 0 | 3 |
-| LSP | 15 | 1 | 14 |
-| MCP | 7 | 0 | 7 |
-| Memory, including L3 | 14 | 4 | 10 |
-| Plugins, including packages | 14 | 1 | 13 |
-| Proactive | 11 | 1 | 10 |
-| Skill | 8 | 0 | 8 |
-| Web search | 4 | 1 | 3 |
-| **Main Pal union** | **151** | **21** | **130** |
+| LLM | 1 | 0 | 1 |
+| LSP | 10 | 0 | 10 |
+| MCP | 5 | 0 | 5 |
+| Memory, including L3 | 8 | 4 | 4 |
+| Plugins, including packages | 8 | 0 | 8 |
+| Proactive | 8 | 1 | 7 |
+| Skill | 7 | 0 | 7 |
+| Web search | 2 | 1 | 1 |
+| **Main Pal union** | **109** | **19** | **90** |
 
 This inventory imports definitions without constructing a runtime or executing
 tools. Actual visibility depends on mounted owners, targets, permissions, dynamic
@@ -231,7 +265,7 @@ an enable-and-attach tool while `browser fetch` does not imply network observati
 Negative clauses, use/avoid examples and recovery prose are not indexed. No vector index or embedding service is used. An empty result does not
 establish that a capability is unavailable.
 Shorten to the domain/object and remove guessed filters. If it still misses,
-check `list_tools` when available before falling back; use `read_tool` for a known alias.
+browse the appropriate `search_tools(domain=...)` directory before falling back; use `read_tool` for a known alias.
 Discovery terms are hidden from normal model surfaces and included in the registry
 fingerprint. They survive scoped worker contract serialization.
 
@@ -263,7 +297,7 @@ not require action/object naming conventions. The System Map names
 search domains alongside subsystem responsibilities; these keywords are not
 `module_name` or `family` filters and do not promise that a capability is mounted.
 Public lifecycle names matter: internal plugin `reattach` is exposed as
-`reload_plugin`; reload, restart, attach and rescan have distinct contracts.
+`manage_plugin(operation="reload")`; reload, restart, attach and rescan have distinct contracts.
 
 For query-only broad discovery, when no complete query match exists, `suggestions` can contain up to three fuzzy
 matches (bounded by a smaller `top_k`). Each must match at least two query words,
@@ -418,12 +452,24 @@ python scripts/audit_tool_discovery.py --output test-logs/tool-discovery-catalog
 ```
 
 This imports definition modules without starting Pal or invoking tools. The CSV
-keeps unconditional words in `effective_vocabulary`, query-dependent rules in
+includes purpose, use_when, do_not_use_when, failure_next_steps, search_intents and
+next_tool_hints so the readable contract can be reviewed beside its search metadata.
+It keeps unconditional words in `effective_vocabulary`, query-dependent rules in
 `search_term_rules`, and ranking scope words in `search_scope_terms`. It
 keeps separate provider declarations and marks Bunshin role-only tools; those
 tools do not share the resident tool surface. It describes source contracts, not
 the running registry. External MCP tools are discovered dynamically and are
 outside this catalog; review their configured guidance overrides separately.
+
+For a known domain, purpose retrieval indexes affirmative `purpose`, authored
+auxiliary terms, selected operation enums and `search_intents`; conditional terms
+apply only under their authored conditions. `search_objects` also supports the
+keyword stage. `use_when`, `do_not_use_when`, failure guidance, next-tool hints and
+arbitrary input descriptions are not indexed as capability claims. Their prose
+can name alternatives or prerequisites without making those alternatives a tool's
+own capability. When a supported intent exists only in `use_when`, express it in
+purpose or narrowly scoped auxiliary words/intent phrases too. Select operation
+enums explicitly rather than manually keeping duplicate operation words in sync.
 
 Important arguments:
 
@@ -474,7 +520,7 @@ Native shell also exposes eight independent indirect capabilities:
 `extend_shell_session` and `unwatch_shell_session`. Each has its own canonical
 path and strict input schema. Read/release retain the exclusive
 `session_id`/`output_ref` branches; an output reference cannot wait.
-`manage_shell_session` remains a distinct compatibility multiplexer.
+The old `manage_shell_session` multiplexer is no longer a model tool; internal dispatch remains shared.
 
 All session actions conservatively declare control and reconcile-first retry:
 reading also participates in output delivery and acknowledgement. A read alias
@@ -490,16 +536,25 @@ host restart; copying files or rescanning metadata alone does not activate them.
 
 ## Artifact Tool Boundary
 
-Artifact tools accept `artifact_id`, not arbitrary local paths.
+Artifact is a file normalizer and scoped reference owner. Original filenames,
+extensions, MIME, processing status and original/processed paths are projected
+from L1 references into model input. Only images attach content automatically;
+text, PDF pages and audio/transcripts use file paths and task-appropriate tools.
+New PDFs have page text/images plus an index, without combined text or chunks;
+UTF-8 text can reuse its managed original. Unsupported types retain their source
+without pretending to have parsed it.
 
-`grep_artifact` searches existing text-like representations only. It does not inspect image pixels, perform OCR, or create audio transcripts. If an artifact needs OCR, ASR, PDF parsing, or image processing, Pal must discover a suitable capability for that representation or path.
+Four indirect tools remain: import_artifact, search_artifacts, inspect_artifact_info
+and inspect_artifact_state. Search without a query lists attachments and reports
+pagination explicitly. read_artifact/grep_artifact/select_artifact/list_artifacts
+are withdrawn. The select owner method remains available for runtime leases,
+including compacted L1 references. Detailed behavior is in [artifact_manager.md](artifact_manager.md).
 
 Image import and browser screenshots register artifacts regardless of the
 selected model's vision support. Core may attach their pixels within its image
 budget when the endpoint supports vision. Otherwise the artifact reference is
-available, but Pal cannot claim to have inspected pixels. `navigate_browser`
-opens a page and returns its text, metadata, and links in the same call;
-`read_browser_page` can reread the current page after interaction.
+available, but Pal cannot claim to have inspected pixels. `read_browser_page(url=...)`
+opens a page and returns text, metadata and links; omit URL to reread the current page after interaction.
 The inline text is a preview. The complete captured text is saved as an immutable
 `text_file` in the receiving runtime's result store, including brokered worker
 reads. Use `rg` and `read_file` on that snapshot for remaining text; reread the
@@ -532,3 +587,20 @@ hash suffixes; original server/tool/prompt identities still route to the externa
 - All `INDIRECT` capabilities remain discoverable through execution discovery.
 - Tool exposure is not capability availability. Availability is runtime state and must be inspected when it matters.
 - External protocol surfaces such as MCP must not bypass Pal execution, approval, or capability policy.
+
+## Channel endpoint control consolidation (2026-10-15)
+
+Channel now has seven indirect tools. `manage_channel_endpoint(name, operation)`
+replaces the five separate attach/detach/restart/enable/disable aliases, which are
+not retained for model discovery or invocation. Both arguments are required;
+operation is one enum and does not introduce action-specific parameter sets.
+Attach preserves an existing transport; restart requests a fresh transport without
+reloading provider code. Enable/disable persist acceptance state without replacing
+the instance; detach retains endpoint configuration. Existing owner dispatch,
+rollback, recovery-socket protection, hub lifetime and lifecycle writer admission
+remain in force. The combined entry conservatively declares control/reconcile-first.
+
+Hub inspection, endpoint directory, object inspection, text/attachment sends and
+credential configuration keep their existing boundaries. The already-attached
+receipt now offers `manage_channel_endpoint(operation=restart)` with the endpoint
+name bound. Source implementation does not activate a running host.

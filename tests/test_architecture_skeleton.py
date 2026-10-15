@@ -100,6 +100,13 @@ from pal.bunshin import register_with_core as register_bunshin_with_core
 ROOT = Path(__file__).resolve().parents[1]
 
 
+
+def _select_memory_backend(core, service, arguments):
+    from pal.memory.maintenance import MemoryBackendOwner
+    from types import SimpleNamespace
+    result = asyncio.run(MemoryBackendOwner(core, service).dispatch("select", arguments))
+    return SimpleNamespace(status=result["status"], structured=result["state"])
+
 class RecordingAdapter(ChannelAdapter):
     channel_kind = "stdio"
 
@@ -685,8 +692,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         generation = core.context.execution_runtime.registry_generation
         for alias in ("run_shell", "search_tools", "read_tool", "read_file", "edit_file", "write_file"):
             self.assertIn(alias, generation.direct_aliases)
-        for alias in ("delete_path",):
-            self.assertIn(alias, generation.indirect_aliases)
+        for alias in ("delete_path", "list_tools", "manage_shell_session"):
+            self.assertNotIn(alias, generation.indirect_aliases)
 
     def test_shell_exec_builtin_tool_runs_commands(self) -> None:
         core = PalCore()
@@ -765,8 +772,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("search_tools", published)
         self.assertIn("call_tool", published)
         self.assertIn("inspect_memory_state", published)
-        self.assertIn("set_active_memory_provider", published)
-        self.assertIn("inspect_memory_provider_inventory", published)
+        self.assertNotIn("set_active_memory_provider", published)
+        self.assertNotIn("inspect_memory_provider_inventory", published)
         self.assertIn("recall_memory", published)
         self.assertNotIn("recall_provider_memory", published)
         self.assertNotIn("operation_execution_discovery_search", published)
@@ -942,7 +949,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("op_file_read", published)
         self.assertIn("op_file_edit", published)
         self.assertIn("op_file_write", published)
-        self.assertIn("op_path_delete", published)
+        self.assertNotIn("op_path_delete", published)
         self.assertNotIn("op_file_state", published)
 
         hit_names = []
@@ -956,7 +963,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("read_file", hit_names)
         self.assertIn("edit_file", hit_names)
         self.assertIn("write_file", hit_names)
-        self.assertIn("delete_path", hit_names)
+        self.assertNotIn("delete_path", hit_names)
         self.assertFalse(any(name.startswith("op_") or name.startswith("intro_") for name in hit_names))
 
     def test_main_runtime_tool_search_returns_only_public_aliases(self) -> None:
@@ -1094,7 +1101,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "use vision or the inline image",
             "If not_text_readable, use vision",
             "list_lsp_document_symbols/workspace_symbols",
-            "find_lsp_definitions/references/hover/call hierarchy",
+            "find_lsp_symbol_locations/references/hover/call hierarchy",
             "use bunshin directly",
             "bunshin status tools",
             "read_checklist/upsert/check/clear",
@@ -1440,7 +1447,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("inspect_memory_state", exposed_names)
             self.assertNotIn("memory_refresh_indexes", exposed_names)
             self.assertNotIn("inspect_memory_state", exposed_names)
-            self.assertNotIn("inspect_active_llm", exposed_names)
+            self.assertNotIn("inspect_llm", exposed_names)
             self.assertNotIn("set_active_llm_endpoint", exposed_names)
             self.assertIn("echo", exposed_names)
             exec_tool = next(item for item in request.tools if item.name == "run_shell")
@@ -1653,7 +1660,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for descriptor in descriptors
         }
 
-        self.assertIn("op_channel_mgmt_restart_endpoint", canonical_paths)
+        self.assertIn("op_channel_mgmt_manage_endpoint", canonical_paths)
         self.assertNotIn("op_channel_mgmt_reload_provider", canonical_paths)
         self.assertNotIn("op_channel_mgmt_disable", canonical_paths)
         self.assertNotIn("op_channel_mgmt_detach", canonical_paths)
@@ -2393,10 +2400,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertIn("list_channel_endpoints", published)
         self.assertIn("send_channel_message", published)
-        self.assertIn("enable_channel_endpoint", published)
-        self.assertIn("disable_channel_endpoint", published)
-        self.assertIn("attach_channel_endpoint", published)
-        self.assertIn("detach_channel_endpoint", published)
+        self.assertIn("manage_channel_endpoint", published)
         self.assertNotIn("operation_channel_lifecycle_attach", published)
         self.assertNotIn("operation_channel_lifecycle_detach", published)
         self.assertNotIn("operation_channel_endpoint_attach", published)
@@ -2468,7 +2472,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 with contextlib.suppress(Exception):
                     core.detach_module("bunshin")
 
-    def test_memory_can_switch_active_l3_provider_via_registered_capability(self) -> None:
+    def test_memory_can_switch_active_l3_provider_via_cli_owner(self) -> None:
         core = PalCore()
         memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
         mock_l3 = MockL3Plugin(records=[{"document_id": "fact:1", "title": "Redis"}])
@@ -2478,12 +2482,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
 
-        configured = core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="set_active_memory_provider",
-                args={"name": "mock_l3"},
-            )
-        )
+        configured = _select_memory_backend(core, memory_service, {"name": "mock_l3"})
         recall_result = mock_l3.recall(MemoryQuery(level="deep", queries=["redis"]))
 
         self.assertEqual(configured.status, "ok")
@@ -2505,18 +2504,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
 
-        core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="set_active_memory_provider",
-                args={"name": "mock_l3"},
-            )
-        )
-        fallback = core.context.execution_runtime.execute(
-            CapabilityCall(
-                name="set_active_memory_provider",
-                args={"name": "null_l3"},
-            )
-        )
+        _select_memory_backend(core, memory_service, {"name": "mock_l3"})
+        fallback = _select_memory_backend(core, memory_service, {"name": "null_l3"})
 
         self.assertEqual(fallback.status, "ok")
         self.assertEqual(memory_service.l3_selector.active_provider_id, "null_l3")
@@ -2531,7 +2520,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual(detached, RuntimeStatus.FORBIDDEN)
         self.assertIsNotNone(core.context.execution_runtime.l3_plugin_registry.get("mock_l3"))
-        self.assertIn("inspect_memory_provider_inventory", core.context.capability_registry.descriptors)
+        self.assertNotIn("inspect_memory_provider_inventory", core.context.capability_registry.descriptors)
 
         reattached = core.reattach_module(mock_l3.module_id)
 
@@ -2596,7 +2585,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("projected_entries", origin_result.structured)
         self.assertIn("legacy assistant", origin_result.llm_text)
         self.assertNotIn("projected_entries", origin_result.llm_text)
-        self.assertIn("inspect_memory_provider_inventory", core.context.capability_registry.descriptors)
+        self.assertNotIn("inspect_memory_provider_inventory", core.context.capability_registry.descriptors)
 
     def test_active_memory_update_and_delete_use_mem_ref_without_target_id(self) -> None:
         core = PalCore()
@@ -2721,7 +2710,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(read.ok)
         self.assertEqual(read.structured["alias"], "run_shell")
         self.assertNotIn("[truncated]", read.structured["description"])
-        self.assertIn("delete_path for deletion", read.structured["description"])
+        self.assertIn("authorized path deletion", read.structured["description"])
         self.assertNotIn("op_exec_shell", read.llm_text)
         self.assertFalse(compat.ok)
         self.assertEqual(compat.status, "unknown_tool")
@@ -2735,12 +2724,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("inspect_proactive_status", core.context.capability_registry.descriptors)
         self.assertIn("list_proactive_tasks", core.context.capability_registry.descriptors)
         self.assertIn("upsert_proactive_task", core.context.capability_registry.descriptors)
-        self.assertIn("delete_proactive_task", core.context.capability_registry.descriptors)
-        self.assertNotIn("proactive_destroy", core.context.capability_registry.descriptors["delete_proactive_task"].aliases)
-        self.assertIn("enable_proactive_task", core.context.capability_registry.descriptors)
-        self.assertIn("disable_proactive_task", core.context.capability_registry.descriptors)
-        self.assertIn("set_proactive_output_channel", core.context.capability_registry.descriptors)
-        self.assertIn("set_proactive_output_target", core.context.capability_registry.descriptors)
+        self.assertIn("manage_proactive_task", core.context.capability_registry.descriptors)
+        self.assertNotIn("proactive_destroy", core.context.capability_registry.descriptors["manage_proactive_task"].aliases)
+        self.assertIn("set_proactive_destination", core.context.capability_registry.descriptors)
         self.assertIn("update_proactive_schedule", core.context.capability_registry.descriptors)
         self.assertNotIn("proactive_attach", core.context.capability_registry.descriptors)
         self.assertNotIn("proactive_detach", core.context.capability_registry.descriptors)
@@ -2805,7 +2791,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             changed_channel = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="set_proactive_output_channel",
+                    name="set_proactive_destination",
                     args={"name": "daily_digest", "out_channel_name": "telegram_main"},
                 )
             )
@@ -2815,7 +2801,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             changed_target = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="set_proactive_output_target",
+                    name="set_proactive_destination",
                     args={"name": "daily_digest", "out_reply_target": {"chat_id": "12345", "thread_id": "7"}},
                 )
             )
@@ -2835,19 +2821,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("next_due_at", rescheduled.structured)
 
             disabled = core.context.execution_runtime.execute(
-                CapabilityCall(name="disable_proactive_task", args={"name": "daily_digest"})
+                CapabilityCall(name="manage_proactive_task", args={"name": "daily_digest", "operation": "disable"})
             )
             self.assertEqual(disabled.status, "ok")
             self.assertFalse(disabled.structured["enabled"])
 
             enabled = core.context.execution_runtime.execute(
-                CapabilityCall(name="enable_proactive_task", args={"name": "daily_digest"})
+                CapabilityCall(name="manage_proactive_task", args={"name": "daily_digest", "operation": "enable"})
             )
             self.assertEqual(enabled.status, "ok")
             self.assertTrue(enabled.structured["enabled"])
 
             deleted = core.context.execution_runtime.execute(
-                CapabilityCall(name="delete_proactive_task", args={"name": "daily_digest"})
+                CapabilityCall(name="manage_proactive_task", args={"name": "daily_digest", "operation": "delete"})
             )
             self.assertEqual(deleted.status, "ok")
             self.assertEqual(deleted.text, "proactive task deleted")
@@ -2869,7 +2855,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
         self.assertEqual(search.status, "ok")
         hit_names = [item["alias"] for item in search.structured["hits"]]
-        self.assertIn("delete_proactive_task", hit_names)
+        self.assertIn("manage_proactive_task", hit_names)
 
         created = core.context.execution_runtime.execute(
             CapabilityCall(
@@ -2883,7 +2869,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
         self.assertEqual(legacy.status, "error")
         deleted = core.context.execution_runtime.execute(
-            CapabilityCall(name="delete_proactive_task", args={"name": "old_alias"})
+            CapabilityCall(name="manage_proactive_task", args={"name": "old_alias", "operation": "delete"})
         )
         self.assertEqual(deleted.status, "ok")
         self.assertEqual(deleted.text, "proactive task deleted")
@@ -3300,7 +3286,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.publish_module_capabilities("channel")
 
             detached = core.context.execution_runtime.execute(
-                CapabilityCall(name="detach_channel_endpoint", args={"name": "socket_main"})
+                CapabilityCall(name='manage_channel_endpoint', args={'name': 'socket_main', 'operation': 'detach'})
             )
             self.assertEqual(detached.status, "ok")
             self.assertFalse(endpoint.attached)
@@ -3309,7 +3295,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIsNone(blocked)
 
             attached = core.context.execution_runtime.execute(
-                CapabilityCall(name="attach_channel_endpoint", args={"name": "socket_main"})
+                CapabilityCall(name='manage_channel_endpoint', args={'name': 'socket_main', 'operation': 'attach'})
             )
             self.assertEqual(attached.status, "ok")
             active_endpoint = channel_runtime.get_endpoint("socket_main")
@@ -4589,7 +4575,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("verification scope", priority.content)
         self.assertIn("result-specific recovery affordances", tool_policy.content)
         self.assertIn("Tool naming and discovery conventions", tool_policy.content)
-        self.assertIn("plugin reattach is exposed as reload_plugin", tool_policy.content)
+        self.assertIn("manage_plugin operation=reload", tool_policy.content)
         self.assertIn("list enumerates; read retrieves content", tool_policy.content)
         self.assertIn("suggested next tool only when", tool_routing.content)
         self.assertIn("never blindly retry a mutation", tool_policy.content)

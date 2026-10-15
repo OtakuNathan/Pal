@@ -34,11 +34,11 @@ def test_all_published_defaults_match_their_schema():
 
 
 def test_omit_only_and_nullable_fields_keep_distinct_invocation_semantics():
-    model = generated_tool_models.ArtifactCapabilitiesArtifactIntrospectionProviderListInput
-    assert _invocation_args(model.model_validate({})) == {}
+    model = generated_tool_models.ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput
+    assert "kind" not in _invocation_args(model.model_validate({}))
     with pytest.raises(ValidationError):
-        model.model_validate({'query_context': None})
-    assert 'default' not in model.model_json_schema()['properties']['query_context']
+        model.model_validate({'kind': None})
+    assert 'default' not in model.model_json_schema()['properties']['kind']
     assert _invocation_args(tool_models.BrowserReadInput(url=None))['url'] is None
     patch = SkillPatch.model_validate({'avoid_when': '', 'activation_terms': [], 'enabled': False})
     assert _invocation_args(patch) == {'avoid_when': '', 'activation_terms': [], 'enabled': False}
@@ -85,7 +85,6 @@ def test_error_paths_preserve_original_cause_and_diagnostic_action(tmp_path):
     from unittest.mock import Mock
     from pal.shared import IntrospectionCall
     from pal.memory.capabilities import MemoryIntrospectionProvider
-    from pal.mcp.plugin import McpManagerPluginProvider
     from pal.mcp.normalize import normalize_protocol_error, normalize_tool_result
     context = SimpleNamespace(port_registry={})
     memory = MemoryIntrospectionProvider(service=SimpleNamespace(_resolve_l3_provider=lambda: None), context=context)
@@ -94,12 +93,6 @@ def test_error_paths_preserve_original_cause_and_diagnostic_action(tmp_path):
     context.port_registry['memory.dreaming:dreaming'] = SimpleNamespace(configure=Mock(side_effect=ValueError('bad schedule')))
     result = memory.dreaming(IntrospectionCall(name='manage_memory_dreaming', args={'operation': 'configure', 'config': {}}))
     assert 'bad schedule' in result.llm_text
-    mcp = McpManagerPluginProvider(runtime_root=tmp_path, core_context=None)
-    result = mcp.image_prepare(IntrospectionCall(name='prepare_mcp_image', args={'path': str(tmp_path / 'artifact-absent.png')}))
-    assert 'artifact-absent.png' in result.llm_text and 'run_shell' in result.recovery_hint
-    missing = mcp.image_prepare(IntrospectionCall(name='prepare_mcp_image', args={}))
-    assert 'read_tool' in missing.recovery_hint
-    assert 'ValueError' != result.llm_text
     error = normalize_protocol_error(ConnectionError('connection refused'), server_id='demo', name='inspect', kind='tool')
     assert 'connection refused' in error.llm_text and "read_mcp_server(name='demo')" in error.llm_text
     error = normalize_tool_result({'isError': True, 'content': [{'type': 'text', 'text': 'invalid field'}]}, server_id='demo', tool_name='inspect')

@@ -321,8 +321,7 @@ def _target_discovery_alias(node_blueprint: CapabilityNodeBlueprint, *, module_i
         return "list_proactive_tasks"
     if node_blueprint.target_kind == "provider":
         return {
-            "memory": "list_memory_providers",
-            "web_search": "list_web_search_providers",
+            "web_search": "inspect_web_search",
         }.get(node_blueprint.path_module_id or module_id, "")
     return ""
 
