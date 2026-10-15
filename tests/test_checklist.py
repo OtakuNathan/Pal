@@ -165,7 +165,8 @@ class TestChecklistCapabilities:
     def test_tool_guidance_is_a_concise_local_contract(self):
         blueprint = ChecklistIntrospectionProvider.upsert.__capability_action_blueprints__[0]
         assert blueprint.guidance is not None
-        assert "multiple status updates in one call" in blueprint.guidance.purpose
+        assert "full checklist" in blueprint.guidance.purpose
+        assert "pending, in progress or completed" in blueprint.guidance.purpose
         assert "before the first mutation" in blueprint.guidance.use_when
         assert "multiple delivery phases" in blueprint.guidance.use_when
         assert "Strongly prefer" not in blueprint.guidance.use_when

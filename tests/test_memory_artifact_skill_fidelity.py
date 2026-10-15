@@ -229,7 +229,7 @@ def test_image_preservation_does_not_accept_invalid_image(services, tmp_path):
 
 
 @pytest.mark.parametrize("tool,method", [
-    (ArtifactListTool, "list_hot"), (ArtifactInfoTool, "info"), (ArtifactReadTool, "read"),
+    (ArtifactListTool, "list_hot"), (ArtifactInfoTool, "describe"), (ArtifactReadTool, "read"),
     (ArtifactSearchTool, "artifact_search"), (ArtifactSelectTool, "select"),
     (ArtifactContentSearchTool, "content_search"),
 ])

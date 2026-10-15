@@ -198,9 +198,11 @@ def test_package_tools_remain_indirect(tmp_path):
     host.publish_management_capabilities()
     contracts = core._build_llm_tool_contracts()
     direct = {item["function"]["name"] for item in contracts}
-    assert not direct & {"install_package", "prepare_package", "inspect_package_status"}
-    listing = next(item["function"] for item in contracts if item["function"]["name"] == "list_plugins")
-    assert "install_package" in listing["description"]
+    assert not direct & {"install_package", "prepare_package", "inspect_package_status", "list_plugins"}
+    listing = core.context.execution_runtime.registry_generation.record_for_alias("list_plugins")
+    assert listing is not None
+    assert listing.execution.invocation_mode.value == "indirect"
+    assert "install_package" in listing.compiled_description
     host.shutdown()
 
 

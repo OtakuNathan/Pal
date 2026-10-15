@@ -63,8 +63,9 @@ class _BrowserFixture:
         if kwargs['action'] == 'screenshot':
             return {'png_base64': base64.b64encode(_FIXTURE_PNG).decode(),
                     'page': {'url': 'https://example.com/', 'title': 'Fixture'}}
-        if kwargs['action'] == 'navigate':
-            return {'action': 'navigate', 'navigation_completed': True,
+        if kwargs['action'] in {'navigate', 'read'}:
+            return {'action': kwargs['action'],
+                    'navigation_completed': kwargs['action'] == 'navigate' or bool(kwargs.get('args', {}).get('url')),
                     'content_status': 'available', 'page': {'url': 'https://example.com/'},
                     'document': {'text': 'Fixture webpage content', 'links': [], 'title': 'Fixture'}}
         return {'action': kwargs['action']}

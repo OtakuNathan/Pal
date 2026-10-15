@@ -18,7 +18,7 @@ def test_fixture_isolates_shell_and_validates_real_lsp_chain(tmp_path, monkeypat
     async def run():
         result = await fixture.execute_tool_async(new_tool_call(name='run_shell',args={'cmd':'touch should-not-exist'}),turn_id='t')
         assert not result.ok and not (tmp_path/'should-not-exist').exists()
-        for name,args in [('prepare_lsp_workspace',{'workspace_root':'.'}),('call_tool',{'name':'read_lsp_diagnostics','args':{'file':'sample.py','workspace_root':'.'}})]:
+        for name,args in [('call_tool',{'name':'prepare_lsp_workspace','args':{'workspace_root':'.'}}),('call_tool',{'name':'read_lsp_diagnostics','args':{'file':'sample.py','workspace_root':'.'}})]:
             result = await fixture.execute_tool_async(new_tool_call(name=name,args=args),turn_id='t')
             assert result.ok, result.llm_text
         assert result.structured['diagnostics'] == []

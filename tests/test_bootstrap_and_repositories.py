@@ -1264,12 +1264,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         runtime = handle.core.context.execution_runtime
         plugin_host = handle.plugin_host
 
-        # Verify sqlite_vec_l3 starts attached with capabilities
+        # Backend maintenance is internal; attachment publishes the provider,
+        # while daily memory tools remain owned by the resident memory module.
         initial_module = handle.core.context.module_registry.require("l3.sqlite_vec_l3")
         l3_caps_before = tuple(initial_module.published_capabilities)
-        self.assertTrue(l3_caps_before, "L3 plugin should have capabilities on boot")
-        for name in l3_caps_before:
-            self.assertIn(name, handle.core.context.capability_registry.descriptors)
+        self.assertEqual(l3_caps_before, ())
+        self.assertTrue(initial_module.mounted)
+        daily_tools = {"recall_memory", "remember_memory", "update_memory", "forget_memory"}
+        self.assertTrue(daily_tools <= handle.core.context.capability_registry.descriptors.keys())
         self.assertIsNotNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
 
         # DETACH
@@ -1278,9 +1280,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         self.assertEqual(detached.status, "ok")
 
-        # Capabilities withdrawn
-        for name in l3_caps_before:
-            self.assertNotIn(name, handle.core.context.capability_registry.descriptors)
+        self.assertFalse(initial_module.mounted)
+        self.assertIsNone(handle.core.context.module_registry.get("l3.sqlite_vec_l3"))
+        self.assertTrue(daily_tools <= handle.core.context.capability_registry.descriptors.keys())
 
         # Provider ref removed
         self.assertIsNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
@@ -1298,13 +1300,14 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         # Capabilities restored
         reattached_module = handle.core.context.module_registry.require("l3.sqlite_vec_l3")
+        self.assertIsNot(reattached_module, initial_module)
+        self.assertTrue(reattached_module.mounted)
         self.assertEqual(
             set(reattached_module.published_capabilities),
             set(l3_caps_before),
             "All L3 capabilities should be restored after re-attach",
         )
-        for name in l3_caps_before:
-            self.assertIn(name, handle.core.context.capability_registry.descriptors)
+        self.assertTrue(daily_tools <= handle.core.context.capability_registry.descriptors.keys())
 
         # Provider ref restored
         self.assertIsNotNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))

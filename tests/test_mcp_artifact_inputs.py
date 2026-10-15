@@ -182,11 +182,12 @@ def test_reference_validates_through_public_facade_and_keeps_original_call_small
     assert 'ENCODED_BYTES' not in result.llm_text
 
 
-def test_inline_conversion_limit_is_checked_before_dispatch(tmp_path, monkeypatch):
-    from pal.mcp import artifact_inputs
+def test_inline_conversion_limit_is_checked_before_dispatch(tmp_path):
     path = tmp_path / 'image.png'
-    path.write_bytes(b'too big')
-    monkeypatch.setattr(artifact_inputs, '_MAX_ENCODED_SOURCE_BYTES', 3)
+    # Exercise the real documented limit, independent of module replacement
+    # by earlier plugin lifecycle tests. The oversized input is a sparse file.
+    with path.open('wb') as source:
+        source.truncate(8 * 1024 * 1024 + 1)
     service = SimpleNamespace(info=lambda *args: {'artifact': {'metadata': {'local_file': {'preferred_path': str(path)}}}})
     context = SimpleNamespace(execution_runtime=SimpleNamespace(turn_io=SimpleNamespace(artifact_scope_for_turn=lambda turn: 'scope')),
         port_registry={'artifact:artifact': service})

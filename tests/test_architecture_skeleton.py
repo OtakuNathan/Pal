@@ -908,14 +908,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
-        result = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_exec_tools"))
+        runtime = core.context.execution_runtime
+        result = runtime.execute_tool(new_tool_call(name="search_tools", args={"domain": "shell"}))
 
-        self.assertEqual(result.status, "ok")
-        tools = result.structured["tools"]
-        shell = next(tool for tool in tools if tool["name"] == "run_shell")
-        self.assertIn("description", shell)
-        self.assertIn("cmd", shell["input_schema"]["properties"])
-        self.assertNotIn("op_", shell["description"])
+        self.assertTrue(result.ok, result.llm_text)
+        self.assertIn("run_shell", {tool["alias"] for tool in result.structured["directory"]["tools"]})
+        contract = runtime.execute_tool(new_tool_call(name="search_tools", args={"query": "run_shell"}))
+        self.assertTrue(contract.ok, contract.llm_text)
+        shell = contract.structured["hits"][0]
+        self.assertEqual(shell["alias"], "run_shell")
+        self.assertTrue(shell["purpose"])
+        self.assertIn("cmd", shell["input_contract"]["properties"])
+        core.close()
 
     def test_tool_search_discovers_shell_exec_by_natural_language(self) -> None:
         core = PalCore()
@@ -1115,101 +1119,23 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.assertNotIn(fragment, source)
 
     def test_declared_tool_guidance_is_concise_and_actionable(self) -> None:
-        source_root = Path(__file__).resolve().parents[1] / "src" / "pal"
+        from scripts.audit_tool_discovery import declared_tools
+
         failures: list[str] = []
         non_actions = {"Read-only.", "No external dependencies.", "Correct invalid input.", "Read-only-ish."}
-
-        for source_path in source_root.rglob("*.py"):
-            tree = ast.parse(source_path.read_text(encoding="utf-8"))
-            constants: dict[str, str] = {}
-            named_guidance: dict[str, ast.Call] = {}
-            for statement in tree.body:
-                if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
-                    continue
-                target = statement.targets[0]
-                if not isinstance(target, ast.Name):
-                    continue
-                try:
-                    value = ast.literal_eval(statement.value)
-                except (TypeError, ValueError):
-                    value = None
-                if isinstance(value, str):
-                    constants[target.id] = value
-                if isinstance(statement.value, ast.Call):
-                    call_name = (
-                        statement.value.func.id
-                        if isinstance(statement.value.func, ast.Name)
-                        else getattr(statement.value.func, "attr", "")
-                    )
-                    if call_name == "ToolGuidance":
-                        named_guidance[target.id] = statement.value
-
-            def guidance_value(node: ast.AST) -> str | None:
-                if isinstance(node, ast.Name):
-                    return constants.get(node.id)
-                try:
-                    value = ast.literal_eval(node)
-                except (TypeError, ValueError):
-                    return None
-                return value if isinstance(value, str) else None
-
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                for decorator in node.decorator_list:
-                    if not isinstance(decorator, ast.Call):
-                        continue
-                    decorator_name = (
-                        decorator.func.id
-                        if isinstance(decorator.func, ast.Name)
-                        else getattr(decorator.func, "attr", "")
-                    )
-                    if decorator_name != "capability_action":
-                        continue
-                    guidance_node = next(
-                        (keyword.value for keyword in decorator.keywords if keyword.arg == "guidance"),
-                        None,
-                    )
-                    if isinstance(guidance_node, ast.Name):
-                        name = guidance_node.id
-                        guidance_node = named_guidance.get(name)
-                        if guidance_node is None:
-                            # Shared contracts may be imported from pure guidance modules.
-                            # Check their resolved fields rather than requiring duplicate literals.
-                            from importlib import import_module
-                            package = "pal." + ".".join(source_path.relative_to(source_root).parts[:-1])
-                            for statement in tree.body:
-                                if not isinstance(statement, ast.ImportFrom):
-                                    continue
-                                for alias in statement.names:
-                                    if (alias.asname or alias.name) != name:
-                                        continue
-                                    module = import_module("." * statement.level + (statement.module or ""), package)
-                                    value = getattr(module, alias.name)
-                                    fields = {field: getattr(value, field) for field in (
-                                        "purpose", "use_when", "do_not_use_when", "failure_next_steps")}
-                                    guidance_node = ast.Call(func=ast.Name(id="ToolGuidance"), args=[],
-                                        keywords=[ast.keyword(arg=k, value=ast.Constant(value=v)) for k, v in fields.items()])
-                    if not isinstance(guidance_node, ast.Call):
-                        failures.append(f"{source_path.name}:{node.lineno}: unresolved guidance")
-                        continue
-                    fields = {
-                        keyword.arg: guidance_value(keyword.value)
-                        for keyword in guidance_node.keywords
-                    }
-                    label = f"{source_path.name}:{node.lineno}:{node.name}"
-                    for field in ("purpose", "use_when", "do_not_use_when"):
-                        if not str(fields.get(field) or "").strip():
-                            failures.append(f"{label}: empty {field}")
-                    # failure_next_steps is an optional host-side fallback:
-                    # empty is legal, but filler is not when a value exists.
-                    purpose = str(fields.get("purpose") or "")
-                    if len(purpose) > 240:
-                        failures.append(f"{label}: purpose is {len(purpose)} characters")
-                    failure = str(fields.get("failure_next_steps") or "").strip()
-                    if failure in non_actions:
-                        failures.append(f"{label}: non-actionable failure guidance {failure!r}")
-
+        tools = declared_tools()
+        self.assertTrue(tools)
+        self.assertIn("show_emotion", {tool.alias for tool in tools})
+        for tool in tools:
+            guidance = tool.guidance
+            label = f"{tool.source}:{tool.line}:{tool.alias}"
+            for field in ("purpose", "use_when", "do_not_use_when"):
+                if not str(getattr(guidance, field) or "").strip():
+                    failures.append(f"{label}: empty {field}")
+            if len(guidance.purpose) > 240:
+                failures.append(f"{label}: purpose is {len(guidance.purpose)} characters")
+            if str(guidance.failure_next_steps or "").strip() in non_actions:
+                failures.append(f"{label}: non-actionable failure guidance")
         self.assertEqual(failures, [])
 
     def test_tool_input_ids_explain_where_the_exact_value_comes_from(self) -> None:
@@ -1241,6 +1167,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "returned by ",
             "from available artifacts",
             "from current context",
+            "from an attachment description",
+            "from a prior memory result",
+            "pal memory providers cli",
         )
         for statement in generated.body:
             if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
