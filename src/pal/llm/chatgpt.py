@@ -78,6 +78,8 @@ class ChatGPTError(RuntimeError):
             return "ChatGPT 授权已失效或尚未配置，请运行 pal wizard --llm --runtime-root <dir> 重新授权。"
         if self.code == "plan_permission_missing":
             return "已登录 ChatGPT，但尚未授予订阅使用权限。请在 pal wizard --llm 中重新授权。"
+        if self.code == "request_outcome_unknown":
+            return "ChatGPT 连接中断，请求可能已被接收；为避免重复推理，未自动重发。请检查已收到的结果后再决定是否重试。"
         return f"ChatGPT 请求未完成（{self.code}）。未切换 endpoint；可使用 /model 手动选择。"
 
     def to_dict(self) -> dict[str, Any]:

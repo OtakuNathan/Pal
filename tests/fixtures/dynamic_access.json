@@ -2795,62 +2795,6 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/llm/transport.py:DirectSDKTransport.activate_endpoint:getattr(self.sdk_transport, 'activate_endpoint', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:DirectSDKTransport.close:getattr(self.sdk_transport, 'close', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:DirectSDKTransport.refresh_credentials:getattr(owner, 'refresh', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:DirectSDKTransport.refresh_credentials:getattr(self.credential_resolver, '__self__', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_close_client_or_raise:getattr(client, 'close', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_close_stream_response_or_raise:getattr(raw, 'close', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_close_stream_response_or_raise:getattr(response, 'close', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_is_single_json_value:getattr(value, 'model_dump', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_is_single_json_value:getattr(value, 'to_dict', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_json_mapping:getattr(value, 'model_dump', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_json_mapping:getattr(value, 'to_dict', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_observe_raw_response_stream:getattr(raw, 'stream', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_open_sdk_response:getattr(resource, 'with_streaming_response', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/llm/transport.py:_raw_http_response:getattr(response, attribute, None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/llm/usage_normalization.py:merge_usage:getattr(right if right.has(name) else left, name)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3794,5 +3738,61 @@
   "src/pal/plugins/l3/sqlite_vec.py:SQLiteVecL3Plugin.inspect_summary:getattr(self.repository, 'read_only', False)": {
     "count": 1,
     "reason": "Passive SQLite provider health accepts a repository adapter without a read-only flag; it never starts embedding work."
+  },
+  "src/pal/llm/http_transport.py:_close_client_or_raise:getattr(client, 'close', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_close_stream_response_or_raise:getattr(raw, 'close', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_close_stream_response_or_raise:getattr(response, 'close', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_is_single_json_value:getattr(value, 'model_dump', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_is_single_json_value:getattr(value, 'to_dict', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_json_mapping:getattr(value, 'model_dump', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_json_mapping:getattr(value, 'to_dict', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_observe_raw_response_stream:getattr(raw, 'stream', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_open_sdk_response:getattr(resource, 'with_streaming_response', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/http_transport.py:_raw_http_response:getattr(response, attribute, None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/transport.py:DirectEndpointTransport.activate_endpoint:getattr(self.sdk_transport, 'activate_endpoint', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/transport.py:DirectEndpointTransport.close:getattr(self.sdk_transport, 'close', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/transport.py:DirectEndpointTransport.refresh_credentials:getattr(owner, 'refresh', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/transport.py:DirectEndpointTransport.refresh_credentials:getattr(self.credential_resolver, '__self__', None)": {
+    "count": 1,
+    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   }
 }

@@ -75,6 +75,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "PreparedLLMRequest": ("pal.llm.runtime", "PreparedLLMRequest"),
     "build_default_endpoint_invoker": ("pal.llm.runtime", "build_default_endpoint_invoker"),
     "DirectSDKTransport": ("pal.llm.transport", "DirectSDKTransport"),
+    "DirectEndpointTransport": ("pal.llm.transport", "DirectEndpointTransport"),
+    "LLMEndpoint": ("pal.llm.endpoint_components", "LLMEndpoint"),
     "EncodedTransportRequest": ("pal.llm.transport", "EncodedTransportRequest"),
     "LLMJSONTransportPort": ("pal.llm.transport", "LLMJSONTransportPort"),
     "EncryptedFileSecretStore": ("pal.llm.secret_store", "EncryptedFileSecretStore"),

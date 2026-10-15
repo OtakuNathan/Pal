@@ -66,13 +66,15 @@ def test_runtime_imports_have_no_cycles():
 
 
 def test_moved_contracts_keep_compatibility_exports():
-    from pal.llm import response_hooks, response_hook_contracts
+    from pal.llm import response_hooks, response_hook_contracts, transport, transport_contracts
     from pal.web_fetch import browser_service, runtime_paths
     from pal.plugins import host, paths
     from pal.bunshin import role_gateway, role_gateway_client, submission_drafts
 
     for name in ("ProviderResponseHookError", "ProviderResponseHookContext"):
         assert getattr(response_hooks, name) is getattr(response_hook_contracts, name)
+    for name in ("LLMTransportError", "LLMStreamControl", "SDKTransportRequest"):
+        assert getattr(transport, name) is getattr(transport_contracts, name)
     for name in ("BrowserRuntimePaths", "_installed_cli_version", "_chromium_installed"):
         assert getattr(browser_service, name) is getattr(runtime_paths, name)
     assert host._source_plugins_root is paths._source_plugins_root

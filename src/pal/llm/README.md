@@ -4,7 +4,9 @@ Owns:
 - immutable provider-neutral LLM request, message, response, usage, and update IR
 - ChatGPT plan OAuth registration, renewable credentials, and explicit usage-pause recovery
 - explicit endpoint selection; no automatic fallback or implicit first endpoint
-- three wire-shape codecs and OpenAI/Anthropic SDK transport boundaries
+- independent wire-shape codecs, endpoint authentication, and configured
+  HTTP SDK or persistent Responses WebSocket transports
+- immutable endpoint compositions built from validated LLM configuration
 - endpoint-declared thinking enums and per-endpoint selection
 - exact-model request hooks loaded from `<runtime_root>/llm/models`
 - built-in provider response hooks that recover leaked provider text protocols
@@ -56,6 +58,21 @@ Invariants:
 - only successful terminal DeepSeek responses can promote complete DSML to a
   tool call; native structured calls retain precedence and provider call IDs
 - SDK clients are reused per endpoint and retired safely when the active endpoint changes
+- `wire_shape`, `auth_kind`/access profile and `transport` are independent node
+  configuration. Load/refresh compiles an `LLMEndpoint` with a fixed codec,
+  authentication provider and transport. Requests execute that composition;
+  access profile never chooses HTTP versus WebSocket. Replaced compositions
+  reject new admission and close after their in-flight requests finish.
+- `http_transport` owns SDK clients and request/response lifetimes;
+  `websocket_transport` owns persistent Responses sockets. Sequential socket
+  requests reuse a socket while continuing to send full context, with no
+  dependency on provider-side response lineage. Concurrent requests hold
+  exclusive sockets. Cancellation, uncertain writes, failed responses, token
+  rotation and endpoint changes retire affected sockets through fd leases.
+  Shared request, cancellation and transport-error types live in
+  `transport_contracts`; `transport` preserves their existing import entry points.
+- WebSocket never automatically replays an ambiguous write or interrupted
+  response; a fresh connection is prepared for a subsequent request instead
 - API credentials are endpoint-local; requests retry only the selected endpoint
 - ChatGPT plan credentials may be shared by endpoints; subscription requests never
   fall back automatically, and a usage pause requires explicit user recovery

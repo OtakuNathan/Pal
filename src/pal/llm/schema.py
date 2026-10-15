@@ -27,6 +27,7 @@ _CURRENT_COLUMNS = frozenset(
         "model_id",
         "display_name",
         "wire_shape",
+        "transport",
         "base_url",
         "auth_kind",
         "credential_ref",
@@ -83,6 +84,20 @@ def migrate_llm_endpoint_schema(db_path: Path) -> LLMEndpointMigrationResult:
         if _CURRENT_COLUMNS <= columns and not (_REMOVED_COLUMNS & columns):
             assert_llm_endpoint_schema_current(database)
             return LLMEndpointMigrationResult(status="current")
+        if (_CURRENT_COLUMNS - {"transport"}) <= columns and not (_REMOVED_COLUMNS & columns):
+            database.execute("BEGIN IMMEDIATE")
+            try:
+                database.execute("ALTER TABLE llm_endpoints ADD COLUMN transport TEXT NOT NULL DEFAULT 'http' CHECK (transport IN ('http', 'websocket'))")
+                rows = database.execute("SELECT endpoint_id, capabilities_blob FROM llm_endpoints").fetchall()
+                for row in rows:
+                    if _legacy_transport(_json_object(row["capabilities_blob"])) == "websocket":
+                        database.execute("UPDATE llm_endpoints SET transport='websocket' WHERE endpoint_id=?", (row["endpoint_id"],))
+                assert_llm_endpoint_schema_current(database)
+                database.commit()
+            except Exception:
+                database.rollback()
+                raise
+            return LLMEndpointMigrationResult(status="migrated", migrated_rows=len(rows))
         if "api_mode" not in columns:
             raise LLMEndpointSchemaError(
                 "unrecognized LLM endpoint schema; expected legacy api_mode or current wire_shape"
@@ -107,6 +122,7 @@ def migrate_llm_endpoint_schema(db_path: Path) -> LLMEndpointMigrationResult:
                 "CREATE INDEX llm_endpoints_enabled_supports_tools_supports_streaming "
                 "ON llm_endpoints(enabled, supports_tools, supports_streaming)"
             )
+            assert_llm_endpoint_schema_current(database)
             database.commit()
         except Exception:
             database.rollback()
@@ -149,6 +165,7 @@ def _migrate_row(row: Mapping[str, Any]) -> dict[str, Any]:
     }
     payload.update(
         {
+            "transport": _legacy_transport(capabilities),
             "wire_shape": wire_shape,
             "thinking_levels_blob": json.dumps(levels, ensure_ascii=False),
             "default_thinking_level": default_level,
@@ -156,6 +173,12 @@ def _migrate_row(row: Mapping[str, Any]) -> dict[str, Any]:
         }
     )
     return payload
+
+
+def _legacy_transport(capabilities: Mapping[str, Any]) -> str:
+    from pal.llm.chatgpt import PROFILE
+
+    return "websocket" if capabilities.get("access_profile") == PROFILE else "http"
 
 
 def _validate_existing_rows(database: sqlite3.Connection) -> None:
@@ -205,6 +228,7 @@ _INSERT_COLUMNS = (
     "model_id",
     "display_name",
     "wire_shape",
+    "transport",
     "base_url",
     "auth_kind",
     "credential_ref",
@@ -237,6 +261,7 @@ CREATE TABLE llm_endpoints__next (
     wire_shape TEXT NOT NULL CHECK (
         wire_shape IN ('openai_completion', 'openai_response', 'anthropic_messages')
     ),
+    transport TEXT NOT NULL DEFAULT 'http' CHECK (transport IN ('http', 'websocket')),
     base_url TEXT NOT NULL,
     auth_kind TEXT NOT NULL DEFAULT 'api_key_ref' CHECK (
         auth_kind IN ('api_key_ref', 'oauth', 'local_provider_auth')

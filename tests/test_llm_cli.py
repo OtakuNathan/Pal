@@ -26,6 +26,26 @@ class LLMCLITests(unittest.TestCase):
         configure_llm_parser(parser)
         return parser.parse_args(list(argv))
 
+    def test_transport_is_configurable_and_replace_preserves_it(self) -> None:
+        from unittest.mock import patch
+
+        def run(*argv):
+            with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+                result = run_llm_cli(self._parse(*argv, "--runtime-root", str(self.runtime_root)))
+            return result, output.getvalue()
+
+        self.assertEqual(run("add", "ws", "--model-id", "gpt-6-astra", "--transport", "websocket")[0], 0)
+        self.assertEqual(run("add", "ws", "--replace", "--notes", "keep transport")[0], 0)
+        before = json.loads(run("list", "--json")[1])["items"]
+        self.assertEqual(before[0]["transport"], "websocket")
+        self.assertIn("TRANSPORT", run("list")[1])
+        with patch("pal.llm.cli._store_api_key_if_requested") as store:
+            self.assertEqual(run("add", "ws", "--replace", "--wire-shape", "anthropic_messages")[0], 2)
+            store.assert_not_called()
+        self.assertEqual(json.loads(run("list", "--json")[1])["items"], before)
+        self.assertEqual(run("add", "ws", "--replace", "--transport", "http")[0], 0)
+        self.assertEqual(json.loads(run("list", "--json")[1])["items"][0]["transport"], "http")
+
     def test_cache_mode_update_preserves_fields_and_rejects_unsupported_binding(self) -> None:
         def run(*args):
             with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):

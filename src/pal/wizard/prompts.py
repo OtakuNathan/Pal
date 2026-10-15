@@ -200,6 +200,7 @@ class WizardLLMEndpoint:
     credential_ref: str | None = None
     capabilities_blob: dict[str, Any] = field(default_factory=dict)
     notes: str | None = None
+    transport: str = "http"
 
 
 @dataclass
@@ -334,6 +335,16 @@ def prompt_identity(current: WizardIdentity | None = None) -> WizardIdentity:
     )
 
 
+def _prompt_transport(wire_shape: str, default: str = "http") -> str:
+    if wire_shape != "openai_response":
+        return "http"
+    while True:
+        transport = ask("  Transport (http or websocket)", default).strip().lower()
+        if transport in {"http", "websocket"}:
+            return transport
+        print("  Choose http or websocket; the server must support the selected transport.")
+
+
 def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -> WizardLLMEndpoint | None:
     print(f"\n  Endpoint #{index}:")
     label = ask("  Label (e.g. my-claude, deepseek-chat)", current.endpoint_id if current else "")
@@ -436,6 +447,7 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         endpoint_id=label,
         model_id=model_id,
         wire_shape=wire_shape,
+        transport=_prompt_transport(wire_shape, current.transport if current and current.wire_shape == wire_shape else "http"),
         base_url=base_url,
         api_key=api_key,
         context_window=context_window,
@@ -502,6 +514,7 @@ def run_llm_endpoint_preflight(
         model_id=endpoint.model_id,
         display_name=endpoint.endpoint_id,
         wire_shape=endpoint.wire_shape,
+        transport=endpoint.transport,
         base_url=endpoint.base_url,
         auth_kind=endpoint.auth_kind,
         credential_ref=credential_ref,
@@ -1069,6 +1082,7 @@ def prompt_chatgpt_endpoint(runtime_root: Path | None, current: WizardLLMEndpoin
         thinking_levels, default_thinking_level = _prompt_chatgpt_thinking(model, current)
         endpoint = WizardLLMEndpoint(
             endpoint_id=label, model_id=model["slug"], wire_shape="openai_response", base_url=API_URL,
+            transport=_prompt_transport("openai_response", current.transport if current else "websocket"),
             api_key=None, context_window=context, max_output_tokens=budget,
             thinking_levels=thinking_levels, default_thinking_level=default_thinking_level,
             supports_tools=True, supports_streaming=True,

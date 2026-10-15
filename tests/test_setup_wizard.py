@@ -177,6 +177,18 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertIsNotNone(endpoint)
         self.assertEqual(LLMCredentialResolver(secret_store=store).resolve_api_key(endpoint), "sk-test-key-123")
 
+    def test_websocket_transport_survives_wizard_save_and_reload(self) -> None:
+        from pal.llm import LLMEndpointRepository
+
+        collected = _make_collected()
+        collected.endpoints[0].wire_shape = "openai_response"
+        collected.endpoints[0].transport = "websocket"
+        self.wizard.seed_from_wizard(self.registration, collected)
+        self.assertEqual(LLMEndpointRepository().list_enabled()[0].transport, "websocket")
+        reloaded = self.wizard.load_existing_wizard_data(self.runtime_root)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.endpoints[0].transport, "websocket")
+
     def test_load_existing_wizard_data_reads_current_runtime(self) -> None:
         collected = _make_collected()
         self.wizard.seed_from_wizard(self.registration, collected)

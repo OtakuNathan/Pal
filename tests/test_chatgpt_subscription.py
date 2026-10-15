@@ -43,7 +43,7 @@ def seed(store, *, expiry=None):
 def endpoint():
     return SimpleNamespace(
         endpoint_id="chatgpt", model_id="account-model", provider="openai", display_name="ChatGPT",
-        base_url=API_URL, wire_shape="openai_response", auth_kind="oauth",
+        base_url=API_URL, wire_shape="openai_response", transport="websocket", auth_kind="oauth",
         credential_ref="pal.chatgpt:oaiapp_test", capabilities_blob={"access_profile": PROFILE},
         thinking_levels_blob=["off"], default_thinking_level="off", supports_tools=True,
         supports_streaming=True, supports_vision=False, max_output_tokens=4096, context_window=32768,
@@ -62,6 +62,14 @@ def request():
 
 def context():
     return ShapeContext(WireShape.OPENAI_RESPONSE, "chatgpt", "account-model", capabilities={"access_profile": PROFILE})
+
+
+class _SubscriptionTransport:
+    def activate_endpoint(self, endpoint_id):
+        pass
+
+    def close(self):
+        pass
 
 
 def test_atomic_store_preserves_other_writers_and_permissions(tmp_path):
@@ -220,17 +228,18 @@ def test_tool_namespace_survives_replay():
     assert OpenAIResponseCodec().encode(req, context()).payload["input"][-1]["namespace"] == "pal"
 
 
-def test_transport_forces_sse_and_pauses_on_stream_quota(tmp_path):
+def test_subscription_transport_streams_and_pauses_on_quota(tmp_path):
     store = EncryptedFileSecretStore(tmp_path / "secrets.json")
     seed(store)
     calls = []
 
-    class SDK:
+    class SDK(_SubscriptionTransport):
         def frames(self, req):
             calls.append(req)
             yield _JSONFrame(0, {"type": "response.failed", "response": {"error": {"code": QUOTA_CODE}}})
 
-    invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(LLMCredentialResolver(store).resolve_api_key, SDK()))
+    invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(
+        LLMCredentialResolver(store).resolve_api_key, websocket_transport=SDK()))
     with pytest.raises(ChatGPTError):
         invoker.invoke(endpoint(), request(), stream=False)
     assert calls[0].stream is True
@@ -374,7 +383,7 @@ def test_http_quota_is_structured_and_pauses_credentials():
     store = InMemorySecretStore()
     seed(store)
 
-    class SDK:
+    class SDK(_SubscriptionTransport):
         def frames(self, req):
             import openai
             response = httpx.Response(429, request=httpx.Request("POST", API_URL + "/responses"),
@@ -382,7 +391,8 @@ def test_http_quota_is_structured_and_pauses_credentials():
             raise openai.RateLimitError("no usage", response=response, body={"code": QUOTA_CODE, "param": "model"})
             yield
 
-    invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(LLMCredentialResolver(store).resolve_api_key, SDK()))
+    invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(
+        LLMCredentialResolver(store).resolve_api_key, websocket_transport=SDK()))
     with pytest.raises(ChatGPTError) as result:
         invoker.invoke(endpoint(), request())
     details = result.value.to_dict()
@@ -539,7 +549,7 @@ def test_runtime_quota_never_executes_partial_tool_or_falls_back(stream):
     store = InMemorySecretStore()
     seed(store)
     requests = []
-    class SDK:
+    class SDK(_SubscriptionTransport):
         def frames(self, req):
             requests.append(req.endpoint_id)
             yield _JSONFrame(0, {"type": "response.output_item.done", "output_index": 0, "item": {
@@ -548,7 +558,8 @@ def test_runtime_quota_never_executes_partial_tool_or_falls_back(stream):
             yield _JSONFrame(1, {"type": "response.failed", "response": {"error": {"code": QUOTA_CODE}}})
     runtime = _runtime(_SwitchSettingsRepository(True), active="chatgpt")
     runtime.endpoint_resolver.endpoints = (endpoint(), _fake_endpoint("paid-api"))
-    runtime.endpoint_invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(LLMCredentialResolver(store).resolve_api_key, SDK()))
+    runtime.endpoint_invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(
+        LLMCredentialResolver(store).resolve_api_key, websocket_transport=SDK()))
     if stream:
         final = list(runtime._iter_stream_updates(request()))[-1].response
     else:

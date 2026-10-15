@@ -24,6 +24,7 @@ from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.shapes.base import _JSONFrame as JSONFrame
 from pal.llm.transport import (
+    DirectEndpointTransport,
     EncodedTransportRequest,
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
@@ -142,6 +143,49 @@ def _params(endpoint, *, request_id: str = "request-1") -> dict:
 
 
 class BunshinLLMTransportTests(unittest.TestCase):
+    def test_role_budgets_do_not_rebuild_the_configured_endpoint_composition(self) -> None:
+        async def scenario():
+            with tempfile.TemporaryDirectory() as directory:
+                database, manager = _manager(Path(directory))
+                configured = _register_endpoint()
+                capture = _CapturingTransport()
+
+                class Port:
+                    def frames(self, request):
+                        yield from capture.frames(None, request)
+
+                    def activate_endpoint(self, endpoint_id):
+                        pass
+
+                    def close(self):
+                        pass
+
+                direct = DirectEndpointTransport(lambda ep: None, sdk_transport=Port())
+                manager._llm_json_transport = direct
+                bound = direct.bind(configured)
+                try:
+                    for budget in (128, 256):
+                        run_id = f"run-{budget}"
+                        manager.runs[run_id] = BunshinRunState(
+                            bunshin_id="bunshin", run_id=run_id,
+                            pack=BunshinInvocationPack(invocation_id="bunshin", metadata={
+                                "preferred_endpoint_id": configured.endpoint_id,
+                                "max_output_tokens": budget,
+                            }),
+                        )
+                        params = _params(with_role_output_budget(configured, budget), request_id=run_id)
+                        params["run_id"] = run_id
+                        params["payload"]["max_tokens"] = budget
+                        events = [event async for event in manager.llm_transport_stream_frames(params)]
+                        self.assertTrue(events)
+                        self.assertIs(direct.bind(configured), bound)
+                    self.assertEqual([req.payload["max_tokens"] for req in capture.requests], [128, 256])
+                finally:
+                    direct.close()
+                    database.close()
+
+        asyncio.run(scenario())
+
     def test_role_output_override_reaches_provider_without_changing_global_budget(self) -> None:
         async def scenario() -> None:
             with tempfile.TemporaryDirectory(prefix="pal-bunshin-output-override-") as tmp:
@@ -541,10 +585,13 @@ class BunshinLLMTransportTests(unittest.TestCase):
                     asyncio.run(scenario(status))
 
     def test_stale_endpoint_is_rejected_before_provider_invocation(self) -> None:
-        async def scenario() -> None:
+        async def scenario(changed_field: str) -> None:
             root = Path(tempfile.mkdtemp(prefix="pal-bunshin-stale-endpoint-"))
             database, manager = _manager(root)
             endpoint = _register_endpoint()
+            if changed_field == "transport":
+                endpoint.wire_shape = "openai_response"
+                endpoint.save()
             manager.runs["run-1"] = BunshinRunState(
                 bunshin_id="bunshin-1",
                 run_id="run-1",
@@ -565,7 +612,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                             for key, value in old_endpoint.__data__.items()
                             if key not in {"created_at", "updated_at"}
                         },
-                        "model_id": "changed-model",
+                        changed_field: "websocket" if changed_field == "transport" else "changed-model",
                     }
                 )
                 proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
@@ -576,7 +623,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                                 old_endpoint,
                                 EncodedTransportRequest(
                                     request_id="stale-request",
-                                    wire_shape=WireShape.OPENAI_COMPLETION,
+                                    wire_shape=WireShape(old_endpoint.wire_shape),
                                     timeout_seconds=30,
                                     payload={"model": "proxy-model", "max_tokens": 64},
                                     stream=True,
@@ -592,7 +639,9 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 database.close()
 
         with patch.dict(os.environ, {"PAL_BUNSHIN_SANDBOXED": "0"}, clear=False):
-            asyncio.run(scenario())
+            for changed_field in ("model_id", "transport"):
+                with self.subTest(changed_field=changed_field):
+                    asyncio.run(scenario(changed_field))
 
     def test_duplicate_transport_request_id_never_reinvokes_provider(self) -> None:
         async def scenario() -> None:

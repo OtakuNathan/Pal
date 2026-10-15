@@ -7,9 +7,56 @@ import unittest
 from pathlib import Path
 
 from pal.llm.schema import LLMEndpointSchemaError, assert_llm_endpoint_schema_current, migrate_llm_endpoint_schema
+from pal.foundation import PalV2Database
+from pal.llm.models import LLMEndpointModel
+from pal.llm.endpoint_spec import LLMEndpointSpec
+from tests.test_chatgpt_subscription import endpoint
 
 
 class LLMEndpointSchemaMigrationTests(unittest.TestCase):
+    def _create_previous_schema(self, path: Path) -> None:
+        database = PalV2Database(path)
+        database.initialize((LLMEndpointModel,))
+        try:
+            spec = LLMEndpointSpec.from_value(endpoint())
+            LLMEndpointModel.create(**spec.to_payload())
+            api = spec.to_payload()
+            api.update(endpoint_id="api", auth_kind="api_key_ref", capabilities_blob={}, transport="http")
+            LLMEndpointModel.create(**api)
+        finally:
+            database.close()
+        with sqlite3.connect(path) as connection:
+            connection.execute("ALTER TABLE llm_endpoints DROP COLUMN transport")
+
+    def test_current_shape_schema_adds_transport_and_preserves_rows_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pal.sqlite3"
+            self._create_previous_schema(path)
+            with sqlite3.connect(path) as connection:
+                before = connection.execute("SELECT endpoint_id, credential_ref, model_id, capabilities_blob FROM llm_endpoints ORDER BY endpoint_id").fetchall()
+                with self.assertRaises(LLMEndpointSchemaError):
+                    assert_llm_endpoint_schema_current(connection)
+            result = migrate_llm_endpoint_schema(path)
+            self.assertEqual((result.status, result.migrated_rows), ("migrated", 2))
+            with sqlite3.connect(path) as connection:
+                assert_llm_endpoint_schema_current(connection)
+                self.assertEqual(before, connection.execute("SELECT endpoint_id, credential_ref, model_id, capabilities_blob FROM llm_endpoints ORDER BY endpoint_id").fetchall())
+                self.assertEqual(connection.execute("SELECT endpoint_id, transport FROM llm_endpoints ORDER BY endpoint_id").fetchall(), [("api", "http"), ("chatgpt", "websocket")])
+            self.assertEqual(migrate_llm_endpoint_schema(path).status, "current")
+
+    def test_failed_transport_upgrade_rolls_back_schema_and_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pal.sqlite3"
+            self._create_previous_schema(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute("UPDATE llm_endpoints SET default_thinking_level='unsupported'")
+                before = connection.execute("SELECT * FROM llm_endpoints ORDER BY endpoint_id").fetchall()
+            with self.assertRaises(LLMEndpointSchemaError):
+                migrate_llm_endpoint_schema(path)
+            with sqlite3.connect(path) as connection:
+                self.assertNotIn("transport", {row[1] for row in connection.execute("PRAGMA table_info(llm_endpoints)")})
+                self.assertEqual(before, connection.execute("SELECT * FROM llm_endpoints ORDER BY endpoint_id").fetchall())
+
     def test_old_endpoint_schema_is_atomically_replaced(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal-llm-schema-"))
         path = root / "pal.sqlite3"

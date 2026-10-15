@@ -31,7 +31,7 @@ from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext, ShapeDecodeError, _JSONFrame as JSONFrame
 from pal.llm.shapes.builder import ResponseIRBuilder
 from pal.llm.serde import part_from_payload, response_from_payload, response_to_payload
-from pal.llm.transport import _iter_json_frames
+from pal.llm.http_transport import _iter_json_frames
 from pal.shared import LLMFinishReason
 
 

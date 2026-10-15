@@ -4,8 +4,10 @@ import hashlib
 import json
 from dataclasses import dataclass, fields
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from pal.llm.ir import ThinkingLevel, WireShape
+from pal.shared.json_values import thaw_json
 
 
 class LLMEndpointSpecError(ValueError):
@@ -37,6 +39,7 @@ class LLMEndpointSpec:
     enabled: bool
     capabilities_blob: Mapping[str, Any]
     notes: str | None
+    transport: str = "http"
 
     @classmethod
     def from_value(cls, value: Mapping[str, Any] | object) -> "LLMEndpointSpec":
@@ -51,6 +54,16 @@ class LLMEndpointSpec:
             raise LLMEndpointSpecError(
                 f"endpoint {endpoint_id} has invalid wire_shape"
             ) from exc
+        transport = str(source.get("transport") or "http").strip()
+        if transport not in {"http", "websocket"}:
+            raise LLMEndpointSpecError(f"endpoint {endpoint_id} has invalid transport: {transport}")
+        if transport == "websocket" and wire_shape != WireShape.OPENAI_RESPONSE.value:
+            raise LLMEndpointSpecError("websocket transport requires openai_response wire_shape")
+        if transport == "websocket":
+            address = urlsplit(base_url)
+            if (address.scheme not in {"http", "https", "ws", "wss"} or not address.netloc
+                    or address.username or address.password or address.query or address.fragment):
+                raise LLMEndpointSpecError("websocket transport requires a base URL without credentials, query or fragment")
         auth_kind = str(source.get("auth_kind") or "api_key_ref").strip()
         if auth_kind not in {"api_key_ref", "oauth", "local_provider_auth"}:
             raise LLMEndpointSpecError(
@@ -156,6 +169,7 @@ class LLMEndpointSpec:
             enabled=bool(source.get("enabled", True)),
             capabilities_blob=capabilities,
             notes=_optional_text(source.get("notes")),
+            transport=transport,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -165,6 +179,7 @@ class LLMEndpointSpec:
             "model_id": self.model_id,
             "display_name": self.display_name,
             "wire_shape": self.wire_shape,
+            "transport": self.transport,
             "base_url": self.base_url,
             "auth_kind": self.auth_kind,
             "credential_ref": self.credential_ref,
@@ -179,7 +194,7 @@ class LLMEndpointSpec:
             "output_modalities_blob": list(self.output_modalities_blob),
             "priority": self.priority,
             "enabled": self.enabled,
-            "capabilities_blob": dict(self.capabilities_blob),
+            "capabilities_blob": thaw_json(self.capabilities_blob),
             "notes": self.notes,
         }
 

@@ -70,6 +70,7 @@ Each `llm_endpoints` row declares:
 
 - stable endpoint, provider-display, and exact model IDs;
 - `wire_shape`;
+- `transport`: `http` or `websocket`, independent of authentication;
 - base URL and credential reference;
 - context and output limits;
 - an explicit `thinking_levels_blob` enum and a
@@ -93,11 +94,32 @@ once and then removed.
 
 ## Wire codecs and SDKs
 
-Endpoint selection chooses a codec solely by `wire_shape`:
+Endpoint loading chooses a codec solely by `wire_shape`:
 
-1. `openai_completion` uses the OpenAI SDK chat-completions API.
-2. `openai_response` uses the OpenAI SDK Responses API.
-3. `anthropic_messages` uses the Anthropic SDK Messages API.
+1. `openai_completion` encodes and decodes chat-completions JSON.
+2. `openai_response` encodes and decodes Responses JSON/events.
+3. `anthropic_messages` encodes and decodes Messages JSON/events.
+
+The validated configuration compiles into an immutable `LLMEndpoint` that binds
+the codec, authentication provider and transport once. The authentication
+component resolves renewable credentials and applies access-profile failure
+policy. The configured transport owns network resource lifetimes. HTTP SDK
+clients live in `http_transport`; persistent sockets live in
+`websocket_transport`. Both return JSON frames to the same codec pipeline.
+Configuration replacement retires the old composition: admitted requests may
+finish, later admissions are rejected, and owned resources close after drain.
+Credentials and connections can renew without changing the component binding.
+
+HTTP supports all three shapes. WebSocket currently supports `openai_response`
+with API credentials or SIWC; configuration rejects unsupported combinations.
+The WebSocket address is derived from the endpoint base URL, while the SIWC
+profile continues to restrict credentials to the official destination.
+`pal llm add ... --transport http|websocket` and the setup wizard persist this
+selection. Omitted transport on API configuration defaults to HTTP. The SIWC
+wizard defaults to WebSocket and allows explicit HTTP. Existing rows gain an
+explicit transport during schema upgrade: HTTP for API, WebSocket for SIWC.
+Transport is part of endpoint serialization/fingerprinting, including Bunshin
+snapshots; workers cannot override the credential owner's selection.
 
 Both streaming and single-shot transports expose one input iterator of JSON
 frames to the selected codec. The codec consumes that iterator and lazily
@@ -395,14 +417,43 @@ Refresh occurs on demand within two minutes of expiry (respecting the returned
 earliest-refresh time). The host and Bunshin manager retain credential ownership;
 remote runners receive raw inference frames and safe failure metadata only.
 
-Subscription HTTP calls always stream, including aggregate generation,
-compaction and preflight. They send full input history and `store=false`, omit
+Subscription inference follows the endpoint's configured transport, including
+aggregate generation, compaction and preflight. WebSocket uses
+`wss://api.openai.com/v1/responses`; explicit HTTP uses streamed Responses
+requests. `DirectEndpointTransport` composes the validated codec, access profile
+and selected transport independently. Both surfaces consume the same
+credential-resolved request envelope and return JSON frames to the existing
+codec, evidence, usage and Bunshin paths.
+OAuth registration, token refresh and model discovery remain HTTP operations.
+The WebSocket dependency is version 15 or later so the SIWC path honors system
+HTTP proxy selection and bypass settings. SOCKS proxies additionally require
+the library's optional `python-socks` dependency.
+
+Each socket sends sequential `response.create` messages and reads through the
+terminal event. Requests send full input history and `store=false`, omit
 unsupported parameters including `max_output_tokens` and `temperature`, project
 system messages to developer messages, and group Pal functions under the `pal`
-namespace. Local token budgets still govern Pal's context planning. Only
+namespace. WebSocket messages omit HTTP's `stream` flag. No
+`previous_response_id` or lane state is required: L1 remains the conversation
+authority. Local token budgets still govern Pal's context planning. Only
 `response.completed` completes a subscription inference; interrupted/incomplete
 streams and failed responses cannot authorize pending tool execution or replay
 acceptance. Ordinary API endpoint behavior remains independent.
+
+Sequential requests reuse an authenticated socket. Concurrent requests acquire
+exclusive fd leases over separate sockets; only one idle socket per binding is
+retained after they settle. Credential/model changes, endpoint deactivation and
+connections older than 55 minutes retire affected sockets without closing them
+under an active worker. Interrupted consumers, cancellation and failed terminal
+events retire their socket. A physically uncertain close quarantines the bound
+resource graph. An idle socket already known to be closed is replaced before
+submission. If send or receive fails after a write begins, the result is
+`request_outcome_unknown`, which is not automatically retried or rerouted.
+Pre-submission connection failures retain the existing bounded retry policy.
+
+Connection reuse makes cache affinity possible; it does not prove that a prefix
+was cached. Report only provider usage counters. Loading this resident transport
+implementation requires a host restart; endpoint refresh does not load Python.
 
 All requests stay on the selected endpoint, including subscription requests.
 No setting or request override can enable automatic fallback. A usage-limit error, whether HTTP
@@ -424,6 +475,7 @@ References:
 - [Accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
 - [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
 - [Preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+- [Responses WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode)
 
 ## Model-facing LLM inspection
 

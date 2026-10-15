@@ -18,6 +18,7 @@ class LLMEndpointModel(BaseModel):
             )
         ]
     )
+    transport = CharField(default="http", constraints=[Check("transport IN ('http', 'websocket')")])
     base_url = TextField()
     auth_kind = CharField(
         default="api_key_ref",

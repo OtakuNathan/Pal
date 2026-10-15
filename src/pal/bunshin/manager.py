@@ -25,7 +25,7 @@ from pal.llm.ir import LLMUsageIR, WireShape
 from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.llm.transport import (
-    DirectSDKTransport,
+    DirectEndpointTransport,
     EncodedTransportRequest,
     LLMStreamControl,
 )
@@ -354,7 +354,7 @@ class BunshinManager:
     role_gateway: RoleAssignmentGateway = field(init=False)
     harness_registry: BunshinHarnessRegistry = field(init=False)
     _host_tool_bundle: Any | None = field(default=None, init=False, repr=False)
-    _llm_json_transport: DirectSDKTransport | None = field(
+    _llm_json_transport: DirectEndpointTransport | None = field(
         default=None,
         init=False,
         repr=False,
@@ -1469,7 +1469,7 @@ class BunshinManager:
         params: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         state = self._require_broker_run(params)
-        endpoint = self._authorize_llm_transport_endpoint(state, params)
+        configured_endpoint, endpoint = self._authorize_llm_transport_endpoint(state, params)
         request_id = str(params.get("request_id") or "").strip()
         if not request_id:
             raise _ManagerTransportError("LLM transport request_id is required")
@@ -1495,7 +1495,7 @@ class BunshinManager:
         self._llm_transport_requests[request_id] = record
         control = LLMStreamControl()
         iterator = self._manager_llm_json_transport().frames(
-            endpoint,
+            configured_endpoint,
             EncodedTransportRequest(
                 request_id=request_id,
                 wire_shape=WireShape(str(endpoint.wire_shape)),
@@ -1699,7 +1699,7 @@ class BunshinManager:
         self,
         state: BunshinRunState,
         params: Mapping[str, Any],
-    ) -> Any:
+    ) -> tuple[Any, Any]:
         endpoint_id = str(params.get("endpoint_id") or "").strip()
         if not endpoint_id:
             raise _ManagerTransportError("LLM transport endpoint_id is required")
@@ -1724,6 +1724,7 @@ class BunshinManager:
                 f"LLM endpoint is unavailable: {endpoint_id}",
                 kind="endpoint_spec_stale",
             )
+        configured_endpoint = endpoint
         endpoint = with_role_output_budget(endpoint, pack_metadata.get("max_output_tokens"))
         requested_shape = str(params.get("wire_shape") or "").strip()
         if requested_shape != str(endpoint.wire_shape):
@@ -1739,18 +1740,20 @@ class BunshinManager:
                 "LLM endpoint specification changed before provider start",
                 kind="endpoint_spec_stale",
             )
-        return endpoint
+        return configured_endpoint, endpoint
 
-    def _manager_llm_json_transport(self) -> DirectSDKTransport:
+    def _manager_llm_json_transport(self) -> DirectEndpointTransport:
         if self._llm_json_transport is None:
             credentials = LLMCredentialResolver(
                 secret_store=EncryptedFileSecretStore(
                     secrets_path=str(Path(self.runtime_root) / "secrets.json")
                 )
             )
-            self._llm_json_transport = DirectSDKTransport(
+            transport = DirectEndpointTransport(
                 credential_resolver=credentials.resolve_api_key
             )
+            transport.prepare_endpoints(LLMEndpointRepository().list_enabled())
+            self._llm_json_transport = transport
         return self._llm_json_transport
 
     def _prune_llm_transport_requests(self) -> None:

@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS llm_endpoints (
   model_id          TEXT NOT NULL,              -- exact model identifier
   display_name      TEXT,
   wire_shape        TEXT NOT NULL,              -- openai_completion | openai_response | anthropic_messages
+  transport         TEXT NOT NULL DEFAULT 'http', -- http | websocket
   base_url          TEXT NOT NULL,
 
   -- Auth

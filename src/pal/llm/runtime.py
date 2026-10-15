@@ -73,7 +73,7 @@ from pal.llm.chatgpt import QUOTA_CODE, exception_error, is_chatgpt
 from pal.llm.shapes.base import ShapeDecodeError
 from pal.llm.transport import (
     RequestSubmission,
-    DirectSDKTransport,
+    DirectEndpointTransport,
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
     LLMStreamControl,
@@ -200,7 +200,7 @@ def build_default_endpoint_invoker(
     _ = runtime_root
     resolver = credentials or LLMCredentialResolver()
     return ShapeEndpointInvoker(
-        transport=DirectSDKTransport(
+        transport=DirectEndpointTransport(
             credential_resolver=resolver.resolve_api_key,
         ),
         response_hooks=response_hooks or ProviderResponseHookRegistry.builtin(),
@@ -258,6 +258,7 @@ class LLMRuntime:
             self.provider_response_hooks = self.endpoint_invoker.response_hooks
         if isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
             self.endpoint_invoker.attempt_sink = self.usage_ledger.record_attempt
+            self.endpoint_invoker.prepare_endpoints(self.endpoint_resolver.endpoints)
         self.endpoint_retry_attempts = max(
             1,
             int(getattr(self.config, "llm_endpoint_retry_attempts", self.endpoint_retry_attempts) or 1),
@@ -572,6 +573,8 @@ class LLMRuntime:
             if callable(refresh_credentials)
             else False
         )
+        if isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
+            self.endpoint_invoker.prepare_endpoints(self.endpoint_resolver.endpoints)
         self.refresh_runtime_settings()
         after = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         primary = self.active_endpoint()

@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -16,19 +16,19 @@ from pal.llm.ir import (
     LLMResponseIR,
     LLMResponseUpdate,
     MessageState,
-    WireShape,
 )
 from pal.llm.attempts import LLMAttemptResult
 from pal.llm.decode_diagnostics import DecodeFailureCapture
 from pal.llm.response_evidence import WireResponseEvidence
 from pal.llm.models import LLMEndpointModel
+from pal.llm.endpoint_components import EndpointCodec, LLMEndpoint, compile_endpoint_codec
+from pal.llm.endpoint_spec import LLMEndpointSpec, endpoint_spec_fingerprint
 from pal.llm.prompt_cache import PromptCacheCoordinator
 from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.request_hooks import apply_provider_request_hooks
-from pal.llm.shapes import codec_for_shape
-from pal.llm.shapes.base import EncodedRequest, ShapeContext, ShapeDecodeError
+from pal.llm.shapes.base import EncodedRequest, ShapeDecodeError
 from pal.llm.transport import (
-    DirectSDKTransport,
+    DirectEndpointTransport,
     RequestSubmission,
     EncodedTransportRequest,
     LLMJSONTransportPort,
@@ -39,7 +39,7 @@ from pal.llm.transport import (
 from pal.shared import LLMFinishReason
 
 
-CredentialResolver = Callable[[LLMEndpointModel], str | None]
+CredentialResolver = Callable[[LLMEndpointSpec], str | None]
 logger = logging.getLogger(__name__)
 
 
@@ -54,12 +54,13 @@ class ShapeEndpointInvoker:
     )
     prompt_cache: PromptCacheCoordinator = field(default_factory=PromptCacheCoordinator)
     attempt_sink: Callable[[LLMAttemptResult], Any] | None = None
+    _codecs: dict[str, tuple[str, EndpointCodec]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if isinstance(self.transport, DirectSDKTransport):
+        if isinstance(self.transport, DirectEndpointTransport):
             return
         if self.credential_resolver is not None:
-            self.transport = DirectSDKTransport(
+            self.transport = DirectEndpointTransport(
                 credential_resolver=self.credential_resolver,
                 sdk_transport=self.transport or SDKJSONTransport(),
             )
@@ -72,7 +73,7 @@ class ShapeEndpointInvoker:
         return bool(refresh() if callable(refresh) else False)
 
     def resume_subscription(self, endpoint: LLMEndpointModel) -> None:
-        if isinstance(self.transport, DirectSDKTransport):
+        if isinstance(self.transport, DirectEndpointTransport):
             self.transport.resume_subscription(endpoint)
 
     def activate_endpoint(self, endpoint_id: str) -> None:
@@ -84,6 +85,27 @@ class ShapeEndpointInvoker:
         close = getattr(self.transport, "close", None)
         if callable(close):
             close()
+        self._codecs.clear()
+
+    def prepare_endpoints(self, endpoints: Iterable[LLMEndpointModel]) -> None:
+        if isinstance(self.transport, DirectEndpointTransport):
+            self.transport.prepare_endpoints(endpoints)
+        else:
+            self._codecs = {
+                str(endpoint.endpoint_id): (endpoint_spec_fingerprint(endpoint),
+                    compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint)))
+                for endpoint in endpoints
+            }
+
+    def _binding(self, endpoint: LLMEndpointModel) -> EndpointCodec:
+        if isinstance(self.transport, DirectEndpointTransport):
+            return self.transport.bind(endpoint)
+        fingerprint = endpoint_spec_fingerprint(endpoint)
+        current = self._codecs.get(str(endpoint.endpoint_id))
+        if current is None or current[0] != fingerprint:
+            current = (fingerprint, compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint)))
+            self._codecs[str(endpoint.endpoint_id)] = current
+        return current[1]
 
     def invoke(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
@@ -118,10 +140,12 @@ class ShapeEndpointInvoker:
         native_sink: Callable[["NativeCandidate"], None] | None = None,
         submission_sink: Callable[[RequestSubmission], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]:
-        from pal.llm.chatgpt import is_chatgpt
-        stream = stream or is_chatgpt(endpoint)
-        shape = WireShape(str(endpoint.wire_shape))
-        capabilities = dict(endpoint.capabilities_blob or {})
+        binding = self._binding(endpoint)
+        if isinstance(binding, LLMEndpoint):
+            stream = stream or binding.auth.force_stream
+        endpoint = binding.spec
+        shape = binding.context.wire_shape
+        capabilities = dict(binding.context.capabilities)
         # Runtime installs the validated turn snapshot; direct invoker callers
         # still resolve trusted endpoint capabilities.
         selection = request.metadata.get("cache_policy_selection")
@@ -129,12 +153,8 @@ class ShapeEndpointInvoker:
             capabilities["prompt_cache"] = dict(selection)
         from pal.llm.replay_compatibility import REPLAY_BINDINGS_KEY
         capabilities[REPLAY_BINDINGS_KEY] = request.metadata.get(REPLAY_BINDINGS_KEY, ())
-        context = ShapeContext(
-            wire_shape=shape, endpoint_id=str(endpoint.endpoint_id),
-            model_id=str(endpoint.model_id), provider_id=str(endpoint.provider),
-            base_url=str(endpoint.base_url or ""), capabilities=capabilities,
-        )
-        codec = codec_for_shape(shape)
+        context = replace(binding.context, capabilities=capabilities)
+        codec = binding.codec
         # N3 (review NEXT_STEPS §4.1): the owner may hand the immutable,
         # already-projected wire encode for THIS attempt — typed input, not
         # a mutable session smuggled through metadata.  Prepared owner-side
@@ -185,7 +205,8 @@ class ShapeEndpointInvoker:
 
         def observed_frames():
             nonlocal frames, frame_count, last_event_type
-            frames = iter(self._transport().frames(endpoint, transport_request))
+            frames = iter(binding.frames(transport_request) if isinstance(binding, LLMEndpoint)
+                          else self._transport().frames(endpoint, transport_request))
             for frame in frames:
                 failure_capture.observe(frame)
                 frame_count += 1

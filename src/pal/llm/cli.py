@@ -94,6 +94,7 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     add_parser.add_argument("--provider", default=None)
     add_parser.add_argument("--display-name", default=None)
     add_parser.add_argument("--wire-shape", choices=tuple(item.value for item in WireShape), default=None)
+    add_parser.add_argument("--transport", choices=("http", "websocket"), default=None)
     add_parser.add_argument("--base-url", default=None)
     add_parser.add_argument("--cache-mode", choices=("implicit", "hybrid", "explicit"), default=None,
                             help="Cache policy: automatic, fixed anchors plus automatic, or rolling explicit anchors")
@@ -183,7 +184,7 @@ def _run_list(args: argparse.Namespace) -> int:
     if not rows:
         print("No configured LLM endpoints.")
         return 0
-    headers = ("ACTIVE", "ENDPOINT", "MODEL", "PROVIDER", "SHAPE", "PRIORITY", "ENABLED")
+    headers = ("ACTIVE", "ENDPOINT", "MODEL", "PROVIDER", "SHAPE", "TRANSPORT", "PRIORITY", "ENABLED")
     values = [
         (
             "*" if row["active"] else "",
@@ -191,6 +192,7 @@ def _run_list(args: argparse.Namespace) -> int:
             row["model_id"],
             row["provider"],
             row["wire_shape"],
+            row["transport"],
             str(row["priority"]),
             "yes" if row["enabled"] else "no",
         )
@@ -277,6 +279,7 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
             model_defaults.get("display_name", endpoint_id),
         ),
         "wire_shape": wire_shape,
+        "transport": _option(args.transport, existing, "transport", "http"),
         "base_url": base_url,
         "auth_kind": auth_kind,
         "credential_ref": credential_ref,
@@ -462,6 +465,7 @@ def _endpoint_payload(endpoint: LLMEndpointModel, *, active_endpoint_id: str | N
         "provider": endpoint.provider,
         "display_name": endpoint.display_name,
         "wire_shape": endpoint.wire_shape,
+        "transport": endpoint.transport,
         "base_url": endpoint.base_url,
         "context_window": endpoint.context_window,
         "max_output_tokens": endpoint.max_output_tokens,

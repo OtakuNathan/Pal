@@ -45,9 +45,12 @@ from pal.llm.chatgpt import ChatGPTError, UNSUPPORTED_PARAMETERS, is_chatgpt, re
 @dataclass(frozen=True)
 class OpenAIResponseCodec(ShapeCodecBase):
     wire_shape: WireShape = WireShape.OPENAI_RESPONSE
+    # Endpoint assembly binds access policy once. None preserves the direct
+    # codec API, whose callers supply their profile through ShapeContext.
+    subscription: bool | None = None
 
     def encode(self, request: LLMRequestIR, context: ShapeContext) -> EncodedRequest:
-        subscription = is_chatgpt(context.capabilities)
+        subscription = self.subscription if self.subscription is not None else is_chatgpt(context.capabilities)
         input_items: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
@@ -176,19 +179,20 @@ class OpenAIResponseCodec(ShapeCodecBase):
         return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAIResponseDecoder":
-        return OpenAIResponseDecoder(context)
+        return OpenAIResponseDecoder(context, subscription=self.subscription)
 
 
 class OpenAIResponseDecoder:
-    def __init__(self, context: ShapeContext) -> None:
+    def __init__(self, context: ShapeContext, *, subscription: bool | None = None) -> None:
         self.context = context
+        self.subscription = subscription if subscription is not None else is_chatgpt(context.capabilities)
         self.builder = ResponseIRBuilder(context)
         self.tool_drafts: dict[int, dict[str, Any]] = {}
         self.replay_items: dict[int, dict[str, Any]] = {}
         self.complete = False
 
     def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
-        if is_chatgpt(self.context.capabilities):
+        if self.subscription:
             event = str(frame.payload.get("type") or "")
             if not event:
                 raise ChatGPTError("missing_stream_event")
@@ -271,7 +275,7 @@ class OpenAIResponseDecoder:
         return tuple(updates)
 
     def finish(self) -> LLMResponseIR:
-        if is_chatgpt(self.context.capabilities) and not self.complete:
+        if self.subscription and not self.complete:
             self.builder.discard_tool_calls()
             raise ChatGPTError("stream_interrupted")
         if not self.builder.complete:

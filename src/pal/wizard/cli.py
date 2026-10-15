@@ -437,6 +437,7 @@ def run_llm_setup_wizard(*, runtime_root: Path) -> int:
         for ep in LLMEndpointRepository().list_enabled():
             endpoints.append(WizardLLMEndpoint(
                 endpoint_id=ep.endpoint_id, model_id=ep.model_id, wire_shape=ep.wire_shape,
+                transport=ep.transport,
                 base_url=ep.base_url, api_key=None, context_window=ep.context_window,
                 max_output_tokens=ep.max_output_tokens, thinking_levels=list(ep.thinking_levels_blob),
                 default_thinking_level=ep.default_thinking_level, supports_tools=ep.supports_tools,

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pal.llm.models import LLMEndpointModel
+from pal.llm.endpoint_spec import LLMEndpointSpec
 from pal.llm.secret_store import KeyringSecretStore, SecretRef, SecretStorePort
 
 
@@ -26,7 +27,7 @@ class LLMCredentialResolver:
     """Resolve provider credentials without exposing them through introspection."""
 
     secret_store: SecretStorePort | None = None
-    _cache: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _cache: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.secret_store is None:
@@ -41,14 +42,14 @@ class LLMCredentialResolver:
     def clear_cache(self) -> None:
         self._cache.clear()
 
-    def resolve_api_key(self, endpoint: LLMEndpointModel) -> str | None:
+    def resolve_api_key(self, endpoint: LLMEndpointModel | LLMEndpointSpec) -> str | None:
         if endpoint.auth_kind == "local_provider_auth":
             return None
         if endpoint.auth_kind == "oauth":
             auth = self.resolve_auth(endpoint)
             return auth.access_token
 
-        cache_key = endpoint.endpoint_id
+        cache_key = (endpoint.endpoint_id, endpoint.credential_ref)
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -64,7 +65,7 @@ class LLMCredentialResolver:
             return secret
         return None
 
-    def resolve_auth(self, endpoint: LLMEndpointModel) -> ResolvedLLMAuth:
+    def resolve_auth(self, endpoint: LLMEndpointModel | LLMEndpointSpec) -> ResolvedLLMAuth:
         if endpoint.auth_kind == "local_provider_auth":
             return ResolvedLLMAuth(kind="local_provider_auth")
         secret_ref = self.secret_ref_for_endpoint(endpoint)
@@ -82,11 +83,11 @@ class LLMCredentialResolver:
             )
         return ResolvedLLMAuth(kind="api_key_ref", secret_ref=secret_ref, api_key=self.resolve_api_key(endpoint))
 
-    def _candidate_env_vars(self, endpoint: LLMEndpointModel) -> list[str]:
+    def _candidate_env_vars(self, endpoint: LLMEndpointModel | LLMEndpointSpec) -> list[str]:
         credential_ref = str(endpoint.credential_ref or "").strip()
         return [credential_ref] if credential_ref else []
 
-    def _get_from_keyring(self, endpoint: LLMEndpointModel) -> str | None:
+    def _get_from_keyring(self, endpoint: LLMEndpointModel | LLMEndpointSpec) -> str | None:
         secret_ref = self.secret_ref_for_endpoint(endpoint)
         return self._get_from_secret_ref(secret_ref)
 
@@ -95,7 +96,7 @@ class LLMCredentialResolver:
             return None
         return self.secret_store.get_secret(secret_ref)
 
-    def secret_ref_for_endpoint(self, endpoint: LLMEndpointModel) -> SecretRef | None:
+    def secret_ref_for_endpoint(self, endpoint: LLMEndpointModel | LLMEndpointSpec) -> SecretRef | None:
         credential_ref = str(endpoint.credential_ref or "").strip()
         if not credential_ref:
             return None
