@@ -264,6 +264,8 @@ class OpenAICompletionDecoder:
         self.tool_calls_finalized = False
         self.native_message: dict[str, Any] = {}
         self.native_tools: dict[int, dict[str, Any]] = {}
+        self.tool_indices_by_id: dict[str, int] = {}
+        self.tool_ids_by_index: dict[int, str] = {}
 
     def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
         self.builder.observe_frame(frame)
@@ -279,6 +281,8 @@ class OpenAICompletionDecoder:
         delta = first.get("delta")
         if not isinstance(delta, Mapping):
             delta = {}
+        if delta.get("tool_calls"):
+            delta = {**delta, "tool_calls": self._indexed_tool_deltas(delta["tool_calls"])}
         self._capture_delta(delta)
         updates: list[LLMResponseUpdate] = []
         reasoning = delta.get("reasoning_content")
@@ -377,12 +381,41 @@ class OpenAICompletionDecoder:
         updates.append(self.builder.mark_complete(reason))
         return tuple(updates)
 
-    def _accumulate_tool_deltas(self, value: Any) -> None:
-        for position, item in enumerate(list(value or [])):
+    def _indexed_tool_deltas(self, value: Any) -> list[dict[str, Any]]:
+        # Standard deltas carry an index even when the ID is omitted. Some
+        # compatible endpoints send ID-only calls; resolve those once so the
+        # executable IR and native replay use the same call boundaries.
+        indexed = []
+        for item in value:
             if not isinstance(item, Mapping):
                 continue
+            call_id = str(item.get("id") or "")
             raw_index = item.get("index")
-            index = int(raw_index) if isinstance(raw_index, int) else position
+            known_index = self.tool_indices_by_id.get(call_id) if call_id else None
+            if raw_index is not None:
+                if type(raw_index) is not int or raw_index < 0:
+                    raise ShapeDecodeError("OpenAI tool delta requires a non-negative integer index")
+                index = raw_index
+                if known_index is not None and known_index != index:
+                    raise ShapeDecodeError("OpenAI tool call id changed index")
+            elif call_id:
+                index = known_index if known_index is not None else max(self.tool_ids_by_index, default=-1) + 1
+            else:
+                raise ShapeDecodeError("OpenAI tool delta has neither index nor call id")
+            previous_id = self.tool_ids_by_index.get(index, "")
+            if call_id and previous_id and previous_id != call_id:
+                raise ShapeDecodeError("OpenAI tool delta index changed call id")
+            self.tool_ids_by_index[index] = call_id or previous_id
+            if call_id:
+                self.tool_indices_by_id[call_id] = index
+            indexed.append({**item, "index": index})
+        return indexed
+
+    def _accumulate_tool_deltas(self, value: Any) -> None:
+        for item in list(value or []):
+            if not isinstance(item, Mapping):
+                continue
+            index = item["index"]
             draft = self.tool_drafts.setdefault(
                 index,
                 {"call_id": "", "name": "", "arguments": []},
@@ -442,12 +475,10 @@ class OpenAICompletionDecoder:
                                 "refusal", "tool_calls", "reasoning_details"}):
                 continue
             if key == "tool_calls":
-                for position, item in enumerate(value or ()):
+                for item in value or ():
                     if not isinstance(item, Mapping):
                         continue
-                    index = item.get("index", position)
-                    if not isinstance(index, int):
-                        raise ShapeDecodeError("tool delta index must be an integer")
+                    index = item["index"]
                     target = self.native_tools.setdefault(index, {})
                     for field, part in item.items():
                         if field == "index":

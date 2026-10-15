@@ -545,4 +545,6 @@ def _last_message_cache_targets(
 
 def _block_index(payload: Mapping[str, Any]) -> int:
     value = payload.get("index")
-    return int(value) if isinstance(value, int) else 0
+    if type(value) is not int or value < 0:
+        raise ShapeDecodeError("Anthropic stream event requires a non-negative integer index")
+    return value

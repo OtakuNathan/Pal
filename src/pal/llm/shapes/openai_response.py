@@ -512,4 +512,6 @@ def _semantic_response_items(parts: list[Any]) -> list[dict[str, Any]]:
 
 def _output_index(payload: Mapping[str, Any]) -> int:
     value = payload.get("output_index")
-    return int(value) if isinstance(value, int) else 0
+    if type(value) is not int or value < 0:
+        raise ShapeDecodeError("Responses stream event requires a non-negative integer output_index")
+    return value
