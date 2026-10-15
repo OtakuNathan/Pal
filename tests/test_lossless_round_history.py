@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from pal.llm.ir import LLMMessageIR, MessageRole, ReasoningPartIR, TextPartIR, WireShape
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext, _JSONFrame
-from pal.llm.transport import _json_mapping
+from pal.llm.http_transport import _json_mapping
 from pal.llm.serde import message_from_payload, message_to_payload
 from pal.memory import MemoryService
 from pal.memory.runtime_state import MemoryRuntimeStatePort
