@@ -25,7 +25,7 @@ from pal.core.compaction import (
     CompactionSnapshot,
 )
 from pal.core.compaction_coordinator import compaction_gate_active
-from pal.core.resident_history import RESIDENT_HISTORY
+from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
@@ -2464,7 +2464,7 @@ class TurnExecutor:
 
         try:
             history = self.context.port_registry.get(RESIDENT_HISTORY.name)
-            archive = history.prepare_archive(left_snapshot) if history is not None else None
+            history_reference = history.prepare_history_reference(left_snapshot) if history is not None else None
             snapshot = CompactionSnapshot.capture_left(
                 memory_service,
                 left_snapshot,
@@ -2485,7 +2485,7 @@ class TurnExecutor:
                     after_commit=after_compact,
                     replay_guard=replay_guard if cache_epoch else None,
                     commit_guard=commit_guard,
-                    commit_hooks=archive,
+                    commit_hooks=history_reference,
                 ),
                 timeout=max(deadline_at - _time.monotonic(), 0.05),
             )

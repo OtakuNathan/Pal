@@ -6,35 +6,19 @@ from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import time
-from typing import Any, Protocol
+from typing import Any, Callable
 
-from pal.core.conversation_history import ConversationArchive, ConversationTextJournal
-from pal.core.resident_checkpoint import RESIDENT_LOGICAL_COROUTINE_ID
-from pal.core.resident_journal import ResidentJournalStore
-from pal.core.runtime_state import RuntimeSnapshotCoordinator, RuntimeSnapshotIdentity, runtime_spec_hash
+from pal.memory.persistence.conversation import ConversationHistoryReference, ConversationTextJournal
+from pal.memory.persistence.checkpoint import RESIDENT_LOGICAL_COROUTINE_ID
+from pal.memory.persistence.journal import ResidentJournalStore
+from pal.memory.persistence.contracts import RuntimeSnapshotCoordinatorPort, RuntimeSnapshotIdentity
 from pal.llm.serde import message_from_payload
 from pal.memory.history_contracts import LeftSnapshot
 from pal.memory.contracts import MEMORY
 from pal.shared import PromptAssemblyContext, PromptFragment
-from pal.shared.ports import PortKey
 from pal.shared.result_snapshot import message_snapshot_refs
 
 LOG = logging.getLogger(__name__)
-
-
-class ResidentHistoryPort(Protocol):
-    def submitted(self) -> None: ...
-    async def checkpoint_async(self, reason: str, *, rebase: bool = False) -> bool: ...
-    async def reset_async(self) -> None: ...
-    def prepare_archive(self, snapshot: LeftSnapshot) -> ConversationArchive: ...
-    def inspect(self) -> dict: ...
-    def record_reply(self, turn_id: str, text: str) -> None: ...
-    def record_stream(self, turn_id: str, kind: str, text: str) -> None: ...
-    def finish_partial_stream(self, turn_id: str) -> None: ...
-    def take_degraded_notice(self) -> bool: ...
-
-
-RESIDENT_HISTORY = PortKey[ResidentHistoryPort]("core:resident_history", ResidentHistoryPort)
 
 
 def snapshot_references(snapshot: dict) -> tuple:
@@ -49,12 +33,16 @@ def snapshot_references(snapshot: dict) -> tuple:
 
 
 class ResidentHistory:
-    def __init__(self, root: Path, context: Any, diagnostics: list):
+    def __init__(self, root: Path, context: Any, diagnostics: list, *,
+                 coordinator: RuntimeSnapshotCoordinatorPort, spec_hash: Callable[[], str],
+                 timezone_name: str = "UTC"):
         self.root = root
         self.context = context
         self.diagnostics = diagnostics
+        self.coordinator = coordinator
+        self.spec_hash = spec_hash
         self.store = ResidentJournalStore(root)
-        self.text_store = ConversationTextJournal(root)
+        self.text_store = ConversationTextJournal(root, timezone_name)
         self.lock = asyncio.Lock()
         self._writer_loop: asyncio.AbstractEventLoop | None = None
         self.tasks: set[asyncio.Task] = set()
@@ -102,8 +90,7 @@ class ResidentHistory:
                 turn_id, stream["text"], timestamp=stream["timestamp"], partial=True)
 
     def _spec(self) -> str:
-        return runtime_spec_hash(self.context.module_registry,
-                                 identity_parts={"host": RESIDENT_LOGICAL_COROUTINE_ID})
+        return self.spec_hash()
 
     async def _capture(self, reason: str) -> dict:
         # Assign the resident incarnation before serializing even when no
@@ -115,7 +102,7 @@ class ResidentHistory:
             sequence=self.store.sequence + 1, producer_fencing_token=1,
             runtime_spec_hash=self._spec(),
         )
-        return await RuntimeSnapshotCoordinator(self.context.module_registry).snapshot(identity)
+        return await self.coordinator.snapshot(identity)
 
     def protect(self, snapshot: dict, *, conservative: bool = False) -> None:
         references = {reference.snapshot_id: reference for reference in snapshot_references(snapshot)}
@@ -178,7 +165,7 @@ class ResidentHistory:
                 self.total_write_bytes += self.store.last_bytes
                 # Recovery commits first. A failed derived text write cannot
                 # invalidate a successful restore or discard replay state.
-                if await self._sync_searchable(snapshot, replace=reason in {"compact", "restore"}):
+                if await self._sync_searchable(snapshot):
                     self._notice_sent = False
                 return True
             except Exception as exc:
@@ -193,12 +180,12 @@ class ResidentHistory:
                 self.last_save_ms = (time.monotonic() - started) * 1000
                 snapshots.release(prepared_owner)
 
-    async def _sync_searchable(self, snapshot: dict, *, replace: bool = False) -> bool:
+    async def _sync_searchable(self, snapshot: dict) -> bool:
         memory = snapshot["modules"].get("memory")
         if memory is None:
             return True
         try:
-            await asyncio.to_thread(self.text_store.sync_memory, memory["payload"], replace=replace)
+            await asyncio.to_thread(self.text_store.sync_memory, memory["payload"])
             return True
         except Exception as exc:
             self._failed("search", exc)
@@ -215,7 +202,7 @@ class ResidentHistory:
 
     async def _reset(self) -> None:
         async with self.lock:
-            coordinator = RuntimeSnapshotCoordinator(self.context.module_registry)
+            coordinator = self.coordinator
             before = await self._capture("before_reset")
             owner = object()
             snapshots = self.context.execution_runtime.result_snapshots
@@ -251,9 +238,9 @@ class ResidentHistory:
                 self._streams.clear()
                 snapshots.release(owner)
 
-    def prepare_archive(self, snapshot: LeftSnapshot) -> ConversationArchive:
+    def prepare_history_reference(self, snapshot: LeftSnapshot) -> ConversationHistoryReference:
         memory = self.context.require_port(MEMORY)
-        return ConversationArchive.prepare(self.root, snapshot, memory.history_root.owner_state()["incarnation"])
+        return ConversationHistoryReference.prepare(self.text_store, snapshot, memory.history_root.owner_state()["incarnation"])
 
     def _failed(self, operation: str, error: Exception) -> None:
         self.status = "degraded"
@@ -267,13 +254,15 @@ class ResidentHistory:
                 "last_save_ms": self.last_save_ms, "last_write_bytes": self.store.last_bytes,
                 "total_write_bytes": self.total_write_bytes,
                 "current_dialogue_file": str(self.text_store.path) if self.text_store.path and self.text_store.path.exists() else None,
+                "history_partition": "message_date",
+                "history_timezone": str(self.text_store.timezone),
                 "last_text_write_bytes": self.text_store.last_bytes,
                 "archive_directory": str(self.root / "data" / "conversation-history")}
 
 
 class ResidentHistoryPromptProvider:
-    provider_id = "core.prompt.resident_history"
-    module_id = "core"
+    provider_id = "memory.prompt.resident_history"
+    module_id = "memory"
 
     def __init__(self, root: Path):
         self.directory = root / "data" / "conversation-history"
@@ -293,21 +282,23 @@ class ResidentHistoryPromptProvider:
                 section="memory_guide", title="Historical dialogue lookup", priority=75,
                 metadata={"prompt_target": "developer"}, content=(
                     f"When prior wording or recorded actions are uncertain, look in {self.directory}. "
-                    "Current dialogue and compact archives share this directory; rg -n PATTERN DIRECTORY "
-                    "searches both in one pass. current_*.jsonl contains dialogue not yet compacted, "
-                    "including retained dialogue from earlier reset incarnations; "
-                    "timestamped JSONL files contain compact archives. Use the latest archive reference "
-                    "attached to compact continuity first. Each UTF-8 JSONL file has a header; "
-                    "timestamp fields on messages preserve actual conversation time. An archive filename's "
-                    "timestamp is archive time, not message time. The current file's header is not an end-time index. "
-                    "Filter by approximate conversation time, search with rg -n, and read neighboring records; "
-                    "Each physical line is one JSON object; the first record has type=header and subsequent records "
-                    "have type=message. jq can extract and filter records, for example "
-                    "jq -r 'select(.type == \"message\" and .role == \"user\") | .text' ARCHIVE "
-                    "(replace ARCHIVE with the actual archive path). jq -r or Python decoding restores escaped "
-                    "newlines; timestamp fields allow time filtering. Redaction can alter exact wording, "
-                    "and crash recovery can leave overlapping records: use conversation_id plus message_id "
-                    "to identify duplicates, keeping the latest version within a current file. "
+                    "Current and previously compacted dialogue share daily YYYY-MM-DD.jsonl files; "
+                    "rg -n PATTERN DIRECTORY searches all history in one pass. Files are partitioned by "
+                    "message occurrence time in Pal's configured timezone, not compact or write time. "
+                    "undated.jsonl holds legacy messages without an unambiguous timestamp. "
+                    "Compact and reset retain existing daily records. Earlier current_*.jsonl files and "
+                    "timestamped compact archives from older versions remain searchable alongside them. "
+                    "Use the daily file paths, conversation ID and time range attached to compact continuity first. "
+                    "Each UTF-8 JSONL physical line is one JSON object: the first has type=header and later "
+                    "records have type=message. Each daily message includes conversation_id, message_id "
+                    "and a timestamp; daily files may contain multiple conversations. "
+                    "Search with rg -n and inspect neighbors, or use jq to filter and decode records, for example "
+                    "jq -r 'select(.type == \"message\" and .role == \"user\") | .text' FILE.jsonl. "
+                    "jq -r or Python decoding restores escaped newlines. Filter message timestamps for "
+                    "precise time ranges. Redaction can alter exact wording. Appended corrections and crash "
+                    "recovery can overlap records: identify them by conversation_id plus message_id and "
+                    "keep the last version of each pair within a daily file. Legacy files may put the "
+                    "conversation ID only in the header. "
                     "A search miss does not prove that "
                     "something was never said. Tool entries retain only original text previews; external output "
                     "snapshots and replay handlers are not retained by these archives."

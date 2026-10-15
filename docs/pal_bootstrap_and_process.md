@@ -217,15 +217,18 @@ The current incomplete round and progress made during storage degradation may
 still be lost after SIGKILL, power loss or OOM. Interrupted tool side effects
 require observation and reconciliation, not automatic retry.
 
-Compaction writes searchable dialogue JSONL before retiring L and publishes a new
-recovery baseline afterward. A separate credential-redacted current-dialogue JSONL
-is appended at round/L-admission boundaries in the same `data/conversation-history/`
-directory as compact archives; `rg` can search both. Its persistence failure never
-invalidates a saved encrypted recovery point. `/reset` preserves searchable dialogue
-and archives but persists an
-empty active state before reporting success. Existing exit checkpoints remain
-readable. Invalid complete journal records fail restoration without being silently
-replaced by later normal saves.
+`pal.memory.persistence` owns encrypted recovery and searchable history. At the
+existing round/L-admission boundaries, it appends credential-redacted dialogue to
+`data/conversation-history/YYYY-MM-DD.jsonl` by message occurrence date in Pal's
+configured timezone. Compact ensures frozen L is recorded before retiring it,
+attaches daily file/time references, and publishes the recovery baseline afterward.
+It never moves or trims daily history. Current and compacted dialogue share those
+files; `rg` can search the entire directory, including unchanged legacy current and
+compact files. Searchable-write failure never invalidates encrypted recovery.
+`/reset` preserves searchable history and persists an empty active state before
+reporting success. Existing encrypted file paths and formats remain readable.
+Invalid complete journal records fail restoration without being silently replaced
+by later normal saves.
 
 ### Worker Crash
 

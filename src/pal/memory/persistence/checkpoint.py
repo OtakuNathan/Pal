@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from pal.core.runtime_state import validate_runtime_snapshot
+from pal.memory.persistence.contracts import validate_runtime_snapshot
 from pal.foundation.encryption import EncryptedJsonEnvelopeCodec
 
 

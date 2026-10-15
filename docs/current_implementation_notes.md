@@ -63,15 +63,18 @@ RAM-owned working set; its durable copy preserves reasoning, native protocol,
 closed R and output references. Restored active turns become interrupted context,
 never automatically replayed execution. Bunshin keeps its existing role recovery.
 
-Before compact retires L, the host writes timestamped UTF-8 conversation JSONL,
-one record per line, and adds its actual path/time coverage to the continuity seed.
-At round/L-admission boundaries it also appends a separately redacted current
-dialogue JSONL in that same directory. Compact trims this current file to the
-remaining R after recovery commits; reset preserves old searchable dialogue.
-The resident prompt includes a history lookup affordance with `rg` and `jq` examples.
-This archive contains dialogue and initial tool previews, not reasoning or external
+Resident persistence is centralized in `pal.memory.persistence`. At the existing
+round/L-admission boundaries, it appends credential-redacted UTF-8 JSONL to one file
+per message date in Pal's configured timezone. Current and compacted dialogue share
+`data/conversation-history/YYYY-MM-DD.jsonl`; unknown legacy clocks use `undated.jsonl`.
+Compact ensures frozen L is present and adds file paths, conversation ID and time
+coverage to continuity. It never rewrites or moves daily history. Reset preserves it.
+The lookup affordance explains `rg`, `jq` and per-message conversation/message IDs;
+appended corrections use the latest version of that pair within a daily file.
+Existing current/compact files remain searchable alongside daily files. This text
+projection retains dialogue and initial tool previews, without reasoning or external
 snapshot ownership. Historical wording, recorded actions, maintained memory and
-current runtime state have distinct evidence boundaries. Reset keeps archives.
+current runtime state have distinct evidence boundaries.
 
 The current memory prompt no longer exposes one generic `Working Memory` block.
 

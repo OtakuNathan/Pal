@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.core.runtime import PalCore
-from pal.core.resident_history import RESIDENT_HISTORY
+from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.execution.generated_tool_models import (
     CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
 )
