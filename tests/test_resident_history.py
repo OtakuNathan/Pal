@@ -1,14 +1,15 @@
 """Resident continuity and historical evidence, with isolated runtime roots."""
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from pal.core.conversation_history import ConversationArchive, history_records
-from pal.core.resident_journal import ResidentJournalStore
-from pal.core.resident_history import ResidentHistoryPromptProvider
+from pal.memory.persistence.conversation import ConversationHistoryReference, history_records
+from pal.memory.persistence.journal import ResidentJournalStore
+from pal.memory.persistence.owner import ResidentHistoryPromptProvider
 from pal.core.compaction import CompactionEngine, CompactionSnapshot, CompactionClockKind
 from pal.core.pal_compaction import PalCompactionPolicy
 from pal.execution.result_snapshots import render_snapshot_hint
@@ -19,6 +20,24 @@ from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from tests.test_resident_checkpoint import _build_app
 
 NOW = "2000-01-01T12:00:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def fixed_conversation_clock(monkeypatch):
+    from pal.memory.persistence import owner
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat(NOW).astimezone(tz)
+
+    monkeypatch.setattr(owner, "datetime", FixedDatetime)
+    monkeypatch.setattr("pal.memory.service.utc_now", lambda: NOW)
+
+
+def read_messages(paths):
+    return [record for path in paths for line in path.read_text().splitlines()
+            if (record := json.loads(line))["type"] == "message"]
 
 
 def app(root):
@@ -129,13 +148,14 @@ def test_multiday_clocks_survive_recovery_and_archive_but_never_enter_model_wire
         assert target.last_checkpoint_status == "restored", target.last_checkpoint_error
         restored = target.handle.memory_service
         check_wire(restored)
-        archive = target.history.prepare_archive(frozen(restored))
+        archive = target.history.prepare_history_reference(frozen(restored))
         assert [record["timestamp"] for record in archive.records] == [NOW, later]
         assert archive.header["conversation_start"] == NOW
         assert archive.header["conversation_end"] == later
         archive.publish()
-        records = [json.loads(line) for line in archive.path.read_text().splitlines()]
-        assert [record["timestamp"] for record in records[1:]] == [NOW, later]
+        records = read_messages(archive.paths)
+        assert [path.name for path in archive.paths] == ["2000-01-01.jsonl", "2000-01-03.jsonl"]
+        assert [record["timestamp"] for record in records] == [NOW, later]
 
     asyncio.run(scenario())
 
@@ -167,7 +187,7 @@ def test_retry_after_replace_fsync_failure_does_not_reuse_a_covered_sequence(tmp
         memory = begin(instance)
         await instance.history.checkpoint_async("round")
         answer(memory, "reply before replace failure")
-        with patch("pal.core.resident_checkpoint._fsync_directory", side_effect=OSError("sync failed")):
+        with patch("pal.memory.persistence.checkpoint._fsync_directory", side_effect=OSError("sync failed")):
             assert not await instance.history.checkpoint_async("compact", rebase=True)
         # The replacement is visible, but its directory sync was not
         # acknowledged. A retry must use that actual disk cursor.
@@ -195,7 +215,7 @@ def test_partial_write_rolls_back_then_next_boundary_repairs_the_point(tmp_path)
             if calls == 1:
                 return write(descriptor, data[:8])
             raise OSError("disk unavailable")
-        with patch("pal.core.resident_journal.os.write", side_effect=broken):
+        with patch("pal.memory.persistence.journal.os.write", side_effect=broken):
             assert not await instance.history.checkpoint_async("round")
         assert ResidentJournalStore(tmp_path).read()["sequence"] == 1
         assert await instance.history.checkpoint_async("round")
@@ -215,7 +235,7 @@ def test_executor_automatically_persists_last_round_without_turn_settlement(tmp_
         memory.begin_l1_turn("T", user_message=LLMMessageIR(MessageRole.USER, (TextPartIR("question"),),
             message_id="u", semantic_kind="user_request"), metadata={"conversation_tracking": True})
         executor = _executor(memory, _runtime(CapturingTransport(["last reply"])))
-        executor.context.port_registry["core:resident_history"] = instance.history
+        executor.context.port_registry["memory:persistence"] = instance.history
         executor.build_turn_prompt = lambda *args, **kwargs: _request_for(memory, ())
         continuation = SimpleNamespace(budget_failure_feedback_text="", llm_round_index=0,
             preferred_llm_endpoint_id=None, preferred_llm_model_id=None, finalization_only=False,
@@ -283,25 +303,25 @@ def test_archive_is_jsonl_with_original_dialogue_and_first_preview_only(tmp_path
     instance.history.record_reply("t", "回复")
     memory.settle_l1_turn("t")
     source = frozen(memory)
-    archive = instance.history.prepare_archive(source)
+    archive = instance.history.prepare_history_reference(source)
     archive.publish()
     archive.publish()
-    lines = archive.path.read_text().splitlines()
+    lines = archive.paths[0].read_text().splitlines()
     records = [json.loads(line) for line in lines]
-    body = archive.path.read_text()
-    assert records[0]["conversation_start"] == NOW
+    body = archive.paths[0].read_text()
+    assert records[0]["date"] == "2000-01-01"
     assert [item["role"] for item in records[1:]] == ["user", "tool", "assistant"]
     assert records[1]["text"] == "原话\n第二行"
     for excluded in ["PRIVATE REASONING", "INJECTED CONTEXT", "HANDLER", "SECRET STRUCTURED",
                      "FULL OUTPUT SHOULD NOT BE ARCHIVED", result.path]:
         assert excluded not in body
     assert "first preview" in body
-    assert archive.path.stat().st_mode & 0o777 == 0o600
-    assert archive.path.parent.stat().st_mode & 0o777 == 0o700
+    assert archive.paths[0].stat().st_mode & 0o777 == 0o600
+    assert archive.paths[0].parent.stat().st_mode & 0o777 == 0o700
     decorated = archive.decorate(entry())
-    assert str(archive.path) in decorated.rendered
+    assert str(archive.paths[0]) in decorated.rendered
     assert "search miss" in decorated.rendered
-    assert decorated.payload["conversation_archive"]["path"] == str(archive.path)
+    assert list(decorated.payload["conversation_history"]["paths"]) == [str(path) for path in archive.paths]
 
 
 def test_current_text_is_redacted_but_full_recovery_preserves_original(tmp_path):
@@ -328,10 +348,10 @@ def test_current_text_is_redacted_but_full_recovery_preserves_original(tmp_path)
         assert turn.messages[0].text == original
         assert turn.messages[-1].reasoning_text == "PRIVATE REASONING"
         assert turn.messages[-1].replay.payload["message"]["signature"] == "opaque"
-        archive = restored.history.prepare_archive(frozen(restored.handle.memory_service))
+        archive = restored.history.prepare_history_reference(frozen(restored.handle.memory_service))
         archive.publish()
-        assert archive.path.parent == path.parent
-        assert all(secret not in archive.path.read_text() for secret in ("private-value", "another-value", "reply-value"))
+        assert archive.paths[0].parent == path.parent
+        assert all(secret not in archive.paths[0].read_text() for secret in ("private-value", "another-value", "reply-value"))
     asyncio.run(scenario())
 
 
@@ -353,7 +373,7 @@ def test_current_text_appends_new_records_without_rewriting_old_rounds(tmp_path)
     asyncio.run(scenario())
 
 
-def test_compact_moves_prefix_to_archive_keeps_live_right_and_reset_keeps_text(tmp_path):
+def test_compact_and_reset_keep_daily_history_without_rewriting_it(tmp_path):
     async def scenario():
         instance = app(tmp_path)
         memory = begin(instance, "旧话")
@@ -368,17 +388,20 @@ def test_compact_moves_prefix_to_archive_keeps_live_right_and_reset_keeps_text(t
             metadata={"conversation_origin": "user", "conversation_timestamp": NOW}),
             metadata={"conversation_tracking": True})
         await instance.history.checkpoint_async("round")
-        archive = instance.history.prepare_archive(source)
+        before_compact = current.read_bytes()
+        archive = instance.history.prepare_history_reference(source)
         archive.publish()
         memory.compact_left(source.run_id, archive.decorate(entry()))
         await instance.history.checkpoint_async("compact", rebase=True)
-        assert archive.path.parent == current.parent
-        assert "旧话" in archive.path.read_text() and "旧回复" in archive.path.read_text()
-        assert "旧话" not in current.read_text() and "旧回复" not in current.read_text()
+        assert current.read_bytes() == before_compact
+        assert sorted(path.name for path in current.parent.glob("*.jsonl")) == ["2000-01-01.jsonl"]
+        assert archive.paths[0].parent == current.parent
+        assert "旧话" in archive.paths[0].read_text() and "旧回复" in archive.paths[0].read_text()
+        assert "旧话" in current.read_text() and "旧回复" in current.read_text()
         assert "正在进行" in current.read_text()
         await instance.history.reset_async()
         assert "正在进行" in current.read_text()
-        assert archive.path.exists()
+        assert archive.paths[0].exists()
     asyncio.run(scenario())
 
 
@@ -400,7 +423,7 @@ def test_searchable_write_failure_does_not_break_full_recovery_and_retries(tmp_p
 
 
 def test_current_text_repairs_incomplete_tail_without_repeating_old_messages(tmp_path):
-    from pal.core.conversation_history import ConversationTextJournal, records_from_memory_payload
+    from pal.memory.persistence.conversation import ConversationTextJournal, records_from_memory_payload
     async def scenario():
         instance = app(tmp_path)
         memory = begin(instance)
@@ -433,7 +456,7 @@ def test_failed_first_text_append_retries_with_a_valid_header(tmp_path):
             if calls == 1:
                 return write(descriptor, data[:8])
             raise OSError("text write unavailable")
-        with patch("pal.core.conversation_history.os.write", side_effect=broken):
+        with patch("pal.memory.persistence.conversation.os.write", side_effect=broken):
             assert await instance.history.checkpoint_async("round")
         assert instance.history.status == "degraded"
         assert await instance.history.checkpoint_async("round")
@@ -455,7 +478,7 @@ def test_durable_recovery_holds_output_until_new_compact_base_is_saved(tmp_path)
         memory.settle_l1_turn("t")
         await instance.history.checkpoint_async("round")
         source = frozen(memory)
-        archive = instance.history.prepare_archive(source)
+        archive = instance.history.prepare_history_reference(source)
         archive.publish()
         memory.compact_left(source.run_id, archive.decorate(entry()))
         assert Path(ref.path).exists()
@@ -470,7 +493,7 @@ def test_durable_recovery_holds_output_until_new_compact_base_is_saved(tmp_path)
         # no second process is started against a real runtime in this test.
         assert await instance.history.checkpoint_async("compact", rebase=True)
         assert not Path(ref.path).exists()
-        assert archive.path.exists()
+        assert archive.paths[0].exists()
     asyncio.run(scenario())
 
 
@@ -483,13 +506,13 @@ def test_reset_keeps_archive_and_cannot_resurrect_old_context(tmp_path):
         memory.settle_l1_turn("t")
         old_incarnation = memory.history_root.owner_state()["incarnation"]
         source = frozen(memory)
-        archive = instance.history.prepare_archive(source)
+        archive = instance.history.prepare_history_reference(source)
         archive.publish()
         memory.compact_left(source.run_id, archive.decorate(entry()))
         await instance.history.checkpoint_async("compact", rebase=True)
         await instance.history.reset_async()
         assert memory.history_root.owner_state()["incarnation"] != old_incarnation
-        assert archive.path.exists()
+        assert archive.paths[0].exists()
         restored = app(tmp_path)
         await restored._restore_checkpoint_async()
         assert restored.last_checkpoint_status == "restored"
@@ -509,6 +532,29 @@ def test_failed_reset_restores_live_state_without_reporting_success(tmp_path):
                 await instance.history.reset_async()
         assert memory.history_root.owner_state()["incarnation"] == old_incarnation
         assert memory.history.turns[0].messages[0].text == "原话\n第二行"
+    asyncio.run(scenario())
+
+
+def test_reset_reuses_daily_file_and_distinguishes_same_message_ids(tmp_path):
+    async def scenario():
+        instance = app(tmp_path)
+        begin(instance, "first incarnation")
+        assert await instance.history.checkpoint_async("round")
+        path = instance.history.text_store.path
+        first_id = instance.handle.memory_service.history_root.incarnation
+        await instance.history.reset_async()
+        begin(instance, "second incarnation")
+        assert await instance.history.checkpoint_async("round")
+        assert instance.history.text_store.path == path
+        rows = read_messages((path,))
+        assert [row["text"] for row in rows] == ["first incarnation", "second incarnation"]
+        assert [row["message_id"] for row in rows] == ["u", "u"]
+        assert rows[0]["conversation_id"] == first_id
+        assert rows[0]["conversation_id"] != rows[1]["conversation_id"]
+        restored = app(tmp_path)
+        await restored._restore_checkpoint_async()
+        assert restored.last_checkpoint_status == "restored"
+        assert read_messages((path,)) == rows
     asyncio.run(scenario())
 
 
@@ -547,7 +593,8 @@ def test_affordance_explains_jq_and_is_absent_from_bunshin(tmp_path):
     text = "\n".join(fragment.content for fragment in fragments)
     assert "jq -r" in text and "type=header" in text and "rg -n" in text
     assert str(tmp_path / "data" / "conversation-history") in text
-    assert "current_*.jsonl" in text and "one pass" in text
+    assert "YYYY-MM-DD.jsonl" in text and "one pass" in text
+    assert "undated.jsonl" in text and "conversation_id" in text
     assert "redacted" in text
     assert provider.build_prompt_fragments(PromptAssemblyContext(core_mode="bunshin")) == []
 
@@ -563,10 +610,10 @@ def test_archive_failure_prevents_compact_install_and_right_is_preserved(tmp_pat
         memory.begin_l1_turn("right", user_text="UNSENT RIGHT")
         source = frozen(memory)
         before = memory.history.turns
-        archive = instance.history.prepare_archive(source)
+        archive = instance.history.prepare_history_reference(source)
         snapshot = CompactionSnapshot.capture_left(memory, source, target_input_budget=100000,
             reserved_output_tokens=1024, clock_kind=CompactionClockKind.USER_TURN, clock_value=1)
-        with patch.object(ConversationArchive, "publish", side_effect=OSError("disk unavailable")):
+        with patch.object(ConversationHistoryReference, "publish", side_effect=OSError("disk unavailable")):
             result = await CompactionEngine(PalCompactionPolicy(), max_attempts=1).run(snapshot,
                 memory_service=memory, llm_runtime=_Transport(_ScriptedLLM(_valid_pal_payload("summary"))), commit_hooks=archive)
         assert result.status == "commit_failed"

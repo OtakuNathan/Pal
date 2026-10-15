@@ -6,8 +6,11 @@ import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Mapping, Protocol, Sequence
 
-
-RUNTIME_SNAPSHOT_SCHEMA_VERSION = "1"
+from pal.memory.persistence.contracts import (
+    RUNTIME_SNAPSHOT_SCHEMA_VERSION as RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+    RuntimeSnapshotIdentity as RuntimeSnapshotIdentity,
+    validate_runtime_snapshot as validate_runtime_snapshot,
+)
 
 
 class RuntimeStatePort(Protocol):
@@ -30,40 +33,6 @@ class RuntimeStatePort(Protocol):
 
     def reset_state(self, reason: str) -> None | Awaitable[None]:
         ...
-
-
-@dataclass(frozen=True)
-class RuntimeSnapshotIdentity:
-    logical_coroutine_id: str
-    workflow_id: str
-    stage_key: str
-    sequence: int
-    producer_fencing_token: int
-    runtime_spec_hash: str
-
-    def __post_init__(self) -> None:
-        for field_name in (
-            "logical_coroutine_id",
-            "workflow_id",
-            "stage_key",
-            "runtime_spec_hash",
-        ):
-            if not str(getattr(self, field_name) or "").strip():
-                raise ValueError(f"runtime snapshot {field_name} is required")
-        if self.sequence < 0:
-            raise ValueError("runtime snapshot sequence must be non-negative")
-        if self.producer_fencing_token <= 0:
-            raise ValueError("runtime snapshot producer_fencing_token must be positive")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "logical_coroutine_id": self.logical_coroutine_id,
-            "workflow_id": self.workflow_id,
-            "stage_key": self.stage_key,
-            "sequence": self.sequence,
-            "producer_fencing_token": self.producer_fencing_token,
-            "runtime_spec_hash": self.runtime_spec_hash,
-        }
 
 
 @dataclass
@@ -154,43 +123,6 @@ class RuntimeSnapshotCoordinator:
             ports,
             key=lambda port: (int(port.state_order), str(port.module_id)),
         )
-
-
-def validate_runtime_snapshot(
-    snapshot: Mapping[str, Any],
-    *,
-    expected_identity: RuntimeSnapshotIdentity | None = None,
-) -> dict[str, Any]:
-    value = dict(snapshot)
-    allowed = {
-        "schema_version",
-        "logical_coroutine_id",
-        "workflow_id",
-        "stage_key",
-        "sequence",
-        "producer_fencing_token",
-        "runtime_spec_hash",
-        "modules",
-    }
-    extras = sorted(set(value) - allowed)
-    if extras:
-        raise ValueError(f"runtime snapshot has unknown fields: {extras}")
-    if str(value.get("schema_version") or "") != RUNTIME_SNAPSHOT_SCHEMA_VERSION:
-        raise ValueError("runtime snapshot schema is unsupported")
-    identity = RuntimeSnapshotIdentity(
-        logical_coroutine_id=str(value.get("logical_coroutine_id") or ""),
-        workflow_id=str(value.get("workflow_id") or ""),
-        stage_key=str(value.get("stage_key") or ""),
-        sequence=int(value.get("sequence") or 0),
-        producer_fencing_token=int(value.get("producer_fencing_token") or 0),
-        runtime_spec_hash=str(value.get("runtime_spec_hash") or ""),
-    )
-    if expected_identity is not None and identity != expected_identity:
-        raise ValueError("runtime snapshot identity does not match the requested incarnation")
-    if not isinstance(value.get("modules"), Mapping):
-        raise ValueError("runtime snapshot modules must be an object")
-    value["modules"] = dict(value["modules"])
-    return value
 
 
 def runtime_spec_hash(

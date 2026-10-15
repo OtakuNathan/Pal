@@ -26,7 +26,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.core.resident_checkpoint import ResidentCheckpointError, ResidentCheckpointStore
+from pal.memory.persistence.checkpoint import ResidentCheckpointError, ResidentCheckpointStore
 from pal.llm.ir import (
     LLMMessageIR,
     MessageRole,
@@ -303,7 +303,7 @@ class H02GracefulRecoveryTests(unittest.TestCase):
                     raise OSError("disk went away mid-replace")
                 return real_replace(src, dst, *a, **kw)
 
-            with patch("pal.core.resident_checkpoint.os.replace",
+            with patch("pal.memory.persistence.checkpoint.os.replace",
                        side_effect=failing_replace):
                 with self.assertRaisesRegex(ResidentCheckpointError, "OSError"):
                     asyncio.run(source._publish_checkpoint_async())

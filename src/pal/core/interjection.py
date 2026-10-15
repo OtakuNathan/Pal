@@ -9,7 +9,7 @@ from typing import Any
 
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.core.compaction_coordinator import compaction_gate_active
-from pal.core.resident_history import RESIDENT_HISTORY
+from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.shared.payloads import extract_text_from_payload
 
 

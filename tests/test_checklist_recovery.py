@@ -5,7 +5,7 @@ import pytest
 
 from pal.checklist import ChecklistService, register_with_core
 from pal.checklist.runtime_state import ChecklistRuntimeStatePort
-from pal.core.resident_checkpoint import ResidentCheckpointStore
+from pal.memory.persistence.checkpoint import ResidentCheckpointStore
 from pal.core.runtime_state import RuntimeSnapshotCoordinator
 from tests.test_resident_checkpoint import _build_app
 

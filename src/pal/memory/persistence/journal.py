@@ -11,8 +11,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pal.core.resident_checkpoint import ResidentCheckpointError, ResidentCheckpointStore, _fsync_directory
-from pal.core.runtime_state import validate_runtime_snapshot
+from pal.memory.persistence.checkpoint import ResidentCheckpointError, ResidentCheckpointStore, _fsync_directory
+from pal.memory.persistence.contracts import validate_runtime_snapshot
 from pal.foundation.encryption import EncryptedJsonEnvelopeCodec
 
 JOURNAL_VERSION = 1

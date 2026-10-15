@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pal.core import PalCore
-from pal.core.resident_checkpoint import ResidentCheckpointStore
+from pal.memory.persistence.checkpoint import ResidentCheckpointStore
 from pal.core.runtime_config import RuntimeConfig
 from pal.execution import register_with_core as register_execution_with_core
 from pal.memory import (

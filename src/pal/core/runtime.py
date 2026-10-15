@@ -25,7 +25,7 @@ from pal.core.compaction_coordinator import (
     compaction_gate_active,
 )
 from pal.core.compaction import CompactionRunResult
-from pal.core.resident_history import RESIDENT_HISTORY
+from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.memory.contracts import MemoryCompactResult
 
 RESIDENT_COMPACTION_SCOPE = "pal:resident"

@@ -14,11 +14,12 @@ from pathlib import Path
 from pal.bootstrap import StubRuntimeHandle, compose_runtime
 from pal.channel import ChannelEndpointRepository
 from pal.core.debug_dump import write_runtime_debug_dump
-from pal.core.resident_checkpoint import (
+from pal.memory.persistence.checkpoint import (
     RESIDENT_LOGICAL_COROUTINE_ID,
     ResidentCheckpointError,
 )
-from pal.core.resident_history import RESIDENT_HISTORY, ResidentHistory, ResidentHistoryPromptProvider
+from pal.memory.persistence.contracts import RESIDENT_HISTORY
+from pal.memory.persistence.owner import ResidentHistory, ResidentHistoryPromptProvider
 from pal.core.runtime_state import (
     RuntimeSnapshotCoordinator,
     runtime_spec_hash,
@@ -93,7 +94,14 @@ class PalRuntimeApp:
 
     def __post_init__(self) -> None:
         core = self.handle.core
-        self.history = ResidentHistory(self._runtime_root(), core.context, core.state.diagnostics)
+        identity = core.context.port_registry.get("identity:identity")
+        preferences = identity.get_preferences() if identity is not None else None
+        self.history = ResidentHistory(
+            self._runtime_root(), core.context, core.state.diagnostics,
+            coordinator=RuntimeSnapshotCoordinator(core.context.module_registry),
+            spec_hash=self._runtime_spec_hash,
+            timezone_name=(preferences.timezone if preferences is not None else None) or "UTC",
+        )
         core.context.port_registry.register(RESIDENT_HISTORY, self.history)
         core.context.prompt_fragment_registry.register(ResidentHistoryPromptProvider(self._runtime_root()))
 

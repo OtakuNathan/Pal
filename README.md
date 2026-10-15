@@ -225,10 +225,12 @@ and rendering. Automatic compaction is driven by the real context budget, not
 a fixed turn interval.
 
 Resident recovery keeps encrypted full L1 and round deltas separately from
-searchable dialogue. Current conversation and compact archives are credential-redacted
-UTF-8 JSONL files in `{runtime_root}/data/conversation-history/`; `rg` searches the
-whole directory and `jq` extracts message text and timestamps. Reasoning, native
-replay and external output files remain outside this searchable copy.
+searchable dialogue, with storage owned by `pal.memory.persistence`. Credential-redacted
+UTF-8 JSONL is appended to `{runtime_root}/data/conversation-history/YYYY-MM-DD.jsonl`
+by message date in Pal's configured timezone. Current and compacted dialogue stay
+together; `rg` searches the directory and `jq` extracts text and timestamps. Compact
+attaches file/time references without moving history. Reasoning, native replay and
+external output files remain outside this searchable copy.
 
 ### Capability Forest
 
