@@ -78,6 +78,7 @@ class CacheWarmDeadlineNotice:
     lead_seconds: int
     prefix_tokens: int
     expires_at: str
+    estimated: bool = False
 
 
 CacheSnapshotProvider = Callable[[], Mapping[str, Any]]
@@ -138,10 +139,9 @@ class CacheWarmDeadlineManager:
         settings = self.settings()
         snapshot = dict(self.cache_snapshot() or {})
         epoch = str(snapshot.get("anchor_epoch") or "").strip()
-        # The idle reminder starts at the completed conversation interaction.
-        # Actual cache availability is checked independently before execution.
         ttl_seconds = max(0, int(snapshot.get("anchor_ttl_seconds") or 0))
         remaining_ttl = snapshot.get("anchor_remaining_ttl_seconds")
+        estimated = bool(snapshot.get("estimated"))
         prefix_tokens = _context_tokens(snapshot)
         if (
             not settings.enabled
@@ -154,7 +154,10 @@ class CacheWarmDeadlineManager:
             or epoch == self._ignored_epoch
         ):
             return False
-        delay_seconds = max(0, ttl_seconds - settings.lead_seconds)
+        # Estimates start when the response returns, including time spent
+        # committing/delivering the turn. Never restart that clock here.
+        lifetime = float(remaining_ttl) if estimated and remaining_ttl is not None else ttl_seconds
+        delay_seconds = max(0, lifetime - settings.lead_seconds)
         self._generation += 1
         generation = self._generation
         self._scheduled_epoch = epoch
@@ -164,7 +167,7 @@ class CacheWarmDeadlineManager:
         self._scheduled_deadline_at = scheduled_at + timedelta(
             seconds=delay_seconds
         )
-        self._cache_expires_at = scheduled_at + timedelta(seconds=ttl_seconds)
+        self._cache_expires_at = scheduled_at + timedelta(seconds=lifetime)
         self._task = asyncio.create_task(
             self._wait_and_notify(
                 generation=generation,
@@ -176,6 +179,7 @@ class CacheWarmDeadlineManager:
                 prefix_tokens=prefix_tokens,
                 delay_seconds=delay_seconds,
                 expires_at=self._cache_expires_at,
+                estimated=estimated,
             ),
             name="pal.cache_warm_deadline",
         )
@@ -230,6 +234,10 @@ class CacheWarmDeadlineManager:
         self._ignored_epoch = normalized
         self.cancel()
         return True
+
+    def is_estimated_notice(self, epoch: str) -> bool:
+        notice = self._active_notice
+        return bool(notice and notice.epoch == epoch and notice.estimated)
 
     def claim_compaction(self, epoch: str) -> bool:
         """Atomically consume the currently visible compact reminder."""
@@ -326,8 +334,9 @@ class CacheWarmDeadlineManager:
         ttl_seconds: int,
         lead_seconds: int,
         prefix_tokens: int,
-        delay_seconds: int,
+        delay_seconds: float,
         expires_at: datetime,
+        estimated: bool = False,
     ) -> None:
         try:
             await self.sleep(delay_seconds)
@@ -367,6 +376,7 @@ class CacheWarmDeadlineManager:
                 lead_seconds=lead_seconds,
                 prefix_tokens=_context_tokens(snapshot),
                 expires_at=expires_at.isoformat(),
+                estimated=estimated,
             )
             if await self.deliver_notice(notice):
                 self._notified_epoch = epoch

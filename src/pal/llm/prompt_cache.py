@@ -25,6 +25,7 @@ from pal.llm.ir import (
     WireShape,
 )
 from pal.llm.cache_diagnostics import describe_request, compare_requests
+from pal.llm.cache_reminder import CacheReminderBasis, CacheReminderTracker, reminder_basis
 from pal.llm.shapes.base import EncodedMessageSpan, EncodedRequest, ShapeContext
 from pal.shared.json_values import thaw_json
 
@@ -90,6 +91,7 @@ class PromptCachePlan:
     tail_current: wire.Boundary | None = None
     admission: _CacheAdmission = field(default_factory=_CacheAdmission, repr=False, compare=False)
     mode: str = "implicit"
+    reminder: CacheReminderBasis | None = field(default=None, repr=False, compare=False)
     anchor: PromptCacheTrackPlan = field(
         default_factory=lambda: PromptCacheTrackPlan("anchor", "5m")
     )
@@ -255,6 +257,7 @@ class PromptCacheCoordinator:
         default_factory=dict, init=False, repr=False
     )
     _last_plan: PromptCachePlan | None = field(default=None, init=False, repr=False)
+    _reminders: CacheReminderTracker = field(default_factory=CacheReminderTracker, init=False, repr=False)
     _attempt_records: deque[dict[str, Any]] = field(
         default_factory=deque,
         init=False,
@@ -300,7 +303,7 @@ class PromptCacheCoordinator:
                 estimated_prefix_tokens=max((s.estimated_cache_prefix_tokens for s in encoded.message_spans if s.message_id in reusable), default=0),
                 decision="provider_automatic" if mode == "implicit" else "disabled",
                 **profile_fields)
-            self._remember(plan, request=request, context=context)
+            plan = self._remember(plan, request=request, context=context, encoded=encoded)
             return plan
 
         spans = {span.message_id: span for span in encoded.message_spans}
@@ -490,7 +493,7 @@ class PromptCacheCoordinator:
             **profile_fields,
             mode="explicit",
         )
-        self._remember(plan, request=request, context=context)
+        plan = self._remember(plan, request=request, context=context, encoded=encoded)
         return plan
 
     def _plan_tail(self, request, context, encoded, dialect, profile_fields, mode):
@@ -555,7 +558,7 @@ class PromptCacheCoordinator:
                 tail_generation=state.generation, tail_current=frontier,
                 **dict(profile_fields, strategy=POLICY if mode == "explicit" else "fixed_anchors"))
             self._prune_scopes_locked(now=now, keep=scope)
-            self._remember(plan, request=request, context=context)
+            plan = self._remember(plan, request=request, context=context, encoded=clean)
             return plan
 
     def end_turn(self, turn_id: str) -> None:
@@ -897,6 +900,7 @@ class PromptCacheCoordinator:
     ) -> None:
         applied_breakpoint_ids = frozenset(applied_cache_breakpoint_message_ids)
         with self._lock:
+            self._reminders.record_success(plan.reminder, usage, maximum=self.max_scope_count)
             stats = self._stats.setdefault(plan.scope_key, _ScopeStats())
             now = time.monotonic()
             stats.last_access_at = now
@@ -1071,6 +1075,10 @@ class PromptCacheCoordinator:
         return {"eligible": False, "reason": "boundary_evidence_unavailable",
                 "anchor_epoch": "", "anchor_ttl_seconds": 0, "prefix_tokens": 0}
 
+    def reminder_snapshot(self, *, logical_scope_id: str, binding: str) -> dict[str, Any]:
+        with self._lock:
+            return self._reminders.snapshot(logical_scope_id=logical_scope_id, binding=binding)
+
     def confirmed_anchor_request(self, *, logical_scope_id: str = "", endpoint_id: str = "") -> dict[str, Any]:
         """READ-evidence anchor confirmation (dffb210 boundary honored).
 
@@ -1150,11 +1158,18 @@ class PromptCacheCoordinator:
         *,
         request: LLMRequestIR,
         context: ShapeContext | None = None,
-    ) -> None:
+        encoded: EncodedRequest | None = None,
+    ) -> PromptCachePlan:
+        if context is not None and encoded is not None:
+            plan = replace(plan, reminder=reminder_basis(
+                request, context, encoded, mode=plan.mode,
+                requested_ttls=tuple(point.ttl for point in plan.breakpoints),
+            ))
         with self._lock:
             self._last_plan = plan
             self._retain_anchor_evidence_locked(
                 plan, request=request, context=context)
+        return plan
 
     def _retain_anchor_evidence_locked(
         self,

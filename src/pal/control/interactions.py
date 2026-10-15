@@ -415,12 +415,19 @@ def cache_warm_deadline_delivery(
     prefix_tokens: int,
     lead_seconds: int,
     expires_at: str,
+    estimated: bool = False,
 ) -> ControlDelivery:
     minutes = max(1, int((max(0, lead_seconds) + 59) // 60))
     text = (
         f"当前约 {max(0, prefix_tokens):,} tokens 的对话缓存将在约 "
         f"{minutes} 分钟后过期。现在 compact 可以利用热缓存，降低下次恢复成本。"
     )
+    if estimated:
+        text = (
+            f"当前约 {max(0, prefix_tokens):,} tokens 的对话已接近预计缓存期限，"
+            f"预计剩余约 {minutes} 分钟，可按需 compact。"
+            "此时间按响应返回时刻和缓存策略预估，不保证缓存仍可复用。"
+        )
     interaction = InteractionMessageSpec(
         interaction_id=cache_warm_deadline_interaction_id(epoch),
         interaction_kind="cache_warm_deadline",

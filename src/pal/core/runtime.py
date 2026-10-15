@@ -574,6 +574,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
 
     def _prompt_cache_warm_deadline_snapshot(self) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
+        reminder = getattr(llm_runtime, "prompt_cache_reminder_snapshot", None)
+        if callable(reminder):
+            return dict(reminder() or {})
         snapshot = getattr(
             llm_runtime,
             "prompt_cache_warm_deadline_snapshot",
@@ -591,6 +594,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             prefix_tokens=notice.prefix_tokens,
             lead_seconds=notice.lead_seconds,
             expires_at=notice.expires_at,
+            estimated=notice.estimated,
         )
         return await self._deliver_control_delivery_async(
             delivery,
@@ -1755,6 +1759,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         if action.route is None:
             return
         cache_epoch = str(action.args.get("cache_epoch") or "").strip()
+        hot_cache_epoch = ""
         gate = self._compaction_gate()
         busy_reply: str | None = None
         ticket = None
@@ -1763,6 +1768,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         # and the hot-cache epoch claim all precede the ticket claim. The
         # manual intent is never scheduled for later (A06/A08/A10).
         async with self.state.channel_turn_transition_lock:
+            estimated_notice = self.cache_warm_deadline.is_estimated_notice(cache_epoch)
             if self.turn_manager.latest_active_turn_id() is not None:
                 busy_reply = (
                     "Compaction is unavailable while a conversation turn is active. "
@@ -1784,16 +1790,17 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     "or dreaming."
                 )
             elif cache_epoch and not self.cache_warm_deadline.claim_compaction(cache_epoch):
-                busy_reply = "这条热缓存 compact 提醒已经处理或失效。"
+                busy_reply = "这条缓存 compact 提醒已经处理或失效。"
             else:
+                hot_cache_epoch = cache_epoch if not estimated_notice else ""
                 ticket = gate.claim(
                     RESIDENT_COMPACTION_SCOPE,
                     deadline_seconds=self.turn_executor.compaction_deadline_seconds(
-                        max_attempts=3 if cache_epoch else None,
+                        max_attempts=3 if hot_cache_epoch else None,
                     ),
                     trigger=(
                         CompactionTrigger.MANUAL_HOT
-                        if cache_epoch
+                        if hot_cache_epoch
                         else CompactionTrigger.MANUAL
                     ),
                 )
@@ -1810,7 +1817,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     await self._deliver_control_delivery_async(
                         control_interactions.terminal_delivery_for_action(
                             action,
-                            "正在利用热缓存 Compact…",
+                            "正在利用热缓存 Compact…" if hot_cache_epoch else "正在 Compact…",
                             delivery_kind="interactive_update",
                         )
                     )
@@ -1832,7 +1839,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 await self._complete_compact_reply_async(action, "Nothing to compact - memory is already minimal.")
                 return
             run_result = await self._run_control_compaction_async(
-                ticket, max_attempts=3 if cache_epoch else None, cache_epoch=cache_epoch,
+                ticket, max_attempts=3 if hot_cache_epoch else None, cache_epoch=hot_cache_epoch,
             )
         finally:
             # Identity-checked: this ticket can never release a successor's
@@ -1854,7 +1861,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     "itself. Reduce the base or switch to a larger endpoint; "
                     "history was left unchanged."
                 )
-            elif cache_epoch:
+            elif hot_cache_epoch:
                 message = (
                     "热缓存已失效或无法复用，已停止自动尝试。原上下文保留，请按需手动 compact。"
                     if run_result.status == "hot_cache_unavailable"

@@ -1455,6 +1455,35 @@ class LLMRuntime:
         if callable(close):
             close(str(turn_id))
 
+    def prompt_cache_reminder_snapshot(self) -> dict[str, Any]:
+        from pal.llm.cache_policy import resolve_mode
+        from pal.llm.cache_reminder import reminder_binding
+        from pal.llm.shapes.base import ShapeContext
+
+        endpoint = self.active_endpoint()
+        if endpoint is None:
+            return {"eligible": False, "estimated": True, "reason": "no_active_endpoint"}
+        selection = self.cache_policy_snapshot()[str(endpoint.endpoint_id)]
+        context = ShapeContext(
+            wire_shape=WireShape(endpoint.wire_shape), endpoint_id=endpoint.endpoint_id,
+            model_id=endpoint.model_id, provider_id=endpoint.provider, base_url=endpoint.base_url,
+            capabilities={"prompt_cache": selection["policy"]},
+        )
+        if resolve_mode(context) == "disabled":
+            return {"eligible": False, "estimated": True, "reason": "cache_disabled"}
+        cache = getattr(self.endpoint_invoker, "prompt_cache", None)
+        snapshot = getattr(cache, "reminder_snapshot", None)
+        if not callable(snapshot):
+            return {}
+        return dict(snapshot(
+            logical_scope_id="pal:resident",
+            binding=reminder_binding(
+                endpoint_id=context.endpoint_id, model_id=context.model_id,
+                provider_id=context.provider_id, wire_shape=context.wire_shape.value,
+                base_url=context.base_url,
+            ),
+        ) or {})
+
     def prompt_cache_warm_deadline_snapshot(self) -> dict[str, Any]:
         prompt_cache = getattr(self.endpoint_invoker, "prompt_cache", None)
         snapshot = getattr(prompt_cache, "warm_deadline_snapshot", None)

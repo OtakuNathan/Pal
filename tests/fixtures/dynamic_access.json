@@ -3739,6 +3739,10 @@
     "count": 1,
     "reason": "Passive SQLite provider health accepts a repository adapter without a read-only flag; it never starts embedding work."
   },
+  "src/pal/core/runtime.py:PalCore._prompt_cache_warm_deadline_snapshot:getattr(llm_runtime, 'prompt_cache_reminder_snapshot', None)": {
+    "count": 1,
+    "reason": "Optional LLM/coordinator cache reminder port; estimated timing stays separate from confirmed cache evidence."
+  },
   "src/pal/llm/http_transport.py:_close_client_or_raise:getattr(client, 'close', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
@@ -3778,6 +3782,14 @@
   "src/pal/llm/http_transport.py:_raw_http_response:getattr(response, attribute, None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/runtime.py:LLMRuntime.prompt_cache_reminder_snapshot:getattr(cache, 'reminder_snapshot', None)": {
+    "count": 1,
+    "reason": "Optional LLM/coordinator cache reminder port; estimated timing stays separate from confirmed cache evidence."
+  },
+  "src/pal/llm/runtime.py:LLMRuntime.prompt_cache_reminder_snapshot:getattr(self.endpoint_invoker, 'prompt_cache', None)": {
+    "count": 1,
+    "reason": "Optional LLM/coordinator cache reminder port; estimated timing stays separate from confirmed cache evidence."
   },
   "src/pal/llm/transport.py:DirectEndpointTransport.activate_endpoint:getattr(self.sdk_transport, 'activate_endpoint', None)": {
     "count": 1,

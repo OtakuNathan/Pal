@@ -847,6 +847,8 @@ Pal 可附加最多五条 `memory_candidates`，自动与手动 compact 的候�
 
 普通手动／自动 compact 优先复用合法的原请求前缀：保持工具定义、system/developer、冻结 L 的原生历史和已解析思考配置，在末尾追加 user 压缩要求。R 不进入源材料；不为了保留缓存重放过期指导。JSON 格式要求只写在末尾，不新增请求级输出 schema。OpenAI 两种 shape 保留工具定义并设置 tool_choice=none；所有 compact 返回的工具调用均不执行。普通 compact 无法复用时走冷路径；显式趁热入口仍受 epoch/期限保护，失效停止而不降级。
 
+[缓存期限提醒](pal_cache_reminder.md) 从成功响应返回时开始，按模型/provider 策略预估期限；未知 provider 默认 30 分钟，提前 5 分钟提示。该预估提醒按钮走普通手动 compact，不作为热缓存证据。
+
 前缀材料按逻辑会话隔离，Pal 与 Bunshin 使用同一读取路径；eager tail 策略从实际规划的闭合边界保存前缀，不依赖已废弃的经济学 anchor 字段或服务端 ACK。保留材料不保证服务端命中。
 
 Pal checklist 作为独立运行时模块随既有加密退出 checkpoint 保存，compact 不修改清单，reset 清空。旧 checkpoint 只允许“增加空 checklist 模块”这一受模块集合与旧 spec hash 校验的迁移；损坏的新清单或其他模块差异不能被忽略。Bunshin 继续使用已有持久化工作清单。
