@@ -5,6 +5,7 @@ import asyncio
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -240,10 +241,22 @@ def test_concurrent_calls_share_one_budget():
     result = {}
     gateway, events = gateway_fixture(response=result)
     calls = MAX_GIT_GATEWAY_DIAGNOSTICS + 20
+    received_calls = []
+    calls_lock = Lock()
+
+    def git_read(_authenticated, params):
+        # Mock.call_count uses a read/modify/write increment and can lose
+        # updates across threads. Record each operation with synchronization.
+        with calls_lock:
+            received_calls.append(params["call_index"])
+        return result
+
+    gateway._git_read = git_read
     with ThreadPoolExecutor(max_workers=8) as executor:
-        assert all(item is result for item in executor.map(lambda _: invoke(gateway), range(calls)))
+        results = executor.map(lambda index: invoke(gateway, call_index=index), range(calls))
+        assert all(item is result for item in results)
     assert len(events) == MAX_GIT_GATEWAY_DIAGNOSTICS
-    assert gateway._git_read.call_count == calls
+    assert sorted(received_calls) == list(range(calls))
     assert_content_free(events)
 
 
