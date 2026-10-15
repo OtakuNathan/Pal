@@ -418,6 +418,40 @@ class LLMIRShapeTests(unittest.TestCase):
                 self.assertEqual(response.finish_reason, "error")
                 self.assertEqual(response.tool_calls, ())
 
+    def test_completion_provider_tool_failures_preserve_reason_and_discard_calls(self) -> None:
+        reasons = (
+            "function_call_filter: MALFORMED_FUNCTION_CALL",
+            "MALFORMED_FUNCTION_CALL",
+            "MALFORMED_TOOL_CALL",
+            "UNEXPECTED_TOOL_CALL",
+            "TOO_MANY_TOOL_CALLS",
+        )
+        for streaming in (False, True):
+            for reason in reasons:
+                for with_call in (False, True):
+                    with self.subTest(streaming=streaming, reason=reason, with_call=with_call):
+                        message = {"role": "assistant"}
+                        if with_call:
+                            message["content"] = "Checking"
+                            message["tool_calls"] = [{
+                                "index": 0, "id": "call-1", "type": "function",
+                                "function": {"name": "write", "arguments": '{"invalid":'},
+                            }]
+                        payload = {"choices": [{
+                            "delta" if streaming else "message": message,
+                            "finish_reason": reason,
+                        }]}
+                        response, updates = decode_frames(
+                            codec_for_shape(WireShape.OPENAI_COMPLETION),
+                            [JSONFrame(0, payload)],
+                            _context(WireShape.OPENAI_COMPLETION),
+                        )
+                        self.assertEqual(response.finish_reason, LLMFinishReason.ERROR)
+                        self.assertEqual(response.tool_calls, ())
+                        self.assertFalse(any(update.tool_call for update in updates))
+                        self.assertEqual(response.message.metadata["provider_finish_reason"], reason)
+                        self.assertIn(reason, response.message.metadata["provider_error"])
+
     def test_legacy_conversion_reports_exact_invalid_argument_location(self) -> None:
         with self.assertRaisesRegex(
             LLMConversionError,

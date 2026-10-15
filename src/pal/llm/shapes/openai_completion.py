@@ -294,7 +294,7 @@ class OpenAICompletionDecoder:
         self._accumulate_tool_deltas(delta.get("tool_calls"))
         finish_reason = first.get("finish_reason")
         if finish_reason:
-            reason = canonical_finish_reason(finish_reason, has_tools=bool(self.tool_drafts))
+            reason = self._terminal_reason(finish_reason, has_tools=bool(self.tool_drafts))
             if reason in {
                 LLMFinishReason.LENGTH,
                 LLMFinishReason.ERROR,
@@ -318,10 +318,20 @@ class OpenAICompletionDecoder:
         self._refresh_replay()
         return self.builder.finish()
 
+    def _terminal_reason(self, value: Any, *, has_tools: bool) -> LLMFinishReason:
+        reason = canonical_finish_reason(value, has_tools=has_tools)
+        if reason == LLMFinishReason.ERROR and value:
+            provider_reason = str(value)
+            self.builder.metadata["provider_finish_reason"] = provider_reason
+            self.builder.metadata["provider_error"] = (
+                f"Provider ended generation with finish_reason={provider_reason}"
+            )
+        return reason
+
     def _feed_complete_message(self, message: dict[str, Any], finish_reason: Any) -> tuple[LLMResponseUpdate, ...]:
         self.native_message = thaw_json(message)
         updates: list[LLMResponseUpdate] = []
-        reason = canonical_finish_reason(finish_reason, has_tools=bool(message.get("tool_calls")))
+        reason = self._terminal_reason(finish_reason, has_tools=bool(message.get("tool_calls")))
         reasoning = message.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
             update = self.builder.append_reasoning(reasoning)

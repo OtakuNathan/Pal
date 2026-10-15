@@ -200,7 +200,10 @@ def canonical_finish_reason(value: LLMFinishReason | str, *, has_tools: bool = F
         return LLMFinishReason.LENGTH
     if raw in {"content_filter", "refusal", "safety"}:
         return LLMFinishReason.CONTENT_FILTER
-    if raw in {"error", "failed", "cancelled", "canceled"}:
+    if raw in {
+        "error", "failed", "cancelled", "canceled",
+        "malformed_function_call", "malformed_tool_call", "unexpected_tool_call", "too_many_tool_calls",
+    } or raw.startswith("function_call_filter:"):
         return LLMFinishReason.ERROR
     if has_tools or raw in {"tool_calls", "tool_use", "function_call"}:
         return LLMFinishReason.TOOL_CALLS

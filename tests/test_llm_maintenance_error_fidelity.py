@@ -239,6 +239,40 @@ def test_responses_decoder_delivers_provider_error_body(event):
     assert "hidden-secret" not in final.text
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_completion_tool_filter_is_reported_as_provider_failure(streaming):
+    from pal.llm.endpoint import ShapeEndpointInvoker
+    from pal.llm.shapes.base import _JSONFrame
+
+    reason = "function_call_filter: MALFORMED_FUNCTION_CALL"
+
+    class Transport:
+        calls = 0
+
+        def frames(self, endpoint, request):
+            self.calls += 1
+            yield _JSONFrame(0, {"id": "google-generation", "choices": [{
+                "delta" if request.stream else "message": {"role": "assistant"},
+                "finish_reason": reason,
+            }], "usage": {"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 23}})
+
+    transport = Transport()
+    runtime = runtime_for(ShapeEndpointInvoker(transport=transport))
+    runtime.endpoint_retry_attempts = 1
+    if streaming:
+        response = list(runtime._iter_stream_updates(_request()))[-1].response
+    else:
+        response = runtime.generate(_request()).response
+    assert transport.calls == 1
+    assert response.finish_reason == "error"
+    assert response.tool_calls == ()
+    assert response.message.metadata["failure_kind"] == "response_error"
+    assert response.message.metadata["error_type"] == "LLMEndpointResponseError"
+    signal = _capture_turn_failure_signal(response)
+    assert reason in signal.primary_blocker
+    assert "no assistant content" not in signal.primary_blocker
+
+
 def test_subscription_error_retains_redacted_provider_detail():
     from pal.llm.chatgpt import ChatGPTError, response_error
     error = response_error({"error": {"code": "request_failed", "message": "subscription provider diagnostic",
