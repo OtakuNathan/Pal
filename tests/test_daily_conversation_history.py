@@ -107,7 +107,7 @@ def test_corrupt_complete_line_is_preserved_and_not_silently_overwritten(tmp_pat
     assert writer.path.read_bytes() == before
 
 
-def test_compact_and_round_writer_can_share_daily_file_without_duplicate_records(tmp_path):
+def test_shared_archive_writer_serializes_duplicate_batches(tmp_path):
     writer = ConversationTextJournal(tmp_path)
     rows = [message("first", "2000-01-01T12:00:00+00:00")]
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -115,7 +115,7 @@ def test_compact_and_round_writer_can_share_daily_file_without_duplicate_records
     assert len(messages(writer.path)) == 1
 
 
-def test_old_current_and_compact_files_remain_searchable_and_untouched(tmp_path):
+def test_low_level_writer_leaves_legacy_files_for_boundary_migration(tmp_path):
     writer = ConversationTextJournal(tmp_path)
     writer.directory.mkdir(parents=True)
     old_current = writer.directory / "current_legacy.jsonl"

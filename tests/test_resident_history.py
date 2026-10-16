@@ -152,7 +152,9 @@ def test_multiday_clocks_survive_recovery_and_archive_but_never_enter_model_wire
         assert [record["timestamp"] for record in archive.records] == [NOW, later]
         assert archive.header["conversation_start"] == NOW
         assert archive.header["conversation_end"] == later
-        archive.publish()
+        archive.stage()
+        restored.compact_left(archive.header["compact_op_id"], archive.decorate(entry()))
+        assert await target.history.checkpoint_async("compact", rebase=True)
         records = read_messages(archive.paths)
         assert [path.name for path in archive.paths] == ["2000-01-01.jsonl", "2000-01-03.jsonl"]
         assert [record["timestamp"] for record in records] == [NOW, later]
@@ -160,7 +162,7 @@ def test_multiday_clocks_survive_recovery_and_archive_but_never_enter_model_wire
     asyncio.run(scenario())
 
 
-def test_failed_save_preserves_ram_and_last_point_then_retries(tmp_path):
+def test_failed_save_preserves_ram_and_last_point_then_retries(tmp_path, caplog):
     async def scenario():
         instance = app(tmp_path)
         memory = begin(instance)
@@ -172,6 +174,9 @@ def test_failed_save_preserves_ram_and_last_point_then_retries(tmp_path):
         assert instance.history.status == "degraded"
         assert instance.history.store.sequence == old_sequence
         assert "private body" not in instance.history.last_error
+        assert "private body" not in caplog.text
+        assert "owner.py" in caplog.text and "in _checkpoint" in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
         assert memory.history.turns[0].messages[-1].text == "new reply"
         saved = ResidentJournalStore(tmp_path).read()
         assert len(saved["modules"]["memory"]["payload"]["l1_turns"][0]["messages"]) == 1
@@ -304,8 +309,11 @@ def test_archive_is_jsonl_with_original_dialogue_and_first_preview_only(tmp_path
     memory.settle_l1_turn("t")
     source = frozen(memory)
     archive = instance.history.prepare_history_reference(source)
-    archive.publish()
-    archive.publish()
+    archive.stage()
+    archive.stage()
+    assert not archive.paths[0].exists()
+    memory.compact_left(source.run_id, archive.decorate(entry()))
+    assert asyncio.run(instance.history.checkpoint_async("compact", rebase=True))
     lines = archive.paths[0].read_text().splitlines()
     records = [json.loads(line) for line in lines]
     body = archive.paths[0].read_text()
@@ -332,13 +340,7 @@ def test_current_text_is_redacted_but_full_recovery_preserves_original(tmp_path)
         answer(memory)
         instance.history.record_reply("t", "已记录\npassword=reply-value")
         assert await instance.history.checkpoint_async("round")
-        path = instance.history.text_store.path
-        records = [json.loads(line) for line in path.read_text().splitlines()]
-        assert [record["role"] for record in records[1:]] == ["user", "assistant"]
-        assert records[1]["timestamp"] == NOW
-        assert records[1]["redacted"] and records[2]["redacted"]
-        for secret in ("private-value", "another-value", "reply-value", "PRIVATE REASONING", "signature"):
-            assert secret not in path.read_text()
+        assert not instance.history.text_store.directory.exists()
         saved = ResidentJournalStore(tmp_path).read()
         assert saved["modules"]["memory"]["payload"]["l1_turns"][0]["messages"][0]["parts"][0]["text"] == original
         restored = app(tmp_path)
@@ -349,27 +351,36 @@ def test_current_text_is_redacted_but_full_recovery_preserves_original(tmp_path)
         assert turn.messages[-1].reasoning_text == "PRIVATE REASONING"
         assert turn.messages[-1].replay.payload["message"]["signature"] == "opaque"
         archive = restored.history.prepare_history_reference(frozen(restored.handle.memory_service))
-        archive.publish()
-        assert archive.paths[0].parent == path.parent
+        archive.stage()
+        restored.handle.memory_service.compact_left(archive.header["compact_op_id"], archive.decorate(entry()))
+        assert await restored.history.checkpoint_async("compact", rebase=True)
+        path = archive.paths[0]
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [record["role"] for record in records[1:]] == ["user", "assistant"]
+        assert records[1]["timestamp"] == NOW
+        assert records[1]["redacted"] and records[2]["redacted"]
+        for secret in ("private-value", "another-value", "reply-value", "PRIVATE REASONING", "signature"):
+            assert secret not in path.read_text()
         assert all(secret not in archive.paths[0].read_text() for secret in ("private-value", "another-value", "reply-value"))
     asyncio.run(scenario())
 
 
-def test_current_text_appends_new_records_without_rewriting_old_rounds(tmp_path):
+def test_round_restore_and_exit_never_publish_current_dialogue(tmp_path):
     async def scenario():
         instance = app(tmp_path)
         memory = begin(instance)
-        await instance.history.checkpoint_async("round")
-        path = instance.history.text_store.path
-        previous = path.read_bytes()
         answer(memory)
         instance.history.record_reply("t", "新回复")
-        await instance.history.checkpoint_async("round")
-        assert path.read_bytes().startswith(previous)
-        assert len(path.read_text().splitlines()) == 3
-        await instance.history.checkpoint_async("round")
-        assert instance.history.text_store.last_bytes == 0
-        assert len(path.read_text().splitlines()) == 3
+        with patch.object(instance.history.archives, "reconcile", side_effect=AssertionError("unexpected archive")):
+            for reason in ("submission", "round", "settlement", "interruption", "exit"):
+                assert await instance.history.checkpoint_async(reason)
+        assert not instance.history.text_store.directory.exists()
+        restored = app(tmp_path)
+        with patch.object(restored.history.archives, "reconcile", side_effect=AssertionError("unexpected startup archive")):
+            await restored._restore_checkpoint_async()
+        assert restored.last_checkpoint_status == "restored", restored.last_checkpoint_error
+        assert restored.handle.memory_service.history.turns[0].messages[-1].text == "回复"
+        assert not restored.history.text_store.directory.exists()
     asyncio.run(scenario())
 
 
@@ -381,44 +392,60 @@ def test_compact_and_reset_keep_daily_history_without_rewriting_it(tmp_path):
         instance.history.record_reply("t", "旧回复")
         memory.settle_l1_turn("t")
         await instance.history.checkpoint_async("round")
-        current = instance.history.text_store.path
+        current = instance.history.text_store.directory / "2000-01-01.jsonl"
         source = frozen(memory)
         memory.begin_l1_turn("right", user_message=LLMMessageIR(
             MessageRole.USER, (TextPartIR("正在进行"),), message_id="r", semantic_kind="user_request",
             metadata={"conversation_origin": "user", "conversation_timestamp": NOW}),
             metadata={"conversation_tracking": True})
         await instance.history.checkpoint_async("round")
-        before_compact = current.read_bytes()
+        assert not current.exists()
         archive = instance.history.prepare_history_reference(source)
-        archive.publish()
+        archive.stage()
         memory.compact_left(source.run_id, archive.decorate(entry()))
         await instance.history.checkpoint_async("compact", rebase=True)
-        assert current.read_bytes() == before_compact
+        before_reset = current.read_bytes()
         assert sorted(path.name for path in current.parent.glob("*.jsonl")) == ["2000-01-01.jsonl"]
         assert archive.paths[0].parent == current.parent
         assert "旧话" in archive.paths[0].read_text() and "旧回复" in archive.paths[0].read_text()
         assert "旧话" in current.read_text() and "旧回复" in current.read_text()
-        assert "正在进行" in current.read_text()
+        assert "正在进行" not in current.read_text()
         await instance.history.reset_async()
+        assert current.read_bytes().startswith(before_reset)
         assert "正在进行" in current.read_text()
         assert archive.paths[0].exists()
     asyncio.run(scenario())
 
 
-def test_searchable_write_failure_does_not_break_full_recovery_and_retries(tmp_path):
+def test_archive_write_failure_waits_for_next_archive_boundary_after_restart(tmp_path):
     async def scenario():
         instance = app(tmp_path)
-        begin(instance, "survives searchable write failure")
-        with patch.object(instance.history.text_store, "sync_memory", side_effect=OSError("private error")):
-            assert await instance.history.checkpoint_async("round")
+        memory = begin(instance, "survives searchable write failure")
+        memory.settle_l1_turn("t")
+        source = frozen(memory)
+        archive = instance.history.prepare_history_reference(source)
+        archive.stage()
+        memory.compact_left(source.run_id, archive.decorate(entry()))
+        with patch("pal.memory.persistence.archive.migrate_history", side_effect=OSError("private error")):
+            assert await instance.history.checkpoint_async("compact", rebase=True)
         assert instance.history.status == "degraded"
         assert instance.history.take_degraded_notice()
         assert not instance.history.restore_failed
         assert "private error" not in instance.history.last_error
+        assert not instance.history.text_store.directory.exists()
+        pending = next(instance.history.archives.directory.glob("*.json"))
+        before = pending.read_bytes()
+        assert b"survives searchable write failure" not in before
         restored = app(tmp_path)
         await restored._restore_checkpoint_async()
         assert restored.last_checkpoint_status == "restored", restored.last_checkpoint_error
+        assert await restored.history.checkpoint_async("round")
+        assert await restored.history.checkpoint_async("exit", rebase=True)
+        assert pending.read_bytes() == before
+        assert not restored.history.text_store.directory.exists()
+        assert await restored.history.reconcile_async()
         assert "survives searchable write failure" in restored.history.text_store.path.read_text()
+        assert restored.history.archives.pending_count() == 0
     asyncio.run(scenario())
 
 
@@ -428,7 +455,10 @@ def test_current_text_repairs_incomplete_tail_without_repeating_old_messages(tmp
         instance = app(tmp_path)
         memory = begin(instance)
         await instance.history.checkpoint_async("round")
-        current = instance.history.text_store.path
+        snapshot = await instance.history._capture("round")
+        writer = ConversationTextJournal(tmp_path)
+        writer.sync_memory(snapshot["modules"]["memory"]["payload"])
+        current = writer.path
         with current.open("ab") as stream:
             stream.write(b'{"text":"partial')
         answer(memory)
@@ -448,6 +478,8 @@ def test_failed_first_text_append_retries_with_a_valid_header(tmp_path):
     async def scenario():
         instance = app(tmp_path)
         begin(instance)
+        snapshot = await instance.history._capture("round")
+        payload = snapshot["modules"]["memory"]["payload"]
         write = os.write
         calls = 0
         def broken(descriptor, data):
@@ -457,9 +489,9 @@ def test_failed_first_text_append_retries_with_a_valid_header(tmp_path):
                 return write(descriptor, data[:8])
             raise OSError("text write unavailable")
         with patch("pal.memory.persistence.conversation.os.write", side_effect=broken):
-            assert await instance.history.checkpoint_async("round")
-        assert instance.history.status == "degraded"
-        assert await instance.history.checkpoint_async("round")
+            with pytest.raises(OSError):
+                instance.history.text_store.sync_memory(payload)
+        instance.history.text_store.sync_memory(payload)
         records = [json.loads(line) for line in instance.history.text_store.path.read_text().splitlines()]
         assert len(records) == 2
         assert records[0]["type"] == "header" and records[1]["role"] == "user"
@@ -479,7 +511,7 @@ def test_durable_recovery_holds_output_until_new_compact_base_is_saved(tmp_path)
         await instance.history.checkpoint_async("round")
         source = frozen(memory)
         archive = instance.history.prepare_history_reference(source)
-        archive.publish()
+        archive.stage()
         memory.compact_left(source.run_id, archive.decorate(entry()))
         assert Path(ref.path).exists()
         with patch.object(instance.history.store, "save", side_effect=OSError("disk unavailable")):
@@ -507,7 +539,7 @@ def test_reset_keeps_archive_and_cannot_resurrect_old_context(tmp_path):
         old_incarnation = memory.history_root.owner_state()["incarnation"]
         source = frozen(memory)
         archive = instance.history.prepare_history_reference(source)
-        archive.publish()
+        archive.stage()
         memory.compact_left(source.run_id, archive.decorate(entry()))
         await instance.history.checkpoint_async("compact", rebase=True)
         await instance.history.reset_async()
@@ -540,11 +572,13 @@ def test_reset_reuses_daily_file_and_distinguishes_same_message_ids(tmp_path):
         instance = app(tmp_path)
         begin(instance, "first incarnation")
         assert await instance.history.checkpoint_async("round")
-        path = instance.history.text_store.path
         first_id = instance.handle.memory_service.history_root.incarnation
         await instance.history.reset_async()
+        path = instance.history.text_store.path
         begin(instance, "second incarnation")
         assert await instance.history.checkpoint_async("round")
+        assert len(read_messages((path,))) == 1
+        await instance.history.reset_async()
         assert instance.history.text_store.path == path
         rows = read_messages((path,))
         assert [row["text"] for row in rows] == ["first incarnation", "second incarnation"]
@@ -565,7 +599,7 @@ def test_reset_does_not_clear_dialogue_if_searchable_preservation_fails(tmp_path
         await instance.history.checkpoint_async("round")
         incarnation = memory.history_root.incarnation
         answer(memory, "keep unsaved progress")
-        with patch.object(instance.history.text_store, "sync_memory", side_effect=OSError("disk unavailable")):
+        with patch.object(instance.history.archives, "stage", side_effect=OSError("disk unavailable")):
             with pytest.raises(OSError):
                 await instance.history.reset_async()
         assert memory.history_root.incarnation == incarnation
@@ -613,10 +647,54 @@ def test_archive_failure_prevents_compact_install_and_right_is_preserved(tmp_pat
         archive = instance.history.prepare_history_reference(source)
         snapshot = CompactionSnapshot.capture_left(memory, source, target_input_budget=100000,
             reserved_output_tokens=1024, clock_kind=CompactionClockKind.USER_TURN, clock_value=1)
-        with patch.object(ConversationHistoryReference, "publish", side_effect=OSError("disk unavailable")):
+        with patch.object(ConversationHistoryReference, "stage", side_effect=OSError("disk unavailable")):
             result = await CompactionEngine(PalCompactionPolicy(), max_attempts=1).run(snapshot,
                 memory_service=memory, llm_runtime=_Transport(_ScriptedLLM(_valid_pal_payload("summary"))), commit_hooks=archive)
         assert result.status == "commit_failed"
         assert memory.history.turns == before
         assert memory.history_root.right_turns()[-1].messages[0].text == "UNSENT RIGHT"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fault", ["none", "packaging", "cancel_after_install"])
+def test_executor_commits_archive_after_durable_install_even_on_post_commit_fault(tmp_path, fault):
+    from tests.test_runtime_compaction import _valid_pal_payload
+    from tests.test_two_segment_executor_flow import _Transport, _ScriptedLLM
+
+    class FaultyEngine(CompactionEngine):
+        async def _commit(self, *args, **kwargs):
+            result = await super()._commit(*args, **kwargs)
+            if fault == "cancel_after_install":
+                raise asyncio.CancelledError
+            return result
+
+        @staticmethod
+        def _result(snapshot, **kwargs):
+            if fault == "packaging" and kwargs.get("status") == "compacted":
+                raise RuntimeError("packaging failed after RAM install")
+            return CompactionEngine._result(snapshot, **kwargs)
+
+    async def scenario():
+        instance = app(tmp_path)
+        memory = begin(instance)
+        answer(memory)
+        instance.history.record_reply("t", "visible reply")
+        memory.settle_l1_turn("t")
+        executor = instance.handle.core.turn_executor
+        executor._compaction_engine = FaultyEngine(PalCompactionPolicy(), max_attempts=1)
+        transport = _Transport(_ScriptedLLM(_valid_pal_payload("summary")))
+        transport.projection_port = None
+        executor.context.port_registry["llm:llm"] = transport
+        if fault == "cancel_after_install":
+            with pytest.raises(asyncio.CancelledError):
+                await executor.compact_memory_async(memory, target_input_budget=100000, reserved_output_tokens=4096)
+        else:
+            result = await executor.compact_memory_async(memory, target_input_budget=100000, reserved_output_tokens=4096)
+            assert result.success, result.failures
+        saved = ResidentJournalStore(tmp_path).read()
+        assert saved["modules"]["memory"]["payload"]["l1_turns"][0]["messages"][0]["semantic_kind"] == "runtime_context_summary"
+        assert instance.history.archives.pending_count() == 0
+        rows = read_messages(sorted(instance.history.text_store.directory.glob("*.jsonl")))
+        assert [row["text"] for row in rows] == ["原话\n第二行", "visible reply"]
+        assert all(row["archive_op_id"] for row in rows)
     asyncio.run(scenario())

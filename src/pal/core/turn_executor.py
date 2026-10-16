@@ -2264,6 +2264,12 @@ class TurnExecutor:
                 failures=("memory service has no history_root",),
                 clock_kind=engine.policy.clock_kind,
             )
+        history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+        if history is not None and not await history.reconcile_async():
+            return CompactionRunResult(
+                status="commit_failed", failures=("pending dialogue archive could not be reconciled",),
+                clock_kind=engine.policy.clock_kind,
+            )
         try:
             if continuation is None:
                 root.promote()
@@ -2527,6 +2533,11 @@ class TurnExecutor:
                 clock_kind=engine.policy.clock_kind,
                 clock_value=clock_value,
             )
+        finally:
+            # A packaging fault or cancellation after install still requires
+            # saving the new work state before publishing its archive.
+            if history is not None and committed_run_record() is not None:
+                await history.checkpoint_async("compact", rebase=True)
         if not run_result.success:
             # The engine returns instead of raising on generation
             # failure; close our run idempotently (reset may already
@@ -2534,8 +2545,6 @@ class TurnExecutor:
             close_run_terminal(cancel=False,
                                reason=f"engine:{run_result.status}")
         else:
-            if history is not None:
-                await history.checkpoint_async("compact", rebase=True)
             # The install already won: rebasing the hosted projection
             # session is post-commit work (F13) — a failure here is
             # recorded, never a rollback of the new left.

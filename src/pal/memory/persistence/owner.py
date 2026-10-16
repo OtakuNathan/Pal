@@ -6,9 +6,12 @@ from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import time
+import traceback
 from typing import Any, Callable
+from uuid import uuid4
 
-from pal.memory.persistence.conversation import ConversationHistoryReference, ConversationTextJournal
+from pal.memory.persistence.conversation import ConversationHistoryReference, ConversationTextJournal, records_from_memory_payload
+from pal.memory.persistence.archive import HistoryArchiveStore
 from pal.memory.persistence.checkpoint import RESIDENT_LOGICAL_COROUTINE_ID
 from pal.memory.persistence.journal import ResidentJournalStore
 from pal.memory.persistence.contracts import RuntimeSnapshotCoordinatorPort, RuntimeSnapshotIdentity
@@ -43,6 +46,8 @@ class ResidentHistory:
         self.spec_hash = spec_hash
         self.store = ResidentJournalStore(root)
         self.text_store = ConversationTextJournal(root, timezone_name)
+        self.archives = HistoryArchiveStore(root, self.text_store)
+        self.archive_error = ""
         self.lock = asyncio.Lock()
         self._writer_loop: asyncio.AbstractEventLoop | None = None
         self.tasks: set[asyncio.Task] = set()
@@ -139,57 +144,80 @@ class ResidentHistory:
 
     async def _checkpoint(self, reason: str, *, rebase: bool) -> bool:
         async with self.lock:
-            if self.restore_failed:
-                self._failed("save", ValueError("recovery requires operator attention"))
-                return False
-            started = time.monotonic()
-            snapshots = self.context.execution_runtime.result_snapshots
-            prepared_owner = object()
-            snapshot = None
-            references = None
-            try:
-                snapshot = await self._capture(reason)
-                references = snapshot_references(snapshot)
-                snapshots.own(prepared_owner, references)
-                # Only L1 references belong to a persisted recovery point.
-                # Transient inventory may also contain the previous point's
-                # leases or a not-yet-delivered output; it is not durable L1.
-                execution = snapshot["modules"].get("execution")
-                if execution is not None:
-                    execution["payload"]["result_snapshots"] = {"refs": [ref.to_dict() for ref in references]}
-                changed_spec = self.store.state is not None and self.store.state["runtime_spec_hash"] != snapshot["runtime_spec_hash"]
-                await asyncio.to_thread(self.store.save, snapshot, rebase=rebase or changed_spec)
-                self.protect(snapshot)
-                self.status, self.last_error = "saved", ""
-                self.saved_at = datetime.now(timezone.utc).isoformat()
-                self.total_write_bytes += self.store.last_bytes
-                # Recovery commits first. A failed derived text write cannot
-                # invalidate a successful restore or discard replay state.
-                if await self._sync_searchable(snapshot):
-                    self._notice_sent = False
-                return True
-            except Exception as exc:
-                if snapshot is not None and references is not None:
-                    # A failed fsync may follow a successful replace. Keep
-                    # files for both possible disk states until a new point
-                    # is unambiguously committed.
-                    self.protect(snapshot, conservative=True)
-                self._failed("save", exc)
-                return False
-            finally:
-                self.last_save_ms = (time.monotonic() - started) * 1000
-                snapshots.release(prepared_owner)
+            return await self._checkpoint_locked(reason, rebase=rebase)
 
-    async def _sync_searchable(self, snapshot: dict) -> bool:
-        memory = snapshot["modules"].get("memory")
-        if memory is None:
-            return True
+    async def _checkpoint_locked(self, reason: str, *, rebase: bool) -> bool:
+        if self.restore_failed:
+            self._failed("save", ValueError("recovery requires operator attention"))
+            return False
+        started = time.monotonic()
+        snapshots = self.context.execution_runtime.result_snapshots
+        prepared_owner = object()
+        snapshot = None
+        references = None
         try:
-            await asyncio.to_thread(self.text_store.sync_memory, memory["payload"])
+            snapshot = await self._capture(reason)
+            references = snapshot_references(snapshot)
+            snapshots.own(prepared_owner, references)
+            # Only L1 references belong to a persisted recovery point.
+            # Transient inventory may also contain the previous point's
+            # leases or a not-yet-delivered output; it is not durable L1.
+            execution = snapshot["modules"].get("execution")
+            if execution is not None:
+                execution["payload"]["result_snapshots"] = {"refs": [ref.to_dict() for ref in references]}
+            changed_spec = self.store.state is not None and self.store.state["runtime_spec_hash"] != snapshot["runtime_spec_hash"]
+            await asyncio.to_thread(self.store.save, snapshot, rebase=rebase or changed_spec)
+            self.protect(snapshot)
+            self.status = "degraded" if self.archive_error else "saved"
+            self.last_error = self.archive_error
+            self.saved_at = datetime.now(timezone.utc).isoformat()
+            self.total_write_bytes += self.store.last_bytes
+            # Only archive boundaries inspect or publish the outbox.
+            # Ordinary rounds, restore and shutdown save work only.
+            if reason in {"compact", "archive_reconcile"}:
+                await self._publish_pending(snapshot)
+            if self.status == "saved":
+                self._notice_sent = False
             return True
         except Exception as exc:
-            self._failed("search", exc)
+            if snapshot is not None and references is not None:
+                # A failed fsync may follow a successful replace. Keep
+                # files for both possible disk states until a new point
+                # is unambiguously committed.
+                self.protect(snapshot, conservative=True)
+            self._failed("save", exc)
             return False
+        finally:
+            self.last_save_ms = (time.monotonic() - started) * 1000
+            snapshots.release(prepared_owner)
+
+    async def _publish_pending(self, snapshot: dict) -> bool:
+        try:
+            await asyncio.to_thread(self.archives.reconcile, snapshot)
+            self.archive_error = ""
+            self.status, self.last_error = "saved", ""
+            return True
+        except Exception as exc:
+            self._failed("archive", exc)
+            return False
+
+    async def reconcile_async(self) -> bool:
+        self._bind_writer_loop()
+        task = asyncio.create_task(self._reconcile())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def _reconcile(self) -> bool:
+        async with self.lock:
+            if self.context.require_port(MEMORY).history_root.active_run is not None:
+                return False  # A live producer still owns its prepared batch.
+            if not self.archives.pending_count():
+                return not self.restore_failed
+            saved = await self._checkpoint_locked("archive_reconcile", rebase=False)
+            return saved and not self.archive_error
 
     async def reset_async(self) -> None:
         self._bind_writer_loop()
@@ -202,19 +230,34 @@ class ResidentHistory:
 
     async def _reset(self) -> None:
         async with self.lock:
+            if self.archives.pending_count():
+                saved = await self._checkpoint_locked("archive_reconcile", rebase=False)
+                if not saved or self.archive_error:
+                    raise OSError("pending dialogue archive could not be reconciled before reset")
+            for turn_id in tuple(self._streams):
+                self.finish_partial_stream(turn_id)
             coordinator = self.coordinator
             before = await self._capture("before_reset")
             owner = object()
             snapshots = self.context.execution_runtime.result_snapshots
             snapshots.own(owner, snapshot_references(before))
             previous_sequence = self.store.sequence
+            operation_id = "reset-" + uuid4().hex
+            reset_started = False
             try:
-                # Preserve the old incarnation's searchable dialogue even
-                # though reset clears it from the recovery generation.
-                if not await self._sync_searchable(before):
-                    raise OSError("searchable dialogue could not be preserved before reset")
+                payload = before["modules"]["memory"]["payload"]
+                incarnation = payload["history_root"]["incarnation"]
+                await asyncio.to_thread(self.archives.stage, {
+                    "operation_id": operation_id, "kind": "reset", "source_incarnation": incarnation,
+                    "timezone": str(self.text_store.timezone),
+                    "records": [{**row, "conversation_id": incarnation, "archive_op_id": operation_id}
+                                for row in records_from_memory_payload(payload)],
+                })
+                reset_started = True
                 await coordinator.reset("soft_reset")
                 empty = await self._capture("reset")
+                await asyncio.to_thread(self.archives.set_reset_target, operation_id,
+                                       empty["modules"]["memory"]["payload"]["history_root"]["incarnation"])
                 # Reset is an explicit new recovery generation and may retire
                 # a corrupt old journal. Ordinary saves never overwrite it.
                 if not self.restore_failed:
@@ -224,14 +267,15 @@ class ResidentHistory:
                 self.restore_failed = False
                 self.status, self.last_error = "saved", ""
                 self.saved_at = datetime.now(timezone.utc).isoformat()
-                await self._sync_searchable(empty)
+                await self._publish_pending(empty)
             except Exception as exc:
                 if self.store.sequence > previous_sequence:
                     self.protect(empty)
                     self.restore_failed = False
                     self._failed("reset_cleanup", exc)
                 else:
-                    await coordinator.restore(before)
+                    if reset_started:
+                        await coordinator.restore(before)
                     self._failed("reset", exc)
                     raise
             finally:
@@ -240,15 +284,26 @@ class ResidentHistory:
 
     def prepare_history_reference(self, snapshot: LeftSnapshot) -> ConversationHistoryReference:
         memory = self.context.require_port(MEMORY)
-        return ConversationHistoryReference.prepare(self.text_store, snapshot, memory.history_root.owner_state()["incarnation"])
+        return ConversationHistoryReference.prepare(self.text_store, snapshot,
+            memory.history_root.owner_state()["incarnation"], self.archives.stage)
 
     def _failed(self, operation: str, error: Exception) -> None:
         self.status = "degraded"
         self.last_error = f"{type(error).__name__}: resident history {operation} failed"
-        LOG.error("Resident history %s failed (%s); preserving the last recovery point", operation, type(error).__name__)
+        if operation == "archive":
+            self.archive_error = self.last_error
+        # Exception messages and locals may contain private conversation or
+        # provider data. Keep the failure location without logging that body.
+        frames = "\n".join(
+            f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
+            for frame in traceback.extract_tb(error.__traceback__)
+        )
+        LOG.error("Resident history %s failed (%s); preserving the last recovery point%s",
+                  operation, type(error).__name__, f"\n{frames}" if frames else "")
         self.diagnostics.append({"kind": f"resident.history.{operation}_failed", "error": self.last_error})
 
     def inspect(self) -> dict:
+        pending = self.archives.pending_count()
         return {"status": self.status, "saved_sequence": self.store.sequence,
                 "saved_at": self.saved_at, "last_error": self.last_error,
                 "last_save_ms": self.last_save_ms, "last_write_bytes": self.store.last_bytes,
@@ -257,6 +312,8 @@ class ResidentHistory:
                 "history_partition": "message_date",
                 "history_timezone": str(self.text_store.timezone),
                 "last_text_write_bytes": self.text_store.last_bytes,
+                "archive_status": "degraded" if self.archive_error else "pending" if pending else "ready",
+                "pending_archive_batches": pending,
                 "archive_directory": str(self.root / "data" / "conversation-history")}
 
 
@@ -281,24 +338,26 @@ class ResidentHistoryPromptProvider:
             )), PromptFragment(
                 section="memory_guide", title="Historical dialogue lookup", priority=75,
                 metadata={"prompt_target": "developer"}, content=(
-                    f"When prior wording or recorded actions are uncertain, look in {self.directory}. "
-                    "Current and previously compacted dialogue share daily YYYY-MM-DD.jsonl files; "
+                    f"For original dialogue removed by compact or reset, look in {self.directory}. "
+                    "Current working dialogue remains in L1, not in these files. "
+                    "Archived dialogue uses daily YYYY-MM-DD.jsonl files; "
                     "rg -n PATTERN DIRECTORY searches all history in one pass. Files are partitioned by "
                     "message occurrence time in Pal's configured timezone, not compact or write time. "
                     "undated.jsonl holds legacy messages without an unambiguous timestamp. "
-                    "Compact and reset retain existing daily records. Earlier current_*.jsonl files and "
-                    "timestamped compact archives from older versions remain searchable alongside them. "
-                    "Use the daily file paths, conversation ID and time range attached to compact continuity first. "
+                    "Only compact/reset archive dialogue; crossing midnight and restarting do not. "
+                    "History can be incomplete until the next archive boundary. "
+                    "Use the daily file paths, archive operation, conversation ID and message/time ranges "
+                    "attached to compact continuity first. Those ranges cover that compact's newly removed originals; "
+                    "earlier records remain searchable in the full history directory. "
                     "Each UTF-8 JSONL physical line is one JSON object: the first has type=header and later "
                     "records have type=message. Each daily message includes conversation_id, message_id "
                     "and a timestamp; daily files may contain multiple conversations. "
                     "Search with rg -n and inspect neighbors, or use jq to filter and decode records, for example "
                     "jq -r 'select(.type == \"message\" and .role == \"user\") | .text' FILE.jsonl. "
                     "jq -r or Python decoding restores escaped newlines. Filter message timestamps for "
-                    "precise time ranges. Redaction can alter exact wording. Appended corrections and crash "
-                    "recovery can overlap records: identify them by conversation_id plus message_id and "
-                    "keep the last version of each pair within a daily file. Legacy files may put the "
-                    "conversation ID only in the header. "
+                    "precise time ranges; archive_op_id selects an exact archive batch. "
+                    "Redaction can alter exact wording. Identify records by conversation_id plus message_id "
+                    "and keep the last version of each pair when reading older records. "
                     "A search miss does not prove that "
                     "something was never said. Tool entries retain only original text previews; external output "
                     "snapshots and replay handlers are not retained by these archives."

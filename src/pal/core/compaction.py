@@ -180,7 +180,7 @@ class CompactionCommitHooks(Protocol):
     def decorate(self, entry: L2Entry) -> L2Entry:
         ...
 
-    def publish(self) -> None:
+    def stage(self) -> None:
         ...
 
 @dataclass(frozen=True)
@@ -586,11 +586,11 @@ class CompactionEngine:
                 )
             if commit_hooks is not None:
                 try:
-                    publish = asyncio.create_task(asyncio.to_thread(commit_hooks.publish))
+                    staged = asyncio.create_task(asyncio.to_thread(commit_hooks.stage))
                     try:
-                        await asyncio.shield(publish)
+                        await asyncio.shield(staged)
                     except asyncio.CancelledError:
-                        await publish
+                        await staged
                         raise
                 except Exception as exc:
                     failure_details.append(exception_report(exc))

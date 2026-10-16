@@ -752,14 +752,15 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 - 从该 L1 生成结构化 continuity
 - 原子替换 L1，并清理依赖该旧 prompt generation 的投影
 
-Memory 的 compact 提交是 RAM 内 L1 替换。本体在提交前确保旧 L 已进入每日历史文件，提交后更新恢复基线；Bunshin 保留现有 checkpoint 合约。
+Memory 的 compact 提交是 RAM 内 L1 替换。本体在提交前加密暂存旧 L 的归档内容，提交后更新恢复基线，再发布每日历史文件；Bunshin 保留现有 checkpoint 合约。
 
 ### Resident history and recovery
 
 `pal.memory.persistence` owns resident recovery and searchable conversation storage:
 `checkpoint.py` stores the encrypted baseline, `journal.py` stores incremental
 recovery records, `conversation.py` owns daily JSONL and compact lookup references,
-and `owner.py` coordinates writes and snapshot leases through explicit contracts.
+`archive.py` owns encrypted archive handoffs, and `owner.py` coordinates writes and
+snapshot leases through explicit contracts.
 The runtime mounts `memory:persistence` and supplies the cross-module snapshot
 coordinator. Storage does not import Core. Bunshin retains its existing recovery
 policy. Submission, round, settlement, interruption, restore and shutdown boundaries
@@ -774,8 +775,10 @@ output files until a successor is durably published. An incomplete journal tail 
 be ignored; an invalid complete record or sequence gap reports a restore failure
 and ordinary saves do not overwrite it.
 
-At the same round/L-admission boundaries, append the separate searchable projection
-to `data/conversation-history/YYYY-MM-DD.jsonl`. Partition by each message's occurrence
+Only compact and reset reconcile and publish the separate searchable projection
+to `data/conversation-history/YYYY-MM-DD.jsonl`. Ordinary rounds, startup recovery,
+shutdown and crossing midnight save working state without publishing or reconciling
+history. Current L1 originals are not copied into searchable history. Partition by each message's occurrence
 date in Pal's configured identity timezone (UTC when unset or unavailable), not the
 write or compact date. A delayed batch can append to several dates. Messages without
 an unambiguous timestamp go to `undated.jsonl`; their time is not invented. Timestamp
@@ -788,21 +791,40 @@ original timestamp, because a day can include several conversations or reset
 incarnations. Text keeps Chinese literal and encodes line breaks as `\n`; `jq -r`
 or Python decoding restores them. Daily headers are not end-time indexes.
 
-Compact ensures its frozen L is durably present in the daily files before installing
-the replacement, and attaches those paths, conversation ID and time coverage to the
-continuity seed. It creates no separate compact archive and never trims or rewrites
-history text. Recovery is saved afterward, before retiring obsolete snapshot leases.
-Reset preserves daily history and durably clears active recovery state; if the old
-dialogue cannot be preserved, reset fails before clearing it. Earlier `current_*.jsonl`
-and timestamped compact archives remain untouched and searchable in the same directory.
-They are not automatically migrated or deleted; some legacy files identify the
-conversation only in the header.
+Before replacing frozen L or resetting L1, durably stage a purpose-separated encrypted
+batch in `data/core/history-outbox/`, outside the searchable directory. Failed staging
+prevents the destructive operation. After install, save the successor recovery point
+before publishing plaintext. Compact attaches daily paths, operation ID, conversation
+ID, per-file first/last message IDs and time ranges to its continuity seed. These
+ranges identify only that compact's newly removed originals; older records remain
+available through the full history directory. Rows include `archive_op_id` for exact
+batch filtering. Reset follows the same handoff without adding a compact seed.
 
-Repeated saves and restart retries deduplicate identical records. A changed message
+Prepared batches are committed only when a saved compact seed names their operation,
+or a saved reset generation matches their target incarnation. Persist the committed
+marker before publishing any plaintext. A publication failure never rolls back an
+installed compact/reset: the encrypted batch remains and reports degradation. The
+next compact/reset reconciles it before admitting another destructive change; startup
+and ordinary rounds deliberately do not retry. Abandoned batches can be retired only
+when originals remain in working state or another committed/published archive covers
+their identities. Unknown ownership fails closed. Snapshot leases still follow the
+durable working state, independently of the redacted archive.
+
+The first committed archive boundary also migrates earlier daily, `current_*.jsonl`
+and compact-archive files once. Deduplicate `(conversation_id, message_id)`, prefer
+the last daily version over legacy versions, preserve tool previews, and exclude
+current working originals. Normalize dates using Pal's timezone; missing clocks stay
+undated. Back up original files outside the search directory under
+`data/history-backups/`. A staged directory and `data/core/history-layout.json` marker
+make directory replacement resumable at the next archive boundary. Startup does not
+migrate. Invalid complete records are preserved and block migration; uncertain final
+tails remain in the untouched backup.
+
+Repeated archive attempts deduplicate identical records. A changed message
 is an appended version: identify records by `(conversation_id, message_id)` and keep
 the last version within each daily file. A partially written final line is repaired
 before append; a corrupt complete line is preserved and reports degradation. Writes
-from the round owner and compact hook share one serialized writer. Cache entries
+from compact/reset share one serialized writer. Cache entries
 store fingerprints, not full dialogue bodies, and only the dates in the latest
 submission remain cached.
 
@@ -816,7 +838,8 @@ Recognizable credentials are redacted before JSON encoding, with a per-message
 `redacted` flag. This is pattern-based credential masking, not a guarantee that
 arbitrary personal information is anonymized. Exact wording can differ at a redaction
 marker; encrypted recovery independently preserves original L1 and replay. A failed
-searchable write reports degradation and retries without invalidating saved recovery.
+searchable write reports degradation and retries at the next compact/reset boundary
+without invalidating saved recovery.
 
 The resident lookup affordance explains date partitioning and lookup, for example
 `rg -n PATTERN data/conversation-history/` and

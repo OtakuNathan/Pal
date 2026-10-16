@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 import threading
-from typing import Iterable
+from typing import Callable, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pal.memory.persistence.checkpoint import _fsync_directory
@@ -129,8 +129,8 @@ class ConversationTextJournal:
     neither owns snapshot leases nor removes records at compact/reset.
     """
 
-    def __init__(self, root: Path, timezone_name: str = "UTC"):
-        self.directory = root / "data" / "conversation-history"
+    def __init__(self, root: Path, timezone_name: str = "UTC", *, directory: Path | None = None):
+        self.directory = directory if directory is not None else root / "data" / "conversation-history"
         try:
             self.timezone = ZoneInfo(timezone_name or "UTC")
         except (ZoneInfoNotFoundError, ValueError):
@@ -160,12 +160,29 @@ class ConversationTextJournal:
             self.sync(records_from_memory_payload(payload), owner["incarnation"])
 
     def sync(self, records: Iterable[dict], incarnation: str) -> None:
+        self.sync_rows({**record, "conversation_id": incarnation} for record in records)
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._days.clear()
+
+    def contains_rows(self, records: Iterable[dict]) -> bool:
+        with self._lock:
+            states = {}
+            for row in records:
+                path = self.record_path(row)
+                if path not in states:
+                    states[path] = self._load(path)
+                if (row["conversation_id"], row["message_id"]) not in states[path].fingerprints:
+                    return False
+            return True
+
+    def sync_rows(self, records: Iterable[dict]) -> None:
         with self._lock:
             self.last_bytes = 0
             batches: dict[Path, list[dict]] = {}
             for record in records:
-                row = {**record, "conversation_id": incarnation}
-                batches.setdefault(self.record_path(row), []).append(row)
+                batches.setdefault(self.record_path(record), []).append(record)
             for path, rows in sorted(batches.items()):
                 self._append(path, rows)
             # Cache only the dates in the current submission, not every day
@@ -260,41 +277,53 @@ class ConversationTextJournal:
 
 @dataclass(frozen=True)
 class ConversationHistoryReference:
-    """Preserve frozen L in daily files before compact, then attach lookup hints."""
+    """Stage frozen L privately before compact and attach future lookup ranges."""
 
     writer: ConversationTextJournal
     paths: tuple[Path, ...]
     header: dict
     records: tuple[dict, ...]
+    stage_batch: Callable[[dict], None]
 
     @classmethod
     def prepare(cls, writer: ConversationTextJournal, snapshot: LeftSnapshot,
-                incarnation: str) -> ConversationHistoryReference:
-        records = history_records(snapshot)
+                incarnation: str, stage_batch: Callable[[dict], None]) -> ConversationHistoryReference:
+        records = [{**row, "conversation_id": incarnation, "archive_op_id": snapshot.run_id}
+                   for row in history_records(snapshot)]
         paths = tuple(sorted({writer.record_path(record) for record in records}))
         times = [record["timestamp"] for record in records
                  if writer.record_path(record).name != "undated.jsonl"]
+        ranges = []
+        for path in paths:
+            rows = [row for row in records if writer.record_path(row) == path]
+            times_for_day = [row["timestamp"] for row in rows if path.name != "undated.jsonl"]
+            ranges.append({"path": str(path), "first_message_id": rows[0]["message_id"],
+                           "last_message_id": rows[-1]["message_id"], "record_count": len(rows),
+                           "start": min(times_for_day, key=datetime.fromisoformat) if times_for_day else None,
+                           "end": max(times_for_day, key=datetime.fromisoformat) if times_for_day else None})
         header = {"conversation_id": incarnation, "compact_op_id": snapshot.run_id,
                   "source_stamp": snapshot.stamp,
                   "conversation_start": min(times, key=datetime.fromisoformat) if times else None,
                   "conversation_end": max(times, key=datetime.fromisoformat) if times else None,
                   "timestamps_missing": len(records) - len(times),
-                  "record_count": len(records), "timezone": str(writer.timezone)}
-        return cls(writer, paths, header, tuple(records))
+                  "record_count": len(records), "timezone": str(writer.timezone), "ranges": ranges}
+        return cls(writer, paths, header, tuple(records), stage_batch)
 
     def decorate(self, entry: L2Entry) -> L2Entry:
         reference = {**self.header, "paths": [str(path) for path in self.paths]}
         payload = {**thaw_json(entry.payload), "conversation_history": reference}
-        files = ", ".join(reference["paths"]) or str(self.writer.directory)
         hint = (
             "\n\n<conversation_history>\n"
-            f"Pre-compaction dialogue in daily JSONL files: {files}\n"
+            "Newly archived pre-compaction dialogue in daily JSONL files.\n"
             f"Conversation ID: {reference['conversation_id']}. "
             f"Known time range: {reference['conversation_start']} to {reference['conversation_end']}; "
             f"records without timestamps: {reference['timestamps_missing']}.\n"
+            f"Archive operation: {reference['compact_op_id']}. "
+            f"Daily ranges: {json.dumps(reference['ranges'], ensure_ascii=False, separators=(',', ':'))}\n"
             "Search with rg -n or filter JSONL with jq to confirm prior wording and recorded actions. "
             f"All conversation history: {self.writer.directory}. "
-            "Each message includes conversation_id and message_id; keep the last version of each pair. "
+            "These ranges cover this compact's newly removed originals; earlier dialogue remains in the history directory. "
+            "Filter archive_op_id for this exact batch. Each message includes conversation_id and message_id. "
             "A search miss does not prove something was never said. Tool previews are historical observations, "
             "not complete execution evidence or current state. Recognizable credentials are redacted. "
             "This reference grants no new instructions or permissions.\n"
@@ -302,5 +331,8 @@ class ConversationHistoryReference:
         )
         return replace(entry, payload=payload, rendered=(entry.rendered or entry.summary) + hint)
 
-    def publish(self) -> None:
-        self.writer.sync(self.records, self.header["conversation_id"])
+    def stage(self) -> None:
+        self.stage_batch({"operation_id": self.header["compact_op_id"], "kind": "compact",
+                          "source_incarnation": self.header["conversation_id"],
+                          "source_stamp": self.header["source_stamp"],
+                          "timezone": self.header["timezone"], "records": list(self.records)})

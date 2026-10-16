@@ -22,6 +22,29 @@ class ResidentCheckpointError(ValueError):
     pass
 
 
+def atomic_json(path: Path, value: dict) -> None:
+    """Durably replace a small recovery sidecar without exposing a partial file."""
+    missing = []
+    parent = path.parent
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for directory in reversed(missing):
+        _fsync_directory(directory.parent)
+    temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @dataclass(frozen=True)
 class ResidentCheckpointStore:
     """One encrypted, atomically replaceable exit checkpoint for resident Pal."""
