@@ -80,8 +80,12 @@ Use the browser capabilities for JavaScript-rendered pages and interactive UI wo
    Click results include open tabs when reported by the browser. Popups do not
    automatically become current: use manage_browser_tabs list/select, then read or snapshot.
    If a popup appears later, list tabs again; do not repeat the click blindly.
-5. Use `capture_browser_screenshot` when pixel evidence is useful. It registers the image for core
-   to attach automatically when the selected model supports vision; do not import it again.
+5. Use `capture_browser_screenshot` when pixel evidence is useful. When registration=registered,
+   core can attach the image when the selected model supports vision; do not import it again.
+   If registration is unavailable or failed, follow the result's recovery guidance for the saved
+   artifact.local_cached_path. If registration=unknown, reconcile with search_artifacts before
+   importing again; omit query to browse this conversation's artifacts. Recover the saved image
+   rather than capturing a replacement solely because registration or inline delivery failed.
 
 The browser profile belongs to the current conversation. `manage_browser_session(operation=close)` releases live
 processes but keeps login state; `manage_browser_session(operation=clear_cache)` clears HTTP cache while retaining

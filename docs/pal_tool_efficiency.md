@@ -15,12 +15,11 @@ apply to the rendered body and pages concatenate back to that body.
 Word matching and alias splitting are isolated to execution discovery; they do
 not change memory or skill retrieval.
 
-Plugin lifecycle names have separate responsibilities: `attach_plugin` loads an
-enabled detached plugin and preserves an attached instance; `detach_plugin`
-unloads it; `reload_plugin` unloads and reloads it in one call, coordinating
-affected dependents. Existing integrations that used attach as a reload must use
-reattach. Package install/prepare discovery covers both plugins and channel
-providers.
+`manage_plugin(name=..., operation=...)` separates lifecycle responsibilities:
+`attach` loads an enabled detached plugin and preserves an attached instance;
+`detach` unloads it; `reload` unloads and reloads it in one call, coordinating
+affected dependents. Use `reload` when changed plugin code must take effect.
+Package install/prepare discovery covers both plugins and channel providers.
 
 For Bunshin, reuse known skill contracts, discovery results, and approval for the
 current workflow. `task_spec_file` accepts an absolute local UTF-8 requirement path;
@@ -93,27 +92,32 @@ and no-op edits cannot be mistaken for recommended invocations.
 Text artifacts expose a managed `text_file.file_path` in their reference and
 prompt manifest, without automatically inlining even short text. Search it with
 `run_shell` and `rg`, then use `read_file` for line ranges; handle oversized lines
-with shell tools. PDFs supply a flat extracted-text file for searching, a
+with shell tools. New PDFs supply per-page text and image files, a
 `page_file_pattern` for directly reading a known original page, and a
-`page_index_file_path` mapping pages to flat-file line ranges. The index records
-pages with no extracted text and the extraction limit; it is not injected in full.
+`page_index_file_path` mapping original page numbers to those files and their
+processing status. They do not produce duplicate combined text or chunks. The
+index records pages with no extracted text and the extraction limit; it is not
+injected in full.
 Managed paths are temporary read-only inputs. Audio uses the same path when a
 transcript exists; no transcription backend is added by this change.
 
-Artifact search merges identical snippets while retaining every representation
-and selector in `locations`. LSP text projections omit an identical nested
+Artifact search returns attachment descriptions and pagination; use the supplied
+file paths for content search. LSP text projections omit an identical nested
 `evidence.result`; the structured result and evidence metadata remain intact.
 `call_tool` accepts the model's chosen arguments without a preliminary schema
 read. Argument validation errors direct it to `read_tool` for the exact schema.
 
 ## Alias-first discovery
 
-Search prioritizes exact aliases, then their unordered underscore-separated
-words, then alias subsets/prefixes. Purpose supplies additional task words and
-synonyms. Applicability prose and registry classifications do not supply positive
-query evidence; classification filters still work. Prefer English queries in
-`[domain] [action] [object]` form when the domain is known. Spaces and underscores
-both work; not every alias has all three components.
+With a known owner, set `search_tools.domain` and describe the desired task in a
+short affirmative English query. Within that strict bucket, purpose and authored
+auxiliary terms/intents rank candidates without action/object gates or boosts.
+Without a domain, exact aliases and conservative keyword matches take priority;
+purpose fallback requires at least two positive term matches. Spelling recovery
+runs after a lexical miss. Review the contract and unmatched terms before calling;
+partial matches do not establish support for every requested feature. Use
+`search_tools(directory_offset=0)` without query/domain to find current domains,
+or `search_tools(domain=owner)` for a compact domain directory.
 
 Default results contain at most three strongest matches, with exact aliases or
 matching word sets converging to one tool when unambiguous. An explicit `top_k`

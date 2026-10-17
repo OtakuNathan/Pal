@@ -323,9 +323,9 @@ IM channel 默认采用三阶段反馈：
 
 推荐原则：
 
-- 常见 UTF-8 文件读写改优先通过结构化文件能力，例如 `file_read`、`file_edit`、`file_write`、`inspect_file_cache`
-- 命令、测试、构建、脚本执行通过 `shell`
-- `web_search` 保留为独立能力与 provider family
+- 常见 UTF-8 文件读写改优先通过 `read_file`、`edit_file`、`write_file`；读取缓存诊断由结果中的恢复信息提供
+- 命令、测试、构建、脚本执行及仓库文本搜索通过 `run_shell`；搜索优先 `rg`，文件枚举优先 `rg --files`
+- `search_web` 保留为独立能力与 provider family
 - `web_fetch` 是 Plugin Hub 管理的 stateful browser 插件；原始 HTTP 足够时由主 Pal 显式使用 `curl`
 
 也就是说：

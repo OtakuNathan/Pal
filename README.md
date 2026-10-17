@@ -139,9 +139,10 @@ that client — the daemon, its turn queue, and its sessions keep running, and
 lifecycle, **not** a detach.
 
 **Detach / attach (plugin lifecycle).** Real detach is a plugin operation.
-`artifact`, `behavior`, `checklist`, `proactive`, `skill`, Bunshin, LSP, MCP,
-L3 providers, and web integrations can be replaced with `detach_plugin` /
-`attach_plugin`. Core, execution, LLM, channel (including the recovery
+`artifact`, `emotion`, `checklist`, `proactive`, `skill`, Bunshin, LSP, MCP,
+L3 providers, and web integrations use `manage_plugin(name=..., operation=...)`:
+`detach` unloads, `attach` loads an enabled detached plugin while preserving an
+attached instance, and `reload` replaces loaded code. Core, execution, LLM, channel (including the recovery
 socket), memory, identity, control, and failure are resident and cannot be
 unloaded. Channel endpoints retain their own target-level lifecycle.
 
@@ -289,7 +290,7 @@ plugin/port dependencies. The returned instance acquires resources in
 `start(scope)` and returns a `ModuleHandle`; the host publishes ports, events,
 prompts and capabilities only after start succeeds, then releases everything
 in reverse order on detach. Plugins can be **hot-attached/detached** at runtime
-(`rescan_plugins` / `attach_plugin` / `detach_plugin` / `enable_plugin`), no
+(`rescan_plugins` for discovery; `manage_plugin` for attach/detach/reload/enable/disable), no
 daemon restart needed.
 
 The resident foundation is `core`, `execution`, `llm`, `channel` (including

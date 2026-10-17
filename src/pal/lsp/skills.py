@@ -61,12 +61,12 @@ Pal sidecars already prepare PATH for common Node/nvm installs. Do not shell-wra
 
 ## Workflow
 
-1. Inspect existing templates with `inspect_lsp_status`, source, or file reads.
+1. Inspect existing template files with source or file reads. `inspect_lsp_status()` reports passive host health, not a template directory.
 2. Choose the canonical `language_id` the LSP template should advertise.
 3. Write the LSP runtime template to `<runtime_root>/plugins/lsp/servers/<server_id>.toml`.
 4. Validate the LSP template with `pal.lsp.config.load_lsp_server_file` or an isolated unit test.
 5. Run LSP rescan through `rescan_lsp_servers` when the running Pal runtime should see the new LSP template.
-6. Verify with `inspect_lsp_status`, `inspect_lsp_status`, and a representative diagnostics/hover request when a sample file exists.
+6. Verify the selected server with `inspect_lsp_status(name=server_id, workspace_root=...)`, using a representative workspace. This checks its binary, project context and initialization together. If a sample file exists, verify a representative diagnostics/hover request too.
 
 ## Safety
 
@@ -82,7 +82,7 @@ Before calling the language support done:
 1. Runtime template file exists at `<runtime_root>/plugins/lsp/servers/<server_id>.toml`.
 2. `load_lsp_server_file` parses it and preserves command, args, extensions, language_ids, markers, and timeouts.
 3. `rescan_lsp_servers` succeeds when the user wants the running runtime refreshed.
-4. `inspect_lsp_status` reports ok, missing_binary, disabled, or another structured status instead of failing unstructured.
+4. `inspect_lsp_status(name=server_id, workspace_root=...)` reports ok, missing_binary, disabled, or another structured status for that server. Omit selectors only when inspecting passive host health.
 5. The handoff lists the template path, server id, language id, any code changes, tests run, and any dependency still missing.
 """
 

@@ -67,15 +67,15 @@ Current boundaries:
 
 对于本地环境能力，推荐保持最小 built-in tool 集：
 
-- `tool_search` / `tool_read` / `tool_call` 作为 capability discovery 和 invocation 元能力
-- `file_read` / `file_edit` / `file_write` / `inspect_file_cache` 作为 UTF-8 文本文件读写改的结构化路径
-- `shell` 作为命令、测试、构建、脚本和无专用 capability 时的 escape hatch
-- `web_search` 作为独立 capability / provider family
+- `search_tools` / `read_tool` / `call_tool` 作为 capability discovery 和 invocation 元能力
+- `read_file` / `edit_file` / `write_file` 作为 UTF-8 文本文件读写改的结构化路径；读取缓存诊断由结果中的恢复信息提供
+- `run_shell` 作为命令、测试、构建、脚本和仓库文本搜索的入口
+- `search_web` 作为独立 capability / provider family
 - `web_fetch` 发布会话级 `browser_*` 能力；`curl` 只是主 Pal 的显式 raw-HTTP escape hatch
 
 也就是说，`MCP` 只是 tool 的一种来源，而不是独立平级哲学层。
 
-`shell` 不再是文件读写查改的默认路径。LLM-facing 描述会要求模型优先使用 dedicated Pal capabilities，并避免在已有专用能力时用 shell 跑 `find`、`grep`、`cat`、`sed`、`awk`、`echo` 或 heredoc 文件编辑。
+普通 UTF-8 文件读取和编辑优先使用结构化文件能力。仓库文本搜索使用 `run_shell` 的 `rg`，枚举文件优先 `rg --files`；仅当不适用或不可用时选择替代命令。不要用 shell 绕过文件编辑的读取校验，也不要为了截短结果把测试或构建管道接到 head、tail 或 grep。
 
 provider native tool calling 只是外部厂商协议层的调用壳。
 
@@ -494,8 +494,8 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 
 最小 discovery surface 至少包括：
 
-- `tool_search`
-- `tool_read`
+- `search_tools`
+- `read_tool`
 - `search_skills`
 - `read_skill`
 

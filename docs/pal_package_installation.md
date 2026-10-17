@@ -147,8 +147,9 @@ No live browser worker is constructed during installation verification.
 
 ## Disable and uninstall
 
-`disable_plugin` persists the startup preference, including for builtins, and
-uses the existing dependency-aware detach. `detach_plugin` is temporary.
+`manage_plugin(name=..., operation=disable)` persists the startup preference,
+including for builtins, and uses the existing dependency-aware detach.
+`manage_plugin(name=..., operation=detach)` is temporary.
 `uninstall_plugin(name, purge_data=false)` removes a community installation; it
 runs as a package job with a brief completion wait and, when available, a
 completion event to Pal for the initiating task. Use `inspect_package_status` when

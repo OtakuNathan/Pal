@@ -32,9 +32,10 @@ keep transcript output; typed requests and replay explicitly disable it.
 source record. The compatibility compiler merges the summary into the first
 user message and does not advertise it as a dynamic context candidate.
 
-Native shell now adds at most one `manage_shell_session` capability hint. It lists only
-the actions applicable to the delivered state and retains `read_tool` as the
-discovery entry point. Already-known operations remain callable directly.
+Native shell adds a bound `read_shell_session` recovery affordance when output
+delivery fails. Ordinary running or terminal state does not replay a control
+menu. The eight separate session tools retain their static contracts; discover
+unknown operations with `search_tools`, or use `read_tool` for a missing contract.
 Result status, session ID, errors, effect semantics and output snapshot references remain
 available. Pagination hints are independent of the session hint. Native input
 schemas, state transitions, cancellation, observation and cleanup are unchanged.

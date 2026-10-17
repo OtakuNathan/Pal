@@ -13,7 +13,17 @@ The resident surface is fully determined by capability descriptors at registry c
 - Owners can opt an `INDIRECT` descriptor into the native tool window with `metadata.native_function=True`. Its original routing, effects, retry policy, admission and permission checks remain in force; model execution dispatches the published function to that record. Low-level direct invocation remains strict. Native schemas inline local nested references so object types are explicit; validation keeps the original schema. Invalid native arguments return the complete input contract, without coercing JSON strings into objects.
 - Other `INDIRECT` descriptors stay out of the tool window. They remain discoverable through `search_tools` and invocable through `call_tool`. Use `read_tool` only when the search hit or context lacks contract details needed for a correct call.
 
-There is no tool-surface config file and no runtime refresh command. Changing direct exposure is a descriptor change in the owning module (applied on the next Pal start), not a TOML edit.
+There is no tool-surface config file or general tool-surface refresh command.
+Changing direct exposure is a descriptor change in the owning module. Plugin
+changes publish a new registry generation through the owning lifecycle operation;
+resident implementation changes require a Pal restart.
+
+Next-tool hints are rendered against that generation's visible aliases. Missing
+optional or role-scoped targets are omitted from model descriptions, without a
+suggestion to search for an unavailable alias. The authored relation stays on the
+descriptor and becomes visible when the target is registered again. An unknown
+hint on a non-detachable first-party tool remains a declaration error unless its
+descriptor explicitly permits missing hints.
 
 Model memory CRUD uses `recall_memory`, `remember_memory`, `update_memory`, and
 `forget_memory`, with all four complete schemas visible in the stable tool window.
@@ -22,8 +32,9 @@ text together, retaining revision history. Optional topics and full case STAR
 remain available; backend adapters still support internal partial corrections.
 Provider recall/write/update/delete adapters remain internal;
 their duplicate `*_provider_memory` aliases are not published for discovery or
-model invocation. Provider health, inventory, lifecycle, and index recovery remain
-available. Normal recall uses the active provider. For mutation reconciliation,
+model invocation. Provider maintenance, inventory, lifecycle and index recovery
+use the official `pal memory` CLI; `inspect_memory_state` provides the model-facing
+hub snapshot. Normal recall uses the active provider. For mutation reconciliation,
 `recall_memory(provider_id=<original provider>, mem_ref=<exact ref>)` preserves the
 original store without switching the active provider or falling back to another.
 

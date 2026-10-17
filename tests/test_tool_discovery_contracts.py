@@ -348,17 +348,52 @@ def test_model_list_contains_selection_capabilities_without_credentials():
 
 def test_builtin_tool_navigation_references_declared_public_aliases():
     import ast
+    import json
     import re
     from pathlib import Path
     from pal.skill.builtin_skills import builtin_declared_skills
     aliases = set()
     references = set()
-    for path in (Path(__file__).parents[1] / 'src' / 'pal').rglob('*.py'):
+    root = Path(__file__).parents[1]
+    retired = set(json.loads((root / 'docs/tool_surface_review.json').read_text())['retired_tools'])
+    retired_pattern = re.compile(r'\b(?:' + '|'.join(map(re.escape, sorted(retired))) + r')\b')
+    stale = []
+    guidance_fields = {'next_step', 'recovery_hint', 'failure_next_steps', 'recommended_next_step'}
+
+    def check_retired(path, node):
+        for value in ast.walk(node):
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                stale.extend((str(path.relative_to(root)), value.lineno, alias)
+                             for alias in retired_pattern.findall(value.value))
+
+    source_paths = [path for source_root in (root / 'src' / 'pal', root / 'plugins')
+                    for path in source_root.rglob('*.py')]
+    for path in source_paths:
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
+            if (('prompt' in path.stem or path.name in {'builtin_skills.py', 'skills.py', 'tool_routing.py', 'tool_guidance.py'})
+                    and isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                check_retired(path, node)
+            if isinstance(node, ast.Dict):
+                fields = {key.value: value for key, value in zip(node.keys, node.values)
+                          if isinstance(key, ast.Constant) and isinstance(key.value, str)}
+                # Bunshin has role-owned tools authored as dictionaries.
+                if 'alias' in fields and 'guidance' in fields and isinstance(fields['alias'], ast.Constant):
+                    aliases.add(fields['alias'].value)
+                for key in guidance_fields & fields.keys():
+                    check_retired(path, fields[key])
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if (isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
+                            and target.slice.value in guidance_fields and node.value is not None):
+                        check_retired(path, node.value)
             if not isinstance(node, ast.Call):
                 continue
             function = node.func.id if isinstance(node.func, ast.Name) else ''
+            for keyword in node.keywords:
+                if keyword.arg in guidance_fields:
+                    check_retired(path, keyword.value)
             if function == 'capability_action':
                 for keyword in node.keywords:
                     if keyword.arg == 'aliases':
@@ -370,9 +405,60 @@ def test_builtin_tool_navigation_references_declared_public_aliases():
                 for keyword in node.keywords:
                     if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
                         references.update(re.findall(r'\(use ([a-z][a-z0-9_]+)(?![a-z0-9_.])[).,]', keyword.value.value))
+                        stale.extend((str(path.relative_to(root)), node.lineno, alias)
+                                     for alias in retired_pattern.findall(keyword.value.value))
+            elif function == 'ToolAffordance':
+                for keyword in node.keywords:
+                    if keyword.arg == 'tool' and isinstance(keyword.value, ast.Constant):
+                        references.add(keyword.value.value)
+                        check_retired(path, keyword.value)
+                    elif keyword.arg == 'arguments' and isinstance(keyword.value, ast.Dict):
+                        for key, value in zip(keyword.value.keys, keyword.value.values):
+                            if (isinstance(key, ast.Constant) and key.value == 'name'
+                                    and isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                                references.add(value.value)
+                    elif keyword.arg == 'reason':
+                        check_retired(path, keyword.value)
+            elif function in {'NextToolHint', 'Field'}:
+                for keyword in node.keywords:
+                    if not isinstance(keyword.value, ast.Constant) or not isinstance(keyword.value.value, str):
+                        continue
+                    if function == 'NextToolHint' and keyword.arg == 'name':
+                        references.add(keyword.value.value)
+                    elif function == 'Field' and keyword.arg == 'description':
+                        stale.extend((str(path.relative_to(root)), node.lineno, alias)
+                                     for alias in retired_pattern.findall(keyword.value.value))
     for skill in builtin_declared_skills():
         references.update(skill.capability_refs)
+    assert not aliases & retired, sorted(aliases & retired)
     assert not references - aliases, sorted(references - aliases)
+    assert not stale, stale
+
+
+def test_current_tool_navigation_guides_do_not_contain_retired_aliases():
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    retired = set(json.loads((root / 'docs/tool_surface_review.json').read_text())['retired_tools'])
+    retired.update({
+        'tool_search', 'tool_read', 'tool_call', 'file_read', 'file_edit', 'file_write',
+        'memory_update', 'memory_delete', 'plugin_attach', 'plugin_detach', 'plugin_reload',
+        'plugin_rescan', 'channel_reload_provider', 'channel_restart_endpoint', 'channel_provider_rescan',
+    })
+    pattern = re.compile(r'\b(?:' + '|'.join(map(re.escape, sorted(retired))) + r')\b')
+    # Operational navigation guides must use current names. Detailed contracts
+    # can retain explicit retirement notes; historical plans remain evidence.
+    paths = ['README.md', 'src/pal/execution/README.md', *(
+        f'docs/{name}.md' for name in (
+            'capability_forest_structure', 'current_implementation_notes', 'pal_channel_contract',
+            'pal_execution_contract', 'pal_package_installation', 'pal_runtime_stack',
+            'pal_tool_efficiency', 'pal_web_fetch_contract', 'tool_output_snapshots',
+            'continuity_optimization'))]
+    stale = [(path, number, alias) for path in paths
+             for number, line in enumerate((root / path).read_text().splitlines(), 1)
+             for alias in pattern.findall(line)]
+    assert not stale, stale
 
 
 @pytest.mark.parametrize("top_k", [None, 5])

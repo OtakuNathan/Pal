@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pal.memory.contracts import MEMORY
-
 from typing import Any
 
 from pal.shared import (
@@ -52,8 +50,9 @@ class ToolSurface:
 
     def select_failure_descriptors(self, signal) -> list[Any]:
         execution_runtime = self.context.execution_runtime
-        records = execution_runtime.compiled_capability_index.records
-        by_canonical = execution_runtime.compiled_capability_index.by_canonical
+        generation = execution_runtime.registry_generation
+        records = generation.capability_index.records
+        by_canonical = generation.capability_index.by_canonical
         selected: list[Any] = []
         seen: set[tuple[str, str]] = set()
 
@@ -73,45 +72,39 @@ class ToolSurface:
                 seen.add(key)
                 selected.append(descriptor)
 
-        include("op_tool_read")
+        def include_alias(alias: str, *, target_id: str | None = None) -> None:
+            record = generation.record_for_alias(alias)
+            if record is not None:
+                include(record.canonical_path, target_id=target_id)
+
+        include_alias("read_tool")
 
         if signal.subsystem == "memory":
-            include("intro_module_memory_show")
-            include("intro_module_memory_list_providers")
-            include("op_memory_mgmt_set_active_provider")
-            try:
-                memory_service = self.context.require_port(MEMORY)
-                active_provider_id = str(memory_service.l3_selector.active_provider_id or "").strip()
-            except KeyError:
-                active_provider_id = ""
-            if active_provider_id:
-                include("intro_provider_memory_inventory", target_id=active_provider_id)
+            include_alias("inspect_memory_state")
         elif signal.subsystem in {"plugin", "plugins"}:
-            include("intro_module_plugins_show")
-            include("intro_module_plugins_list")
-            include("intro_module_plugins_inspect")
-            include("op_plugin_mgmt_rescan")
-            include("op_plugin_mgmt_enable")
-            include("op_plugin_mgmt_disable")
+            include_alias("inspect_plugin")
+            include_alias("list_plugins")
+            include_alias("rescan_plugins")
+            include_alias("manage_plugin")
         elif signal.subsystem == "channel":
-            include("intro_module_channel_show")
-            include("intro_module_channel_list")
-            include("op_channel_mgmt_manage_endpoint")
+            include_alias("inspect_channel_state")
+            include_alias("list_channel_endpoints")
+            include_alias("manage_channel_endpoint")
             endpoint_id = (
                 str(signal.related_ids.get("endpoint_id") or "").strip()
                 or str(signal.component or "").strip()
             )
             if endpoint_id:
-                include("intro_endpoint_channel_inspect", target_id=endpoint_id)
+                include_alias("inspect_channel_endpoint", target_id=endpoint_id)
         elif signal.subsystem == "llm":
-            include("intro_module_llm_inspect")
+            include_alias("inspect_llm")
         elif signal.subsystem == "execution":
-            include("intro_module_exec_show")
-            include("intro_module_exec_tools")
+            include_alias("inspect_execution_state")
+            include_alias("search_tools")
         elif signal.subsystem == "web_search":
-            include("intro_module_web_search_show")
+            include_alias("inspect_web_search")
         elif signal.subsystem == "web_fetch":
-            include("intro_module_web_fetch_show")
+            include_alias("inspect_browser_status")
         else:
             module_name = str(signal.subsystem or "").strip()
             if module_name:

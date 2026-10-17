@@ -29,7 +29,6 @@ Continue with the contract for the subsystem you are changing:
 - [pal_skill_contract.md](pal_skill_contract.md)
 - [pal_control_plane.md](pal_control_plane.md)
 - [pal_introspection_contract.md](pal_introspection_contract.md)
-- [pal_tasking_contract.md](pal_tasking_contract.md)
 - [bunshin_contract_orchestration.md](bunshin_contract_orchestration.md)
 - [pal_proactive_contract.md](pal_proactive_contract.md)
 - [pal_memory_contract.md](pal_memory_contract.md)
@@ -52,6 +51,7 @@ implementation status.
 
 ## Historical Records and Validation Evidence
 
+- [Former tasking contract](pal_tasking_contract.md): superseded task/work-order design; use [Bunshin contract orchestration](bunshin_contract_orchestration.md) for current workflows and tools.
 - [Archive index](archive/README.md): past plans, migration decisions, audits and delivery reports.
 - [Historical test log summary](archive/session_compaction/test_log_summary.md): original results and checksums; raw logs remain available locally and in Git history.
 - [Public proof evidence](evidence/2026-08-14-public-proof/README.md): reproducible demonstration evidence.
@@ -78,11 +78,11 @@ relevant validation report; do not add raw test logs to version control.
 - `pal_change_admission.md`: change admission checklist for contract changes, generated code, dogfood, and review risk.
 - `pal_llm_contract.md`: canonical LLM shape, native provider transports, streaming, and model routing.
 - `pal_execution_contract.md`: capability, tool, plugin, and execution contract.
-- `pal_behavior_contract.md`: affordance descriptors, skill manuals, behavior advice, and the cap-search vs advise split.
+- `pal_behavior_contract.md`: retirement boundary for the former behavior advisor; current manuals and execution guidance belong to skills and tool contracts.
 - `pal_skill_contract.md`: skill learning, sanitization, STAR applicability, storage, and injection contract.
 - `pal_control_plane.md`: explicit control, approval, and governance flows.
 - `pal_introspection_contract.md`: self-observation, diagnostics, self-maintenance, and extensibility.
-- `pal_tasking_contract.md`: tasking, bunshins, checkpoints, ledgers, and workspace governance.
+- `pal_tasking_contract.md`: historical task/work-order design, superseded by `bunshin_contract_orchestration.md`.
 - `bunshin_contract_orchestration.md`: current Bunshin contract graph, role protocol, durable execution, and publication boundaries.
 - `pal_engineering_quality_gates.md`: design baseline for reviewer/verifier gates, LSP evidence, sandbox enforcement, and bunshin engineering-quality hardening.
 - `bunshin_repair_bill_replay.md`: planned repair-bill replay model for propagating downstream integration failures back through the module DAG.

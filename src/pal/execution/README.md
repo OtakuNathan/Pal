@@ -6,9 +6,11 @@ Owns:
 - `ToolGuidance.search_terms`: internal reviewed action/object synonyms. Legacy
   `search_objects` remains supported. `search_enum_fields` explicitly selects
   operation enum properties; unrelated format/value enums are not indexed.
-  Every query word must match the alias or declared vocabulary. Purpose and
-  negative-use prose are display-only. Raw exact aliases rank first, followed
-  by case-folded aliases and whole-word matches. Vocabulary survives worker
+  Within an explicit owner domain, affirmative purpose and authored auxiliary
+  terms/intents rank candidates without action/object gates. Without a domain,
+  exact aliases and conservative keyword matches precede purpose fallback,
+  which requires at least two positive term matches. Negative-use prose is not
+  positive retrieval evidence. Vocabulary survives worker
   serialization, stays out of model-facing contracts/results, and contributes
   to the immutable registry fingerprint.
 - O(1) bound action dispatch index
@@ -37,9 +39,10 @@ Notes:
 - lifecycle protection lasts until a synchronous handler's worker exits.
   Cancellation waits for that exit before propagating; repeated cancellation
   cannot release the fence early, and cancelled queued handlers do not start
-- every LLM-facing tool has one generation-wide unique alias; direct tools are
-  provider tools, while indirect tools are discovered with `search_tools` and
-  `read_tool` and invoked only through `call_tool`
+- every LLM-facing tool has one generation-wide unique alias; direct tools and
+  explicit `native_function` opt-ins expose complete schemas in the tool window.
+  Other indirect tools are discovered with `search_tools`, inspected with
+  `read_tool` when contract information is missing, and invoked through `call_tool`
 - Pal-owned tools bind strict Pydantic v2 input/output models, `ToolGuidance`,
   machine execution semantics, examples, and the handler in one immutable
   registry record. Provider descriptions and search documents are compiled
@@ -47,10 +50,11 @@ Notes:
 - input serialization preserves declared defaults inside nested lists and
   objects, explicit nulls, and false/zero values; only unset null sentinels
   are omitted
-- guidance may name likely next tools. Compilation renders the exact direct or
-  `read_tool`/`call_tool` route for the current surface. Unknown first-party
-  aliases fail compilation, while detachable and scoped projections render an
-  unavailable/rediscovery fallback
+- guidance may name likely next tools. Compilation renders the actual direct,
+  native-function or indirect route for the current surface. Unknown hints on
+  non-detachable first-party tools fail compilation unless explicitly permitted.
+  Missing optional or role-scoped hints are omitted from model descriptions;
+  their authored relations remain available for future registry generations
 - invocation returns a discriminated `complete`, `rejected`, or
   `failed` result; effect outcome and retry direction are explicit
 - failures must deliver their original cause, exception chain and diagnostic

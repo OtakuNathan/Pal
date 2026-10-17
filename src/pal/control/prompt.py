@@ -18,9 +18,9 @@ class ControlPromptFragmentProvider(PromptFragmentProvider):
         if not self.provider.mounted:
             guidance = "Control operations are unavailable."
         elif self.provider.degraded:
-            guidance = "Control operations are degraded. Check tool results before assuming success."
+            guidance = "Human control commands are degraded. Inspect the resident registry with pal control status before assuming availability."
         else:
-            guidance = "Control operations are available through the control tools."
+            guidance = "Human control commands are handled through channel controls and the resident registry. Inspect registered commands with pal control status."
         return [
             PromptFragment(
                 section="runtime",

@@ -1,5 +1,7 @@
 # Pal Tasking Contract
 
+> 历史设计，已被当前 Bunshin contract orchestration 替代。下文的 task/work-order 模型及工具名称不代表现行接口。当前任务、角色和执行契约见 [bunshin_contract_orchestration.md](bunshin_contract_orchestration.md)，公开工具以 [pal_tool_surface.md](pal_tool_surface.md) 和当前注册表为准。
+
 > 目标：定义 `tasking`、`bunshins`、checkpoint、ledger、workspace 治理，以及 `Pal` 如何观察和终止 bunshins。
 
 ## 目标

@@ -174,10 +174,10 @@ Channel provider 代码由 PluginHost 管理；ChannelRuntime 和 EndpointHub �
 上面的 `provider.toml` / `build_channel_provider(context)` 是原地兼容的旧格式。
 
 `rescan_plugins` 扫描元数据，不自动导入或重载新增第三方 provider。
-原生声明可在扫描时建立 Hub；旧格式的 endpoint types 在首次 `attach_plugin` 时发现。
-`attach_plugin` 加载 provider 并恢复符合持久化 attach 意图的 endpoints；
-`reload_plugin(provider_id)` 执行 detach → unload → load → attach。
-`disable_plugin` / `enable_plugin` 管理代码启用状态，旧 manifest 的 enabled 仅用于首次发现。
+原生声明可在扫描时建立 Hub；旧格式的 endpoint types 在首次 `manage_plugin(operation=attach)` 时发现。
+`manage_plugin(name=provider_id, operation=attach)` 加载 provider 并恢复符合持久化 attach 意图的 endpoints；
+operation=reload 执行 detach → unload → load → attach。
+operation=disable/enable 管理代码启用状态，旧 manifest 的 enabled 仅用于首次发现。
 解析失败保留已知 provider，不作为物理删除处理。
 
 每个物理 endpoint id 在 ChannelRuntime 中有稳定 EndpointHub。

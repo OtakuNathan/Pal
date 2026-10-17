@@ -98,6 +98,21 @@ class BrowserScreenshotToolTests(unittest.TestCase):
         self.assertTrue(Path(result.structured["artifact"]["local_cached_path"]).is_file())
         self.assertEqual(len(str(service.calls[0]["session_key"])), 64)
 
+    def test_uncertain_registration_uses_current_artifact_inventory_for_recovery(self) -> None:
+        from unittest.mock import AsyncMock
+
+        owner = SimpleNamespace(import_local_for_turn=AsyncMock(side_effect=OSError('receipt lost')))
+        result = asyncio.run(BrowserScreenshotTool(service=_FakeBrowserService(self.root)).ainvoke(
+            {}, session_key='a' * 64, persistent=True,
+            runtime=SimpleNamespace(runtime_root=self.root, provider_registry={'artifact:artifact': owner}),
+            turn_id='turn-browser-shot',
+        ))
+        self.assertEqual(result.structured['registration'], 'unknown')
+        self.assertTrue(Path(result.structured['artifact']['local_cached_path']).is_file())
+        self.assertIn('search_artifacts', result.structured['next_step'])
+        self.assertNotIn('list_artifacts', result.structured['next_step'])
+        self.assertFalse(result.context_messages)
+
     def test_old_screenshot_alias_is_not_registered(self) -> None:
         service = _FakeBrowserService(self.root)
         core = PalCore()

@@ -606,7 +606,7 @@ MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput = _strict_model(
 MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput = _strict_model(
     'MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput',
     {
-        'name': (str, Field(..., description='Provider name returned by list_memory_providers.')),
+        'name': (str, Field(..., description='Exact memory backend name from pal memory providers. Backend selection is maintained through the pal memory CLI.')),
     },
 )
 

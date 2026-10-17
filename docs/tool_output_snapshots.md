@@ -66,9 +66,9 @@ byte intervals; remote transport keeps its existing incremental download and
 capacity rules. Snapshot creation and L1 delivery precede output acknowledgment.
 Failed delivery retries output preparation, never command execution. ACK retry
 does not create another L1 event. A save failure delivers an honest error without
-acknowledging or releasing native output. `manage_shell_session` can retry a failed
+acknowledging or releasing native output. `read_shell_session` can retry a failed
 session's captured export; a one-shot result without a session supplies an
-`output_ref` for read/release instead. Release is explicit abandonment, never a
+`output_ref` for `read_shell_session` / `release_shell_session` instead. Release is explicit abandonment, never a
 consequence of a disk error. Generic save failures preserve validated structured
 results and host context/control messages while marking the model preview incomplete.
 All successful handler and discovery-tool results use the same budget boundary.

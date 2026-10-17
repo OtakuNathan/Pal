@@ -20,8 +20,9 @@ TOOL_DISCOVERY_STOP_HINT = (
 TOOL_EXECUTION_SYSTEM_POLICY = (
     "Pal configuration maintenance: web search backend settings/credentials/selection, core cache reminders, "
     "and Bunshin profile/family overrides use the official Pal CLI through run_shell. Consult or reuse "
-    "pal.self.maintenance for these operations and use an explicit --runtime-root. Health/auth inspection "
-    "and online plugin/channel recovery remain tools. User-project browser/layout/network debugging remains "
+    "pal.self.maintenance for these operations and use an explicit --runtime-root. Memory backend maintenance, "
+    "index refresh and embedding migrations use the pal memory CLI; use memory tools for records. Web search "
+    "health/auth inspection and online plugin/channel recovery remain tools. User-project browser/layout/network debugging remains "
     "a normal business capability. Do not substitute a state-label setter or edit runtime storage for a supported CLI operation.\n"
     "Tool naming and discovery conventions:\n"
     "- Public aliases usually start with an action followed by domain/object and qualifiers, e.g. "
@@ -31,8 +32,10 @@ TOOL_EXECUTION_SYSTEM_POLICY = (
     "search ranks affirmative tool purposes and tool-authored auxiliary terms/intents; query words need not "
     "follow alias action/object naming. Extra words do not automatically exclude a candidate, so compare "
     "each full contract with the original request, especially its unmatched terms and limitations. "
-    "A candidate is not proof that every requested feature is supported. When query words are uncertain, "
-    "search_tools(domain=owner) returns up to 16 names and brief purposes, not full schemas. "
+    "A candidate is not proof that every requested feature is supported. For inventory, "
+    "search_tools(directory_offset=0) with no query or domain returns available owner domains; "
+    "search_tools(domain=owner) returns up to 16 names and brief purposes from "
+    "that domain, not full schemas. "
     "Read a plausible directory entry's full contract before invoking it; follow directory.next_offset for more. "
     "Native tools whose complete schemas are already exposed need no extra discovery. "
     "A known exact alias can still be queried directly. "
@@ -99,7 +102,11 @@ TOOL_EXECUTION_SYSTEM_POLICY = (
 
 
 TOOL_DISCOVERY_DEVELOPER_GUIDANCE = (
-    "- Invoke tools with a complete native schema in the current window directly by name; the runtime handles their internal routing. Invoke other known indirect aliases through call_tool(name=alias, args=...). "
+    "- Invoke tools with a complete native schema in the current window directly by name; the runtime handles their internal routing. Invoke other established indirect aliases through call_tool(name=alias, args=...). "
+    "Names mentioned in historical dialogue or old manuals do not establish current availability; use the "
+    "current tool surface and discovered contracts. If a historical name is missing, rediscover the task's "
+    "purpose within its owner domain. Use search_tools(directory_offset=0) with no query/domain to find "
+    "available domains and search_tools(domain=owner) to browse one. "
     "Search with a short affirmative English task description and a known owner domain, e.g. domain='browser', "
     "query='capture a screenshot of the current page'. When query words are uncertain, "
     "search_tools(domain=owner) browses up to 16 names and brief purposes. Read a plausible directory entry's full contract; "

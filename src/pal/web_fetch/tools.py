@@ -135,7 +135,7 @@ class BrowserScreenshotTool:
         except Exception as exc:
             payload["registration"] = "unknown"
             payload["registration_error"] = exception_report(exc)
-            payload["next_step"] = "Screenshot saved; registration outcome is uncertain and no inline image was delivered. Inspect list_artifacts before importing the saved path again."
+            payload["next_step"] = "Screenshot saved; registration outcome is uncertain and no inline image was delivered. Reconcile with search_artifacts before importing the saved path again; omit query to browse this conversation's artifacts."
             return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
         if imported.status != RuntimeStatus.OK:
             payload["registration"] = "failed"

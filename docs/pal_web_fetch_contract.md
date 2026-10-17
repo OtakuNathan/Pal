@@ -16,9 +16,9 @@
 
 ## Lifecycle
 
-`web_fetch` 遵循 `raii.v1`：插件实例先创建资源，能力后发布；detach 时能力先撤下，再关闭 sidecar、CLI daemon 和浏览器。模块自己的 attach/detach 能力不对外注册，生命周期入口是 Plugin Hub 的 `attach_plugin` / `detach_plugin` / `reload_plugin`。attach 保留已加载实例；reattach 在一次调用中卸载并重新加载。
+`web_fetch` 遵循 `raii.v1`：插件实例先创建资源，能力后发布；detach 时能力先撤下，再关闭 sidecar、CLI daemon 和浏览器。模块自己的 attach/detach 能力不对外注册，生命周期入口是 `manage_plugin(name="web_fetch", operation=...)`。attach 保留已加载实例；reload 在一次调用中卸载并重新加载。
 
-sidecar 空闲后会退出，下一次调用按需重建。主对话 profile 不随 sidecar、插件刷新或 Pal 重启删除；`close_browser` 只释放活进程，`reset_browser(confirm=true)` 才删除当前对话 profile。
+sidecar 空闲后会退出，下一次调用按需重建。主对话 profile 不随 sidecar、插件刷新或 Pal 重启删除；`manage_browser_session(operation=close)` 只释放活进程，operation=reset 且 confirm=true 才删除当前对话 profile。
 
 ## Session model
 
@@ -26,11 +26,11 @@ sidecar 空闲后会退出，下一次调用按需重建。主对话 profile 不
 - Bunshin：以 workflow run id 派生临时 session，不持久化。
 - 同一 session 串行执行，不同 session 受全局并发上限约束。
 - profile 最长保留 30 天，总预算 2 GiB；只按 LRU 删除不活跃 profile。
-- 所有 URL 必须是绝对 `http` / `https` URL，不能浏览 `file://`。
+- 网页 URL 必须是绝对 `http` / `https` URL；已挂载扩展允许对应 ID 的 `chrome-extension://` 页面，不能浏览 `file://`。
 
 ## Public capabilities
 
-默认仅直接暴露 `navigate_browser`，其描述说明完整 Chromium 和本地扩展开发能力，并通过结构化 next-tool hints 引出页面读取、定位、状态和扩展管理。后续工具通过 `read_tool` / `call_tool` 调用，也可通过 tool search 发现；发现入口不要求先执行导航，已有页面可直接读取。
+`read_browser_page` 默认直接暴露，合并打开页面与读取正文：提供 url 时打开页面，省略时读取当前页面。其他浏览器工具通过 `search_tools(domain="browser", query=...)` 发现并使用 `call_tool` 调用；仅在缺少契约信息时补 `read_tool`。发现或查询状态不要求先导航。
 
 间接暴露的读取、交互及管理路径：
 
@@ -38,20 +38,20 @@ sidecar 空闲后会退出，下一次调用按需重建。主对话 profile 不
 
 - `click_browser_target`, `fill_browser_field`, `type_browser_text`, `press_browser_key`
 - `hover_browser_target`, `select_browser_option`, `set_browser_checked_state`, `scroll_browser`
+- `drag_browser_target`, `evaluate_browser_script`, `manage_browser_network_capture`
 - `resize_browser_viewport`, `navigate_browser_history`, `manage_browser_tabs`, `handle_browser_dialog`
 - `inspect_browser_layout`, `capture_browser_screenshot`, `inspect_browser_status`
-- `close_browser`, `clear_browser_cache`, `reset_browser`
-- `inspect_browser_extensions`, `manage_browser_extension`
+- `manage_browser_session`, `manage_browser_extension`
 
-`clear_browser_cache` 只清理当前对话浏览器的 HTTP 缓存，保留 cookies、localStorage、IndexedDB 和 service-worker CacheStorage。它不提供密码管理，也不负责退出登录。浏览器尚未启动时会使用原 profile 打开空白页，不恢复旧 URL；只有浏览器确认清理后才报告成功。清理后是否重新导航或刷新由当前任务决定。
+`manage_browser_session(operation=clear_cache)` 只清理当前对话浏览器的 HTTP 缓存，保留 cookies、localStorage、IndexedDB 和 service-worker CacheStorage。它不提供密码管理，也不负责退出登录。浏览器尚未启动时会使用原 profile 打开空白页，不恢复旧 URL；只有浏览器确认清理后才报告成功。清理后是否重新导航或刷新由当前任务决定。
 
 ### 本地扩展开发
 
 浏览器使用当前固定 Playwright CLI 所配套的完整 Chromium（当前为 153 / revision 1243），以 `channel=chromium` 无头运行；安装器使用 `playwright install chromium --no-shell`。不使用系统 Chromium，也不依赖旧 Python Playwright 缓存。
 
-`manage_browser_extension(operation=mount, path=...)` 挂载含 `manifest.json` 的本地 Manifest V3 扩展目录；`reload` 和 `unmount` 使用 `inspect_browser_extensions` 返回的 `extension_id`。配置按当前持久化对话 profile 隔离，最多 16 个；不支持临时 Bunshin 浏览器或商店安装。扩展源码保留在开发目录中，修改后显式 reload。
+`manage_browser_extension(operation=mount, path=...)` 挂载含 `manifest.json` 的本地 Manifest V3 扩展目录；`reload` 和 `unmount` 使用 `inspect_browser_status` 返回的 `extension_id`。配置按当前持久化对话 profile 隔离，最多 16 个；不支持临时 Bunshin 浏览器或商店安装。扩展源码保留在开发目录中，修改后显式 reload。
 
-配置变更先确认关闭当前浏览器，再保存配置；所有标签会关闭，但登录资料保留。下一次导航按新配置启动。`inspect_browser_extensions` 区分配置清单与观察到的 service worker；worker 缺失可能是休眠或扩展没有后台 worker，不能据此断言加载失败。用目标页面验证内容脚本，也可通过 navigate/read 访问已挂载 ID 的 `chrome-extension://` 页面（包括 manifest、popup、options）。未挂载 ID 不允许作为导航目标。
+配置变更先确认关闭当前浏览器，再保存配置；所有标签会关闭，但登录资料保留。下一次导航按新配置启动。`inspect_browser_status` 区分配置清单与观察到的 service worker；worker 缺失可能是休眠或扩展没有后台 worker，不能据此断言加载失败。用目标页面验证内容脚本，也可通过 `read_browser_page(url=...)` 访问已挂载 ID 的 `chrome-extension://` 页面（包括 manifest、popup、options）。未挂载 ID 不允许作为导航目标。
 
 扩展目录或 manifest 损坏时仍可查询配置并 unmount。扩展的浏览器运行结果才是加载与功能证据，挂载返回仅确认配置成功。当前不提供统一的扩展后台错误收集工具。
 
@@ -63,7 +63,9 @@ canonical path 统一为 `op_browser_*`；状态查询仍是模块 introspection
 
 ## Restricted surface
 
-插件不发布任意 JavaScript、上传、cookie/local/session storage 读写、网络拦截、请求正文读取、录制、trace、video、PDF 或 dashboard。`read_browser_page` 和 layout inspection 内部使用固定脚本，但调用者不能注入脚本。
+`evaluate_browser_script` 在当前页面执行调用者提供的 JavaScript 函数，可读取页面内部状态或使用当前 origin 的 fetch；优先只读表达式，写入需要已授权意图，且受页面权限和 CORS 约束。`manage_browser_network_capture` 用注入 hook 观察 fetch/XHR；导航后必须重新 start，并确认 installed=true。它不提供网络拦截或修改。
+
+插件没有专用上传、cookie/storage 编辑、录制、trace、video、PDF 或 dashboard 工具。原始 HTTP 足够时使用主 Pal 的 `run_shell` 与 curl；需要浏览器登录态时才考虑页面内 fetch。
 
 ## Dependency and repair
 

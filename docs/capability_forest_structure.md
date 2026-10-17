@@ -136,8 +136,9 @@ It is optimized for discovery and prompt/tool schema generation, not execution.
 
 The dispatch projection.
 
-It maps canonical paths and aliases to concrete runtime handlers. It is optimized
-for exact invocation, not broad search.
+It maps canonical path/target pairs to concrete runtime handlers. The compiled
+registry resolves public aliases before dispatch. This index serves exact
+invocation, not broad search.
 
 ## Naming
 
@@ -147,10 +148,9 @@ Pal separates stable execution keys from human-readable names.
 
 The canonical path is the stable execution key, such as:
 
-- `${1}_list`
-- `${1}_provider_show::mock_l3`
-- `tool_search`
-- `rescan_plugins`
+- `op_tool_search`
+- `op_tool_read`
+- `op_browser_read`
 
 It should be:
 
@@ -161,8 +161,9 @@ It should be:
 
 ### Display Name
 
-The display name is for humans and model-facing descriptions. It may be shorter,
-friendlier, and less stable than the canonical path.
+The display name is a human-facing label. Model invocation uses the public alias,
+which must be unique within its registry generation. Canonical paths are internal
+identities, not model-callable names.
 
 ### `omit_family_in_canonical`
 
@@ -171,23 +172,23 @@ Some high-frequency capabilities intentionally use compact canonical names.
 Example:
 
 - capability family/action may be `discovery/search`
-- canonical path is still `tool_search`
+- canonical path is explicitly `op_tool_search`; the public alias is `search_tools`
 
 This is controlled by metadata, so compact names are explicit and testable.
 
 ## Instance-Level Targets
 
-Instance-level capabilities must automatically receive `target_id`.
+Instance-level capabilities receive a model-facing selector through hydration.
 
 Examples:
 
 - channel endpoint management
-- LLM endpoint inspection
-- L3 provider introspection
-- plugin instance lifecycle
+- proactive task inspection and run history
 
-The compiler injects `target_id` into instance-level action schemas so callers do
-not need to hand-maintain that argument on every action blueprint.
+The compiler injects the declared `target_argument` (normally `name`) into
+instance-level action schemas. Internally, dispatch still uses `target_id`.
+Module-level aggregate tools such as `inspect_llm` do not acquire an instance
+selector merely because their output describes several objects.
 
 ## Module-Level Targets
 
@@ -223,21 +224,27 @@ Search answers discovery questions:
 - Which module/family/tags narrow the result?
 - What required parameters does a capability need?
 
-`tool_search` returns compact hits by default:
+`search_tools` returns callable hits with guidance and input contracts:
 
-- `name`
-- `description`
-- `required_params`
+- `alias`, `domain`, `purpose`, `use_when`, `do_not_use_when`
+- `invocation_mode`, `input_contract`, `execution`
+- matched and unmatched terms when applicable
 
 It accepts:
 
 - `query`
-- `namespace`: `intro`/`introspection` or `op`/`operation`
+- `domain`: strict operation-owner bucket
+- `namespace`: `inspect`/`introspection` or `action`/`operation`
 - `family`
-- `module_id`
+- `module_name`
 - `tags`
 - `top_k` / `limit`
 - `facets`
+- `directory_offset`
+
+`search_tools(domain=...)` without query browses a compact domain directory;
+`search_tools(directory_offset=0)` without query/domain lists available domains.
+Directory entries are navigation, not query matches or full contracts.
 
 `facets` defaults to false. When true, the result includes namespace, module, and
 family counts over the deduplicated candidate set. Facets are a narrowing aid,
@@ -252,9 +259,10 @@ Execute answers exact dispatch questions:
 - Are the arguments valid?
 - Which handler receives the call?
 
-`tool_call` invokes a discovered capability by canonical path or alias. It
-should be used after discovery or when the caller already knows the exact
-capability name.
+`call_tool(name=alias, args=...)` invokes an indirect capability by its exact
+public alias. Tools whose complete native schemas are already exposed are
+invoked directly. Use `read_tool` only when a known tool's contract information
+is missing. Neither entrypoint accepts canonical paths as model-callable names.
 
 ## Module Nodes And Plugin Nodes
 
