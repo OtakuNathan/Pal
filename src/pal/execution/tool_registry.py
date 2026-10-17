@@ -560,13 +560,11 @@ def _compile_next_tool_lines(
             raise ValueError(
                 f"non-detachable tool {record.alias!r} points to unknown next-tool alias {hint.name!r}"
             )
-        elif "search_tools" in direct_aliases:
-            route = (
-                "It is not available in the current tool surface; use "
-                f"`search_tools(query={json.dumps(hint.name)})` to find the current equivalent."
-            )
         else:
-            route = "It is not available in the current tool surface; do not attempt to invoke it."
+            # Optional and role-scoped relations remain authored on the
+            # descriptor for future generations. Do not expose an unavailable
+            # alias or ask the model to search for it in this same view.
+            continue
         lines.append(f"`{hint.name}` ({route}) — {hint.use_when.strip()}")
     return tuple(lines)
 

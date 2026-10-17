@@ -280,7 +280,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.proactive_runner)
         self.assertIn("proactive", handle.core.context.module_registry.modules)
 
-    def test_composed_guidance_and_prompt_references_resolve_or_state_availability(self) -> None:
+    def test_composed_guidance_and_prompt_references_resolve_or_omit_unavailable_hints(self) -> None:
         handle = self._compose_runtime(wizard=self.wizard, registration=self.registration, database=self.database)
         generation = handle.core.context.execution_runtime.registry_generation
         records = {**generation.direct_aliases, **generation.indirect_aliases}
@@ -301,7 +301,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                         self.assertIn(mentioned, records, f"{alias} refers to unavailable {mentioned}")
                 for hint in record.guidance.next_tool_hints:
                     if hint.name not in records:
-                        self.assertIn("not available in the current tool surface", record.compiled_description)
+                        self.assertNotIn(f"`{hint.name}`", record.compiled_description)
         for fragment in handle.core.collect_prompt_fragments(PromptAssemblyContext()):
             with self.subTest(prompt=fragment.section):
                 for mentioned in set(tool_name.findall(fragment.content)) - data_fields:

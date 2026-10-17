@@ -126,7 +126,35 @@ class ToolGuidanceCompilationTests(unittest.TestCase):
             description = runtime.registry_generation.direct_aliases[
                 "scoped_starter"
             ].compiled_description
-            self.assertIn("not available in the current tool surface", description)
+            self.assertNotIn("missing_next", description)
+        finally:
+            runtime.shutdown()
+
+    def test_optional_hints_follow_registry_availability_without_losing_authored_relations(self) -> None:
+        runtime = ExecutionRuntime()
+        try:
+            # Even with discovery available, an absent next tool must not
+            # produce a suggestion to search this same registry for its name.
+            _mount(runtime, "search_tools", mode=InvocationMode.DIRECT)
+            _mount(runtime, "starter", mode=InvocationMode.DIRECT,
+                guidance=_guidance(purpose="Start work", hints=(
+                    NextToolHint(name="optional_next", use_when="Continue work"),)),
+                metadata={"allow_missing_next_tool_hints": True})
+            before = runtime.registry_generation
+            self.assertNotIn("optional_next", before.provider_specs["starter"]["function"]["description"])
+
+            target = mount_test_capability(runtime, alias="optional_next", canonical_path="op_test_optional_next",
+                InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=lambda _: {},
+                execution=_execution(InvocationMode.INDIRECT))
+            available = runtime.registry_generation
+            self.assertIn("`optional_next` (indirect)", available.provider_specs["starter"]["function"]["description"])
+            self.assertNotIn("optional_next", before.provider_specs["starter"]["function"]["description"])
+
+            runtime.unmount_subtree(target)
+            current = runtime.registry_generation
+            self.assertNotIn("optional_next", current.provider_specs["starter"]["function"]["description"])
+            self.assertEqual(current.direct_aliases["starter"].guidance.next_tool_hints[0].name, "optional_next")
+            self.assertIn("`optional_next` (indirect)", available.provider_specs["starter"]["function"]["description"])
         finally:
             runtime.shutdown()
 

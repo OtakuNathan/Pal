@@ -637,15 +637,15 @@ class TestScopedRoleFiltering:
             )
 
             scoped = BunshinScopedExecutionRuntime(base, ["op_test_probe"])
-            # The scoped descriptor keeps the static relation but degrades its
-            # routing honestly; the global descriptor routes normally.
+            # The scoped descriptor keeps the authored relation for future
+            # views but exposes no unavailable next tool; the global view does.
             spec = {
                 item["function"]["name"]: item["function"]
                 for item in scoped.build_llm_tool_contracts()
             }
             assert "probe" in spec
             assert "diagnose_lsp_server" not in spec
-            assert "not available in the current tool surface" in spec["probe"]["description"]
+            assert "diagnose_lsp_server" not in spec["probe"]["description"]
 
             # Dynamic suggestions resolve against the captured role view only.
             scoped_result = asyncio.run(
