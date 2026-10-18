@@ -35,6 +35,7 @@ class CoreRuntimeState(AgentTurnRuntimeState):
     turn_scopes: dict[str, str] = field(default_factory=dict)
     control_scopes: dict[str, ControlScopeState] = field(default_factory=dict)
     active_turn_id: str | None = None
+    btw_turn_id: str | None = None
     pending_channel_turns: deque[Any] = field(default_factory=deque)
     channel_turn_transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     resident_interrupt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

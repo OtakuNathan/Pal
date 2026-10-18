@@ -200,6 +200,7 @@ def _with_failure_diagnostics(text: str, structured: dict[str, Any], *, error: s
 
 @dataclass
 class ExecutionRuntime(ExecutionRuntimePort):
+    transient: bool = field(default=False, init=False)
     activity_decorator: Any | None = field(default=None, kw_only=True)
     provider_registry: dict[str, Any] = field(default_factory=dict)
     l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
@@ -2001,6 +2002,28 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if memory_service is not None:
             self.result_snapshots.bind_history(memory_service.history)
 
+    def fork_transient(self) -> ExecutionRuntime:
+        """Borrow capabilities/extension services with isolated, non-durable tool state.
+
+        The child does not own the shared executor, extension or snapshot store;
+        it must release its history references, not shut down those services.
+        """
+        from copy import copy
+
+        child = copy(self)
+        child.transient = True
+        child.logical_state = InMemoryLogicalExecutionState()
+        child.execution_sessions = LogicalExecutionSessions(state_backend=child.logical_state)
+        child._interrupt_handles = {}
+        child._interrupt_tasks = {}
+        child._interrupt_state_lock = threading.Lock()
+        return child
+
+    async def finish_transient_turn(self, turn_id: str) -> None:
+        """Drain this temporary owner's work without shutting down shared services."""
+        await self.interrupt_turn(turn_id)
+        self.execution_sessions.clear_visible_results(turn_id)
+
     def configure_runtime_root(self, root) -> None:
         root = Path(root)
         if self.result_snapshots.references():
@@ -2216,6 +2239,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             "budget": budget,
             "allow_tools": bool(allow_tools),
             "execution_runtime": self,
+            **({"transient_execution": True} if self.transient else {}),
         }
 
     def _resolve_char_limit(self, budget: ToolCallBudget) -> int | None:

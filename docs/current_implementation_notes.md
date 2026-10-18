@@ -2,6 +2,11 @@
 
 This file is a short sync point for the current codebase when older design notes lag behind implementation.
 
+`/btw <question>` is a temporary, read-only-by-instruction side turn using a
+snapshot of L, the resident cache identity, and independent execution/projection
+state. It does not append to resident conversation history. See
+[Temporary side questions](btw_side_questions.md) for lifecycle and activation.
+
 ## Domain communication contracts
 
 Domain-owned protocols describe service calls; `PortKey[T]` identifies them at

@@ -81,6 +81,15 @@ class ShapeEndpointInvoker:
         if callable(activate):
             activate(endpoint_id)
 
+    def fork_transient(self) -> ShapeEndpointInvoker:
+        """Borrow transport/usage reporting without retaining side content in the host."""
+        from copy import copy
+
+        child = copy(self)
+        child.prompt_cache = self.prompt_cache.fork_transient()
+        child._codecs = dict(self._codecs)
+        return child
+
     def close(self) -> None:
         close = getattr(self.transport, "close", None)
         if callable(close):

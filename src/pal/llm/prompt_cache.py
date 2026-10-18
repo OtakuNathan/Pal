@@ -265,6 +265,16 @@ class PromptCacheCoordinator:
     )
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
+    def fork_transient(self) -> PromptCacheCoordinator:
+        """Use identical provider routing policy with privately owned cache tails."""
+        return PromptCacheCoordinator(
+            minimum_prefix_tokens=self.minimum_prefix_tokens,
+            rolling_net_threshold_tokens=self.rolling_net_threshold_tokens,
+            observation_ttl_seconds=self.observation_ttl_seconds,
+            max_scope_count=self.max_scope_count,
+            max_attempt_records=self.max_attempt_records,
+        )
+
     def plan(
         self,
         request: LLMRequestIR,
@@ -1160,6 +1170,10 @@ class PromptCacheCoordinator:
         context: ShapeContext | None = None,
         encoded: EncodedRequest | None = None,
     ) -> PromptCachePlan:
+        if request.metadata.get("transient_history"):
+            # Side questions share the provider cache key, but must not become
+            # the resident warm-request anchor or take over its reminder.
+            return replace(plan, reminder=None)
         if context is not None and encoded is not None:
             plan = replace(plan, reminder=reminder_basis(
                 request, context, encoded, mode=plan.mode,

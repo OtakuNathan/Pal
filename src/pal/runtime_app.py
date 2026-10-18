@@ -200,6 +200,9 @@ class PalRuntimeApp:
         core = self.handle.core
         core.state.resident_quiescing = True
         try:
+            from pal.core.btw import cancel_btw
+
+            await cancel_btw(core)
             await core.turn_manager.interrupt_active_turn(
                 reason="process_shutdown"
             )

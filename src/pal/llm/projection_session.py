@@ -205,6 +205,72 @@ class EndpointProjectionSession:
     def active_attempt(self) -> AttemptKey | None:
         return self._active.attempt if self._active is not None else None
 
+    def fork_prefix(self, session_id: LogicalSessionId, message_ids: Sequence[str]) -> EndpointProjectionSession:
+        """Capture a detached projection of a closed prefix, including native bytes.
+
+        No active draft, frontier or commit authority is borrowed. Item/block
+        ownership also trims a user message merged across the L/R boundary.
+        The source may continue, rebind or retire immediately after this call.
+        """
+        child = EndpointProjectionSession(session_id)
+        if self.binding is None or self.retired:
+            return child
+        child.bind(self.binding, capabilities=self._capabilities)
+        kept = set(message_ids)
+        for item, span, blocks, cache in zip(
+            self._prefix_items, self._prefix_item_spans,
+            self._prefix_item_block_spans, self._prefix_cache_spans,
+        ):
+            if (not span and not any(blocks)) or (
+                set(span) & kept and not set(span) <= kept and (not blocks or any(not block for block in blocks))
+            ):
+                # A legacy item cannot prove the cut. Let the branch encode
+                # its full canonical L view instead of claiming missing bytes.
+                return EndpointProjectionSession(session_id)
+            blocks = tuple(block or span for block in blocks)
+            owned = _retire_wire_item(thaw_json(item), span, blocks, kept)
+            if owned is not None:
+                value, ids, block_ids = owned
+                child._prefix_items.append(value)
+                child._prefix_item_spans.append(ids)
+                child._prefix_item_block_spans.append(block_ids)
+                child._prefix_cache_spans.append(retire_spans(cache, item, blocks, kept))
+        for entry in self._pending_wire_tail:
+            if (not entry.span_ids and not any(entry.block_spans)) or (
+                set(entry.span_ids) & kept and not set(entry.span_ids) <= kept
+                and (not entry.block_spans or any(not block for block in entry.block_spans))
+            ):
+                return EndpointProjectionSession(session_id)
+            owned_blocks = tuple(block or entry.span_ids for block in entry.block_spans)
+            owned = _retire_wire_item(thaw_json(entry.item), entry.span_ids, owned_blocks, kept)
+            if owned is not None:
+                value, ids, blocks = owned
+                child._pending_wire_tail.append(_PendingWireItem(
+                    value, ids, blocks,
+                    retire_spans(entry.cache_spans, entry.item, owned_blocks, kept),
+                ))
+        for entry in self._committed_head_system:
+            if set(entry.span_ids) & kept and not set(entry.span_ids) <= kept:
+                return EndpointProjectionSession(session_id)
+            if entry.span_ids and set(entry.span_ids) <= kept:
+                child._committed_head_system.append(_HeadSystemEntry(
+                    entry.span_ids, tuple(freeze_json_mapping(thaw_json(p)) for p in entry.parts),
+                    entry.cache_spans,
+                ))
+        # A prefix cut can expose a trailing Anthropic user item that was
+        # previously followed by R. Leave it open for the normal seam merge.
+        if self.binding.wire_shape.value == "anthropic_messages":
+            pending = []
+            while child._prefix_items and child._prefix_items[-1].get("role") == "user":
+                pending.insert(0, _PendingWireItem(
+                    child._prefix_items.pop(), child._prefix_item_spans.pop(),
+                    child._prefix_item_block_spans.pop(), child._prefix_cache_spans.pop(),
+                ))
+            child._pending_wire_tail = pending + child._pending_wire_tail
+        child._frontier_item_count = len(child._prefix_items)
+        child._l_coverage_ids = tuple(mid for mid in self.covered_message_ids() if mid in kept)
+        return child
+
     @property
     def owner_fence(self) -> int:
         return self._owner_fence

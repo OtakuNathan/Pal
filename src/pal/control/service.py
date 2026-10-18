@@ -383,6 +383,11 @@ class ControlPlane(ControlPlanePort):
         )
 
     def _register_builtins(self) -> None:
+        self.register_command(ControlCommandSpec(
+            name="btw", handler=self._handle_btw,
+            description="Ask a temporary read-only side question without adding to conversation history.",
+            usage="/btw <question>", show_in_panel=True,
+        ))
         self.register_command(ControlCommandSpec(name="memory_review",
             handler=lambda invocation: ControlAction(action_kind="memory_review_open", target_scope="memory",
                 route=invocation.route, args={"batch_id": invocation.argv[0] if invocation.argv else ""}),
@@ -514,6 +519,18 @@ class ControlPlane(ControlPlanePort):
                     show_in_panel=False,
                 )
             )
+
+    def _handle_btw(self, invocation: ControlCommandInvocation) -> ControlAction:
+        # argv has shell-style tokenization; side questions must retain their
+        # original quotes, whitespace and newlines instead.
+        parts = invocation.raw_text.lstrip().split(maxsplit=1)
+        text = parts[1] if len(parts) == 2 else ""
+        if not text.strip():
+            return ControlAction(action_kind="invalid_command", target_scope="control",
+                                 route=invocation.route, notes="Use /btw <question>.")
+        return ControlAction(action_kind="start_btw", target_scope="runtime",
+                             route=invocation.route,
+                             args={"text": text, "input_id": invocation.origin_event_id})
 
     def _handle_control(self, invocation: ControlCommandInvocation) -> ControlAction:
         return ControlAction(

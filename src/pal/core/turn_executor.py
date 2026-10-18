@@ -102,6 +102,8 @@ def _artifact_unavailable_summary(refs: list[ArtifactRefPartIR]) -> str:
     return "\n".join(lines)
 
 class TurnExecutor:
+    include_live_execution_context = True
+
     def __init__(
         self,
         context,
@@ -541,7 +543,7 @@ class TurnExecutor:
             self._abandon_turn_projection_round(projection_pack)
         self._debug_log_outcome(continuation, outcome)
         refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
-        if refresh is not None:
+        if refresh is not None and self.include_live_execution_context:
             refresh(continuation)
         preferred_endpoint_id = str(outcome.preferred_endpoint_id or "").strip() or None
         preferred_model_id = str(outcome.preferred_model_id or "").strip() or None
@@ -842,7 +844,7 @@ class TurnExecutor:
                     await self._after_tool_batch(continuation)
                 await self._checkpoint_resident_async(continuation.turn_id, "round", continuation)
                 refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
-                if refresh is not None:
+                if refresh is not None and self.include_live_execution_context:
                     refresh(continuation)
         return EffectResult(
             status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
@@ -1431,7 +1433,15 @@ class TurnExecutor:
             selected_turns = tuple(getattr(memory_pack, "l1_turns", ()) or ())
             context_view = view_builder(continuation.turn_id, selected_turns)
             prepare = getattr(getattr(self.context, "execution_runtime", None), "prepare_model_context", None)
-            if prepare is not None:
+            if not self.include_live_execution_context:
+                # Temporary side turns retain local file-result visibility but
+                # must not claim/acknowledge the resident's live observations.
+                from pal.execution.runtime import ExecutionRuntime
+
+                ExecutionRuntime.prepare_model_context(
+                    self.context.execution_runtime, memory_service, continuation, context_view=context_view,
+                )
+            elif prepare is not None:
                 prepare(memory_service, continuation, context_view=context_view)
                 active_turn = memory_service.active_l1_turn(continuation.turn_id)
                 context_view = view_builder(continuation.turn_id, selected_turns)

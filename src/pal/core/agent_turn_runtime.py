@@ -59,6 +59,7 @@ class AgentTurnRuntime:
         after_tool_batch: Callable[[Any], Awaitable[None]] | None = None,
         inject_pending: Callable[[Any], Awaitable[bool]] | None = None,
         after_compaction: Callable[[Any], Awaitable[None]] | None = None,
+        executor_type: type[TurnExecutor] = TurnExecutor,
     ) -> "AgentTurnRuntime":
         resolved_state = state if state is not None else AgentTurnRuntimeState()
         resolved_guard_host = guard_host
@@ -103,7 +104,7 @@ class AgentTurnRuntime:
             )
             return request_adapter(request) if request_adapter is not None else request
 
-        executor = TurnExecutor(
+        executor = executor_type(
             context,
             resolved_state,
             resolved_guard_host,

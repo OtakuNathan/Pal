@@ -24,6 +24,8 @@ The normal dreaming chat notices and `REPLY_FAILED` recovery flow remain separat
 | `memory.sleep` | Actual sleeping transition after maintenance admission and successful required notice, or after service recovery; `subsystem=memory`, `component=dreaming`, `sleeping`. |
 
 Safe-mode tools use the same tool topics with `phase=safe_mode` and `scope_id`.
+Temporary `/btw` side turns use the ordinary turn topics with `turn_kind=btw`
+and their own turn ID; see [Temporary side questions](btw_side_questions.md).
 A turn ID is optional: channel delivery recovery can happen after a turn has ended.
 Component identifies the observed failure location, not a proven root cause.
 Broadcast payloads omit prompts, tool arguments/results, credentials and exception

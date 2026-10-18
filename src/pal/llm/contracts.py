@@ -268,6 +268,24 @@ class LLMRuntimePort(LLMQueryPort, Protocol):
 LLM_RUNTIME = PortKey[LLMRuntimePort]("llm:llm", LLMRuntimePort)
 LLM_QUERY = PortKey[LLMQueryPort]("llm:query", LLMQueryPort)
 
+
+@dataclass(frozen=True)
+class LLMSideTurn:
+    runtime: LLMRuntimePort
+    release: Callable[[], None]
+    preferred_endpoint_id: str | None = None
+    preferred_model_id: str | None = None
+
+
+class LLMSideTurnPort(Protocol):
+    def create_side_turn(
+        self, *, scope_id: str, branch_id: str, message_ids: tuple[str, ...],
+    ) -> LLMSideTurn: ...
+
+
+# Optional feature port: ordinary LLM providers need not implement side turns.
+LLM_SIDE_TURNS = PortKey[LLMSideTurnPort]("llm:side_turns", LLMSideTurnPort)
+
 def generation_result_from_values(
     text: str = "",
     *,

@@ -184,6 +184,19 @@ class ResultSnapshotStore:
             self._listeners[key] = changed
             changed((), history.turns)
 
+    def unbind_history(self, history) -> None:
+        """Release one temporary history without disturbing resident owners."""
+        with self._lock:
+            key = id(history)
+            listener = self._listeners.pop(key, None)
+            self._histories.pop(key, None)
+            if listener is not None:
+                history.remove_change_listener(listener)
+            for owner in tuple(self._owners):
+                if isinstance(owner, tuple) and owner[0] == key:
+                    self._owners.pop(owner)
+            self.reap()
+
     def detach_histories(self):
         """Restore boundary: discard old roots while restored references are pinned."""
         with self._lock:

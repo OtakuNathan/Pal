@@ -48,6 +48,9 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
         "Search saved output snapshots with rg. "
         "Inspect the saved file rather than rerunning its producer. "
         "Run long-lived tests and builds directly so their complete stdout and stderr remain available."
+        " POSIX commands run through a shell with the command text in its arguments. "
+        "pkill -f and similar full-command-line matches may also terminate that outer shell; "
+        "manage processes using confirmed PIDs or an available shell-session termination tool."
     ),
     do_not_use_when=(
         "Do not use for Pal runtime, module, capability, or Bunshin state when a Pal tool is available. "

@@ -23,6 +23,7 @@ from pal.llm.contracts import (
     LLMPreflightRequest,
     LLMRuntimePort,
     LLMProjectionPort,
+    LLMSideTurn,
 )
 from pal.llm.credentials import LLMCredentialResolver, LLMCredentialUnavailableError
 from pal.llm.endpoint import ShapeEndpointInvoker
@@ -321,6 +322,39 @@ class LLMRuntime:
                 return session
             session.rebind(binding, capabilities=capabilities)
         return session
+
+    def fork_projection_session(self, scope_id: str, branch_id: str, message_ids: tuple[str, ...]) -> EndpointProjectionSession:
+        """Read-only capture; the resident owner and any active round stay untouched."""
+        source = self._projection_sessions.get(scope_id)
+        identity = LogicalSessionId(branch_id)
+        return (source.fork_prefix(identity, message_ids) if source is not None
+                else EndpointProjectionSession(identity))
+
+    def fork_side_turn(self, scope_id: str, branch_id: str, message_ids: tuple[str, ...]) -> LLMSideTurn:
+        projection = self.fork_projection_session(scope_id, branch_id, message_ids)
+        child = self.fork_transient()
+        child._projection_sessions[scope_id] = projection
+        endpoint = child.active_endpoint()
+        return LLMSideTurn(
+            runtime=child, release=child.retire_projection_sessions,
+            preferred_endpoint_id=endpoint.endpoint_id if endpoint is not None else None,
+            preferred_model_id=endpoint.model_id if endpoint is not None else None,
+        )
+
+    def fork_transient(self) -> LLMRuntime:
+        """Share transport/accounting, isolate generation receipts and projections."""
+        from copy import copy
+
+        child = copy(self)
+        child.last_request = None
+        child.last_endpoint_id = None
+        child.last_model_id = None
+        child.last_projection_receipt = None
+        child._projection_sessions = {}
+        child._detached_stream_tasks = set()
+        if isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
+            child.endpoint_invoker = self.endpoint_invoker.fork_transient()
+        return child
 
     def prepare_generation_plan(
         self, request: LLMRequestIR

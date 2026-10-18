@@ -517,6 +517,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     turn_executor: TurnExecutor = field(init=False)
     module_lifecycle: ModuleLifecycle = field(init=False)
     cache_warm_deadline: CacheWarmDeadlineManager = field(init=False)
+    _btw_turn: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.turn_manager = TurnManager(
@@ -567,6 +568,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
 
     def close(self) -> None:
         self.cache_warm_deadline.close()
+        btw = self._btw_turn
+        if btw is not None and btw.task is not None:
+            btw.task.cancel()
 
     def _runtime_settings_repository(self) -> Any | None:
         llm_runtime = self.context.port_registry.get("llm:llm")
@@ -1209,6 +1213,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             if action.action_kind == "show_panel":
                 await self._handle_show_panel_async(action)
                 return
+            if action.action_kind == "start_btw":
+                from pal.core.btw import start_btw
+
+                await start_btw(self, action)
+                return
             if action.action_kind == "show_status":
                 await self._handle_show_status_async(action)
                 return
@@ -1709,7 +1718,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 self.state.resident_drained_event.set()
         if current_turn_id is not None:
             await self.turn_manager.interrupt_active_turn(reason="reset")
+        from pal.core.btw import cancel_btw
+
         try:
+            await cancel_btw(self)
             try:
                 await asyncio.wait_for(
                     self.state.resident_drained_event.wait(),

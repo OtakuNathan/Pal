@@ -69,6 +69,7 @@ class ControlEventHandler(EventHandler):
             payload=payload,
             route=route,
             correlation_id=event.correlation_id,
+            event_id=event.event_id,
         )
         action = self.control_plane.parse_event(control_event)
         if action is not None and action.action_kind == "fallback_user_message":
