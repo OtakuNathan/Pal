@@ -48,6 +48,9 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
         "Search saved output snapshots with rg. "
         "Inspect the saved file rather than rerunning its producer. "
         "Run long-lived tests and builds directly so their complete stdout and stderr remain available."
+        " target=0 selects this local host; other targets require the native shell backend. "
+        "Pass literal text through optional stdin instead of embedding a heredoc: "
+        "cmd='python -', stdin=\"print('hello')\\n\". Input is UTF-8, with no added newline, and ends at EOF."
         " POSIX commands run through a shell with the command text in its arguments. "
         "pkill -f and similar full-command-line matches may also terminate that outer shell; "
         "manage processes using confirmed PIDs or an available shell-session termination tool."
@@ -102,6 +105,7 @@ class _ShellProcessSupervisor:
     cwd: str | None
     timeout_ms: int
     output_root: Path
+    stdin_bytes: bytes | None = None
     termination_grace_seconds: float = SHELL_TERMINATION_GRACE_SECONDS
     capture_output: Callable[[Path, Path], tuple[ResultSnapshotRef, str] | None] | None = None
     started: bool = field(default=False, init=False)
@@ -120,12 +124,17 @@ class _ShellProcessSupervisor:
             stdout_path = Path(output_dir) / "stdout"
             stderr_path = Path(output_dir) / "stderr"
             timed_out = False
-            with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+            with contextlib.ExitStack() as inputs, stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
                 if self._cancel_requested.is_set():
                     return _ShellExecution(returncode=None, stdout="", stderr="", cancelled=True, started=False)
+                stdin = subprocess.DEVNULL
+                if self.stdin_bytes is not None:
+                    stdin = inputs.enter_context(tempfile.TemporaryFile(dir=output_dir))
+                    stdin.write(self.stdin_bytes)
+                    stdin.seek(0)
                 proc = subprocess.Popen(
                     self.argv,
-                    stdin=subprocess.DEVNULL,
+                    stdin=stdin,
                     stdout=stdout_file,
                     stderr=stderr_file,
                     cwd=self.cwd,
@@ -333,6 +342,29 @@ class ShellExecTool:
         self,
         args: dict[str, object],
     ) -> tuple[str, str | None, int, _ShellProcessSupervisor] | CapabilityResult:
+        target = args.get("target", 0)
+        stdin = args.get("stdin")
+        error = ""
+        code = "invalid_shell_input"
+        if type(target) is not int or target < 0:
+            error = "target must be a non-negative integer"
+        elif target != 0:
+            error = "The built-in shell only supports target=0; use the native shell for remote execution."
+            code = "unsupported_target"
+        elif stdin is not None and not isinstance(stdin, str):
+            error = "stdin must be UTF-8 text or null"
+        stdin_bytes = None
+        if not error and stdin is not None:
+            try:
+                stdin_bytes = stdin.encode("utf-8")
+            except UnicodeEncodeError:
+                error = "stdin must be valid UTF-8 text"
+        if error:
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID, text=error, llm_text=error,
+                structured={"error_code": code},
+                effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED),
+            )
         cmd = str(args.get("cmd") or "").strip()
         if not cmd:
             return CapabilityResult(
@@ -354,6 +386,7 @@ class ShellExecTool:
             cwd=cwd,
             timeout_ms=timeout_ms,
             output_root=self.output_root,
+            stdin_bytes=stdin_bytes,
         )
         return cmd, cwd, timeout_ms, supervisor
 
@@ -386,6 +419,7 @@ class ShellExecTool:
         if execution.output_error and (execution.timed_out or execution.cancelled):
             output_text += "\nCommand " + ("timed out" if execution.timed_out else "was cancelled") + "."
         structured = {
+            "target": 0,
             "cmd": cmd,
             "cwd": cwd or str(Path.cwd()),
             "display_text": display_text,
@@ -442,6 +476,7 @@ class ShellExecTool:
             text=display_text,
             llm_text=display_text,
             structured={
+                "target": 0,
                 "error_code": "shell_execution_failed" if supervisor.started else "shell_spawn_failed",
                 "cmd": cmd,
                 "cwd": cwd or str(Path.cwd()),

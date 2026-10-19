@@ -77,6 +77,14 @@ Current boundaries:
 
 普通 UTF-8 文件读取和编辑优先使用结构化文件能力。仓库文本搜索使用 `run_shell` 的 `rg`，枚举文件优先 `rg --files`；仅当不适用或不可用时选择替代命令。不要用 shell 绕过文件编辑的读取校验，也不要为了截短结果把测试或构建管道接到 head、tail 或 grep。
 
+自带 shell 与 native shell 共同接受 `cmd`、`cwd`、`target`、`stdin`、`timeout_ms`。
+`target` 默认 `0`；自带实现仅执行本地命令，对其他目标在启动前明确拒绝。
+`stdin` 可省略或为 `null`，表示不提供输入；字符串按 UTF-8 原样提供，读取结束即 EOF，
+不裁剪空白、不补换行，空字符串提供空输入。例如 `{"cmd":"python3 -","stdin":"print('hello')\n"}`。
+输入通过临时文件接入子进程，不要求模型拼接 heredoc。命令语法及执行错误由底层 shell 报告。
+native 的 `tty`、`wait_ms`、`sudo` 继续作为扩展参数；显式 `stdin` 要求 `tty=false`。
+远程和提权输入要求 worker/helper 支持对应能力；不支持或超过现有传输限制时，在执行前拒绝。
+
 provider native tool calling 只是外部厂商协议层的调用壳。
 
 它可以帮助 `LLM` 以原生方式表达 tool intent，但不能绕过本地 `Execution`：

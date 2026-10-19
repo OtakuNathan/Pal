@@ -280,6 +280,8 @@ ExecutionShellExecShellExecCapabilityMixinShellInput = _strict_model(
     'ExecutionShellExecShellExecCapabilityMixinShellInput',
     {
         'cmd': (str, Field(..., description='Shell command to execute as one string. Pipelines and shell operators are accepted.')),
+        'target': (int, Field(0, ge=0, strict=True, description='Execution target. This built-in shell supports only 0 (local); remote targets require the native backend.')),
+        'stdin': (str | None, Field(None, description='Optional literal UTF-8 standard input. No newline is added; EOF follows the text. Omit or use null for no supplied input.')),
         'cwd': (str, Field(None, description='Optional working directory.')),
         'timeout_ms': (int, Field(None, description='Optional timeout in milliseconds. Defaults to 120000 and cannot exceed 600000.', ge=1, le=600000)),
     },
@@ -288,6 +290,7 @@ ExecutionShellExecShellExecCapabilityMixinShellInput = _strict_model(
 ExecutionShellExecShellExecCapabilityMixinShellOutput = _strict_model(
     'ExecutionShellExecShellExecCapabilityMixinShellOutput',
     {
+        'target': (int, Field(None)),
         'cmd': (str, Field(None)),
         'cwd': (str, Field(None)),
         'returncode': (int, Field(None)),
