@@ -8,6 +8,7 @@ from typing import Any
 from pal.control.contracts import ControlRoute
 from pal.core.compaction_coordinator import CompactionTicket
 from pal.core.turn_state import AgentTurnRuntimeState
+from pal.core.scheduling import CoreScheduler
 from pal.foundation import utc_now
 
 
@@ -29,6 +30,7 @@ class ControlScopeState:
 
 @dataclass
 class CoreRuntimeState(AgentTurnRuntimeState):
+    scheduler: CoreScheduler = field(default_factory=CoreScheduler)
     active_turns: dict[str, Any] = field(default_factory=dict)
     completed_turns: dict[str, Any] = field(default_factory=dict)
     turn_tasks: dict[str, Any] = field(default_factory=dict)
@@ -41,8 +43,6 @@ class CoreRuntimeState(AgentTurnRuntimeState):
     resident_interrupt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     resident_interrupting_turn_id: str | None = None
     resident_interrupt_task: asyncio.Task[bool] | None = None
-    resident_quiescing: bool = False
-    memory_maintenance: bool = False
     memory_ingress_reservations: int = 0
     memory_control_reservations: int = 0
     memory_maintenance_changed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -54,6 +54,23 @@ class CoreRuntimeState(AgentTurnRuntimeState):
     compaction_tickets: dict[str, CompactionTicket] = field(default_factory=dict)
     detached_modules: set[str] = field(default_factory=set)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def resident_quiescing(self) -> bool:
+        return any(name == "quiescing" or name.startswith("quiescing:")
+                   for name in self.scheduler.state.barriers)
+
+    @resident_quiescing.setter
+    def resident_quiescing(self, enabled: bool) -> None:
+        self.scheduler.set_barrier("quiescing", enabled)
+
+    @property
+    def memory_maintenance(self) -> bool:
+        return "memory_maintenance" in self.scheduler.state.barriers
+
+    @memory_maintenance.setter
+    def memory_maintenance(self, enabled: bool) -> None:
+        self.scheduler.set_barrier("memory_maintenance", enabled)
 
     def __post_init__(self) -> None:
         if self.active_turn_id is None:

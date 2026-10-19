@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.core.runtime import PalCore
@@ -30,6 +30,7 @@ class CoreSnapshot:
     active_turns: int
     mode: str
     detached_modules: list[str]
+    scheduler: dict = field(default_factory=dict)
 
 
 @capability_node(
@@ -148,6 +149,7 @@ def inspect_core(provider: CoreIntrospectionProvider) -> CoreSnapshot:
         active_turns=len(core.state.active_turns),
         mode=core.state.mode,
         detached_modules=sorted(core.state.detached_modules),
+        scheduler=core.state.scheduler.snapshot(),
     )
 
 

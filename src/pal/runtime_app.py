@@ -198,7 +198,7 @@ class PalRuntimeApp:
 
     async def _checkpoint_for_shutdown_async(self) -> None:
         core = self.handle.core
-        core.state.resident_quiescing = True
+        core.state.scheduler.set_barrier("quiescing:shutdown", True)
         try:
             from pal.core.btw import cancel_btw
 

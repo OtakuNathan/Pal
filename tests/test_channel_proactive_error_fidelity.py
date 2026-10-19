@@ -98,6 +98,7 @@ def make_handler(repository=None):
     runner = ProactiveRunner(repository=repository)
     handler = ProactiveTriggerHandler(manager, runner)
     core = SimpleNamespace(state=SimpleNamespace(diagnostics=[]),
+        can_start_proactive_turn=lambda: True,
         turn_manager=SimpleNamespace(cleanup_interrupted=Mock()),
         run_turn_continuation_async=AsyncMock())
     continuation = SimpleNamespace(turn_id="job-turn")

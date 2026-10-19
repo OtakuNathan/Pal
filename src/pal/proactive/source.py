@@ -20,6 +20,8 @@ class ProactiveEventSource(EventSource):
             self.paused_for_memory = True
             return False
         self.manager.enqueue_due_triggers()
+        if core is not None and not core.can_start_proactive_turn():
+            return False
         return self.manager.trigger_mailbox.has_pending()
 
     def drain(self, context) -> list[EventEnvelope]:

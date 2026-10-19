@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 
@@ -90,9 +90,13 @@ class CompactionGate:
     asserts that when a lock object is supplied.
     """
 
-    def __init__(self, state: Any, *, transition_lock: Any | None = None) -> None:
+    def __init__(
+        self, state: Any, *, transition_lock: Any | None = None,
+        admission_barrier: Callable[[str, bool], None] | None = None,
+    ) -> None:
         self._state = state
         self._lock = transition_lock
+        self._admission_barrier = admission_barrier
 
     @property
     def lock(self) -> Any | None:
@@ -128,6 +132,10 @@ class CompactionGate:
             raise RuntimeError("runtime state does not expose compaction_tickets")
         return tickets
 
+    def _publish_barrier(self, ticket: CompactionTicket, enabled: bool) -> None:
+        if self._admission_barrier is not None:
+            self._admission_barrier(f"compact:{ticket.op_id}", enabled)
+
     def claim(
         self,
         scope: str,
@@ -149,12 +157,14 @@ class CompactionGate:
             # rejected by the commit guard, so a hung provider coroutine
             # cannot pin the scope forever.
             del tickets[scope_key]
+            self._publish_barrier(current, False)
         ticket = CompactionTicket(
             scope=scope_key,
             trigger=CompactionTrigger(trigger),
             deadline_seconds=deadline_seconds,
         )
         tickets[scope_key] = ticket
+        self._publish_barrier(ticket, True)
         return ticket
 
     def advance(self, ticket: CompactionTicket, phase: CompactionPhase) -> CompactionTicket | None:
@@ -165,6 +175,7 @@ class CompactionGate:
             return None
         updated = current.with_phase(phase)
         self._tickets()[ticket.scope] = updated
+        self._publish_barrier(updated, updated.phase != CompactionPhase.RELEASED)
         return updated
 
     def cancel(self, scope: str, *, reason: str) -> CompactionTicket | None:
@@ -196,6 +207,7 @@ class CompactionGate:
             return False
         self._tickets()[scope_key] = current.with_phase(CompactionPhase.RELEASED)
         del self._tickets()[scope_key]
+        self._publish_barrier(current, False)
         return True
 
 

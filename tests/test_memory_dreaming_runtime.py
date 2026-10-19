@@ -57,7 +57,9 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("turn failed")
         self.core._process_admitted_channel_turn_async = admitted
         with self.assertRaisesRegex(RuntimeError, "turn failed"):
-            await self.core.process_channel_turn_async(SimpleNamespace())
+            await self.core.process_channel_turn_async(SimpleNamespace(
+                event=SimpleNamespace(event_id="failed-direct-turn"),
+            ))
         self.assertEqual(self.core.state.memory_ingress_reservations, 0)
         self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
 

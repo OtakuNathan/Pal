@@ -603,9 +603,26 @@ def _validate_sendable_payload(payload: Mapping[str, Any]) -> None:
     if container is None:
         return
     open_calls: dict[str, str] = {}
+    anthropic_pending: set[str] = set()
     problems: list[str] = []
     for index, item in enumerate(payload[container]):
         events, placement = _item_tool_events(item)
+        if anthropic_pending:
+            results = {call_id for kind, call_id in events if kind == "result"}
+            missing = anthropic_pending - results
+            if missing:
+                problems.append(
+                    f"item[{index}]: tool_use requires tool_result in the immediately "
+                    f"following user message: {sorted(missing)}"
+                )
+        # Anthropic's Messages grammar is stricter than a globally balanced
+        # event trace. An intervening ordinary turn cannot split this group.
+        blocks = item.get("content") if isinstance(item, Mapping) else None
+        anthropic_pending = {
+            str(block.get("id") or "")
+            for block in (blocks if isinstance(blocks, (list, tuple)) else ())
+            if isinstance(block, Mapping) and block.get("type") == "tool_use"
+        }
         if placement:
             problems.extend(f"item[{index}]: {problem}" for problem in placement)
         for kind, call_id in events:

@@ -28,6 +28,11 @@ class ProactiveTriggerHandler(EventHandler):
         if definition is None:
             return []
         core = context.require_port("core:core")
+        # The source may have drained several events, or user input may have
+        # won admission since prepare(). Requeue without opening a turn/run.
+        if not core.can_start_proactive_turn():
+            self.manager.enqueue_trigger(event.payload)
+            return []
         try:
             continuation = self._build_continuation(core, event.payload, definition)
         except Exception as exc:
@@ -39,12 +44,14 @@ class ProactiveTriggerHandler(EventHandler):
                     exc.add_note("Creating the failed run record also failed:\n" + exception_report(recording_exc))
             self._record_failure(core, event.payload, None, run_id, exc)
             return []
-        task = asyncio.create_task(self._run_trigger_async(core, event.payload, continuation))
+        task = core.start_background_turn(
+            continuation, lambda: self._run_trigger_async(core, event.payload, continuation),
+        )
+        if task is None:
+            self.manager.enqueue_trigger(event.payload)
+            return []
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
-        # Register before returning to the event loop, which uses tracked tasks
-        # to decide whether there is still work to await.
-        core.track_turn_task(continuation, task)
         return []
 
     @staticmethod

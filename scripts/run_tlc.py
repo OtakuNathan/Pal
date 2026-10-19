@@ -87,6 +87,13 @@ def check_generated(group: str | None) -> list[str]:
         "foundation": ("spec/foundation/FdLeaseImplementationTopology.tla", render_fd_lease_implementation_topology),
     }
     checked = []
+    if group is None or group == "core":
+        from pal.core.scheduling import render_scheduling_topology
+
+        path = "spec/core/ResidentSchedulingTopology.tla"
+        if (ROOT / path).read_text() != render_scheduling_topology():
+            raise ValueError(f"Generated implementation model is stale: {path}")
+        checked.append(path)
     for name, (path, render) in renderers.items():
         if group is not None and group != name:
             continue

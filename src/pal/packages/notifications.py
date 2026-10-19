@@ -131,9 +131,9 @@ class PackageCompletionSource:
                     self.claimed.discard(job_id)
 
     def _idle(self):
-        state = self.core.state
-        return not (state.resident_quiescing or state.memory_maintenance or state.active_turns or state.pending_channel_turns
-                    or any(not task.done() for task in state.turn_tasks.values()))
+        from pal.core.scheduling import ResidentTurnKind
+
+        return not self.core.resident_admission_reason(ResidentTurnKind.BACKGROUND)
 
     def prepare(self, context):
         with self.lock:
@@ -179,12 +179,19 @@ class PackageCompletionSource:
             opening = EventEnvelope(event_kind=EVENT, source_kind="packages", payload=message, event_id=identity)
             continuation = TurnContinuation(turn_id=identity, opening_event=opening, delivery_binding=binding,
                 program=completion_program(opening, **core.turn_execution_options()), correlation_id=opening_turn)
-            task = asyncio.create_task(self._run(job_id, continuation))
+            from pal.core.scheduling import ResidentTurnKind
+
+            task = core.start_background_turn(
+                continuation, lambda: self._run(job_id, continuation),
+                kind=ResidentTurnKind.BACKGROUND,
+            )
+            if task is None:
+                with self.lock:
+                    self.started.discard(job_id)
+                    self.claimed.discard(job_id)
+                return []
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
-            core.state.active_turn_id = identity
-            core.state.resident_drained_event.clear()
-            core.track_turn_task(continuation, task)
         return []
 
     async def _run(self, job_id, continuation):
@@ -211,8 +218,6 @@ class PackageCompletionSource:
                 self.started.discard(job_id)
             core.state.active_turns.pop(continuation.turn_id, None)
             core.turn_manager._mark_turn_exited(continuation.turn_id)
-            if not self.closed:
-                await core._start_next_queued_turn_async()
             core.notify_ready()
 
     def close(self):

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.foundation.log_paths import pal_debug_log_path
+from pal.core.contracts import CoreRuntimeState
 
 _SENSITIVE_KEY_PARTS = (
     "api_key",
@@ -182,6 +183,7 @@ def _core_state_snapshot(state: Any) -> dict[str, Any]:
     control_scopes = getattr(state, "control_scopes", {}) or {}
     return {
         "active_turn_count": len(active_turns),
+        "scheduler": state.scheduler.snapshot() if isinstance(state, CoreRuntimeState) else {},
         "active_turns": [_turn_snapshot(turn_id, continuation) for turn_id, continuation in active_turns.items()],
         "active_turn_id": str(getattr(state, "active_turn_id", "") or ""),
         "resident_quiescing": bool(getattr(state, "resident_quiescing", False)),

@@ -2078,8 +2078,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         (emitted_topic, dict(event))
                     ),
                 )
-            task = asyncio.create_task(asyncio.sleep(60))
-            core.track_turn_task(continuation, task)
+            task = core.start_background_turn(continuation, lambda: asyncio.sleep(60))
+            self.assertIsNotNone(task)
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task

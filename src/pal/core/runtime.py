@@ -10,7 +10,7 @@ from collections import deque
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from pal.control import interactions as control_interactions
@@ -36,6 +36,9 @@ from pal.core.cache_warm_deadline import (
     CacheWarmDeadlineNotice,
 )
 from pal.core.contracts import CoreRuntimeState
+from pal.core.scheduling import (
+    CoreTurnPhase, ResidentTurnKind, SchedulingEvent, TurnLease, admission_reason,
+)
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.dispatcher import EventDispatcher
 from pal.core.failure_orchestrator import FailureHandlingResult, FailureOrchestrator
@@ -149,6 +152,9 @@ class TurnManager:
             continuation.waiting_effect_id = effect.effect_id
             return effect
         except StopIteration as stop:
+            lease = self.state.scheduler.state.owner
+            if lease is not None and lease.turn_id == continuation.turn_id:
+                self.state.scheduler.transition(SchedulingEvent.PROGRAM_FINISHED, lease=lease)
             self.state.active_turns.pop(continuation.turn_id, None)
             outcome = stop.value
             self.state.completed_turns[continuation.turn_id] = outcome
@@ -182,6 +188,9 @@ class TurnManager:
         current_task = asyncio.current_task()
         try:
             continuation = self.state.active_turns.get(turn_id)
+            lease = self.state.scheduler.state.owner
+            if lease is not None and lease.turn_id == turn_id:
+                self.state.scheduler.transition(SchedulingEvent.CANCEL, lease=lease)
             if isinstance(continuation, TurnContinuation):
                 continuation.interrupted = True
                 continuation.interrupt_reason = reason
@@ -323,6 +332,10 @@ class TurnManager:
         }
 
     def latest_active_turn_id(self) -> str | None:
+        lease = self.state.scheduler.state.owner
+        if lease is not None:
+            self.state.resident_drained_event.clear()
+            return lease.turn_id
         turn_id = self.state.active_turn_id
         if turn_id and self._is_turn_live(turn_id):
             self.state.resident_drained_event.clear()
@@ -343,7 +356,10 @@ class TurnManager:
 
     def _mark_turn_exited(self, turn_id: str) -> None:
         self.context.execution_runtime.execution_sessions.clear_visible_results(turn_id)
-        if self.state.active_turn_id == turn_id:
+        lease = self.state.scheduler.state.owner
+        if lease is not None and lease.turn_id == turn_id:
+            self.state.scheduler.transition(SchedulingEvent.PROGRAM_FINISHED, lease=lease)
+        elif self.state.active_turn_id == turn_id:
             self.state.active_turn_id = None
             self.state.resident_drained_event.set()
         self.state.turn_scopes.pop(turn_id, None)
@@ -353,6 +369,7 @@ class TurnManager:
 class MainLoop:
     queue: deque[EventEnvelope] = field(default_factory=deque)
     dispatcher: EventDispatcher = field(default_factory=EventDispatcher)
+    schedule_pending: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
     _wakeup_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _wakeup_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
 
@@ -418,6 +435,10 @@ class MainLoop:
             if inspect.isawaitable(result):
                 await result
         self.drain_ready_sources(context)
+        # Completion callbacks only release ownership and wake the pump. Queue
+        # admission is a core action, never an asynchronous task's finally.
+        if self.schedule_pending is not None:
+            await self.schedule_pending()
         envelope = self.pop()
         if envelope is None:
             return None
@@ -520,6 +541,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     _btw_turn: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.main_loop.schedule_pending = self._start_next_queued_turn_async
         self.turn_manager = TurnManager(
             context=self.context,
             state=self.state,
@@ -630,6 +652,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         return CompactionGate(
             self.state,
             transition_lock=self.state.channel_turn_transition_lock,
+            admission_barrier=self.state.scheduler.set_barrier,
         )
 
     def _compaction_gate_active(self) -> bool:
@@ -638,6 +661,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     async def _inject_pending_for_executor_async(self, continuation) -> bool:
         from pal.core.interjection import inject_pending_interjection_async
 
+        owner = self.state.scheduler.state.owner
+        if owner is not None and owner.kind == ResidentTurnKind.PROACTIVE:
+            return False
         before = len(self.state.pending_channel_turns)
         await inject_pending_interjection_async(
             context=self.context,
@@ -864,10 +890,90 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             control_scope_key=self._derive_channel_control_scope_key(channel_envelope),
         )
 
+    def _resident_other_work(self) -> bool:
+        # /btw reads a captured L in its own branch; it is not a resident
+        # writer. Legacy/stub hosts with live records still fail admission.
+        return bool(
+            any(key != self.state.btw_turn_id for key in self.state.active_turns)
+            or any(key != self.state.btw_turn_id and not task.done()
+                   for key, task in self.state.turn_tasks.items())
+        )
+
+    def _pending_user_work(self) -> bool:
+        # The pump drains ALL ready sources before invoking any handler.
+        # Source preparation is advisory; actual admission sees the normalized
+        # user events already in the pump, irrespective of source ordering.
+        return bool(
+            self.state.pending_channel_turns or self.state.memory_ingress_reservations
+            or any(event.event_kind == EventKind.USER_MESSAGE for event in self.main_loop.queue)
+        )
+
+    def resident_admission_reason(self, kind: ResidentTurnKind = ResidentTurnKind.CHAT) -> str:
+        if self._compaction_gate_active():
+            return "compaction"
+        return admission_reason(
+            self.state.scheduler.state, kind,
+            pending_users=self._pending_user_work() if kind != ResidentTurnKind.CHAT else False,
+            other_work=self._resident_other_work(),
+        )
+
+    def can_start_proactive_turn(self) -> bool:
+        return not self.resident_admission_reason(ResidentTurnKind.PROACTIVE)
+
+    def _admit_resident_turn(self, turn_id: str, kind: ResidentTurnKind) -> TurnLease | None:
+        if self._compaction_gate_active():
+            return None
+        decision = self.state.scheduler.transition(
+            SchedulingEvent.ADMIT, turn_id=turn_id, kind=kind,
+            pending_users=self._pending_user_work() if kind != ResidentTurnKind.CHAT else False,
+            other_work=self._resident_other_work(),
+        )
+        if not decision.accepted:
+            return None
+        self.turn_manager._remember_active_turn(turn_id)
+        return decision.state.owner
+
+    def _finish_resident_turn(self, lease: TurnLease) -> None:
+        scheduler = self.state.scheduler
+        scheduler.transition(SchedulingEvent.PROGRAM_FINISHED, lease=lease)
+        if scheduler.transition(SchedulingEvent.TASK_FINISHED, lease=lease).accepted:
+            if self.state.active_turn_id == lease.turn_id:
+                self.state.active_turn_id = None
+            self.state.resident_drained_event.set()
+            self.notify_ready()
+
+    def start_background_turn(
+        self, continuation: TurnContinuation, run: Callable, *,
+        kind: ResidentTurnKind = ResidentTurnKind.PROACTIVE,
+    ) -> asyncio.Task | None:
+        """Reserve before starting any asynchronous producer or opening L1."""
+        lease = self._admit_resident_turn(continuation.turn_id, kind)
+        if lease is None:
+            return None
+        coroutine = None
+        task = None
+        try:
+            coroutine = run()
+            task = asyncio.create_task(coroutine)
+            self.track_turn_task(continuation, task, lease=lease)
+            return task
+        except BaseException:
+            if task is not None:
+                # A failed registration still owns a scheduled coroutine.
+                # Cancel it and keep the slot until cancellation is observed.
+                task.cancel()
+                task.add_done_callback(lambda finished:
+                                       self._on_turn_task_done(lease.turn_id, finished, lease=lease))
+            elif coroutine is not None:
+                coroutine.close()
+            if task is None:
+                self._finish_resident_turn(lease)
+            raise
+
     def _start_channel_turn_task_locked(
         self,
         channel_envelope: ChannelEnvelope,
-    ) -> asyncio.Task[Any]:
+    ) -> asyncio.Task[Any] | None:
         delivery_binding = channel_envelope.opening_delivery_binding
         if delivery_binding is None:
             control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
@@ -877,6 +983,21 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             )
         control_scope_key = delivery_binding.control_scope_key
         turn_id = channel_envelope.event.event_id
+        lease = self._admit_resident_turn(turn_id, ResidentTurnKind.CHAT)
+        if lease is None:
+            return None
+        self.state.turn_scopes[turn_id] = control_scope_key
+        coroutine = self._background_channel_turn_runner_async(channel_envelope)
+        try:
+            task = asyncio.create_task(coroutine)
+        except BaseException:
+            coroutine.close()
+            self.state.turn_scopes.pop(turn_id, None)
+            self._finish_resident_turn(lease)
+            raise
+        self.state.turn_tasks[turn_id] = task
+        task.add_done_callback(lambda finished, owner=lease:
+                              self._on_channel_turn_task_done(channel_envelope, finished, lease=owner))
         self.context.turn_event_bus.emit(TURN_START, {
             "turn_id": turn_id,
             "scope_key": control_scope_key,
@@ -884,26 +1005,21 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             "channel_kind": channel_envelope.endpoint.channel_kind,
             "reply_target": dict(channel_envelope.response_handle.reply_target),
         })
-        self.turn_manager._remember_active_turn(turn_id)
-        self.state.turn_scopes[turn_id] = control_scope_key
-        task = asyncio.create_task(self._background_channel_turn_runner_async(channel_envelope))
-        self.state.turn_tasks[turn_id] = task
-        task.add_done_callback(lambda finished, current_turn_id=turn_id: self._on_turn_task_done(current_turn_id, finished))
         return task
 
     async def _start_next_queued_turn_async(self) -> None:
         async with self.state.channel_turn_transition_lock:
-            if self.state.resident_quiescing or self._compaction_gate_active():
-                return
-            if self.turn_manager.latest_active_turn_id() is not None:
+            if self.resident_admission_reason():
                 return
             while self.state.pending_channel_turns:
-                pending = self.state.pending_channel_turns.popleft()
+                pending = self.state.pending_channel_turns[0]
                 next_envelope = await self._prepare_channel_turn_async(pending)
                 next_turn_id = next_envelope.event.event_id
                 if self._turn_task_running(next_turn_id):
+                    self.state.pending_channel_turns.popleft()
                     continue
-                self._start_channel_turn_task_locked(next_envelope)
+                if self._start_channel_turn_task_locked(next_envelope) is not None:
+                    self.state.pending_channel_turns.popleft()
                 return
 
     async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
@@ -933,11 +1049,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 # already queued: nothing to do. The active turn's
                 # working/typing status must keep running.
                 return
-            if (
-                self.state.resident_quiescing
-                or self._compaction_gate_active()
-                or self.turn_manager.latest_active_turn_id() is not None
-            ):
+            if self.resident_admission_reason() or self.state.pending_channel_turns:
                 # Busy: queue the envelope.
                 # The active turn keeps its typing status; working_stop is
                 # only emitted when that turn actually ends (turn.end /
@@ -964,6 +1076,8 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         self,
         channel_envelope: ChannelEnvelope,
     ) -> TurnOutcome:
+        turn_id = channel_envelope.event.event_id
+        tracked = self.state.turn_tasks.get(turn_id) is asyncio.current_task()
         async with self.state.channel_turn_transition_lock:
             if (
                 self.state.resident_quiescing
@@ -973,12 +1087,24 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 raise RuntimeError(
                     "resident runtime is quiescing, dreaming, or compacting"
                 )
+            lease = self.state.scheduler.state.owner if tracked else self._admit_resident_turn(
+                turn_id, ResidentTurnKind.CHAT,
+            )
+            if lease is None or lease.turn_id != turn_id:
+                raise RuntimeError("resident turn admission is busy")
             self.state.memory_ingress_reservations += 1
         try:
             return await self._process_admitted_channel_turn_async(channel_envelope)
+        except BaseException:
+            if not tracked:
+                self.turn_manager.cleanup_interrupted(turn_id, reason="failed")
+            raise
         finally:
             self.state.memory_ingress_reservations -= 1
             self.state.memory_maintenance_changed.set()
+            if not tracked:
+                self._finish_resident_turn(lease)
+                await self._start_next_queued_turn_async()
 
     async def _process_admitted_channel_turn_async(
         self, channel_envelope: ChannelEnvelope,
@@ -1009,7 +1135,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             "max_output_tokens": self.turn_manager._resolve_max_output_tokens(),
         }
 
-    def track_turn_task(self, continuation: TurnContinuation, task: asyncio.Task[Any]) -> None:
+    def track_turn_task(
+        self, continuation: TurnContinuation, task: asyncio.Task[Any], *, lease: TurnLease,
+    ) -> None:
+        if lease != self.state.scheduler.state.owner or lease.turn_id != continuation.turn_id:
+            raise RuntimeError("tracked resident task requires its admission lease")
         binding = continuation.delivery_binding
         if binding is not None:
             if not continuation.control_scope_key:
@@ -1027,6 +1157,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             lambda finished, current_continuation=continuation: self._on_tracked_turn_task_done(
                 current_continuation,
                 finished,
+                lease=lease,
             )
         )
 
@@ -1055,7 +1186,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         self,
         continuation: TurnContinuation,
         task: asyncio.Task[Any],
+        *, lease: TurnLease,
     ) -> None:
+        if lease != self.state.scheduler.state.owner:
+            self._on_turn_task_done(continuation.turn_id, task, lease=lease)
+            return
         status = "success"
         if task.cancelled():
             status = "interrupted"
@@ -1084,11 +1219,20 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 "status": status,
             },
         )
-        self._on_turn_task_done(continuation.turn_id, task)
+        self._on_turn_task_done(continuation.turn_id, task, lease=lease)
 
     async def run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
         # Tracked callers already own paired events through their task callback.
         owns_events = self.state.turn_tasks.get(continuation.turn_id) is not asyncio.current_task()
+        lease = self.state.scheduler.state.owner
+        if owns_events:
+            kind = (ResidentTurnKind.PROACTIVE
+                    if continuation.opening_event is not None
+                    and continuation.opening_event.event_kind == EventKind.PROACTIVE_TRIGGER
+                    else ResidentTurnKind.CHAT)
+            lease = self._admit_resident_turn(continuation.turn_id, kind)
+        if lease is None or lease.turn_id != continuation.turn_id:
+            raise RuntimeError("resident turn admission is busy")
         payload = self._tracked_turn_event_payload(continuation)
         if owns_events:
             self.context.turn_event_bus.emit(TURN_START, payload)
@@ -1104,7 +1248,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             raise
         finally:
             if owns_events:
+                if continuation.turn_id in self.state.active_turns:
+                    self.turn_manager.cleanup_interrupted(continuation.turn_id, reason=status)
                 self.context.turn_event_bus.emit(TURN_END, {**payload, "status": status})
+                self._finish_resident_turn(lease)
+                await self._start_next_queued_turn_async()
 
     def _begin_tool_result_turn(self, continuation: TurnContinuation) -> None:
         bind = getattr(self.context.execution_runtime, "bind_result_history", None)
@@ -1166,14 +1314,38 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     schedule_timer=not self.state.pending_channel_turns,
                 )
             self._queue_channel_status(channel_envelope, "working_stop", {"typing_owner": f"turn:{turn_id}"})
-            await self._start_next_queued_turn_async()
+            # The done callback releases the lease AFTER this finally exits.
+            self.notify_ready()
 
-    def _on_turn_task_done(self, turn_id: str, task: asyncio.Task[Any]) -> None:
+    def _on_channel_turn_task_done(
+        self, envelope: ChannelEnvelope, task: asyncio.Task[Any], *, lease: TurnLease,
+    ) -> None:
+        turn_id = envelope.event.event_id
+        # A task cancelled before its first coroutine step never enters the
+        # runner's finally. Close its presentation and reservation here too.
+        if lease == self.state.scheduler.state.owner and turn_id in self.state.turn_scopes:
+            self.turn_manager.cleanup_interrupted(turn_id, reason="interrupted" if task.cancelled() else "failed")
+            self.context.turn_event_bus.emit(TURN_END, {
+                "turn_id": turn_id,
+                "scope_key": self._delivery_binding_for_envelope(envelope).control_scope_key,
+                "endpoint_id": envelope.endpoint.endpoint_id,
+                "channel_kind": envelope.endpoint.channel_kind,
+                "reply_target": dict(envelope.response_handle.reply_target),
+                "status": "interrupted" if task.cancelled() else "failed",
+            })
+            self._queue_channel_status(envelope, "working_stop", {"typing_owner": f"turn:{turn_id}"})
+        self._on_turn_task_done(turn_id, task, lease=lease)
+
+    def _on_turn_task_done(
+        self, turn_id: str, task: asyncio.Task[Any], *, lease: TurnLease | None = None,
+    ) -> None:
         stored = self.state.turn_tasks.get(turn_id)
         if stored is task:
             self.state.turn_tasks.pop(turn_id, None)
         with contextlib.suppress(asyncio.CancelledError, Exception):
             task.result()
+        if lease is not None:
+            self._finish_resident_turn(lease)
         self.notify_ready()
 
     async def handle_control_action_async(self, action: ControlAction, *, require_provider: bool = False) -> bool | None:
@@ -1350,6 +1522,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             activity = "quiescing (preparing to stop)"
         elif self.state.memory_maintenance:
             activity = "memory_maintenance (sleeping)"
+        elif self.state.scheduler.state.phase == CoreTurnPhase.FINALIZING:
+            activity = "finalizing (finishing a turn)"
+        elif self.state.scheduler.state.owner is not None:
+            activity = "in_turn (processing a turn)"
         elif active_turns:
             activity = "in_turn (processing a turn)"
         elif queued_messages:
@@ -1703,7 +1879,8 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         async with self.state.channel_turn_transition_lock:
             if self.state.resident_quiescing:
                 return False
-            self.state.resident_quiescing = True
+            reset_barrier = "quiescing:reset:" + uuid4().hex
+            self.state.scheduler.set_barrier(reset_barrier, True)
             self._invalidate_model_selections()
             # Two-segment admission: a confirmed reset seizes the history
             # root's live run first (X04/X05); the owner cancels it before
@@ -1716,11 +1893,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             current_turn_id = self.turn_manager.latest_active_turn_id()
             if current_turn_id is None:
                 self.state.resident_drained_event.set()
-        if current_turn_id is not None:
-            await self.turn_manager.interrupt_active_turn(reason="reset")
         from pal.core.btw import cancel_btw
 
         try:
+            if current_turn_id is not None:
+                await self.turn_manager.interrupt_active_turn(reason="reset")
             await cancel_btw(self)
             try:
                 await asyncio.wait_for(
@@ -1763,7 +1940,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             return True
         finally:
             async with self.state.channel_turn_transition_lock:
-                self.state.resident_quiescing = False
+                self.state.scheduler.set_barrier(reset_barrier, False)
                 self.state.resident_drained_event.set()
             await self._start_next_queued_turn_async()
 

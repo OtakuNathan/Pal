@@ -67,6 +67,15 @@ Interaction rule:
 - turn computations yield effect requests and are resumed by `PalCore`
 - `MainLoop` drains mailbox-backed sources after async wakeups rather than
   pulling module-private queues on an idle timer
+- resident chat, proactive and background completion turns share the
+  synchronous scheduler reducer in `scheduling.py`; ownership lasts through
+  task teardown, including post-commit I/O and cancellation. Proactive waits
+  in its trigger mailbox while busy and yields to queued user input.
+- scheduler phases and orthogonal admission barriers are the authority for
+  resident admission. `/btw` reads a captured immutable L in its transient
+  branch and does not claim the resident writer slot. See
+  [resident scheduling](../../../docs/core_turn_scheduling.md) for the model,
+  transition boundaries and verification scope.
 - resident reset interrupts the active turn, preserves already queued channel
   messages, and resets module-owned runtime state through their registered
   runtime-state ports before the same mailbox resumes

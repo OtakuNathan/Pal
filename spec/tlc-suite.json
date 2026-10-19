@@ -659,6 +659,51 @@
       "module": "spec/llm/RoundSubmission.tla",
       "kind": "negative",
       "invariant": "NativeRetained"
+    },
+    {
+      "config": "spec/core/ResidentTurnScheduling.cfg",
+      "module": "spec/core/ResidentTurnScheduling.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/core/ResidentTurnSchedulingConcurrent.cfg",
+      "module": "spec/core/ResidentTurnScheduling.tla",
+      "kind": "negative",
+      "invariant": "SingleResidentTurn"
+    },
+    {
+      "config": "spec/core/ResidentTurnSchedulingEarlyIdle.cfg",
+      "module": "spec/core/ResidentTurnScheduling.tla",
+      "kind": "negative",
+      "invariant": "OwnershipUntilTeardown"
+    },
+    {
+      "config": "spec/core/ResidentTurnSchedulingForeignHistory.cfg",
+      "module": "spec/core/ResidentTurnScheduling.tla",
+      "kind": "negative",
+      "invariant": "StableHistoryView"
+    },
+    {
+      "config": "spec/core/ResidentSchedulingTopology.cfg",
+      "module": "spec/core/ResidentSchedulingTopology.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/core/ResidentTurnSchedulingLive.cfg",
+      "module": "spec/core/ResidentTurnScheduling.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/core/ResidentTurnSchedulingStaleCompletion.cfg",
+      "module": "spec/core/ResidentTurnScheduling.tla",
+      "kind": "negative",
+      "invariant": "OwnershipUntilTeardown"
+    },
+    {
+      "config": "spec/core/ResidentTurnSchedulingBarrierRelease.cfg",
+      "module": "spec/core/ResidentTurnScheduling.tla",
+      "kind": "negative",
+      "invariant": "BarrierOwnership"
     }
   ],
   "support_modules": [

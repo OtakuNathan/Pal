@@ -20,6 +20,12 @@ Exposes:
 
 ## Context and handoff
 
+Triggers wait in the existing mailbox until core admits a resident turn.
+Running/finalizing chat, dreaming, quiescence and compaction apply backpressure;
+pending user input has priority. Admission is rechecked after event dispatch.
+No run record, L1 turn or user reply is created before admission. While a
+proactive turn runs, new user input remains queued for the next chat turn.
+
 Each run uses a new model-cache scope and sees only its trigger and its own
 active L1 turn. It does not consume queued user interjections or reuse the
 resident history projection, including the projection's left-history bootstrap.

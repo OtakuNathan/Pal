@@ -2151,7 +2151,10 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         # so its typing status must stay up while turn-queue-2 waits.
         self.assertNotIn("working_stop", [item.kind for item in self.endpoint.status_outbox])
 
+        first_task = self.core.state.turn_tasks["turn-queue-1"]
         first_release.set()
+        await asyncio.wait_for(first_task, timeout=1.0)
+        await self.core.drain_once_async()
         await asyncio.wait_for(second_started.wait(), timeout=1.0)
 
         self.assertEqual(started, ["turn-queue-1", "turn-queue-2"])
@@ -2197,7 +2200,10 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.core.state.pending_channel_turns), 1)
         self.assertNotIn("turn-scope-2", self.core.state.turn_tasks)
 
+        first_task = self.core.state.turn_tasks["turn-scope-1"]
         first_release.set()
+        await asyncio.wait_for(first_task, timeout=1.0)
+        await self.core.drain_once_async()
         await asyncio.wait_for(second_started.wait(), timeout=1.0)
         self.assertEqual(started, ["turn-scope-1", "turn-scope-2"])
         self.assertEqual(self.core.state.active_turn_id, "turn-scope-2")

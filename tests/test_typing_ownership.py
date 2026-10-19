@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 from pal.channel.capabilities import TypingSubscriber
 from pal.core import PalCore
+from pal.core.scheduling import ResidentTurnKind
 from pal.core.turn_events import TURN_END, TURN_START
 
 
@@ -47,6 +48,8 @@ class ContinuationTypingTests(IsolatedAsyncioTestCase):
         for topic in (TURN_START, TURN_END):
             core.context.turn_event_bus.subscribe(topic, lambda topic, event: events.append(topic))
         continuation = SimpleNamespace(turn_id="tracked", delivery_binding=None, opening_event=None, control_scope_key="")
+        lease = core._admit_resident_turn("tracked", ResidentTurnKind.CHAT)
+        self.assertIsNotNone(lease)
         core.state.turn_tasks["tracked"] = asyncio.current_task()
         core._begin_tool_result_turn = Mock()
         core._run_turn_continuation_async = AsyncMock(return_value="done")
@@ -56,6 +59,7 @@ class ContinuationTypingTests(IsolatedAsyncioTestCase):
         finally:
             core.state.turn_tasks.clear()
             core.state.active_turns.clear()
+            core._finish_resident_turn(lease)
             core.close()
 
 

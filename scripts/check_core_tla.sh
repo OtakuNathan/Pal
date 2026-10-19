@@ -12,7 +12,7 @@ if [[ -z "${tla_jar}" || ! -f "${tla_jar}" ]]; then
 fi
 
 cd "${repo_root}"
-for model in RuntimeProjectionLifecycle PluginPublicationLifecycle; do
+for model in RuntimeProjectionLifecycle PluginPublicationLifecycle ResidentTurnScheduling ResidentSchedulingTopology; do
     java -XX:+UseParallelGC -jar "${tla_jar}" \
         -workers "${workers}" \
         -cleanup \
