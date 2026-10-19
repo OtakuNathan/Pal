@@ -14,7 +14,25 @@ from pal.lsp.config import LspServerConfig
 
 
 class LspProtocolError(RuntimeError):
-    pass
+    """A language server returned a JSON-RPC error, or its transport failed.
+
+    Keeping the JSON-RPC ``code``, ``data`` and the originating ``method`` lets
+    callers tell a deterministic rejection (method not implemented, invalid
+    params) from a transport failure that is worth retrying.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int | None = None,
+        data: Any = None,
+        method: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
+        self.method = method
 
 
 @dataclass
@@ -153,6 +171,12 @@ class AsyncLspConnector:
         try:
             await self._write({"jsonrpc": "2.0", "id": ident, "method": method, "params": dict(params or {})})
             return await asyncio.wait_for(future, timeout=max(0.1, self.config.request_timeout_ms / 1000))
+        except LspProtocolError as exc:
+            if exc.method is None:
+                # A transport failure is shared by all pending requests. Keep
+                # method attribution local to this request.
+                raise LspProtocolError(str(exc), code=exc.code, data=exc.data, method=method) from exc
+            raise
         finally:
             self._pending.pop(ident, None)
 
@@ -241,7 +265,16 @@ class AsyncLspConnector:
         if future is None or future.done():
             return
         if message.get("error"):
-            future.set_exception(LspProtocolError(str(message.get("error"))))
+            error = message.get("error")
+            payload = error if isinstance(error, dict) else {"message": str(error)}
+            code = payload.get("code")
+            future.set_exception(
+                LspProtocolError(
+                    str(payload.get("message") or error),
+                    code=code if isinstance(code, int) else None,
+                    data=payload.get("data"),
+                )
+            )
             return
         result = message.get("result")
         future.set_result(dict(result or {}) if isinstance(result, dict) else {"value": result})

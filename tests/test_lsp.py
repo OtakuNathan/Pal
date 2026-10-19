@@ -132,6 +132,62 @@ class LspConnectorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
+    async def test_response_error_preserves_code_data_and_request_method(self) -> None:
+        class ErrorConnector(AsyncLspConnector):
+            @property
+            def healthy(self) -> bool:
+                return True
+
+            async def _write(self, payload: dict) -> None:
+                await self._dispatch_message({
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "error": {"code": -32602, "message": "invalid position", "data": {"line": 12}},
+                })
+
+        connector = ErrorConnector(
+            LspServerConfig(server_id="fake", command=(sys.executable,)),
+            workspace_root=self.root,
+        )
+        with self.assertRaises(LspProtocolError) as raised:
+            await connector.request("textDocument/hover", {})
+        self.assertEqual(str(raised.exception), "invalid position")
+        self.assertEqual(raised.exception.code, -32602)
+        self.assertEqual(raised.exception.data, {"line": 12})
+        self.assertEqual(raised.exception.method, "textDocument/hover")
+        self.assertEqual(connector._pending, {})
+
+    async def test_shared_transport_error_keeps_each_request_method(self) -> None:
+        ready = asyncio.Event()
+
+        class WaitingConnector(AsyncLspConnector):
+            @property
+            def healthy(self) -> bool:
+                return True
+
+            async def _write(self, payload: dict) -> None:
+                if len(self._pending) == 2:
+                    ready.set()
+
+        connector = WaitingConnector(
+            LspServerConfig(server_id="fake", command=(sys.executable,)),
+            workspace_root=self.root,
+        )
+        methods = ("textDocument/hover", "textDocument/references")
+        requests = asyncio.gather(
+            *(connector.request(method, {}) for method in methods), return_exceptions=True
+        )
+        await asyncio.wait_for(ready.wait(), timeout=1)
+        failure = LspProtocolError("server stdout closed")
+        connector._fail_pending(failure)
+        errors = await requests
+        for method, error in zip(methods, errors):
+            self.assertIsInstance(error, LspProtocolError)
+            self.assertEqual(error.method, method)
+            self.assertEqual(str(error), "server stdout closed")
+        self.assertIsNone(failure.method)
+        self.assertEqual(connector._pending, {})
+
     async def test_initialize_drains_large_stderr_output(self) -> None:
         server = self.root / "fake_lsp.py"
         server.write_text(
@@ -1349,62 +1405,65 @@ language_ids = ["foo"]
         self.assertEqual(len(attempts), 2)
 
     async def test_protocol_failure_restarts_workspace_session_once(self) -> None:
-        workspace = self.root / "restartable"
-        workspace.mkdir()
-        initialized: list[int] = []
-        closed: list[int] = []
-        instances: list[object] = []
+        for code in (None, -32800, -32801, -32802, -32002):
+            with self.subTest(code=code):
+                workspace = self.root / "restartable"
+                workspace.mkdir(exist_ok=True)
+                initialized: list[int] = []
+                closed: list[int] = []
+                instances: list[object] = []
 
-        class RestartingConnector(_ConnectorDiagnostics):
-            def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
-                _ = config
-                self.workspace_root = workspace_root
-                self.index = len(instances)
-                self.healthy = True
-                instances.append(self)
+                class RestartingConnector(_ConnectorDiagnostics):
+                    def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
+                        _ = config
+                        self.workspace_root = workspace_root
+                        self.index = len(instances)
+                        self.healthy = True
+                        instances.append(self)
 
-            async def initialize(self) -> None:
-                initialized.append(self.index)
+                    async def initialize(self) -> None:
+                        initialized.append(self.index)
 
-            async def request(self, method: str, params: dict) -> dict:
-                _ = method, params
-                if self.index == 0:
-                    self.healthy = False
-                    raise LspProtocolError("server stdout closed")
-                return {"value": [{"name": "route"}]}
+                    async def request(self, method: str, params: dict) -> dict:
+                        _ = method, params
+                        if self.index == 0:
+                            self.healthy = False
+                            raise LspProtocolError("recoverable failure", code=code)
+                        return {"value": [{"name": "route"}]}
 
-            async def close(self) -> FdCloseOutcome:
-                closed.append(self.index)
-                return FdCloseOutcome.detached()
+                    async def close(self) -> FdCloseOutcome:
+                        closed.append(self.index)
+                        return FdCloseOutcome.detached()
 
-        state = LspServerState(
-            file_config=LspServerFileConfig(
-                config=LspServerConfig(
-                    server_id="fake_python",
-                    command=(sys.executable,),
-                    extensions=(".py",),
-                    language_ids=("python",),
-                ),
-                source="test",
-                config_path=str(self.root / "fake.toml"),
-            ),
-            config_path=self.root / "fake.toml",
-        )
-        self.manager.states[state.server_id] = state
+                state = LspServerState(
+                    file_config=LspServerFileConfig(
+                        config=LspServerConfig(
+                            server_id="fake_python",
+                            command=(sys.executable,),
+                            extensions=(".py",),
+                            language_ids=("python",),
+                        ),
+                        source="test",
+                        config_path=str(self.root / "fake.toml"),
+                    ),
+                    config_path=self.root / "fake.toml",
+                )
+                self.manager.states[state.server_id] = state
 
-        with _patch_lsp_connector(RestartingConnector):
-            result = await self.manager.run_lsp_operation(
-                "workspace_symbols",
-                {
-                    "server_id": "fake_python",
-                    "workspace_root": str(workspace),
-                    "query": "route",
-                },
-            )
+                with _patch_lsp_connector(RestartingConnector):
+                    result = await self.manager.run_lsp_operation(
+                        "workspace_symbols",
+                        {
+                            "server_id": "fake_python",
+                            "workspace_root": str(workspace),
+                            "query": "route",
+                        },
+                    )
 
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(initialized, [0, 1])
-        self.assertEqual(closed, [0])
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(initialized, [0, 1])
+                self.assertEqual(closed, [0])
+                await self.manager.close_all()
 
     async def test_extended_operations_use_fixed_lsp_methods(self) -> None:
         sample = self.root / "sample.py"
@@ -1487,6 +1546,76 @@ language_ids = ["foo"]
         self.assertEqual(incoming["result"]["items"][0]["name"], "target")
         self.assertEqual(incoming["result"]["calls"][0]["calls"][0]["from"]["name"], "caller")
         self.assertEqual(outgoing["result"]["calls"][0]["calls"][0]["to"]["name"], "dependency")
+
+    async def test_json_rpc_error_is_reported_verbatim_without_restart(self) -> None:
+        sample = self.root / "sample.py"
+        sample.write_text("def target():\n    return 1\n", encoding="utf-8")
+
+        class FakeConnector(_ConnectorDiagnostics):
+            def __init__(self, workspace_root: Path) -> None:
+                self.workspace_root = workspace_root
+                self.requests: list[str] = []
+                self.close_calls = 0
+
+            async def ensure_document_open(self, file_path: Path, *, language_id: str) -> dict:
+                _ = language_id
+                return {
+                    "uri": file_path.resolve().as_uri(),
+                    "file_sha256": "fake-sha",
+                    "text": file_path.read_text(encoding="utf-8"),
+                }
+
+            async def request(self, method: str, params: dict) -> dict:
+                self.requests.append(method)
+                if method == "textDocument/prepareCallHierarchy":
+                    return {"value": [{"name": "target", "kind": 12, "uri": params["textDocument"]["uri"]}]}
+                if method == "callHierarchy/outgoingCalls":
+                    raise LspProtocolError("method not found", code=-32601, method=method)
+                raise AssertionError(f"unexpected LSP method: {method}")
+
+            async def close(self) -> FdCloseOutcome:
+                self.close_calls += 1
+                return FdCloseOutcome.detached()
+
+        connector = FakeConnector(self.root)
+        state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="fake_python",
+                    command=(sys.executable,),
+                    extensions=(".py",),
+                    language_ids=("python",),
+                ),
+                source="test",
+                config_path=str(self.root / "fake.toml"),
+            ),
+            config_path=str(self.root / "fake.toml"),
+            connector=connector,  # type: ignore[arg-type]
+            attached=True,
+        )
+        self.manager.states[state.server_id] = state
+
+        async def fake_ensure_attached(target_state: LspServerState, workspace_root: Path) -> None:
+            target_state.connector = connector  # type: ignore[assignment]
+            target_state.attached = True
+            connector.workspace_root = workspace_root
+
+        self.manager._ensure_attached = fake_ensure_attached  # type: ignore[method-assign]
+
+        result = await self.manager.run_lsp_operation(
+            "outgoing_calls", {"file": str(sample), "line": 0, "character": 4}
+        )
+
+        self.assertEqual(connector.requests.count("callHierarchy/outgoingCalls"), 1)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "lsp_method_unsupported")
+        self.assertEqual(result["server_error"]["code"], -32601)
+        self.assertEqual(result["server_error"]["message"], "method not found")
+        self.assertEqual(result["server_error"]["method"], "callHierarchy/outgoingCalls")
+        self.assertIn("does not implement", result["next_step"])
+        self.assertEqual(connector.close_calls, 0)
+        self.assertIs(state.connector, connector)
+        self.assertTrue(state.attached)
 
 
 class LspPrewarmTests(unittest.TestCase):

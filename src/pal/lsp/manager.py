@@ -11,7 +11,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from pal.foundation import utc_now
 from pal.foundation.sidecar import dispatch_sidecar_request, handle_sidecar_client
@@ -25,6 +25,12 @@ from pal.lsp.environment import (
     prepare_workspace_lsp_environment,
 )
 from pal.lsp.ipc import cleanup_manager_endpoint, lsp_runtime_dir, start_manager_server
+
+
+# Preserve recovery for cancellation, modified content and lost initialization.
+# Surface other server responses without automatically restarting the session.
+_RETRYABLE_LSP_ERROR_CODES = frozenset({-32800, -32801, -32802, -32002})
+_METHOD_NOT_FOUND = -32601
 
 
 @dataclass
@@ -698,6 +704,16 @@ class LspManager:
                     return {**result, "attempt_errors": attempt_errors} if attempt_errors else result
                 except (LspProtocolError, asyncio.TimeoutError, BrokenPipeError, ConnectionError) as exc:
                     detail = f"{exc.__class__.__name__}: {exc}"
+                    if _is_deterministic_lsp_error(exc):
+                        # The server answered with a JSON-RPC error. Retrying or
+                        # restarting cannot change that answer, and discarding the
+                        # session would punish a healthy server for one request.
+                        return self._server_error_payload(
+                            operation,
+                            exc,
+                            state=state,
+                            workspace_root=workspace_root,
+                        )
                     state.last_error = exception_report(exc)
                     attempt_errors.append({"attempt": attempt + 1, "stage": "request", "error": state.last_error})
                     await self._discard_workspace_session_locked(state, workspace_root)
@@ -1116,6 +1132,38 @@ class LspManager:
         detail = state.last_error or "unknown attach failure"
         return f"recent_attach_failure:{detail}; retry_after_seconds={remaining:.1f}"
 
+    def _server_error_payload(
+        self,
+        operation: str,
+        exc: LspProtocolError,
+        *,
+        state: LspServerState,
+        workspace_root: Path,
+    ) -> dict[str, Any]:
+        """Surface the server's own JSON-RPC error verbatim instead of collapsing it."""
+        error: dict[str, Any] = {"code": exc.code, "message": str(exc)}
+        if exc.method:
+            error["method"] = exc.method
+        if exc.data is not None:
+            error["data"] = exc.data
+        unsupported = exc.code == _METHOD_NOT_FOUND
+        subject = exc.method or "the request"
+        next_step = (
+            f"{state.server_id} does not implement {subject} (JSON-RPC {exc.code}: {exc}). "
+            "Do not retry it; use textDocument/references or a repository text search instead."
+            if unsupported
+            else f"{state.server_id} rejected {subject} with JSON-RPC {exc.code}: {exc}."
+        )
+        return {
+            "status": "error",
+            "operation": operation,
+            "error_code": "lsp_method_unsupported" if unsupported else "lsp_server_error",
+            "server_error": error,
+            "workspace_root": str(workspace_root),
+            "server": self._server_summary(state),
+            "next_step": next_step,
+        }
+
     def _unavailable_payload(
         self,
         operation: str,
@@ -1388,6 +1436,15 @@ def _refresh_state_attachment(state: LspServerState) -> None:
         return
     state.connector = None
     state.attached = False
+
+
+def _is_deterministic_lsp_error(exc: BaseException) -> TypeGuard[LspProtocolError]:
+    """True when the server answered with a JSON-RPC error that retrying cannot fix."""
+    return (
+        isinstance(exc, LspProtocolError)
+        and exc.code is not None
+        and exc.code not in _RETRYABLE_LSP_ERROR_CODES
+    )
 
 
 def _result_list(value: Any) -> list[Any]:
