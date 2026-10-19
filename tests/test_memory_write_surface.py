@@ -1,9 +1,11 @@
 """Model memory CRUD uses the facade while backend adapters stay internal."""
+from pathlib import Path
+
 import pytest
 
 from pal.core import PalCore
 from pal.memory import MemoryService, register_with_core as register_memory
-from pal.memory.contracts import MemoryQuery
+from pal.memory.contracts import L3MutationResult, MemoryQuery
 from pal.memory.embedding import HashingEmbedder
 from pal.memory.repository import L3ProviderSelector
 from pal.memory.storage import MemoryStorage
@@ -248,3 +250,23 @@ def test_hub_health_keeps_counts_without_backend_network_probe(memory_runtime, m
     assert state['mounted']
     assert 'counts' in state and 'inspection_error' not in state
     assert not {'embedding_identity', 'generation_id', 'embedding_transport', 'vector_backend_detail'}.intersection(state)
+
+
+@pytest.mark.parametrize("alias,method,args", [
+    ("remember_memory", "commit", {"kind": "fact", "summary": "demo", "search_text": "demo"}),
+    ("update_memory", "correct", {"mem_ref": "fact:one", "content": "demo"}),
+    ("forget_memory", "delete", {"mem_ref": "fact:one"}),
+])
+def test_memory_write_errors_keep_full_diagnostics_without_memory_body(memory_runtime, monkeypatch, alias, method, args):
+    runtime, provider, _ = memory_runtime
+    diagnostic = "storage detail " * 1000 + "ROOT_CAUSE: write permission denied; token=hidden-secret"
+    monkeypatch.setattr(provider, method, lambda _: L3MutationResult(
+        status="error", document_id="fact:one", hit={"summary": "PRIVATE_MEMORY_BODY"},
+        metadata={"backend_error": diagnostic}))
+    result = runtime.invoke_indirect_tool(new_tool_call(name=alias, args=args))
+    assert result.kind == "failed"
+    assert result.snapshot_refs
+    complete = "\n".join(Path(ref.path).read_text() for ref in result.snapshot_refs)
+    assert "ROOT_CAUSE: write permission denied" in complete
+    assert "PRIVATE_MEMORY_BODY" not in complete + result.llm_text
+    assert "hidden-secret" not in complete + result.llm_text

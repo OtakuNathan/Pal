@@ -64,6 +64,62 @@ def context():
     return ShapeContext(WireShape.OPENAI_RESPONSE, "chatgpt", "account-model", capabilities={"access_profile": PROFILE})
 
 
+def test_auth_network_error_keeps_redacted_root_cause():
+    def respond(request):
+        try:
+            raise OSError("certificate verification failed; token=hidden-secret")
+        except OSError as exc:
+            raise httpx.ConnectError("auth proxy connection failed", request=request) from exc
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        service = ChatGPTAuthService(InMemorySecretStore(), client=client)
+        with pytest.raises(ChatGPTError) as caught:
+            service._request("POST", ISSUER + "/oauth/token")
+    error = caught.value
+    assert error.code == "network_error" and error.retryable
+    assert "auth proxy connection failed" in str(error)
+    assert "certificate verification failed" in str(error)
+    assert "hidden-secret" not in str(error) + json.dumps(error.to_dict())
+    assert isinstance(error.__cause__, httpx.ConnectError)
+
+
+@pytest.mark.parametrize("status", [200, 502])
+@pytest.mark.parametrize("body", [
+    "upstream diagnostic " * 400 + "ROOT_CAUSE: gateway offline; token=hidden-secret",
+    '["ROOT_CAUSE: invalid response shape", {"access_token":"hidden-secret"}]',
+])
+def test_auth_invalid_response_keeps_body_status_and_request_id(status, body):
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(
+        status, text=body, headers={"x-request-id": "auth-request-123"}
+    ))) as client:
+        with pytest.raises(ChatGPTError) as caught:
+            ChatGPTAuthService(InMemorySecretStore(), client=client)._request("POST", ISSUER + "/oauth/token")
+    error = caught.value
+    assert error.code == ("request_failed" if status == 502 else "invalid_server_response")
+    assert error.status == status
+    assert f"HTTP {status}" in str(error)
+    assert "auth-request-123" in str(error)
+    assert "ROOT_CAUSE" in str(error)
+    assert "hidden-secret" not in str(error) + json.dumps(error.to_dict())
+
+
+def test_terminal_refresh_error_preserves_server_diagnostic_after_clearing_tokens():
+    store = InMemorySecretStore()
+    seed(store, expiry=time.time() - 1)
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(400, json={
+        "error": "invalid_grant", "error_description": "refresh token revoked", "refresh_token": "hidden-secret",
+    }, headers={"x-request-id": "refresh-request-123"}))) as client:
+        with pytest.raises(ChatGPTError) as caught:
+            ChatGPTAuthService(store, client=client).access_token(REF)
+    error = caught.value
+    assert error.code == "reauthorization_required"
+    assert "HTTP 400" in str(error)
+    assert "refresh-request-123" in str(error)
+    assert "invalid_grant" in str(error) and "refresh token revoked" in str(error)
+    assert "hidden-secret" not in str(error)
+    record = json.loads(store.get_secret(REF))
+    assert record["needs_reauthorization"] and "refresh_token" not in record
+
+
 class _SubscriptionTransport:
     def activate_endpoint(self, endpoint_id):
         pass

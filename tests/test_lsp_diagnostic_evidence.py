@@ -1,6 +1,8 @@
 import asyncio
 from unittest.mock import AsyncMock
 
+import pytest
+
 from pal.lsp.config import LspServerConfig, LspServerFileConfig
 from pal.lsp.connector import AsyncLspConnector
 from pal.lsp.manager import LspManager, LspServerState
@@ -65,4 +67,32 @@ def test_document_version_is_set_before_change_notification(tmp_path):
         result = await connector.diagnostics(sample, language_id="python")
         assert result["document_version"] == result["diagnostic_version"] == 2
         assert result["diagnostics_state"] == "fresh"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failed_operation", ["diagnostics", "document_symbols"])
+def test_workspace_probe_keeps_downstream_error_and_attempts(tmp_path, failed_operation):
+    async def run():
+        (tmp_path / "sample.py").write_text("value = 1")
+        config = LspServerConfig(server_id="fake", command=("unused",), extensions=(".py",))
+        state = LspServerState(LspServerFileConfig(config), tmp_path / "config")
+        failure = {"status": "error", "error_code": "lsp_method_unsupported",
+                   "server_error": {"code": -32601, "message": "symbols disabled", "method": "textDocument/documentSymbol",
+                                    "data": {"reason": "feature disabled"}},
+                   "attempt_errors": [{"attempt": 1, "error": "earlier connection lost"}],
+                   "next_step": "Use repository text search."}
+        manager = LspManager(tmp_path)
+        async def operation(name, params):
+            if name == failed_operation:
+                return failure
+            return {"status": "ok", "result": {"diagnostics_state": "fresh", "diagnostics": []}}
+        manager.run_lsp_operation = operation
+        result = await manager._probe_workspace_server(state, tmp_path)
+        assert result["status"] == "unavailable"
+        assert result["server_error"] == failure["server_error"]
+        assert result["attempt_errors"] == failure["attempt_errors"]
+        projected = _capability_from_rpc("Workspace preparation", result)
+        assert "symbols disabled" in projected.llm_text
+        assert "earlier connection lost" in projected.llm_text
+        assert projected.recovery_hint == failure["next_step"]
     asyncio.run(run())

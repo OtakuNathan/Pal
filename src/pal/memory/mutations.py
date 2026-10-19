@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 from uuid import uuid4
 
 from pal.foundation import utc_now
+from pal.foundation.diagnostics import exception_report
 from pal.memory.contracts import L3CommitRequest, L3MutationResult
 
 
@@ -172,8 +173,8 @@ def commit_batch(provider, request):
             ))
     except BatchRejected as exc:
         return L3BatchCommitResult(exc.result.status, metadata=dict(exc.result.metadata))
-    except PermissionError:
-        return L3BatchCommitResult("unavailable")
+    except PermissionError as exc:
+        return L3BatchCommitResult("unavailable", metadata={"error": exception_report(exc)})
     projection_failed = False
     for result in results:
         try:

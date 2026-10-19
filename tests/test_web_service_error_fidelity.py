@@ -15,6 +15,7 @@ import pytest
 
 from pal.core import PalCore
 from pal.execution import register_with_core as register_execution
+from pal.execution.contracts import ToolCallBudget
 from pal.foundation.diagnostics import exception_report
 from pal.shared.tool_protocol import new_tool_call
 from pal.web_fetch import browser_service as browser
@@ -105,6 +106,28 @@ def test_search_http_error_keeps_complete_response_body(monkeypatch):
     text = exception_report(caught.value)
     assert "429" in text and "first cause" in text and "last cause" in text
     assert "hidden-secret" not in text
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_long_search_errors_reach_shared_tool_snapshots(core, fallback):
+    providers = [SimpleNamespace(search=MagicMock(side_effect=failure(
+        f"provider {index}: " + "detail " * 1000 + f"ROOT_CAUSE_{index}; token=hidden-secret"
+    ))) for index in range(6)]
+    if fallback:
+        providers.append(SimpleNamespace(search=MagicMock(return_value=[])))
+    register_search(core.context, search_service(*providers))
+    core.publish_module_capabilities("web_search")
+    result = core.context.execution_runtime.execute_tool(
+        new_tool_call(name="search_web", args={"query": "demo"}),
+        budget=ToolCallBudget(max_output_chars=2000, preview_chars=200),
+    )
+    assert result.ok is fallback
+    assert result.snapshot_refs
+    complete = "\n".join(Path(ref.path).read_text() for ref in result.snapshot_refs)
+    for index in range(6):
+        assert f"ROOT_CAUSE_{index}" in complete
+    assert "backend root cause" in complete
+    assert "hidden-secret" not in complete + result.llm_text
 
 
 @pytest.mark.parametrize("provider,payload", [

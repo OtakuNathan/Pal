@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.foundation.diagnostics import diagnostic_summary, diagnostic_text
+from pal.foundation.diagnostics import diagnostic_text
 from pal.memory.contracts import L3MutationResult, L3RecallResult, L3RecallView, MemoryQuery
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
@@ -86,13 +86,15 @@ def render_mutation_result_for_llm(action: str, result: L3MutationResult, *, pro
     if mem_ref:
         lines.append(f"mem_ref: {mem_ref}")
     metadata = result.metadata or {}
+    # The shared tool presenter owns diagnostic summaries and full snapshots.
+    # Keep complete diagnostics here without exposing the memory body itself.
     if metadata.get("reason"):
-        lines.append("reason: " + diagnostic_text(str(metadata['reason']), limit=240))
+        lines.append("reason: " + diagnostic_text(str(metadata['reason']), limit=None))
     if metadata.get('warning'):
-        lines.append("warning: " + diagnostic_text(diagnostic_summary(str(metadata['warning'])), limit=240))
+        lines.append("warning: " + diagnostic_text(str(metadata['warning']), limit=None))
     for key in ('error', 'backend_error'):
         if metadata.get(key):
-            lines.append("error: " + diagnostic_text(diagnostic_summary(str(metadata[key])), limit=240))
+            lines.append("error: " + diagnostic_text(str(metadata[key]), limit=None))
     if metadata.get("successors"):
         lines.append("successors: " + ", ".join(metadata["successors"]))
     for key in ('replayed', 'deduplicated', 'deleted', 'forgotten', 'changed', 'no_changes'):

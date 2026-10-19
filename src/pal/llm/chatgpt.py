@@ -21,7 +21,7 @@ from uuid import uuid4
 import httpx
 
 from pal.llm.secret_store import SecretRef, SecretStorePort, TransactionalSecretStorePort
-from pal.foundation.diagnostics import diagnostic_text
+from pal.foundation.diagnostics import diagnostic_text, exception_summary
 from pal.shared.json_values import thaw_json
 
 PROFILE = "openai_chatgpt"
@@ -57,7 +57,13 @@ class ChatGPTError(RuntimeError):
         self.param = str(param or "")
         self.request_id = str(request_id or "")
         self.diagnostic = diagnostic_text(diagnostic, limit=None)
-        super().__init__(self.user_message + ("\n" + self.diagnostic if self.diagnostic else ""))
+        context = []
+        if self.status is not None:
+            context.append(f"HTTP {self.status}")
+        if self.request_id:
+            context.append(f"request_id={self.request_id}")
+        super().__init__(self.user_message + ("\n" + diagnostic_text("; ".join(context), limit=None) if context else "")
+                         + ("\n" + self.diagnostic if self.diagnostic else ""))
 
     @property
     def retryable(self) -> bool:
@@ -172,17 +178,23 @@ class ChatGPTAuthService:
                     response = client.request(method, url, **kwargs)
             else:
                 response = self.client.request(method, url, **kwargs)
-        except httpx.HTTPError:
-            raise ChatGPTError("network_error") from None
+        except httpx.HTTPError as exc:
+            raise ChatGPTError("network_error", diagnostic=exception_summary(exc)) from exc
         try:
             body = response.json() if response.content else {}
-        except ValueError:
-            body = {}
+        except ValueError as exc:
+            raise ChatGPTError(
+                "request_failed" if response.status_code >= 300 else "invalid_server_response",
+                status=response.status_code, request_id=response.headers.get("x-request-id", ""),
+                diagnostic=f"Response body:\n{response.text}",
+            ) from exc
         if response.status_code >= 300:
-            raise response_error(body if isinstance(body, Mapping) else {}, status=response.status_code,
+            raise response_error(body if isinstance(body, Mapping) else {"response_body": body}, status=response.status_code,
                                  request_id=response.headers.get("x-request-id", ""))
         if not isinstance(body, dict):
-            raise ChatGPTError("invalid_server_response")
+            raise ChatGPTError("invalid_server_response", status=response.status_code,
+                               request_id=response.headers.get("x-request-id", ""),
+                               diagnostic=f"Response body:\n{response.text}")
         return body
 
     def host_id(self) -> str:
@@ -237,7 +249,8 @@ class ChatGPTAuthService:
                     if exc.code in _TERMINAL_REFRESH:
                         self._clear_tokens(record)
                         self._write(ref, record)
-                        raise ChatGPTError("reauthorization_required") from None
+                        raise ChatGPTError("reauthorization_required", status=exc.status, param=exc.param,
+                                           request_id=exc.request_id, diagnostic=exc.diagnostic) from exc
                     raise
                 self._save_tokens(record, tokens)
             if self.clock() >= float(record.get("expires_at", 0)):

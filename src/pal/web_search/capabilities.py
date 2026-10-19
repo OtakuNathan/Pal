@@ -26,7 +26,7 @@ from pal.shared.inspection import inspection_snapshot
 from pal.web_search.contracts import WebSearchQuery
 from pal.web_search.models import WebSearchProviderModel
 from pal.web_search.service import WebSearchService
-from pal.foundation.diagnostics import diagnostic_summary, diagnostic_text, exception_report, exception_summary
+from pal.foundation.diagnostics import diagnostic_summary, diagnostic_text, exception_report
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -255,13 +255,11 @@ class WebSearchIntrospectionProvider:
             )
         except Exception as exc:
             diagnostic = exception_report(exc)
-            brief = diagnostic_text(exception_summary(exc), limit=1200)
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
                 text="web search failed",
                 structured={"query": query_text, "error_code": "web_search_failed", "error": diagnostic},
-                llm_text="web search failed: " + brief,
-                llm_failure_details={"query": query_text, "error_code": "web_search_failed", "error": brief},
+                llm_text="web search failed:\n" + diagnostic,
                 effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE),
             )
         payload = {
@@ -279,11 +277,9 @@ class WebSearchIntrospectionProvider:
         if result.provider_errors:
             visible["provider_errors"] = [
                 {"provider_id": error.get("provider_id"),
-                 "error": diagnostic_text(diagnostic_summary(str(error.get("error") or "")), limit=240)}
-                for error in result.provider_errors[:5]
+                 "error": diagnostic_summary(str(error.get("error") or ""))}
+                for error in result.provider_errors
             ]
-            if len(result.provider_errors) > 5:
-                visible["additional_provider_errors"] = len(result.provider_errors) - 5
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web search results",

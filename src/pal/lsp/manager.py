@@ -541,12 +541,15 @@ class LspManager:
         )
         if str(result.get("status") or "") != "ok":
             return {
+                **result,
                 "status": "unavailable",
                 "operation": "diagnostics",
                 "file": str(probe_file),
                 "reason": str(
                     result.get("reason")
                     or result.get("error")
+                    or result.get("server_error")
+                    or result.get("error_code")
                     or "operation_unavailable"
                 ),
             }
@@ -606,6 +609,7 @@ class LspManager:
         )
         if str(symbol_result.get("status") or "") != "ok":
             return {
+                **symbol_result,
                 "status": "unavailable",
                 "operation": "diagnostics+document_symbols",
                 "file": str(probe_file),
@@ -614,6 +618,8 @@ class LspManager:
                     + str(
                         symbol_result.get("reason")
                         or symbol_result.get("error")
+                        or symbol_result.get("server_error")
+                        or symbol_result.get("error_code")
                         or "operation_unavailable"
                     )
                 ),

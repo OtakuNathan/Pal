@@ -127,6 +127,25 @@ def test_batch_conflict_rolls_back_body_fts_pending_and_receipts(setup_review):
     assert list(provider.service.l2_store.items) == before
 
 
+def test_batch_permission_error_retains_cause_and_authorized_draft(setup_review, monkeypatch):
+    from pal.memory.rendering import render_batch_result_for_llm
+
+    reviews, provider, _ = setup_review
+    state = decision(reviews, stage(reviews), "accept", candidate_id="c1")
+    state = decision(reviews, state, "submit")
+    def fail_transaction():
+        raise PermissionError("cannot write memory.db; token=hidden-secret")
+    monkeypatch.setattr(provider.repository, "write_transaction", fail_transaction)
+    result = reviews.commit(state["batch_id"])
+    assert result["status"] == "unavailable"
+    diagnostic = result["provider_result"]["metadata"]["error"]
+    assert "PermissionError" in diagnostic and "cannot write memory.db" in diagnostic
+    assert "hidden-secret" not in diagnostic
+    assert "cannot write memory.db" in render_batch_result_for_llm(result)
+    assert reviews.get(state["batch_id"], ROUTE)["drafts"]
+    assert provider.repository.database.execute_sql("SELECT count(*) FROM memory_batch_receipts").fetchone()[0] == 0
+
+
 def test_receipt_reconciles_crash_after_commit_and_never_resurrects_deleted(setup_review):
     reviews, provider, storage = setup_review
     state = decision(reviews, stage(reviews), "accept", candidate_id="c1")
