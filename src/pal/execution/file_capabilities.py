@@ -46,7 +46,8 @@ FILE_READ_GUIDANCE = ToolGuidance(
     search_terms=('local', 'text', 'source', 'code', 'config', 'configuration', 'show',),
     purpose=(
         "Read selected lines or multiple ranges from one UTF-8 file on target (default 0, local). "
-        "Remote IDs and names use the run_shell resolver and require a compatible worker."
+        "Remote IDs and names use the run_shell resolver and require a compatible worker. "
+        "When an unchanged marker is returned, reuse the earlier result."
     ),
     use_when=(
         "Reading local source, configuration, immutable output snapshots, or an artifact's supplied text_file.file_path. Use ranges for multiple "
