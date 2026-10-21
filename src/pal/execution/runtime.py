@@ -292,6 +292,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def model_response_received(self, continuation):
         """Allow an optional execution owner to refresh outside request assembly."""
 
+    async def execute_remote_file_async(self, action: str, call: CapabilityCall) -> CapabilityResult:
+        """Execution extensions override this boundary to route worker file calls."""
+        raise ToolRejectedError("Remote file access requires the remote execution plugin.",
+                                error_code="unsupported_target")
+
     def observe_tool_delivery(self, call, result):
         """Record coverage proven by a durably committed tool result."""
 

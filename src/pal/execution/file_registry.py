@@ -157,8 +157,9 @@ class FileRegistry:
                     'recovery_hint': exc.recovery_hint}
             # Both Pal and standalone result types are dataclasses. Receipt is
             # a facade model only in Pal, so serialize that boundary explicitly.
-            payload = {key: getattr(result, key) for key in (
-                'status', 'llm_text', 'text', 'structured', 'recovery_hint', 'context_delivery')}
+            payload = {'status': result.status, 'llm_text': result.llm_text,
+                'text': result.text, 'structured': result.structured,
+                'recovery_hint': result.recovery_hint, 'context_delivery': result.context_delivery}
             receipt = result.effect_receipt
             payload['effect_receipt'] = ({'outcome': receipt.outcome, 'receipt': receipt.receipt}
                                          if receipt else None)

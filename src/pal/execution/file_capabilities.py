@@ -307,13 +307,12 @@ class FileCapabilityMixin:
     async def _file_async(self, action, call):
         target = call.args.get("target", 0)
         if type(target) is int and target == 0:
-            return getattr(self, "file_" + action)(call)
+            return {"read": self.file_read, "edit": self.file_edit, "write": self.file_write}[action](call)
         runtime = call.meta.get("execution_runtime")
-        execute = getattr(runtime, "execute_remote_file_async", None)
-        if execute is None:
+        if runtime is None:
             raise ToolRejectedError("Remote file access requires the remote execution plugin.",
                                     error_code="unsupported_target")
-        return await execute(action, call)
+        return await runtime.execute_remote_file_async(action, call)
 
     async def file_read_async(self, call):
         return await self._file_async("read", call)
