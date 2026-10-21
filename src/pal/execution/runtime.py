@@ -1755,6 +1755,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         managed_snapshot = bool(
             isinstance(result, CompleteResult)
             and call.name == "read_file"
+            and type(call.args.get("target", 0)) is int
+            and call.args.get("target", 0) == 0
+            and not (manifest and manifest.remote)
             and call.args.get("file_path")
             and self.result_snapshots is not None
             and self.result_snapshots.lookup_path(str(call.args["file_path"])) is not None
@@ -2001,6 +2004,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def bind_result_history(self, memory_service) -> None:
         if memory_service is not None:
             self.result_snapshots.bind_history(memory_service.history)
+
+    def unbind_result_history(self, memory_service) -> None:
+        if memory_service is not None:
+            self.result_snapshots.unbind_history(memory_service.history)
 
     def fork_transient(self) -> ExecutionRuntime:
         """Borrow capabilities/extension services with isolated, non-durable tool state.

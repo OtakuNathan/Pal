@@ -102,6 +102,7 @@ class FileDeliveryManifest:
     inherited_ranges: tuple[tuple[int, int], ...] = ()
     parent_result_ids: tuple[str, ...] = ()
     complete_file: bool = False
+    remote: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +119,7 @@ class FileDeliveryManifest:
             "inherited_ranges": [list(item) for item in self.inherited_ranges],
             "parent_result_ids": list(self.parent_result_ids),
             "complete_file": self.complete_file,
+            "remote": dict(self.remote),
         }
 
     @classmethod
@@ -127,6 +129,7 @@ class FileDeliveryManifest:
             return None
         return cls(
             file_key=str(payload.get("file_key") or ""),
+            remote=dict(payload.get("remote") or {}),
             digest=str(payload.get("digest") or ""),
             total_lines=max(0, int(payload.get("total_lines") or 0)),
             spans=tuple(
@@ -189,6 +192,7 @@ class FileDeliveryManifest:
             return None
         return FileDeliveryManifest(
             file_key=self.file_key,
+            remote=dict(self.remote),
             digest=self.digest,
             total_lines=self.total_lines,
             spans=tuple(selected),

@@ -24,9 +24,14 @@ the user has not chosen a connection method. `list_remote` resolves unknown targ
 local meaning, and an explicit request for SSH takes precedence over the default route.
 
 `read_file`, `edit_file` and `write_file` are directly exposed file tools. Direct editing
-uses the existing read-delivery and stale-snapshot checks. `write_file` explicitly
-describes local files on the Pal host: shell target selection does not redirect it;
-remote writes use the shell on the required target.
+uses the existing read-delivery and stale-snapshot checks. All three accept an explicit
+`target`, defaulting to local `0`, just like `run_shell`. Remote integer IDs and exact
+configured names/shortcuts are resolved by the remote plugin. Unknown or ambiguous
+aliases fail closed; numeric strings are not converted to IDs. File paths are resolved
+on the selected worker. A remote file result gains mutation authority only after its
+post-budget delivery manifest enters L1 and the worker acknowledges that context
+revision. Removing a result revokes its contribution; disconnected workers must
+reconcile the latest revision before a dependent mutation.
 
 ## State, events and coverage
 

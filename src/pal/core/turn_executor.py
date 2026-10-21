@@ -1924,6 +1924,7 @@ class TurnExecutor:
         memory_service = self.context.port_registry.get("memory:memory")
         method = (memory_service.append_l1_tool_result if memory_service is not None else None)
         if not callable(method):
+            self._discard_uncommitted_tool_delivery(str(continuation.turn_id), call.call_id)
             return
         bind = getattr(self.context.execution_runtime, "bind_result_history", None)
         if callable(bind):
@@ -1953,7 +1954,7 @@ class TurnExecutor:
         except Exception:
             self._discard_uncommitted_tool_delivery(
                 turn_id,
-                result.replay_result_ref,
+                call.call_id,
             )
             raise
         delivery = getattr(result, "context_delivery", None)
@@ -1982,7 +1983,7 @@ class TurnExecutor:
                 )
                 self._discard_uncommitted_tool_delivery(
                     turn_id,
-                    result.replay_result_ref,
+                    call.call_id,
                 )
                 raise
 

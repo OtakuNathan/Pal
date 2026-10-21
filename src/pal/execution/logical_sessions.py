@@ -27,6 +27,11 @@ class LogicalExecutionSessions:
         with self._lock:
             return self._visible_results.get(str(turn_id), frozenset())
 
+    def projected_visible_results(self, turn_id: str) -> frozenset[str] | None:
+        """None denotes an embedded caller without a model-request projection."""
+        with self._lock:
+            return self._visible_results.get(str(turn_id))
+
     def clear_visible_results(self, turn_id: str) -> None:
         with self._lock:
             self._visible_results.pop(str(turn_id), None)

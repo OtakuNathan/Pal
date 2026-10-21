@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
-import fcntl
 import hashlib
 import os
 from pathlib import Path
 import tempfile
 import threading
+from contextlib import contextmanager
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
@@ -42,6 +42,33 @@ MUTATION_LOCK_BUCKET_COUNT = 256
 _MUTATION_LOCKS = tuple(
     threading.RLock() for _ in range(MUTATION_LOCK_BUCKET_COUNT)
 )
+
+
+@contextmanager
+def _process_file_lock(handle):
+    """Hold the same advisory byte lock on every supported worker platform."""
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def resolve_file_path(file_path: str | Path) -> Path:
@@ -89,8 +116,7 @@ def atomic_compare_and_swap_utf8(
         lock_root = Path(tempfile.gettempdir()) / "pal-file-locks"
         lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock_name = f"bucket-{lock_bucket:03d}.lock"
-        with (lock_root / lock_name).open("a+b") as lock_handle:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        with (lock_root / lock_name).open("a+b") as lock_handle, _process_file_lock(lock_handle):
             _atomic_compare_and_swap_locked(
                 resolved,
                 expected_content=expected_content,
@@ -143,6 +169,10 @@ def _atomic_compare_and_swap_locked(
             os.chmod(temporary, resolved.stat().st_mode & 0o7777)
 
         os.replace(temporary, resolved)
+        # Windows does not expose a portable directory fsync. The replacement
+        # is atomic and the file was flushed; do not claim directory durability.
+        if os.name == "nt":
+            return
         directory_synced = False
         try:
             directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -179,7 +209,7 @@ def _mutation_lock_bucket(file_key: str) -> int:
 def file_cache_key(file_path: str | Path) -> str:
     """Return the canonical key shared by all read-before-mutate tools."""
     try:
-        return str(resolve_file_path(file_path))
+        return os.path.normcase(str(resolve_file_path(file_path)))
     except (OSError, RuntimeError, ValueError):
         # Keep cache inspection and invalidation total even for malformed or
         # temporarily unresolvable paths.  expanduser still runs when possible
@@ -409,6 +439,7 @@ class SessionFileStateCache:
 
     backend: LogicalExecutionStateBackend
     context: LogicalExecutionContext
+    visible_result_ids: frozenset[str] | None = None
 
     def mark_read(
         self,
@@ -454,6 +485,7 @@ class SessionFileStateCache:
             execution_lifetime_id=self.context.execution_lifetime_id,
             file_key=file_cache_key(resolved),
             digest=digest,
+            visible_result_ids=self.visible_result_ids,
         )
         if grant is None:
             return None

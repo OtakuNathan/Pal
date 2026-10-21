@@ -28,7 +28,7 @@ Lines == 1..2
 \* Three versions cover two consecutive successful mutations, which is the
 \* shortest lineage that exposes rollback and inherited-owner leaks.
 Versions == 0..2
-ResultStates == {"unused", "pending", "live", "retired"}
+ResultStates == {"unused", "pending", "delivered", "live", "retired"}
 \* Replay and direct delivery intentionally refine the same abstract Read
 \* transition: their ownership boundary differs in Python, not their file
 \* evidence semantics.
@@ -139,6 +139,16 @@ ObserveRead(r, coverage) ==
 DeliverResult(r) ==
     /\ r \in Results
     /\ resultState[r] = "pending"
+    /\ resultState' = [resultState EXCEPT ![r] = "delivered"]
+    /\ UNCHANGED <<diskExists, diskVersion, resultKind, resultVersion,
+                    present, visible, renderable, contribOwners, requiredVisible,
+                    externalChanged, lastRejected, rejectedVersion>>
+
+\* The worker learns of post-budget L1 delivery only through ACK. Dropped
+\* ACKs stutter; late/duplicate ACKs cannot transition a retired identity.
+AcknowledgeResult(r) ==
+    /\ r \in Results
+    /\ resultState[r] = "delivered"
     /\ resultState' = [resultState EXCEPT ![r] = "live"]
     /\ present' = [present EXCEPT ![r] = TRUE]
     /\ visible' = [visible EXCEPT ![r] = renderable[r]]
@@ -248,7 +258,7 @@ ExternalMutate ==
 
 RetireResult(r) ==
     /\ r \in Results
-    /\ resultState[r] \in {"pending", "live"}
+    /\ resultState[r] \in {"pending", "delivered", "live"}
     /\ resultState' = [resultState EXCEPT ![r] = "retired"]
     /\ present' = [present EXCEPT ![r] = FALSE]
     /\ visible' = [visible EXCEPT ![r] = {}]
@@ -262,6 +272,7 @@ Next ==
     \/ \E r \in Results, coverage \in SUBSET Lines :
           ObserveRead(r, coverage)
     \/ \E r \in Results : DeliverResult(r)
+    \/ \E r \in Results : AcknowledgeResult(r)
     \/ \E r \in Results, coverage \in SUBSET Lines :
           ProjectResult(r, coverage)
     \/ \E r \in Results : HideResult(r)
@@ -293,7 +304,7 @@ TypeOK ==
 
 NoPendingAuthority ==
     \A r \in Results :
-        resultState[r] = "pending" =>
+        resultState[r] \in {"pending", "delivered"} =>
             \A line \in Lines : ~ContributionValid(r, line)
 
 RetiredOwnsNothing ==

@@ -45,7 +45,8 @@ FILE_READ_GUIDANCE = ToolGuidance(
     search_objects=('file', 'files'),
     search_terms=('local', 'text', 'source', 'code', 'config', 'configuration', 'show',),
     purpose=(
-        "Read selected lines from one UTF-8 text file. "
+        "Read selected lines from one UTF-8 text file on target (default 0, local). "
+        "Remote names and IDs use the same resolver as run_shell; remote execution requires a compatible worker. "
         "ranges=[{offset, limit}, ...] delivers multiple blocks in one call (sed -n style). "
         "When an unchanged marker is returned, reuse the earlier result; "
         "re-read only if the file changed."
@@ -82,7 +83,7 @@ FILE_READ_GUIDANCE = ToolGuidance(
 FILE_EDIT_GUIDANCE = ToolGuidance(
     search_objects=('file', 'files'),
     search_terms=('local', 'text', 'source', 'code', 'replace', 'patch', 'modify', 'update',),
-    purpose="Apply valid exact replacements to one local UTF-8 file and report any failed items.",
+    purpose="Apply valid exact replacements to one target UTF-8 file and report any failed items.",
     use_when=(
         "Making a focused change to an existing text file whose affected lines were delivered by read_file and remain in the current logical "
         "context. Supply edits=[{old_string, new_string, replace_all?}]. All items match the original read snapshot; "
@@ -103,10 +104,10 @@ FILE_EDIT_GUIDANCE = ToolGuidance(
 FILE_WRITE_GUIDANCE = ToolGuidance(
     search_objects=('file', 'files'),
     search_terms=('local', 'text', 'source', 'code', 'create', 'save',),
-    purpose="Write complete UTF-8 text content to a local file on the Pal host, creating it or replacing all of its contents.",
+    purpose="Write complete UTF-8 text content to a file on the selected target, creating it or replacing all of its contents.",
     use_when=(
         "Creating a text file, or intentionally replacing an existing file's complete contents after its complete "
-        "current version has been read. Missing parent directories are created. Paths are local to the Pal host."
+        "current version has been read. Missing parent directories are created. target=0 is local; remote names and IDs use the same resolver as run_shell. Paths belong to that target."
     ),
     do_not_use_when=(
         "Focused changes to an existing file (use edit_file). Do not overwrite an existing file from a partial, "
@@ -216,6 +217,10 @@ def _file_tool_result(
     context: object,
     hints: dict[str, str],
 ) -> IntrospectionResult:
+    if type(call.args.get("target", 0)) is not int or call.args.get("target", 0) != 0:
+        raise ToolRejectedError("Remote file access requires the remote execution plugin.",
+                                error_code="unsupported_target")
+    call = replace(call, args={key: value for key, value in call.args.items() if key != "target"})
     runtime = call.meta.get("execution_runtime")
     snapshots = getattr(runtime, "result_snapshots", None)
     path = str(call.args.get("file_path") or "")
@@ -229,6 +234,7 @@ def _file_tool_result(
         snapshots.retain_delivery((ref,), lifetime=context.execution_lifetime_id, call_id=delivery_id)
     try:
         result = _reject_pre_effect_failure(_tool_capability_result(tool, call.args), hints)
+        result = replace(result, structured={**(result.structured or {}), "target": 0, "target_name": "local"})
     except BaseException:
         if ref is not None:
             snapshots.finish_delivery(lifetime=context.execution_lifetime_id, call_id=delivery_id)
@@ -286,7 +292,9 @@ def _session_file_tools(owner: object, call: IntrospectionCall):
     context = runtime.logical_context_for_turn(turn_id)
     backend = runtime.logical_state
     return (
-        SessionFileStateCache(backend=backend, context=context),
+        SessionFileStateCache(backend=backend, context=context,
+            visible_result_ids=(runtime.execution_sessions.projected_visible_results(turn_id)
+                if call.meta.get("turn_id") else None)),
         SessionFileVisibilityCache(backend=backend, context=context,
             visible_result_ids=(runtime.execution_sessions.visible_results(turn_id)
                 if call.meta.get("turn_id") else None)),
@@ -296,11 +304,32 @@ def _session_file_tools(owner: object, call: IntrospectionCall):
 
 
 class FileCapabilityMixin:
+    async def _file_async(self, action, call):
+        target = call.args.get("target", 0)
+        if type(target) is int and target == 0:
+            return getattr(self, "file_" + action)(call)
+        runtime = call.meta.get("execution_runtime")
+        execute = getattr(runtime, "execute_remote_file_async", None)
+        if execute is None:
+            raise ToolRejectedError("Remote file access requires the remote execution plugin.",
+                                    error_code="unsupported_target")
+        return await execute(action, call)
+
+    async def file_read_async(self, call):
+        return await self._file_async("read", call)
+
+    async def file_edit_async(self, call):
+        return await self._file_async("edit", call)
+
+    async def file_write_async(self, call):
+        return await self._file_async("write", call)
+
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="file",
         action_name="read",
+        async_handler_name="file_read_async",
         guidance=FILE_READ_GUIDANCE,
         aliases=("read_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinReadInput,
@@ -328,6 +357,7 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="edit",
+        async_handler_name="file_edit_async",
         guidance=FILE_EDIT_GUIDANCE,
         aliases=("edit_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditInput,
@@ -350,6 +380,7 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="write",
+        async_handler_name="file_write_async",
         guidance=FILE_WRITE_GUIDANCE,
         aliases=("write_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinWriteInput,

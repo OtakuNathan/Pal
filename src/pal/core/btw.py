@@ -170,7 +170,7 @@ class BtwTurn:
                 if self.llm_branch is not None:
                     self.llm_branch.release()
             finally:
-                self.snapshots.unbind_history(self.memory.history)
+                self.execution.unbind_result_history(self.memory)
             raise
         self.task: asyncio.Task | None = None
 
@@ -245,7 +245,7 @@ class BtwTurn:
                 self.continuation.program.close,
                 self.memory.history.clear,
                 lambda: self.snapshots.finish_turn(self.turn_id),
-                lambda: self.snapshots.unbind_history(self.memory.history),
+                lambda: self.execution.unbind_result_history(self.memory),
                 self.llm_branch.release,
                 self.execution.logical_state.reset_state,
             )

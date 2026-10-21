@@ -47,14 +47,18 @@ def test_exact_recall_preserves_lookup_outcome_and_successor_refs(status):
     assert "fact:next:opaque" in text and "noise" not in text
 
 
-def test_mutation_keeps_receipt_and_bounds_warnings():
+@pytest.mark.parametrize("diagnostic_key", ["reason", "warning", "error", "backend_error"])
+def test_mutation_keeps_receipt_and_complete_redacted_diagnostics(diagnostic_key):
+    diagnostic = "api_key=secret " + "detail " * 200 + "ROOT_CAUSE: index unavailable"
     result = L3MutationResult(status="ok", document_id="fact:opaque", metadata={
-        "no_changes": True, "replayed": True, "warning": "api_key=secret " + "x" * 1000,
+        "no_changes": True, "replayed": True, diagnostic_key: diagnostic,
         "index_refresh": {"internal": "noise"}})
     text = render_mutation_result_for_llm("update", result, provider_id="original-store")
     assert "mem_ref: fact:opaque" in text and "provider_id: original-store" in text
     assert "no_changes: True" in text and "replayed: True" in text
-    assert "noise" not in text and "secret" not in text and len(text) < 500
+    assert "noise" not in text and "secret" not in text
+    # Delivery budgets and snapshots belong to the shared tool presenter.
+    assert diagnostic.replace("api_key=secret", "api_key=[redacted]") in text
 
 
 @pytest.mark.parametrize("status", ["ok", "conflict"])
@@ -130,9 +134,11 @@ def test_search_presentation_hides_rank_implementation_and_keeps_contracts():
     assert projected["hits"][0] == {"name": "manual", "avoid_when_overlap": True, "metadata": {"score": "business-value"}}
 
 
-def test_web_success_keeps_compact_provider_diagnostics_and_complete_items():
+def test_web_success_keeps_all_redacted_provider_diagnostics_and_complete_items():
     error = 'Traceback (most recent call last):\n  File "/backend/private.py", line 1\n    backend()\nRuntimeError: quota exhausted; api_key=secret'
-    errors = [{"provider_id": f"p{i}", "provider_kind": "kind", "error": error + "x" * 800} for i in range(7)]
+    details = " detail" * 200
+    errors = [{"provider_id": f"p{i}", "provider_kind": "kind",
+               "error": error + details + f" ROOT_CAUSE_{i}"} for i in range(7)]
     service = SimpleNamespace(query=lambda _: SimpleNamespace(items=[SimpleNamespace(
         title="Title", url="https://example.test", snippet="Complete snippet", provider_id="working", provider_kind="kind", rank=1)],
         configured_provider_id="p0", effective_provider_id="working", fallback_used=True, provider_errors=errors))
@@ -142,7 +148,11 @@ def test_web_success_keeps_compact_provider_diagnostics_and_complete_items():
     assert projected["fallback_used"] is True and projected["effective_provider_id"] == "working"
     assert "quota exhausted" in result.llm_text
     assert "Traceback" not in result.llm_text and "/backend/private.py" not in result.llm_text and "secret" not in result.llm_text
-    assert len(projected["provider_errors"]) == 5 and projected["additional_provider_errors"] == 2
+    assert projected["provider_errors"] == [
+        {"provider_id": f"p{i}",
+         "error": "RuntimeError: quota exhausted; api_key=[redacted]" + details + f" ROOT_CAUSE_{i}"}
+        for i in range(7)
+    ]
     assert result.structured["provider_errors"] == errors
 
 

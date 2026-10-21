@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.execution.targets import ExecutionTarget, TARGET_DESCRIPTION
+
 from typing import Any, Literal
 
 from pydantic import Field, create_model, field_validator
@@ -161,6 +163,7 @@ class FileReadRangeItem(StrictToolModel):
 ExecutionFileCapabilitiesFileCapabilityMixinReadInput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinReadInput',
     {
+        'target': (ExecutionTarget, Field(0, description=TARGET_DESCRIPTION)),
         'file_path': (str, Field(..., description='Path to the file to read.')),
         'offset': (int, Field(None, description='1-based line number to start reading from. Defaults to 1. Ignored when ranges is set.', ge=1)),
         'limit': (int, Field(None, description='Maximum number of lines to return. Defaults to 2000. Ignored when ranges is set.', ge=1)),
@@ -171,6 +174,9 @@ ExecutionFileCapabilitiesFileCapabilityMixinReadInput = _strict_model(
 ExecutionFileCapabilitiesFileCapabilityMixinReadOutput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinReadOutput',
     {
+        'target': (int, Field(None)),
+        'target_name': (str, Field(None)),
+        'operation_id': (str, Field(None)),
         'file_path': (str, Field(None)),
         'content': (str, Field(None)),
         'start_line': (int, Field(None)),
@@ -195,7 +201,8 @@ class FileEditItem(StrictToolModel):
 ExecutionFileCapabilitiesFileCapabilityMixinEditInput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinEditInput',
     {
-        'file_path': (str, Field(..., description='Local UTF-8 file to edit.')),
+        'target': (ExecutionTarget, Field(0, description=TARGET_DESCRIPTION)),
+        'file_path': (str, Field(..., description='UTF-8 file to edit on the selected target.')),
         'edits': (list[FileEditItem], Field(..., min_length=1, description='Replacements matched against one original read snapshot. Valid items apply; failed or overlapping items are reported without applying them.')),
     },
 )
@@ -203,6 +210,9 @@ ExecutionFileCapabilitiesFileCapabilityMixinEditInput = _strict_model(
 ExecutionFileCapabilitiesFileCapabilityMixinEditOutput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinEditOutput',
     {
+        'target': (int, Field(None)),
+        'target_name': (str, Field(None)),
+        'operation_id': (str, Field(None)),
         'file_path': (str, Field(None)),
         'error_code': (str, Field(None)),
         'patch': (str, Field(None)),
@@ -218,6 +228,7 @@ ExecutionFileCapabilitiesFileCapabilityMixinEditOutput = _strict_model(
 ExecutionFileCapabilitiesFileCapabilityMixinWriteInput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinWriteInput',
     {
+        'target': (ExecutionTarget, Field(0, description=TARGET_DESCRIPTION)),
         'file_path': (str, Field(..., description='Path to create or overwrite.')),
         'content': (str, Field(..., description='Complete UTF-8 text content for the file.')),
     },
@@ -226,6 +237,9 @@ ExecutionFileCapabilitiesFileCapabilityMixinWriteInput = _strict_model(
 ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput',
     {
+        'target': (int, Field(None)),
+        'target_name': (str, Field(None)),
+        'operation_id': (str, Field(None)),
         'file_path': (str, Field(None)),
         'bytes_written': (int, Field(None)),
         'created': (bool, Field(None)),
@@ -280,7 +294,7 @@ ExecutionShellExecShellExecCapabilityMixinShellInput = _strict_model(
     'ExecutionShellExecShellExecCapabilityMixinShellInput',
     {
         'cmd': (str, Field(..., description='Shell command to execute as one string. Pipelines and shell operators are accepted.')),
-        'target': (int, Field(0, ge=0, strict=True, description='Execution target. This built-in shell supports only 0 (local); remote targets require the native backend.')),
+        'target': (ExecutionTarget, Field(0, description=TARGET_DESCRIPTION)),
         'stdin': (str | None, Field(None, description='Optional literal UTF-8 standard input. No newline is added; EOF follows the text. Omit or use null for no supplied input.')),
         'cwd': (str, Field(None, description='Optional working directory.')),
         'timeout_ms': (int, Field(None, description='Optional timeout in milliseconds. Defaults to 120000 and cannot exceed 600000.', ge=1, le=600000)),
