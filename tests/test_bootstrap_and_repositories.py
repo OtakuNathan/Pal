@@ -4764,6 +4764,33 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("ctl_panel_1", self.endpoint._interactive_messages)
 
+    async def test_telegram_approval_code_blocks_survive_card_resolution(self) -> None:
+        self.endpoint.endpoint.send_policy["max_message_chars"] = 4096
+        text = "Command:\n```sh\nprintf 'hello <&> 中文'\n```\n\nStandard input:\n```\ninput\n```"
+        spec = InteractionMessageSpec(
+            interaction_id="sudo_card",
+            interaction_kind="approval_request",
+            text=text,
+            buttons=((InteractionButtonSpec(label="Approve once", action_key="control.action.dispatch"),),),
+        )
+        handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        await self.endpoint._open_or_update_interaction_async(handle, spec=spec, allow_update=False)
+        message = next(payload for kind, payload in self.fake_bot.actions if kind == "message")
+        self.assertEqual(message["parse_mode"], "MarkdownV2")
+        self.assertIn("```sh\nprintf 'hello <&> 中文'\n```", message["text"])
+        self.assertIn("reply_markup", message)
+
+        resolved = InteractionMessageSpec(
+            interaction_id=spec.interaction_id,
+            interaction_kind=spec.interaction_kind,
+            text=text + "\n\nApproved once.",
+        )
+        await self.endpoint._resolve_interaction_async(resolved)
+        edited = next(payload for kind, payload in self.fake_bot.actions if kind == "edit_message_text")
+        self.assertEqual(edited["parse_mode"], "MarkdownV2")
+        self.assertIn("```sh\nprintf 'hello <&> 中文'\n```", edited["text"])
+        self.assertIsNone(edited["reply_markup"])
+
     async def test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message(self) -> None:
         spec = InteractionMessageSpec(
             interaction_id="review_long",

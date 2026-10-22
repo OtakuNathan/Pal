@@ -273,6 +273,16 @@ def _telegram_text_segments(text: str, *, limit: int) -> list[_TelegramTextSegme
     ]
 
 
+def _telegram_interaction_segments(spec: InteractionMessageSpec, *, limit: int) -> list[_TelegramTextSegment]:
+    text = interaction_text(spec)
+    if spec.interaction_kind == "approval_request":
+        return _telegram_text_segments(text, limit=limit)
+    return [
+        _TelegramTextSegment(rendered_text=part, fallback_text=part, parse_mode=None)
+        for part in _segment_text(text, limit=limit)
+    ]
+
+
 def _safe_int(value: Any) -> int | None:
     try:
         return int(str(value))
@@ -1781,9 +1791,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     return
         markup = self._build_interaction_markup(spec)
         sent = None
-        parts = _segment_text(interaction_text(spec), limit=max_chars)
+        parts = _telegram_interaction_segments(spec, limit=max_chars)
         for index, part in enumerate(parts):
-            kwargs: dict[str, Any] = {"chat_id": chat_id, "text": part}
+            kwargs: dict[str, Any] = {"chat_id": chat_id, "text": part.rendered_text}
+            if part.parse_mode is not None:
+                kwargs["parse_mode"] = part.parse_mode
             if thread_id is not None:
                 kwargs["message_thread_id"] = thread_id
             if index == len(parts) - 1 and markup is not None:
@@ -1868,6 +1880,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             "text": interaction_text(spec),
             "reply_markup": None if clear_keyboard else self._build_interaction_markup(spec),
         }
+        max_chars = max(int(self.endpoint.send_policy.get("max_message_chars") or 4096), 1)
+        parts = _telegram_interaction_segments(spec, limit=max_chars)
+        if len(parts) == 1:
+            kwargs["text"] = parts[0].rendered_text
+            if parts[0].parse_mode is not None:
+                kwargs["parse_mode"] = parts[0].parse_mode
         try:
             await self.application.bot.edit_message_text(**kwargs)
         except Exception as exc:
