@@ -332,6 +332,8 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertIsNone(socket.detached_at)
 
     def test_load_existing_wizard_data_prefers_telegram_over_recovery_socket(self) -> None:
+        from pal.channel import ChannelEndpointRepository
+
         collected = _make_collected()
         collected.channel = WizardChannel(
             endpoint_id="telegram_main",
@@ -342,6 +344,9 @@ class TestSeedFromWizard(unittest.TestCase):
             supports_receipt_marker=True,
         )
         self.wizard.seed_from_wizard(self.registration, collected)
+        ChannelEndpointRepository().upsert(
+            endpoint_id="null", channel_kind="null", binding_key="/dev/null", enabled=True,
+        )
 
         existing = self.wizard.load_existing_wizard_data(self.runtime_root)
 
@@ -349,6 +354,17 @@ class TestSeedFromWizard(unittest.TestCase):
         assert existing is not None
         self.assertEqual(existing.channel.endpoint_id, "telegram_main")
         self.assertEqual(existing.channel.channel_kind, "telegram")
+
+    def test_load_existing_wizard_data_does_not_choose_sink_over_socket(self) -> None:
+        from pal.channel import ChannelEndpointRepository
+
+        self.wizard.seed_from_wizard(self.registration, _make_collected())
+        ChannelEndpointRepository().upsert(
+            endpoint_id="null", channel_kind="null", binding_key="/dev/null", enabled=True,
+        )
+        existing = self.wizard.load_existing_wizard_data(self.runtime_root)
+        self.assertIsNotNone(existing)
+        self.assertEqual(existing.channel.channel_kind, "socket")
 
     def test_seed_from_wizard_seeds_only_search_provider_state(self) -> None:
         from pal.llm import RuntimeSettingRepository

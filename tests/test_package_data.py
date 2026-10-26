@@ -50,6 +50,7 @@ def test_required_runtime_package_data_is_available() -> None:
         ("pal.plugins_builtin.lsp", "plugin.toml"),
         ("pal.plugins_builtin.lsp", "runtime.py"),
         ("pal.plugins_builtin.bunshin", "plugin.toml"),
+        ("pal.plugins_builtin.null_channel", "plugin.toml"),
     )
 
     for package, relative_path in required_files:

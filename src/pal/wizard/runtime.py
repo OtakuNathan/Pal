@@ -71,6 +71,8 @@ def ensure_recovery_socket_channel(repository: ChannelEndpointRepository, runtim
 
 
 def _choose_primary_wizard_channel(records: list[ChannelEndpointModel]) -> ChannelEndpointModel | None:
+    # A discard destination must never become the default conversation channel.
+    records = [record for record in records if record.channel_kind != "null"]
     attached = [record for record in records if record.detached_at is None]
     return (
         next((record for record in attached if record.channel_kind != "socket"), None)

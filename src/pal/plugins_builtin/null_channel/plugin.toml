@@ -1,0 +1,12 @@
+plugin_id = "null_channel"
+entrypoint = "pal.plugins_builtin.null_channel.runtime"
+version = "1.0.0"
+enabled_by_default = true
+lifecycle_protocol = "raii.v1"
+module_id = "null_channel"
+requires_plugins = []
+requires_ports = ["channel:provider_manager"]
+reload_modules = ["pal.plugins_builtin.null_channel"]
+
+[channel]
+endpoint_types = ["null"]

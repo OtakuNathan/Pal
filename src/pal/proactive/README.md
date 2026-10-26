@@ -53,6 +53,12 @@ supplied; passing only the task name is rejected.
 - Supply a channel name to select it. Without a target, resolve the current
   conversation on that channel or its unique default; never carry a target
   across channels.
+- For a silent task, select the `null` endpoint supplied by the built-in
+  `null_channel` plugin: `set_proactive_destination(name=TASK,
+  out_channel_name="null")`. Output is discarded by the channel, independently
+  of the model's wording or invisible characters. This is the string `"null"`,
+  distinct from JSON null, which clears the destination. Run history and normal
+  execution/approval requirements still apply; a sink cannot host a review UI.
 - Explicit `out_channel_name: null` clears the channel and target together.
   A nonempty target cannot accompany that clear.
 - Explicit `out_reply_target: {}` clears only the target, retaining the selected

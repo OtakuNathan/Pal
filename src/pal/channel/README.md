@@ -127,6 +127,19 @@ Interaction rule:
   target addressing stays private to the endpoint
 - secrets/tokens are write-only; introspection never returns them
 
+Silent output:
+- The built-in `null_channel` plugin provides the endpoint named `null`, an
+  intentional discard destination similar to `/dev/null`. It accepts replies,
+  stream updates, attachments and interaction/status messages without transport
+  I/O, callback state or replay. Normal outbox flushing acknowledges replies
+  and attachments; no recipient or connected reader is required.
+- Loading the plugin creates its default endpoint only if absent. Reload keeps
+  the endpoint's existing enabled/detached state. The endpoint and plugin use
+  the ordinary channel/plugin lifecycle controls.
+- The recovery socket is a communication endpoint: unread data can cause
+  backpressure or ACK timeout, and unacknowledged frames may be replayed after
+  reconnection. It is not a discard destination.
+
 Channel plugin contract:
 - New packages use a normal `plugin.toml` with `lifecycle_protocol = "raii.v1"`,
   `requires_ports = ["channel:provider_manager"]`, and a `[channel]` table with

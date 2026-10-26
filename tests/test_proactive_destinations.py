@@ -6,10 +6,12 @@ import pytest
 
 from pal.core import PalCore
 from pal.channel import ChannelRuntime
+from pal.channel.contracts import EndpointConfig
 from pal.execution import register_with_core as register_execution
 from pal.foundation import PalV2Database
 from pal.proactive import ProactiveManager, ProactiveRepository, register_with_core as register_proactive
 from pal.proactive.models import ProactiveDefinitionModel, ProactiveRunModel
+from pal.plugins_builtin.null_channel.endpoint import NullChannelEndpoint
 from pal.shared.tool_protocol import new_tool_call
 
 
@@ -26,6 +28,7 @@ def env(tmp_path):
             endpoint=SimpleNamespace(endpoint_id=name, channel_kind="telegram" if name == "telegram_main" else "socket"),
             derive_default_reply_target=lambda target=target: dict(target),
         ))
+    channel.endpoint_registry.register(NullChannelEndpoint(endpoint=EndpointConfig("null", "null", "/dev/null")))
     core.context.port_registry["channel:channel"] = channel
     binding = {"channel_id": "telegram_main", "reply_target": {"chat_id": "42", "thread_id": "7"}}
     from tests.turn_fakes import TurnIOFixture
@@ -119,6 +122,24 @@ def test_channel_and_explicit_target_change_together_and_can_clear(env):
     assert cleared.ok
     assert manager.registered["reminder"].out_channel_id is None
     assert manager.registered["reminder"].out_reply_target == {}
+
+
+def test_null_channel_is_an_explicit_persisted_destination_distinct_from_clearing(env):
+    runtime, manager, _ = env
+    created = invoke(runtime, "upsert_proactive_task", {
+        "name": "silent", "goal": "local maintenance", "out_channel_name": "null",
+    })
+    assert created.ok, created.llm_text
+    assert manager.registered["silent"].out_channel_id == "null"
+    assert created.structured["out_reply_target"] == {"sink": "null"}
+    assert ProactiveRepository().list_definitions()[0].definition.out_channel_id == "null"
+    assert invoke(runtime, "upsert_proactive_task", {"name": "reminder", "goal": "remind me"}).ok
+    moved = invoke(runtime, "set_proactive_destination", {"name": "reminder", "out_channel_name": "null"})
+    assert moved.ok, moved.llm_text
+    assert manager.registered["reminder"].out_reply_target == {"sink": "null"}
+    cleared = invoke(runtime, "set_proactive_destination", {"name": "reminder", "out_channel_name": None})
+    assert cleared.ok
+    assert manager.registered["reminder"].out_channel_id is None
 
 
 def test_telegram_rejects_non_chat_target(env):
