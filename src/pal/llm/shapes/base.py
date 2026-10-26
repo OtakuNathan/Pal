@@ -14,10 +14,9 @@ from pal.llm.ir import (
     WireShape,
 )
 from pal.shared.json_values import freeze_json_mapping, thaw_json
-
-
-class ShapeDecodeError(RuntimeError):
-    pass
+from pal.llm.decode_contracts import ShapeDecodeError
+from pal.llm.cache_capabilities import PromptCacheCapabilities, bind_prompt_cache_capabilities
+from pal.llm.response_blocks import ResponseBlockSnapshot, ResponseBlockUpdate, decode_response_blocks
 
 
 @dataclass(frozen=True)
@@ -35,6 +34,13 @@ class ShapeContext:
     # must consult this instead of inferring position from an empty list,
     # because encode(prefix + tail) != encode(prefix) + encode(tail).
     has_conversation_prefix: bool = False
+    cache_capabilities: PromptCacheCapabilities = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "cache_capabilities", bind_prompt_cache_capabilities(
+            wire_shape=self.wire_shape, provider_id=self.provider_id, model_id=self.model_id,
+            base_url=self.base_url, capabilities=self.capabilities,
+        ))
 
 
 JSONPathPart: TypeAlias = str | int
@@ -157,10 +163,10 @@ class _JSONFrame:
 
 
 class _ShapeDecoder(Protocol):
-    def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
+    def feed(self, frame: _JSONFrame) -> tuple[ResponseBlockUpdate, ...]:
         ...
 
-    def finish(self) -> LLMResponseIR:
+    def finish(self) -> ResponseBlockSnapshot:
         ...
 
 
@@ -175,6 +181,11 @@ class ShapeCodec(Protocol):
         frames: Iterable[_JSONFrame],
         context: ShapeContext,
     ) -> Iterator[LLMResponseUpdate]:
+        ...
+
+    def split(
+        self, frames: Iterable[_JSONFrame], context: ShapeContext,
+    ) -> Iterator[ResponseBlockUpdate]:
         ...
 
 
@@ -213,9 +224,14 @@ class ShapeCodecBase:
         frames: Iterable[_JSONFrame],
         context: ShapeContext,
     ) -> Iterator[LLMResponseUpdate]:
+        yield from decode_response_blocks(self.split(frames, context))
+
+    def split(
+        self, frames: Iterable[_JSONFrame], context: ShapeContext,
+    ) -> Iterator[ResponseBlockUpdate]:
         decoder = self._new_decoder(context)
         terminal_seen = False
-        last_response: LLMResponseIR | None = None
+        last_response: ResponseBlockSnapshot | None = None
         for frame in frames:
             for update in decoder.feed(frame):
                 if update.delta_kind == LLMResponseDeltaKind.STATE:
@@ -224,4 +240,4 @@ class ShapeCodecBase:
                 yield update
         final = decoder.finish()
         if not terminal_seen or last_response != final:
-            yield LLMResponseUpdate(final, delta_kind=LLMResponseDeltaKind.STATE)
+            yield ResponseBlockUpdate(final, delta_kind=LLMResponseDeltaKind.STATE)

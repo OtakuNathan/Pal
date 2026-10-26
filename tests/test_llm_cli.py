@@ -82,6 +82,33 @@ class LLMCLITests(unittest.TestCase):
                     self.assertIn("low, medium, high, xhigh, max", hint)
                     self.assertEqual("minimal" in hint, shape != "anthropic_messages")
 
+    def test_general_cache_parameters_preserve_deepseek_identity_and_survive_replace(self) -> None:
+        def run(*args):
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+                result = run_llm_cli(self._parse(*args, "--runtime-root", str(self.runtime_root)))
+            return result, out.getvalue()
+
+        self.assertEqual(run("add", "deepseek-v4-pro", "--cache-protocol", "general",
+                             "--cache-mode", "implicit", "--cache-reminder-ttl-seconds", "900")[0], 0)
+        self.assertEqual(run("add", "deepseek-v4-pro", "--replace", "--notes", "keep policy")[0], 0)
+        item = json.loads(run("list", "--json")[1])["items"][0]
+        self.assertEqual(item["provider"], "deepseek")
+        self.assertEqual(item["capabilities"]["prompt_cache"], {
+            "protocol": "general", "mode": "implicit", "reminder_ttl_seconds": 900, "enabled": True,
+        })
+
+    def test_declared_cache_protocol_supports_alias_and_rejects_incompatible_shape_atomically(self) -> None:
+        def run(*args):
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+                result = run_llm_cli(self._parse(*args, "--runtime-root", str(self.runtime_root)))
+            return result, out.getvalue()
+
+        self.assertEqual(run("add", "alias", "--provider", "proxy", "--base-url", "https://example.test",
+                             "--cache-protocol", "openai_chat_explicit", "--cache-mode", "explicit")[0], 0)
+        before = json.loads(run("list", "--json")[1])["items"]
+        self.assertEqual(run("add", "alias", "--replace", "--cache-protocol", "anthropic_explicit")[0], 2)
+        self.assertEqual(json.loads(run("list", "--json")[1])["items"], before)
+
     def test_invalid_anthropic_effort_does_not_mutate_add_or_replace(self) -> None:
         from unittest.mock import patch
 

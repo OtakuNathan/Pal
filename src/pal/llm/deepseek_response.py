@@ -10,7 +10,6 @@ from pal.llm.ir import (
     LLMFinishReason,
     LLMMessageIR,
     LLMResponseDeltaKind,
-    LLMResponseIR,
     LLMResponseItemKind,
     LLMResponseUpdate,
     MessageRole,
@@ -23,23 +22,23 @@ from pal.llm.response_hook_contracts import (
     ProviderResponseHookContext,
     ProviderResponseHookError,
 )
-from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+from pal.llm.response_blocks import (
+    ResponseBlock, ResponseBlockSnapshot, ResponseBlockUpdate, tool_block,
+    decode_response_blocks, updates_to_blocks,
+)
 
 
 # Grammar compatibility follows DeepSeek's MIT-licensed V4 encoding parser:
 # https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/encoding/encoding_dsv4.py
 _DSML_TOKEN = "｜DSML｜"
-_CLOSED_TOOL_INTERACTION_PATTERN = re.compile(
-    r"<closed_tool_interaction>.*?</closed_tool_interaction>",
-    flags=re.DOTALL,
-)
-_CLEARED_TOOL_MARKER_PATTERN = re.compile(
-    r"(?m)^\s*\[old tool (?:interaction|result) cleared\]\s*$"
-)
 _EOS_TOKEN = "<｜end▁of▁sentence｜>"
 _DSML_TAG_PATTERN = re.compile(
     r"<\s*/?\s*[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*"
     r"(?:tool_calls|invoke|parameter)\b",
+    flags=re.IGNORECASE,
+)
+_DSML_TOOL_OPEN_PATTERN = re.compile(
+    r"<\s*[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*tool_calls\s*>",
     flags=re.IGNORECASE,
 )
 _DSML_CANONICAL_PREFIXES = tuple(
@@ -48,25 +47,20 @@ _DSML_CANONICAL_PREFIXES = tuple(
     for bars in ("|", "||")
     for tag in ("tool_calls", "invoke", "parameter")
 )
-_PROJECTION_OPEN = "<closed_tool_interaction>"
-_PROJECTION_CLOSE = "</closed_tool_interaction>"
-_CLEARED_MARKERS = (
-    "[old tool interaction cleared]",
-    "[old tool result cleared]",
-)
 
 
 class _SafeTextGate:
-    """Release ordinary text while retaining reserved-protocol prefixes.
+    """Recognize a DeepSeek envelope at a body boundary, outside examples.
 
-    Shape codecs already provide the input iterator.  This gate is only the
-    small cross-chunk decorator DeepSeek needs: it never owns transport or wire
-    decoding, and it retains at most one possible reserved tag prefix.
+    Only a top-level tool_calls opener can change body text into a tool block.
+    Inline mentions, Markdown quotes/code and reasoning are never protocol.
     """
 
     def __init__(self) -> None:
         self._pending = ""
-        self._discarding_projection = False
+        self._line = ""
+        self._fence: tuple[str, int] | None = None
+        self._inline_ticks = 0
         self.dsml_seen = False
 
     def feed(self, value: str, *, final: bool = False) -> str:
@@ -75,38 +69,23 @@ class _SafeTextGate:
         self._pending += str(value or "")
         released: list[str] = []
         while self._pending:
-            if self._discarding_projection:
-                close_index = self._pending.find(_PROJECTION_CLOSE)
-                if close_index >= 0:
-                    self._pending = self._pending[close_index + len(_PROJECTION_CLOSE) :]
-                    self._discarding_projection = False
-                    continue
-                if final:
-                    self._pending = ""
-                else:
-                    keep = max(0, len(_PROJECTION_CLOSE) - 1)
-                    self._pending = self._pending[-keep:] if keep else ""
-                break
-
-            special_index = _first_special_index(self._pending)
+            special_index = self._pending.find("<")
             if special_index < 0:
                 released.append(self._pending)
+                self._observe_plain(self._pending)
                 self._pending = ""
                 break
             if special_index:
-                released.append(self._pending[:special_index])
+                plain = self._pending[:special_index]
+                released.append(plain)
+                self._observe_plain(plain)
                 self._pending = self._pending[special_index:]
-
-            if self._pending.startswith("<"):
-                if self._pending.startswith(_PROJECTION_OPEN):
-                    self._pending = self._pending[len(_PROJECTION_OPEN) :]
-                    self._discarding_projection = True
-                    continue
-                if _PROJECTION_OPEN.startswith(self._pending):
-                    if final:
-                        self._pending = ""
-                    break
-                if _DSML_TAG_PATTERN.match(self._pending):
+            if self._at_protocol_boundary():
+                match = _DSML_TAG_PATTERN.match(self._pending)
+                if match and re.fullmatch(
+                    r"<\s*[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*tool_calls",
+                    match.group(), flags=re.IGNORECASE,
+                ):
                     self.dsml_seen = True
                     self._pending = ""
                     break
@@ -115,45 +94,54 @@ class _SafeTextGate:
                         self.dsml_seen = True
                         self._pending = ""
                     break
-                released.append(self._pending[0])
-                self._pending = self._pending[1:]
-                continue
-
-            marker = next(
-                (item for item in _CLEARED_MARKERS if self._pending.startswith(item)),
-                None,
-            )
-            if marker is not None:
-                self._pending = self._pending[len(marker) :]
-                if self._pending.startswith("\r\n"):
-                    self._pending = self._pending[2:]
-                elif self._pending.startswith("\n"):
-                    self._pending = self._pending[1:]
-                continue
-            if any(item.startswith(self._pending) for item in _CLEARED_MARKERS):
-                if final:
-                    self._pending = ""
-                break
             released.append(self._pending[0])
+            self._observe_plain(self._pending[0])
             self._pending = self._pending[1:]
         return "".join(released)
 
+    def _at_protocol_boundary(self) -> bool:
+        return (self._fence is None and not self._inline_ticks
+                and not self._line.strip() and len(self._line) <= 3)
+
+    def _observe_plain(self, text: str) -> None:
+        for fragment in text.splitlines(keepends=True):
+            self._line += fragment
+            if fragment.endswith("\n"):
+                marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)\n$", self._line)
+                if marker:
+                    fence = marker.group(1)
+                    if self._fence is None and not self._inline_ticks:
+                        self._fence = (fence[0], len(fence))
+                    elif (self._fence is not None
+                          and fence[0] == self._fence[0]
+                          and len(fence) >= self._fence[1]
+                          and not marker.group(2).strip()):
+                        self._fence = None
+                elif self._fence is None:
+                    for ticks in re.finditer(r"(?<!\\)`+", self._line):
+                        size = len(ticks.group())
+                        if not self._inline_ticks:
+                            self._inline_ticks = size
+                        elif self._inline_ticks == size:
+                            self._inline_ticks = 0
+                self._line = ""
+
     @property
     def pending_dsml(self) -> bool:
-        return bool(self._pending) and _could_be_dsml_prefix(self._pending)
+        return (self._at_protocol_boundary() and bool(self._pending)
+                and _could_be_dsml_prefix(self._pending))
 
 
-def normalize_deepseek_updates(
+def normalize_deepseek_blocks(
     context: ProviderResponseHookContext,
-    updates: Iterable[LLMResponseUpdate],
-) -> Iterator[LLMResponseUpdate]:
+    updates: Iterable[ResponseBlockUpdate],
+) -> Iterator[ResponseBlockUpdate]:
     """Decorate a shape-codec update iterator with DeepSeek normalization."""
 
     text_gate = _SafeTextGate()
-    reasoning_gate = _SafeTextGate()
     recovery_prefix = _output_recovery_text_prefix(context)
     projected_parts: list[Any] = []
-    native_calls: dict[str, ToolCallIR] = {}
+    native_calls: dict[str, ResponseBlock] = {}
     source_text = ""
     source_reasoning = ""
     deferred_text = ""
@@ -162,7 +150,7 @@ def normalize_deepseek_updates(
         None,
         ThinkingLevel.OFF,
     }
-    last_response: LLMResponseIR | None = None
+    last_response: ResponseBlockSnapshot | None = None
     terminal_seen = False
 
     for update in updates:
@@ -172,13 +160,11 @@ def normalize_deepseek_updates(
         if update.delta_kind == LLMResponseDeltaKind.REASONING:
             structured_reasoning_seen = True
             source_reasoning += update.text_delta
-            safe = reasoning_gate.feed(update.text_delta)
-            if reasoning_gate.dsml_seen:
-                raise ProviderResponseHookError(
-                    "DeepSeek emitted textual DSML inside reasoning content"
-                )
-            if safe:
-                _append_part(projected_parts, ReasoningPartIR(safe))
+            safe = update.text_delta
+            last_part = response.message.parts[-1] if response.message.parts else None
+            redacted = isinstance(last_part, ReasoningPartIR) and last_part.redacted
+            if safe or redacted:
+                _append_part(projected_parts, ReasoningPartIR(safe, redacted=redacted))
                 yield _projected_update(
                     response,
                     projected_parts,
@@ -216,11 +202,7 @@ def normalize_deepseek_updates(
                 deferred_text = ""
                 source_text += textual_reasoning + "</think>" + value
                 textual_reasoning = textual_reasoning.removeprefix("<think>")
-                safe_reasoning = reasoning_gate.feed(textual_reasoning)
-                if reasoning_gate.dsml_seen:
-                    raise ProviderResponseHookError(
-                        "DeepSeek emitted textual DSML inside reasoning content"
-                    )
+                safe_reasoning = textual_reasoning
                 if safe_reasoning:
                     _append_part(projected_parts, ReasoningPartIR(safe_reasoning))
                     yield _projected_update(
@@ -243,15 +225,16 @@ def normalize_deepseek_updates(
             continue
 
         if update.delta_kind == LLMResponseDeltaKind.TOOL_CALL:
-            call = update.tool_call
+            call = update.tool_block
             if call is not None and call.call_id not in native_calls:
+                call = _normalize_native_tool_block(call)
                 native_calls[call.call_id] = call
                 projected_parts.append(call)
                 yield _projected_update(
                     response,
                     projected_parts,
                     LLMResponseDeltaKind.TOOL_CALL,
-                    tool_call=call,
+                    tool_block=call,
                 )
             continue
 
@@ -264,10 +247,11 @@ def normalize_deepseek_updates(
             # already semantic, so preserve their closure for Core; textual
             # DSML remains hidden until the actual response terminal arrives.
             if update.item_kind == LLMResponseItemKind.TOOL_CALL:
-                yield LLMResponseUpdate(
+                yield ResponseBlockUpdate(
                     response=_project_response(response, projected_parts),
                     delta_kind=LLMResponseDeltaKind.ITEM_COMMITTED,
-                    tool_call=update.tool_call,
+                    tool_block=native_calls.get(update.tool_block.call_id, update.tool_block)
+                    if update.tool_block is not None else None,
                     item_id=update.item_id,
                     item_kind=update.item_kind,
                 )
@@ -287,26 +271,23 @@ def normalize_deepseek_updates(
             projected_parts,
             TextPartIR,
         )
-        source_reasoning, reasoning_dsml = _feed_terminal_remainder(
+        source_reasoning, _ = _feed_terminal_remainder(
             response.reasoning_text,
             source_reasoning,
-            reasoning_gate,
+            None,
             projected_parts,
             ReasoningPartIR,
         )
-        if reasoning_dsml:
-            raise ProviderResponseHookError(
-                "DeepSeek emitted textual DSML inside reasoning content"
-            )
-        for call in response.tool_calls:
+        for call in response.tool_blocks:
             if call.call_id not in native_calls:
+                call = _normalize_native_tool_block(call)
                 native_calls[call.call_id] = call
                 projected_parts.append(call)
                 yield _projected_update(
                     response,
                     projected_parts,
                     LLMResponseDeltaKind.TOOL_CALL,
-                    tool_call=call,
+                    tool_block=call,
                 )
 
         has_dsml = bool(recovery_prefix) or text_gate.dsml_seen or text_gate.pending_dsml or text_dsml
@@ -332,7 +313,7 @@ def normalize_deepseek_updates(
                         replay=response.message.replay,
                     ),
                 )
-                yield LLMResponseUpdate(hidden, LLMResponseDeltaKind.STATE)
+                yield ResponseBlockUpdate(hidden, LLMResponseDeltaKind.STATE)
                 continue
             if response.finish_reason not in {
                 LLMFinishReason.STOP,
@@ -370,7 +351,7 @@ def normalize_deepseek_updates(
                     normalized = _parse_dsml_response(
                         context,
                         parse_response,
-                        _canonicalize_dsml(parse_text),
+                        _canonicalize_dsml_body(parse_text),
                         dsml_token=_DSML_TOKEN,
                     )
                     if recovery_prefix:
@@ -390,7 +371,7 @@ def normalize_deepseek_updates(
                                 normalized.message,
                                 parts=(
                                     *continuation_reasoning,
-                                    *normalized.tool_calls,
+                                    *normalized.tool_blocks,
                                 ),
                             ),
                         )
@@ -401,13 +382,13 @@ def normalize_deepseek_updates(
                     f"DeepSeek DSML response normalization failed: {type(exc).__name__}"
                 ) from exc
             if not native_calls:
-                for call in normalized.tool_calls:
-                    yield LLMResponseUpdate(
+                for call in normalized.tool_blocks:
+                    yield ResponseBlockUpdate(
                         response=normalized,
                         delta_kind=LLMResponseDeltaKind.TOOL_CALL,
-                        tool_call=call,
+                        tool_block=call,
                     )
-            yield LLMResponseUpdate(normalized, LLMResponseDeltaKind.STATE)
+            yield ResponseBlockUpdate(normalized, LLMResponseDeltaKind.STATE)
             continue
 
         finalized = _project_response(
@@ -418,9 +399,9 @@ def normalize_deepseek_updates(
         )
         if not finalized.message.parts:
             raise ProviderResponseHookError(
-                "DeepSeek response contained only an echoed internal projection"
+                "DeepSeek response produced no semantic parts"
             )
-        yield LLMResponseUpdate(finalized, LLMResponseDeltaKind.STATE)
+        yield ResponseBlockUpdate(finalized, LLMResponseDeltaKind.STATE)
 
     if last_response is None:
         raise ProviderResponseHookError("DeepSeek response produced no semantic updates")
@@ -495,16 +476,16 @@ def _replay_text(message: LLMMessageIR) -> str:
 
 def _parse_dsml_response(
     context: ProviderResponseHookContext,
-    response: LLMResponseIR,
+    response: ResponseBlockSnapshot,
     text: str,
     *,
     dsml_token: str,
-) -> LLMResponseIR:
+) -> ResponseBlockSnapshot:
     tool_calls_open = f"<{dsml_token}tool_calls>"
     tool_calls_close = f"</{dsml_token}tool_calls>"
-    open_index = text.find(tool_calls_open)
+    open_index = _tool_envelope_start(text)
     close_index = text.find(tool_calls_close, open_index + len(tool_calls_open))
-    if close_index < 0:
+    if open_index < 0 or close_index < 0:
         raise ProviderResponseHookError("DeepSeek DSML tool_calls block is not closed")
     if text.find(tool_calls_open, open_index + len(tool_calls_open)) >= 0:
         raise ProviderResponseHookError("DeepSeek DSML response has nested tool_calls blocks")
@@ -516,21 +497,17 @@ def _parse_dsml_response(
         raise ProviderResponseHookError("DeepSeek DSML response has content after tool_calls")
 
     existing_reasoning = tuple(
-        ReasoningPartIR(
-            _strip_internal_projection(part.text),
-            redacted=part.redacted,
-        )
+        part
         for part in response.message.parts
         if isinstance(part, ReasoningPartIR)
-        and (_strip_internal_projection(part.text) or part.redacted)
     )
     textual_reasoning, content = _split_reasoning_and_content(
         context,
         prefix.rstrip(),
         has_structured_reasoning=bool(existing_reasoning),
     )
-    content = _strip_internal_projection(content).strip()
-    textual_reasoning = _strip_internal_projection(textual_reasoning).strip()
+    content = content.strip()
+    textual_reasoning = textual_reasoning.strip()
     calls = _parse_tool_calls(
         body,
         message_id=response.message.message_id,
@@ -550,6 +527,7 @@ def _parse_dsml_response(
         parts=tuple(parts),
         state=MessageState.COMPLETE,
         replay=None,
+        metadata={**dict(response.message.metadata), "protocol_tool_inventory_adapted": True},
     )
     return replace(
         response,
@@ -584,12 +562,12 @@ def _parse_tool_calls(
     *,
     message_id: str,
     dsml_token: str,
-) -> tuple[ToolCallIR, ...]:
+) -> tuple[ResponseBlock, ...]:
     invoke_pattern = re.compile(
         rf'<{re.escape(dsml_token)}invoke\s+name="([^"]+)">\s*(.*?)\s*</{re.escape(dsml_token)}invoke>',
         flags=re.DOTALL,
     )
-    calls: list[ToolCallIR] = []
+    calls: list[ResponseBlock] = []
     cursor = 0
     for invoke_index, match in enumerate(invoke_pattern.finditer(body)):
         if body[cursor : match.start()].strip():
@@ -603,7 +581,7 @@ def _parse_tool_calls(
             dsml_token=dsml_token,
         )
         call_id = f"call_ds_{message_id.replace('-', '')}_{invoke_index}"
-        calls.append(new_tool_call(call_id=call_id, name=name, arguments=arguments))
+        calls.append(tool_block(call_id=call_id, name=name, arguments=arguments))
         cursor = match.end()
     if body[cursor:].strip():
         raise ProviderResponseHookError("DeepSeek DSML tool_calls contains malformed invoke content")
@@ -653,9 +631,27 @@ def _parse_parameters(
     return arguments
 
 
-def _first_special_index(value: str) -> int:
-    indexes = [index for index in (value.find("<"), value.find("[")) if index >= 0]
-    return min(indexes) if indexes else -1
+def _normalize_native_tool_block(block: ResponseBlock) -> ResponseBlock:
+    """DeepSeek-only translation of DSML inside a native tool input field."""
+    raw = block.arguments
+    if not isinstance(raw, str):
+        return block
+    text = _canonicalize_dsml(raw.strip())
+    if text.startswith(f"<{_DSML_TOKEN}parameter"):
+        arguments = _parse_parameters(text, tool_name=block.name, dsml_token=_DSML_TOKEN)
+    elif text.startswith((f"<{_DSML_TOKEN}invoke", f"<{_DSML_TOKEN}tool_calls>")):
+        if text.startswith(f"<{_DSML_TOKEN}tool_calls>"):
+            closing = f"</{_DSML_TOKEN}tool_calls>"
+            if not text.endswith(closing):
+                raise ProviderResponseHookError("DeepSeek native tool DSML envelope is not closed")
+            text = text[len(f"<{_DSML_TOKEN}tool_calls>"):-len(closing)]
+        parsed = _parse_tool_calls(text, message_id=block.call_id, dsml_token=_DSML_TOKEN)
+        if len(parsed) != 1 or parsed[0].name != block.name:
+            raise ProviderResponseHookError("DeepSeek native tool DSML does not match its tool block")
+        arguments = parsed[0].arguments
+    else:
+        return block
+    return replace(block, payload={**dict(block.payload), "arguments": arguments})
 
 
 def _normalized_prefix(value: str) -> str:
@@ -667,6 +663,7 @@ def _could_be_dsml_prefix(value: str) -> bool:
     return bool(normalized) and any(
         candidate.lower().startswith(normalized.lower())
         for candidate in _DSML_CANONICAL_PREFIXES
+        if candidate.endswith("tool_calls") and not candidate.startswith("</")
     )
 
 
@@ -702,12 +699,12 @@ def _append_part(parts: list[Any], part: TextPartIR | ReasoningPartIR) -> None:
 
 
 def _project_response(
-    response: LLMResponseIR,
+    response: ResponseBlockSnapshot,
     parts: list[Any] | tuple[Any, ...],
     *,
     finish_reason: LLMFinishReason | None = None,
     state: MessageState | None = None,
-) -> LLMResponseIR:
+) -> ResponseBlockSnapshot:
     return replace(
         response,
         message=replace(
@@ -721,25 +718,25 @@ def _project_response(
 
 
 def _projected_update(
-    response: LLMResponseIR,
+    response: ResponseBlockSnapshot,
     parts: list[Any],
     kind: LLMResponseDeltaKind,
     *,
     text_delta: str = "",
-    tool_call: ToolCallIR | None = None,
-) -> LLMResponseUpdate:
-    return LLMResponseUpdate(
+    tool_block: ResponseBlock | None = None,
+) -> ResponseBlockUpdate:
+    return ResponseBlockUpdate(
         response=_project_response(response, parts),
         delta_kind=kind,
         text_delta=text_delta,
-        tool_call=tool_call,
+        tool_block=tool_block,
     )
 
 
 def _feed_terminal_remainder(
     cumulative: str,
     consumed: str,
-    gate: _SafeTextGate,
+    gate: _SafeTextGate | None,
     projected_parts: list[Any],
     part_type: type[TextPartIR] | type[ReasoningPartIR],
 ) -> tuple[str, bool]:
@@ -748,21 +745,21 @@ def _feed_terminal_remainder(
             "DeepSeek codec updates diverged from the terminal response"
         )
     remainder = cumulative[len(consumed) :]
-    safe = gate.feed(remainder, final=True)
+    safe = gate.feed(remainder, final=True) if gate is not None else remainder
     if safe:
         _append_part(projected_parts, part_type(safe))
-    return cumulative, gate.dsml_seen or gate.pending_dsml
+    return cumulative, bool(gate is not None and (gate.dsml_seen or gate.pending_dsml))
 
 
 def _preserve_native_calls(
     context: ProviderResponseHookContext,
-    response: LLMResponseIR,
-    native_calls: tuple[ToolCallIR, ...],
-) -> LLMResponseIR:
-    canonical = _canonicalize_dsml(response.text)
+    response: ResponseBlockSnapshot,
+    native_calls: tuple[ResponseBlock, ...],
+) -> ResponseBlockSnapshot:
+    canonical = _canonicalize_dsml_body(response.text)
     open_tag = f"<{_DSML_TOKEN}tool_calls>"
     close_tag = f"</{_DSML_TOKEN}tool_calls>"
-    open_index = canonical.find(open_tag)
+    open_index = _tool_envelope_start(canonical)
     close_index = canonical.find(close_tag, open_index + len(open_tag))
     if open_index < 0 or close_index < 0:
         raise ProviderResponseHookError("DeepSeek DSML tool_calls block is not closed")
@@ -770,13 +767,9 @@ def _preserve_native_calls(
     if suffix not in {"", _EOS_TOKEN}:
         raise ProviderResponseHookError("DeepSeek DSML response has content after tool_calls")
     existing_reasoning = tuple(
-        ReasoningPartIR(
-            _strip_internal_projection(part.text),
-            redacted=part.redacted,
-        )
+        part
         for part in response.message.parts
         if isinstance(part, ReasoningPartIR)
-        and (_strip_internal_projection(part.text) or part.redacted)
     )
     textual_reasoning, content = _split_reasoning_and_content(
         context,
@@ -784,8 +777,8 @@ def _preserve_native_calls(
         has_structured_reasoning=bool(existing_reasoning),
     )
     parts: list[Any] = list(existing_reasoning)
-    textual_reasoning = _strip_internal_projection(textual_reasoning).strip()
-    content = _strip_internal_projection(content).strip()
+    textual_reasoning = textual_reasoning.strip()
+    content = content.strip()
     if textual_reasoning:
         parts.append(ReasoningPartIR(textual_reasoning))
     if content:
@@ -799,6 +792,26 @@ def _preserve_native_calls(
     )
 
 
-def _strip_internal_projection(text: str) -> str:
-    stripped = _CLOSED_TOOL_INTERACTION_PATTERN.sub("", str(text or ""))
-    return _CLEARED_TOOL_MARKER_PATTERN.sub("", stripped)
+def _tool_envelope_start(text: str) -> int:
+    gate = _SafeTextGate()
+    start = 0
+    for match in _DSML_TOOL_OPEN_PATTERN.finditer(text):
+        gate.feed(text[start:match.start()])
+        if gate._at_protocol_boundary():
+            return match.start()
+        gate.feed(match.group())
+        start = match.end()
+    return -1
+
+
+def _canonicalize_dsml_body(text: str) -> str:
+    start = _tool_envelope_start(text)
+    # The compatibility grammar never rewrites preceding body examples.
+    return text[:start] + _canonicalize_dsml(text[start:]) if start >= 0 else text
+
+
+def normalize_deepseek_updates(
+    context: ProviderResponseHookContext, updates: Iterable[LLMResponseUpdate],
+) -> Iterator[LLMResponseUpdate]:
+    """Compatibility facade; protocol adaptation still precedes shared decoding."""
+    yield from decode_response_blocks(normalize_deepseek_blocks(context, updates_to_blocks(updates)))

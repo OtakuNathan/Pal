@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR
+from pal.llm.response_blocks import ResponseBlock, ResponseBlockSnapshot, ResponseBlockUpdate
 
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
@@ -12,8 +13,6 @@ from pal.llm.ir import (
     LLMRequestIR,
     LLMResponseDeltaKind,
     LLMResponseItemKind,
-    LLMResponseIR,
-    LLMResponseUpdate,
     MessageRole,
     PromptRegionIR,
     ReasoningPartIR,
@@ -31,8 +30,8 @@ from pal.llm.shapes.base import (
     finalize_cache_spans,
     request_parameter_supported,
 )
-from pal.llm.shapes.builder import ResponseIRBuilder, canonical_finish_reason
-from pal.llm.shapes.common import anthropic_tool_definition, json_object, tool_results
+from pal.llm.shapes.builder import ResponseBlockBuilder, canonical_finish_reason
+from pal.llm.shapes.common import anthropic_tool_definition, tool_results
 from pal.shared.json_values import thaw_json
 
 
@@ -238,18 +237,18 @@ class AnthropicMessagesCodec(ShapeCodecBase):
 class AnthropicMessagesDecoder:
     def __init__(self, context: ShapeContext) -> None:
         self.context = context
-        self.builder = ResponseIRBuilder(context)
+        self.builder = ResponseBlockBuilder(context)
         self.blocks: dict[int, dict[str, Any]] = {}
         self.tool_drafts: dict[int, dict[str, Any]] = {}
         self.complete = False
 
-    def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
+    def feed(self, frame: _JSONFrame) -> tuple[ResponseBlockUpdate, ...]:
         self.builder.observe_frame(frame)
         payload = dict(frame.payload)
         if isinstance(payload.get("content"), (list, tuple)):
             return self._feed_complete_message(payload)
         event_type = str(payload.get("type") or "")
-        updates: list[LLMResponseUpdate] = []
+        updates: list[ResponseBlockUpdate] = []
         if event_type == "content_block_start":
             self._start_block(payload)
         elif event_type == "content_block_delta":
@@ -285,7 +284,7 @@ class AnthropicMessagesDecoder:
             self.complete = True
         return tuple(updates)
 
-    def finish(self) -> LLMResponseIR:
+    def finish(self) -> ResponseBlockSnapshot:
         if not self.builder.complete:
             self._discard_open_tools()
             self.builder.mark_complete(
@@ -296,8 +295,8 @@ class AnthropicMessagesDecoder:
         self._refresh_replay()
         return self.builder.finish()
 
-    def _feed_complete_message(self, payload: Mapping[str, Any]) -> tuple[LLMResponseUpdate, ...]:
-        updates: list[LLMResponseUpdate] = []
+    def _feed_complete_message(self, payload: Mapping[str, Any]) -> tuple[ResponseBlockUpdate, ...]:
+        updates: list[ResponseBlockUpdate] = []
         content = list(payload.get("content") or [])
         reason = canonical_finish_reason(payload.get("stop_reason") or "stop", has_tools=False)
         self.blocks = {index: dict(block) for index, block in enumerate(content) if isinstance(block, Mapping)}
@@ -318,10 +317,10 @@ class AnthropicMessagesDecoder:
                 if not call_id:
                     self.blocks.pop(index, None)
                     continue
-                update = self.builder.append_tool_call(
+                update = self.builder.append_tool_block(
                     call_id=call_id,
                     name=str(block.get("name") or ""),
-                    arguments=json_object(block.get("input") or {}, label="Anthropic tool input"),
+                    arguments=block.get("input") or {}, label="Anthropic tool input",
                 )
             else:
                 update = None
@@ -337,7 +336,7 @@ class AnthropicMessagesDecoder:
                 committed = self.builder.commit_item(
                     item_id=str(block.get("id") or f"{self.builder.message_id}:{index}"),
                     item_kind=item_kind,
-                    tool_call=update.tool_call,
+                    tool_block=update.tool_block,
                 )
                 if committed is not None:
                     updates.append(committed)
@@ -359,13 +358,24 @@ class AnthropicMessagesDecoder:
                 "input_json": [],
             }
 
-    def _append_delta(self, payload: Mapping[str, Any]) -> list[LLMResponseUpdate]:
+    def _append_delta(self, payload: Mapping[str, Any]) -> list[ResponseBlockUpdate]:
         index = _block_index(payload)
         delta = payload.get("delta")
         if not isinstance(delta, Mapping):
             return []
         delta_type = str(delta.get("type") or "")
         block = self.blocks.setdefault(index, {})
+        expected_block = {
+            "text_delta": "text",
+            "thinking_delta": "thinking",
+            "signature_delta": "thinking",
+            "citations_delta": "text",
+            "input_json_delta": "tool_use",
+        }.get(delta_type)
+        if expected_block is not None and block.get("type") != expected_block:
+            raise ShapeDecodeError(
+                f"Anthropic {delta_type} does not match block {index} type {block.get('type')!r}"
+            )
         if delta_type == "text_delta":
             text = str(delta.get("text") or "")
             block["type"] = "text"
@@ -400,7 +410,7 @@ class AnthropicMessagesDecoder:
             draft["input_json"].append(str(delta.get("partial_json") or ""))
         return []
 
-    def _finish_block(self, index: int) -> list[LLMResponseUpdate]:
+    def _finish_block(self, index: int) -> list[ResponseBlockUpdate]:
         draft = self.tool_drafts.get(index)
         if draft is None:
             block = dict(self.blocks.get(index) or {})
@@ -421,10 +431,8 @@ class AnthropicMessagesDecoder:
             self.blocks.pop(index, None)
             return []
         name = str(draft.get("name") or "").strip()
-        if not name:
-            raise ShapeDecodeError("Anthropic stream tool call has no name")
         raw = "".join(str(item) for item in draft.get("input_json") or []) or "{}"
-        arguments = json_object(raw, label=f"tool {name} input")
+        arguments = raw
         self.tool_drafts.pop(index, None)
         self.blocks[index] = {
             "type": "tool_use",
@@ -432,23 +440,23 @@ class AnthropicMessagesDecoder:
             "name": name,
             "input": thaw_json(arguments),
         }
-        tool_update = self.builder.append_tool_call(
+        tool_update = self.builder.append_tool_block(
             call_id=str(draft["id"]),
             name=name,
-            arguments=dict(arguments),
+            arguments=arguments, label=f"tool {name} input",
         )
         committed = self.builder.commit_item(
             item_id=str(draft["id"]),
             item_kind=LLMResponseItemKind.TOOL_CALL,
-            tool_call=tool_update.tool_call,
+            tool_block=tool_update.tool_block,
         )
         return [
             tool_update,
             *([committed] if committed is not None else []),
         ]
 
-    def _finalize_tools(self) -> list[LLMResponseUpdate]:
-        updates: list[LLMResponseUpdate] = []
+    def _finalize_tools(self) -> list[ResponseBlockUpdate]:
+        updates: list[ResponseBlockUpdate] = []
         for index in sorted(tuple(self.tool_drafts)):
             draft = self.tool_drafts.pop(index)
             call_id = str(draft.get("id") or "").strip()
@@ -456,12 +464,10 @@ class AnthropicMessagesDecoder:
                 self.blocks.pop(index, None)
                 continue
             name = str(draft.get("name") or "").strip()
-            if not name:
-                raise ShapeDecodeError("Anthropic stream tool call has no name")
             arguments = draft.get("parsed_input")
             if not isinstance(arguments, Mapping):
                 raw = "".join(str(item) for item in draft.get("input_json") or []) or "{}"
-                arguments = json_object(raw, label=f"tool {name} input")
+                arguments = raw
             self.blocks[index] = {
                 "type": "tool_use",
                 "id": call_id,
@@ -469,16 +475,16 @@ class AnthropicMessagesDecoder:
                 "input": thaw_json(arguments),
             }
             updates.append(
-                self.builder.append_tool_call(
+                self.builder.append_tool_block(
                     call_id=call_id,
                     name=name,
-                    arguments=dict(arguments),
+                    arguments=arguments, label=f"tool {name} input",
                 )
             )
             committed = self.builder.commit_item(
                 item_id=call_id,
                 item_kind=LLMResponseItemKind.TOOL_CALL,
-                tool_call=updates[-1].tool_call,
+                tool_block=updates[-1].tool_block,
             )
             if committed is not None:
                 updates.append(committed)

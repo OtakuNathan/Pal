@@ -53,6 +53,10 @@ Interaction rule:
 - accepted reasoning and native continuation survive turn closure and restart
   until explicit LEFT compaction. Crash recovery repairs unfinished or invalid
   protocol without fabricating tool results
+- projection send receipts prove request admission only. Accepted L1 messages,
+  including their replay envelopes, are the sole response authority; native
+  projection material derives from them after finalization, with tool ids,
+  names and arguments checked against the accepted semantic parts
 - one logical turn may create at most three compact generations. Semantic
   generation gets three attempts before that compact RPC fails with memory
   unchanged. The prompt plus local validator cap visible checkpoint JSON at

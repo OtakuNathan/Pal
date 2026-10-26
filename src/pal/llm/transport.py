@@ -13,6 +13,7 @@ from pal.llm.endpoint_spec import LLMEndpointSpec, endpoint_spec_fingerprint
 from pal.llm.http_transport import DefaultSDKClientFactory, SDKClientFactory, SDKJSONTransport
 from pal.llm.models import LLMEndpointModel
 from pal.llm.request_contracts import RequestSubmission
+from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.shapes.base import _JSONFrame
 from pal.llm.transport_contracts import (
     AuthenticatedFrameTransport, AuthenticatedTransportRequest, CloseableFrameIterator,
@@ -30,6 +31,7 @@ class DirectEndpointTransport:
     # Optional complete transports remain injectable for SDK/loopback tests.
     sdk_transport: Any = None
     websocket_transport: AuthenticatedFrameTransport | None = None
+    response_hooks: ProviderResponseHookRegistry = field(default_factory=ProviderResponseHookRegistry.builtin)
     _endpoints: dict[str, LLMEndpoint] = field(default_factory=dict, init=False, repr=False)
     _fingerprints: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
@@ -41,7 +43,7 @@ class DirectEndpointTransport:
         with self._lock:
             if self._fingerprints.get(spec.endpoint_id) == fingerprint:
                 return self._endpoints[spec.endpoint_id]
-            compiled = compile_endpoint_codec(spec)
+            compiled = compile_endpoint_codec(spec, self.response_hooks)
             # Access profile selects credential/failure policy, never transport.
             auth_type = ChatGPTEndpointAuth if is_chatgpt(spec) else EndpointAuth
             auth = auth_type(compiled.spec, self.credential_resolver)
@@ -49,13 +51,22 @@ class DirectEndpointTransport:
                 port = self.websocket_transport or ResponsesWebSocketTransport()
             else:
                 port = self.sdk_transport or SDKJSONTransport()
-            bound = LLMEndpoint(compiled.spec, compiled.codec, compiled.context, auth, port)
+            bound = LLMEndpoint(compiled.spec, compiled.codec, compiled.context, auth, port,
+                                response_hooks=compiled.response_hooks)
             previous = self._endpoints.get(spec.endpoint_id)
             self._endpoints[spec.endpoint_id] = bound
             self._fingerprints[spec.endpoint_id] = fingerprint
         if previous is not None:
             previous.retire(close_transport=previous.transport is not bound.transport)
         return bound
+
+    def configure_response_hooks(self, registry: ProviderResponseHookRegistry) -> None:
+        """Future admissions rebind; existing endpoint generations stay frozen."""
+        with self._lock:
+            if registry is self.response_hooks:
+                return
+            self.response_hooks = registry
+            self._fingerprints.clear()
 
     def prepare_endpoints(self, endpoints: Iterable[LLMEndpointModel | LLMEndpointSpec]) -> None:
         specs = tuple(LLMEndpointSpec.from_value(endpoint) for endpoint in endpoints)

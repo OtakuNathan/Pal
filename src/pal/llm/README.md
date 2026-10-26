@@ -9,8 +9,10 @@ Owns:
 - immutable endpoint compositions built from validated LLM configuration
 - endpoint-declared thinking enums and per-endpoint selection
 - exact-model request hooks loaded from `<runtime_root>/llm/models`
-- built-in provider response hooks that recover leaked provider text protocols
-  before Core, L1, or Channel can observe them
+- provider response defaults and endpoint response differences loaded from
+  `<runtime_root>/llm/providers` and `<runtime_root>/llm/endpoints`
+- DeepSeek-only recovery of leaked DSML body envelopes before Core, L1, or
+  Channel can observe executable tool calls
 - provider-neutral, resident-process usage accounting
 - endpoint retry, timeout, preflight, and usage accounting reused by
   ordinary and compaction requests
@@ -50,17 +52,30 @@ Invariants:
 - endpoint-declared unsupported request parameters are omitted by codecs while
   the provider-neutral generation policy remains unchanged
 - exact-model hooks can modify only messages and tool definitions
-- provider response hooks decorate the codec-owned response-update iterator
-  and can only normalize updates into the same immutable IR; malformed
-  provider protocols are endpoint failures
-- the DeepSeek decorator streams ordinary text but retains possible DSML tag
-  prefixes across chunks, so textual DSML can never escape as a channel delta
+- codecs classify reasoning, body text and native tool items before any
+  provider-specific normalization; reasoning and body examples are not tool calls
+- codecs split native envelopes into non-executable response blocks, retaining
+  tool input as raw JSON/string values until protocol adaptation is complete
+- endpoint assembly binds provider defaults followed by exact-endpoint hooks;
+  the common response decoder runs after both layers and alone creates ToolCallIR
+- Runtime consumes the semantic `LLMEndpointInvokerPort`; lifecycle, projection
+  receipts and attempt accounting use `ManagedEndpointInvokerPort`, independent
+  of the concrete invoker. Custom semantic invokers return already-adapted IR;
+  Runtime never converts their output back to blocks or re-runs protocol hooks
+- endpoint cache capabilities bind before policy execution. Explicit
+  `prompt_cache.protocol` overrides compatibility presets; unknown endpoints
+  use `general`. Cache planning consumes bound capabilities rather than
+  inferring them from provider identity, URL or model names
+- built-in DSML recovery is exclusive to the DeepSeek provider hook; it never
+  runs on other provider identities or inside reasoning
+- the DeepSeek decorator streams ordinary text and examples but retains possible
+  top-level DSML tool envelope prefixes across chunks, outside Markdown examples
 - only successful terminal DeepSeek responses can promote complete DSML to a
   tool call; native structured calls retain precedence and provider call IDs
 - SDK clients are reused per endpoint and retired safely when the active endpoint changes
 - `wire_shape`, `auth_kind`/access profile and `transport` are independent node
   configuration. Load/refresh compiles an `LLMEndpoint` with a fixed codec,
-  authentication provider and transport. Requests execute that composition;
+  authentication provider, transport and both response-hook layers. Requests execute that composition;
   access profile never chooses HTTP versus WebSocket. Replaced compositions
   reject new admission and close after their in-flight requests finish.
 - `http_transport` owns SDK clients and request/response lifetimes;
@@ -81,10 +96,17 @@ Invariants:
   a later length terminal and is executed once through Core's normal tool effect
   path after the response iterator closes
 - streaming and single-shot responses pass through the same codec-owned JSON-frame iterator
-- decoder state and provider stream events never escape the codec
+- failed provider attempts retain bounded private response frames, exception
+  chains and the owner's pre-submission R snapshot, when available; successful
+  attempts and cancellation do not write failure captures
+- decoder state and provider stream events remain private to LLM; only validated
+  response IR crosses into Core, L1 and Channel
 - closed L1 turns preserve reasoning parts and replay envelopes until explicit compaction
 - transport admission and accepted output are separate owner-side lifecycle events
 - L1 is the replay authority; frozen projections can be rebuilt without native loss
+- projection send receipts contain no response payload. Native projection
+  material derives from the accepted message's replay, never from independent
+  pre-hook capture; tool ids, names and arguments must agree with accepted IR
 
 The [LLM contract](../../../docs/pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)
 defines accepted configuration vocabulary, per-shape `off` behavior, manual

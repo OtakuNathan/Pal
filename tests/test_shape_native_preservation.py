@@ -93,8 +93,12 @@ def test_stream_citations_survive_settlement_restore_and_reencoding():
 
 def test_malformed_citation_is_not_silently_discarded():
     ctx = ShapeContext(WireShape.ANTHROPIC_MESSAGES, "ep", "model")
-    frames = [_JSONFrame(0, {"type": "content_block_delta", "index": 0,
-                            "delta": {"type": "citations_delta", "citation": "invalid"}})]
+    frames = [
+        _JSONFrame(0, {"type": "content_block_start", "index": 0,
+                       "content_block": {"type": "text", "text": ""}}),
+        _JSONFrame(1, {"type": "content_block_delta", "index": 0,
+                       "delta": {"type": "citations_delta", "citation": "invalid"}}),
+    ]
     with pytest.raises(ShapeDecodeError, match="citation object"):
         list(codec_for_shape(ctx.wire_shape).decode(iter(frames), ctx))
 

@@ -259,17 +259,32 @@ def test_responses_final_items_supply_opaque_fields_missing_from_deltas():
     assert thaw_json(updates[-1].response.message.replay.payload["output"]) == output
 
 
-def test_hook_adaptation_keeps_original_source_and_a_single_callable_inventory():
+@pytest.mark.parametrize("provider_id", ["deepseek", "custom"])
+def test_hook_adaptation_keeps_original_source_and_a_single_callable_inventory(provider_id):
     from pal.llm.replay_acceptance import bind_accepted_replay
     from pal.llm.ir import ReplayEnvelope
     from pal.shared.tool_protocol import ToolCallIR
     raw = {"message": {"role": "assistant", "content": "original textual tool syntax", "reasoning_content": "r"}}
-    message = LLMMessageIR(MessageRole.ASSISTANT, (ToolCallIR("c", "read", {"path": "x"}),))
-    accepted = bind_accepted_replay(message, ReplayEnvelope(WireShape.OPENAI_COMPLETION, "ep", "m", raw), provider_id="deepseek")
+    message = LLMMessageIR(MessageRole.ASSISTANT, (ToolCallIR("c", "read", {"path": "x"}),),
+                           metadata={"protocol_tool_inventory_adapted": True})
+    accepted = bind_accepted_replay(message, ReplayEnvelope(WireShape.OPENAI_COMPLETION, "ep", "m", raw), provider_id=provider_id)
     assert thaw_json(accepted.replay.source_payload) == raw
     assert len(accepted.replay.payload["message"]["tool_calls"]) == 1
     assert accepted.replay.payload["message"]["reasoning_content"] == "r"
     assert message_from_payload(message_to_payload(accepted)) == accepted
+
+
+def test_provider_identity_does_not_authorize_a_changed_tool_inventory():
+    from pal.llm.replay_acceptance import bind_accepted_replay
+    from pal.llm.ir import ReplayEnvelope
+    from pal.llm.response_hook_contracts import ProviderResponseHookError
+    from pal.shared.tool_protocol import ToolCallIR
+
+    raw = {"message": {"role": "assistant", "content": "ordinary body text"}}
+    message = LLMMessageIR(MessageRole.ASSISTANT, (ToolCallIR("c", "read", {"path": "x"}),))
+    with pytest.raises(ProviderResponseHookError, match="inventory differs"):
+        bind_accepted_replay(message, ReplayEnvelope(WireShape.OPENAI_COMPLETION, "ep", "m", raw),
+                             provider_id="deepseek")
 
 
 def test_recovery_keeps_all_native_reasoning_instead_of_only_last_response():

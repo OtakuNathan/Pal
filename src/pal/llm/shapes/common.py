@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR, ToolDefinitionIR, ToolResultIR
 
-import json
 from typing import Any, Iterable, Mapping
 
 from pal.llm.ir import (
@@ -11,7 +10,7 @@ from pal.llm.ir import (
     MessageRole,
     TextPartIR,
 )
-from pal.llm.shapes.base import ShapeDecodeError
+from pal.llm.response_blocks import json_object
 from pal.shared.json_values import thaw_json
 
 
@@ -70,19 +69,6 @@ def tool_calls(message: LLMMessageIR) -> tuple[ToolCallIR, ...]:
 
 def tool_results(message: LLMMessageIR) -> tuple[ToolResultIR, ...]:
     return tuple(part for part in message.parts if isinstance(part, ToolResultIR))
-
-
-def json_object(value: Any, *, label: str) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        return dict(value)
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise ShapeDecodeError(f"{label} contained invalid JSON") from exc
-        if isinstance(parsed, Mapping):
-            return dict(parsed)
-    raise ShapeDecodeError(f"{label} must be a JSON object")
 
 
 def role_value(role: MessageRole) -> str:

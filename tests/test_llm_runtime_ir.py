@@ -843,7 +843,7 @@ def adjust_messages(messages):
         self.assertIn("kind=response_error", result.text)
         self.assertIn("DSML response is malformed", result.text)
 
-    def test_output_recovery_is_normalized_after_dsml_fragments_are_merged(self) -> None:
+    def test_output_recovery_adapts_dsml_at_the_raw_invoker_boundary(self) -> None:
         token = "｜DSML｜"
         first_text = (
             f"<{token}tool_calls>\n"
@@ -855,17 +855,18 @@ def adjust_messages(messages):
             f"</{token}invoke>\n"
             f"</{token}tool_calls>"
         )
-        responses = [
-            LLMResponseIR(
-                LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR(first_text),)),
-                LLMFinishReason.LENGTH,
-            ),
-            LLMResponseIR(
-                LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR(second_text),)),
-                LLMFinishReason.STOP,
-            ),
-        ]
-        invoker = _SequenceInvoker(responses)
+        class RecoveryTransport:
+            attempts = 0
+
+            def frames(self, endpoint, request):
+                self.attempts += 1
+                yield _JSONFrame(0, {"choices": [{
+                    "message": {"role": "assistant", "content": first_text if self.attempts == 1 else second_text},
+                    "finish_reason": "length" if self.attempts == 1 else "stop",
+                }]})
+
+        transport = RecoveryTransport()
+        invoker = ShapeEndpointInvoker(transport=transport)
         endpoint = _endpoint(provider="deepseek")
         endpoint.capabilities_blob = {
             "max_output_recovery": {
@@ -892,7 +893,7 @@ def adjust_messages(messages):
 
         result = runtime.generate(request)
 
-        self.assertEqual(invoker.attempts, 2)
+        self.assertEqual(transport.attempts, 2)
         self.assertEqual(result.finish_reason, LLMFinishReason.TOOL_CALLS)
         self.assertEqual(result.text, "")
         self.assertEqual(result.tool_calls[0].name, "search_tools")

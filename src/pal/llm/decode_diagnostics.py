@@ -1,8 +1,9 @@
 """Bounded, private failure captures of the transport-to-codec boundary.
 
-Response text and tool arguments are retained for reproduction. Requests,
-credentials and HTTP headers are never captured. These are decoded SDK frames,
-not raw HTTP/SSE bytes. Successful attempts never write a capture.
+Response text, reasoning and tool arguments are retained for reproduction,
+along with the owner's pre-submission R snapshot when available. Full requests,
+authentication credentials and HTTP headers are never captured. These are decoded
+SDK frames, not raw HTTP/SSE bytes. Successful attempts never write a capture.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 _WRITE_LOCK = threading.Lock()
 MAX_CAPTURE_BYTES = 2 * 1024 * 1024
 MAX_CAPTURES = 20
+MAX_CONTEXT_BYTES = 2 * 1024 * 1024
 
 
 class DecodeFailureCapture:
@@ -62,7 +64,9 @@ class DecodeFailureCapture:
         self.frames.append(encoded)
         self.retained_bytes += len(encoded)
 
-    def save(self, exc: BaseException, **metadata: Any) -> Path | None:
+    def save(
+        self, exc: BaseException, *, request_context: Any = None, **metadata: Any,
+    ) -> Path | None:
         """Best effort: persistence must never replace the original failure."""
         temporary: str | None = None
         try:
@@ -83,6 +87,7 @@ class DecodeFailureCapture:
                 "capture_errors": self.capture_errors,
                 "complete_capture": not (self.dropped_frames or self.truncated_frames or self.capture_errors),
                 "frames": [json.loads(frame) for frame in self.frames],
+                "request_context": _bounded_context(request_context),
             }
             with _WRITE_LOCK:
                 root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -106,3 +111,22 @@ class DecodeFailureCapture:
                     Path(temporary).unlink(missing_ok=True)
                 except OSError:
                     pass
+
+
+def _bounded_context(context: Any) -> dict[str, Any] | None:
+    if context is None:
+        return None
+    value = thaw_json(context)
+    encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
+    if len(encoded) <= MAX_CONTEXT_BYTES:
+        return {"complete_capture": True, "snapshot": value}
+    return {
+        "complete_capture": False,
+        "original_bytes": len(encoded),
+        "snapshot_identity": {
+            key: value[key]
+            for key in ("turn_id", "llm_round_index", "history_incarnation", "history_cut")
+            if isinstance(value, dict) and key in value
+        },
+        "snapshot_tail": encoded[-MAX_CONTEXT_BYTES:].decode("utf-8", errors="replace"),
+    }

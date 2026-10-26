@@ -1,25 +1,11 @@
 """Trusted capability and mode selection, independent of mutable cache history."""
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
-from pal.llm.ir import WireShape
+from pal.llm.cache_capabilities import CacheProfileError, PromptCacheDialect
 from pal.llm.shapes.base import ShapeContext
-
-class PromptCacheDialect(StrEnum):
-    NONE = "none"
-    OPENAI_RESPONSES_EXPLICIT = "openai_responses_explicit"
-    OPENAI_CHAT_EXPLICIT = "openai_chat_explicit"
-    OPENAI_AUTOMATIC = "openai_automatic"
-    OPENROUTER_OPENAI_EXPLICIT = "openrouter_openai_explicit"
-    OPENROUTER_AUTOMATIC = "openrouter_automatic"
-    OPENROUTER_ANTHROPIC_AUTOMATIC = "openrouter_anthropic_automatic"
-    OPENROUTER_ANTHROPIC_EXPLICIT = "openrouter_anthropic_explicit"
-    ANTHROPIC_EXPLICIT = "anthropic_explicit"
-
 
 @dataclass(frozen=True)
 class CacheProfile:
@@ -67,10 +53,6 @@ CACHE_PROFILES: Mapping[str, CacheProfile] = MappingProxyType({
 })
 
 
-class CacheProfileError(ValueError):
-    """Reject an unsupported cache policy before invoking the provider."""
-
-
 def cache_options(context: ShapeContext) -> Mapping[str, Any]:
     options = context.capabilities.get("prompt_cache", {}) or {}
     if not isinstance(options, Mapping):
@@ -78,29 +60,8 @@ def cache_options(context: ShapeContext) -> Mapping[str, Any]:
     return options
 
 
-def openai_explicit_supported(model_id: str) -> bool:
-    # Documented families, not arbitrary future versions or compatible aliases.
-    name = model_id.lower().removeprefix("openai/")
-    return bool(re.fullmatch(r"gpt-5\.6(?:-[a-z0-9.-]+)?|gpt-6-astra(?:-[a-z0-9.-]+)?", name))
-
-
-def is_gateway(context: ShapeContext) -> bool:
-    from urllib.parse import urlsplit
-    return (context.provider_id.lower() == "openrouter"
-            or urlsplit(context.base_url or "").hostname == "openrouter.ai")
-
-
 def native_dialect(context: ShapeContext) -> PromptCacheDialect:
-    gateway = is_gateway(context)
-    if context.wire_shape == WireShape.ANTHROPIC_MESSAGES and (gateway or context.provider_id.lower() == "anthropic"):
-        return PromptCacheDialect.OPENROUTER_ANTHROPIC_EXPLICIT if gateway else PromptCacheDialect.ANTHROPIC_EXPLICIT
-    if (gateway or context.provider_id.lower() == "openai") and openai_explicit_supported(context.model_id):
-        if context.wire_shape in (WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION):
-            if gateway:
-                return PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
-            return (PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT if context.wire_shape == WireShape.OPENAI_RESPONSE
-                    else PromptCacheDialect.OPENAI_CHAT_EXPLICIT)
-    return PromptCacheDialect.NONE
+    return context.cache_capabilities.explicit_dialect
 
 
 def available_modes(context: ShapeContext) -> tuple[str, ...]:
@@ -171,11 +132,7 @@ def resolve_dialect(context: ShapeContext) -> PromptCacheDialect:
     if mode in ("explicit", "hybrid"):
         return native_dialect(context)
     # Implicit means no local caching controls, including Anthropic auto opt-in.
-    if is_gateway(context):
-        return PromptCacheDialect.OPENROUTER_AUTOMATIC
-    if context.provider_id.lower() == "openai":
-        return PromptCacheDialect.OPENAI_AUTOMATIC
-    return PromptCacheDialect.NONE
+    return context.cache_capabilities.implicit_dialect
 
 
 def validate_cache_policy(context: ShapeContext) -> None:

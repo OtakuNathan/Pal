@@ -46,6 +46,7 @@ from pal.core.core_events import TURN_TOOL_CALL_FAILED, TURN_TOOL_RESULT_COMMITT
 from pal.failure import FailureSignal
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.conversions import tool_definition_ir_from_dict
+from pal.llm.serde import message_to_payload
 from pal.llm.ir import (
     ArtifactRefPartIR,
     ImagePartIR,
@@ -484,7 +485,10 @@ class TurnExecutor:
                 ),
             ),
             tools=tuple(tool_definition_ir_from_dict(tool) for tool in tools),
-            metadata=dict(prompt.metadata),
+            metadata={
+                **dict(prompt.metadata),
+                "failure_context": self._llm_failure_context(continuation),
+            },
         )
         snapshot_store = getattr(getattr(self.context, "execution_runtime", None), "result_snapshots", None)
         memory = getattr(self.context, "port_registry", {}).get("memory:memory")
@@ -659,12 +663,9 @@ class TurnExecutor:
                 continuation,
                 outcome.response.message.message_id,
             )
-            # F2: the send receipt survives the swap — it authorizes the
-            # freeze of THIS round (the projected payload was sent); the
-            # R2 (review 95373ef): but its native capture described the
-            # pre-boundary provider output that canonical L1 just discarded.
-            # Strip it here — the accepted contribution is synthesized text
-            # and no provider-native payload may "complete" it.
+            # The send proof survives replacement. Replay belongs solely
+            # to the accepted message, so there is no parallel response
+            # payload on the receipt to revoke.
             send_receipt = outcome.projection_receipt
             outcome = self._generation_result_from_text(
                 self.fallback_final_reply(continuation),
@@ -672,8 +673,6 @@ class TurnExecutor:
                 response_mode=LLMResponseMode.CHAT,
             )
             if send_receipt is not None:
-                if getattr(send_receipt, "native", None) is not None:
-                    send_receipt = replace(send_receipt, native=None)
                 outcome = replace(outcome, projection_receipt=send_receipt)
             await self._upsert_l1_assistant_async(
                 continuation,
@@ -2567,6 +2566,32 @@ class TurnExecutor:
         self.clear_execution_cursors(continuation)
         return run_result
 
+    def _llm_failure_context(self, continuation) -> dict[str, Any]:
+        """Freeze diagnostic R before submission advances the live L/R cut.
+
+        This snapshot is never sent to the provider or installed back into L1.
+        The endpoint writes it only if this request fails.
+        """
+        context: dict[str, Any] = {
+            "turn_id": str(continuation.turn_id),
+            "llm_round_index": continuation.llm_round_index,
+        }
+        memory = self.context.port_registry.get("memory:memory")
+        root = memory.history_root if memory is not None else None
+        if root is not None:
+            cut = root.cut
+            context.update(
+                history_incarnation=root.incarnation,
+                history_cut={
+                    "turn_count": cut.turn_count,
+                    "intra_messages": cut.intra_messages,
+                    "revision": cut.revision,
+                    "cut_id": cut.cut_id,
+                },
+                right_messages=[message_to_payload(m) for m in root.right_messages()],
+            )
+        return context
+
     def _history_submission_observer(self, request: LLMRequestIR):
         memory = getattr(self.context, "port_registry", {}).get("memory:memory")
         root = (memory.history_root if memory is not None else None)
@@ -2833,14 +2858,12 @@ class TurnExecutor:
         projected payload actually went on the wire (F2); failures,
         errors, dropped/fallback sends and pre-boundary discards reject
         the round so the next request re-sends the tail cold instead of
-        freezing an answer that never happened.  When the receipt carries
-        a captured native candidate (F3) the REAL continuation policy
-        applies: inventory-matched, contract-PRESERVED material commits
-        byte-true (native_committed=True; the native payload carries the
-        assistant turn); degraded material refuses the freeze — an IR
-        re-encode of thinking/signature content would replay an illegal
-        protocol.  Projection bookkeeping is diagnostic-only here — it
-        never alters the outcome the caller already holds.
+        freezing an answer that never happened. Native continuation derives
+        only from the accepted message's replay envelope. Its tool names and
+        arguments must match accepted IR, and structural continuation contracts
+        must be preserved. Degraded material refuses the freeze; required
+        thinking/signature content is never silently re-encoded or discarded.
+        Projection bookkeeping never alters the accepted outcome.
         """
 
         if projection_pack is None:
@@ -2884,44 +2907,31 @@ class TurnExecutor:
         ):
             _reject("round_failed")
             return
-        # F3: apply the real continuation policy to the captured candidate.
-        native = getattr(receipt, "native", None)
+        # L1's accepted contribution is the only replay authority. The send
+        # receipt proves admission, but carries no independent response copy.
+        from pal.llm.replay_acceptance import native_candidate_from_accepted_message
+
         closed_call_ids: tuple[str, ...] = ()
         accepted_messages: tuple = ()
         native_committed = False
-        if native is not None:
-            semantic_call_ids = tuple(
-                str(call.call_id)
-                for call in (outcome.tool_calls or ())
-            )
-            if tuple(native.call_ids) != semantic_call_ids:
-                # The captured native no longer describes the accepted turn:
-                # either the acceptance boundary replaced the contribution
-                # (finalization fallback), or a response hook promoted
-                # textual DSML the codec never saw.  The native payload must
-                # not be frozen as the turn; commit the accepted IR alone.
-                native = None
-        if native is not None:
-            try:
+        try:
+            native = native_candidate_from_accepted_message(accepted)
+            if native is not None:
                 session.attach_native(attempt, native)
-            except Exception as exc:
-                # Degraded/unsupported material cannot legally continue on
-                # this protocol; refuse the freeze (cold next round) instead
-                # of re-encoding required-native content from IR.
-                if diagnostics is not None:
-                    diagnostics.append({
-                        "kind": "two_segment_turn_projection_native_degraded",
-                        "error": f"{type(exc).__name__}: {exc}",
-                    })
-                _reject("native_degraded")
-                return
-            native_committed = True
-            closed_call_ids = tuple(native.call_ids)
-            # One representation per assistant contribution: the native
-            # payload already carries the assistant turn (its tool calls
-            # AND plain text); only span coverage advances.
-        elif getattr(accepted, "parts", None):
-            accepted_messages = (accepted,)
+                native_committed = True
+                closed_call_ids = tuple(native.call_ids)
+            elif accepted.parts:
+                # This also covers merged Completion replay: the codec uses
+                # its accepted message envelope and preserves every piece.
+                accepted_messages = (accepted,)
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics.append({
+                    "kind": "two_segment_turn_projection_native_degraded",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+            _reject("native_degraded")
+            return
         try:
             import hashlib as _hashlib
 

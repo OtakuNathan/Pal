@@ -65,14 +65,14 @@ class ContinuationDecision:
 
 @dataclass(frozen=True)
 class NativeCandidate:
-    """Native continuation material captured from one decode attempt.
+    """A candidate native continuation envelope for structural validation.
 
     ``payload_json`` is the canonical serialization of the provider-native
-    payload (the replay envelope payload).  ``call_ids`` is the codec-level
-    tool-call inventory, in order of appearance; the shared runtime
-    reconciles it against the ACCEPTED call set before any association is
-    trusted (a response hook may promote textual DSML into structured calls
-    the codec never saw).
+    payload. ``call_ids`` names its ordered tool inventory. Raw diagnostic
+    captures may use this validator, but production projection candidates
+    derive only from the accepted L1 message's replay envelope. Call ids,
+    names and arguments must agree with accepted semantic IR before the
+    projection may attach that derived material.
     """
 
     wire_shape: WireShape

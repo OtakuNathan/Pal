@@ -8,6 +8,8 @@ from threading import RLock
 from pal.llm.endpoint_auth import EndpointAuth
 from pal.llm.chatgpt import is_chatgpt
 from pal.llm.endpoint_spec import LLMEndpointSpec
+from pal.llm.response_hook_contracts import BoundResponseHooks
+from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.ir import WireShape
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeCodec, ShapeContext, _JSONFrame
@@ -25,18 +27,22 @@ class EndpointCodec:
     spec: LLMEndpointSpec
     codec: ShapeCodec
     context: ShapeContext
+    response_hooks: BoundResponseHooks = field(default_factory=BoundResponseHooks, kw_only=True)
 
 
-def compile_endpoint_codec(spec: LLMEndpointSpec) -> EndpointCodec:
+def compile_endpoint_codec(
+    spec: LLMEndpointSpec, response_hooks: ProviderResponseHookRegistry | None = None,
+) -> EndpointCodec:
     spec = replace(spec, capabilities_blob=freeze_json_mapping(spec.capabilities_blob))
     shape = WireShape(spec.wire_shape)
     codec = codec_for_shape(shape)
     if isinstance(codec, OpenAIResponseCodec):
         codec = replace(codec, subscription=is_chatgpt(spec))
+    registry = response_hooks if response_hooks is not None else ProviderResponseHookRegistry.builtin()
     return EndpointCodec(spec, codec, ShapeContext(
         wire_shape=shape, endpoint_id=spec.endpoint_id, model_id=spec.model_id,
         provider_id=spec.provider, base_url=spec.base_url, capabilities=spec.capabilities_blob,
-    ))
+    ), response_hooks=registry.bind(endpoint_id=spec.endpoint_id, provider_id=spec.provider))
 
 
 @dataclass(frozen=True)

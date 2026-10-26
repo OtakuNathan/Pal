@@ -12,6 +12,7 @@ from typing import Any, Iterator
 
 from pal.foundation import PalV2Database
 from pal.llm.credentials import LLMCredentialResolver
+from pal.llm.cache_capabilities import PromptCacheDialect
 from pal.llm.ir import WireShape
 from pal.llm.endpoint_spec import validate_thinking_levels
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
@@ -98,6 +99,10 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     add_parser.add_argument("--base-url", default=None)
     add_parser.add_argument("--cache-mode", choices=("implicit", "hybrid", "explicit"), default=None,
                             help="Cache policy: automatic, fixed anchors plus automatic, or rolling explicit anchors")
+    add_parser.add_argument("--cache-protocol", choices=("general", *(item.value for item in PromptCacheDialect)),
+                            default=None, help="Declare endpoint cache capabilities; general sends no cache controls")
+    add_parser.add_argument("--cache-reminder-ttl-seconds", type=_positive_int, default=None,
+                            help="Estimated cache lifetime for local reminders")
     add_parser.add_argument(
         "--auth-kind",
         choices=("api_key_ref", "oauth", "local_provider_auth"),
@@ -312,13 +317,21 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
             model_defaults.get("notes", "Configured via pal llm add."),
         ),
     }
-    if args.cache_mode is not None:
+    cache_options = {
+        key: value for key, value in (
+            ("mode", args.cache_mode), ("protocol", args.cache_protocol),
+            ("reminder_ttl_seconds", args.cache_reminder_ttl_seconds),
+        ) if value is not None
+    }
+    if cache_options:
         from pal.llm.cache_policy import validate_cache_policy
         from pal.llm.shapes.base import ShapeContext
         capabilities["prompt_cache"] = {
             **dict(capabilities.get("prompt_cache") or {}),
-            "enabled": True, "mode": args.cache_mode,
+            **cache_options,
         }
+        if args.cache_mode is not None:
+            capabilities["prompt_cache"]["enabled"] = True
         validate_cache_policy(ShapeContext(
             WireShape(wire_shape), endpoint_id, model_id, provider_id=provider,
             base_url=base_url, capabilities=capabilities,

@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR
+from pal.llm.response_blocks import ResponseBlock, ResponseBlockMessage, ResponseBlockSnapshot, ResponseBlockUpdate, tool_block
 
 from typing import Any, Mapping
 from uuid import uuid4
 
 from pal.llm.ir import (
     LLMFinishReason,
-    LLMMessageIR,
     LLMResponseDeltaKind,
     LLMResponseItemKind,
-    LLMResponseIR,
-    LLMResponseUpdate,
     LLMUsageIR,
     MessageRole,
     MessageState,
@@ -24,7 +21,7 @@ from pal.llm.usage_normalization import merge_usage, usage_from_mapping
 from pal.llm.shapes.base import ShapeContext, ShapeDecodeError
 
 
-class ResponseIRBuilder:
+class ResponseBlockBuilder:
     def __init__(self, context: ShapeContext) -> None:
         self.context = context
         self.message_id = str(uuid4())
@@ -44,7 +41,7 @@ class ResponseIRBuilder:
         self.usage = self.evidence.usage
         self.provider_generation_id = self.evidence.provider_generation_id
 
-    def append_text(self, text: str) -> LLMResponseUpdate | None:
+    def append_text(self, text: str) -> ResponseBlockUpdate | None:
         value = str(text or "")
         if not value:
             return None
@@ -54,7 +51,7 @@ class ResponseIRBuilder:
             self.parts.append(TextPartIR(value))
         return self.update(LLMResponseDeltaKind.TEXT, text_delta=value)
 
-    def append_reasoning(self, text: str, *, redacted: bool = False) -> LLMResponseUpdate | None:
+    def append_reasoning(self, text: str, *, redacted: bool = False) -> ResponseBlockUpdate | None:
         value = str(text or "")
         if not value and not redacted:
             return None
@@ -69,17 +66,13 @@ class ResponseIRBuilder:
             self.parts.append(ReasoningPartIR(value, redacted=redacted))
         return self.update(LLMResponseDeltaKind.REASONING, text_delta=value)
 
-    def append_tool_call(self, *, call_id: str, name: str, arguments: Mapping[str, Any]) -> LLMResponseUpdate:
-        tool_call = ToolCallIR(
-            call_id=str(call_id),
-            name=str(name),
-            arguments=dict(arguments),
-        )
-        self.parts.append(tool_call)
+    def append_tool_block(self, *, call_id: str, name: str, arguments: Any, label: str = "tool arguments") -> ResponseBlockUpdate:
+        block = tool_block(call_id=str(call_id), name=str(name), arguments=arguments, label=label)
+        self.parts.append(block)
         self.finish_reason = LLMFinishReason.TOOL_CALLS
-        return self.update(LLMResponseDeltaKind.TOOL_CALL, tool_call=tool_call)
+        return self.update(LLMResponseDeltaKind.TOOL_CALL, tool_block=block)
 
-    def mark_complete(self, finish_reason: LLMFinishReason | str | None = None) -> LLMResponseUpdate:
+    def mark_complete(self, finish_reason: LLMFinishReason | str | None = None) -> ResponseBlockUpdate:
         if finish_reason is not None:
             self.finish_reason = canonical_finish_reason(finish_reason, has_tools=self.has_tools)
         elif self.has_tools:
@@ -89,10 +82,10 @@ class ResponseIRBuilder:
 
     @property
     def has_tools(self) -> bool:
-        return any(isinstance(part, ToolCallIR) for part in self.parts)
+        return any(isinstance(part, ResponseBlock) for part in self.parts)
 
     def discard_tool_calls(self) -> None:
-        self.parts = [part for part in self.parts if not isinstance(part, ToolCallIR)]
+        self.parts = [part for part in self.parts if not isinstance(part, ResponseBlock)]
         self.committed_items = {
             item_id: kind
             for item_id, kind in self.committed_items.items()
@@ -105,8 +98,8 @@ class ResponseIRBuilder:
         *,
         item_id: str,
         item_kind: LLMResponseItemKind | str,
-        tool_call: ToolCallIR | None = None,
-    ) -> LLMResponseUpdate | None:
+        tool_block: ResponseBlock | None = None,
+    ) -> ResponseBlockUpdate | None:
         normalized_id = str(item_id or "").strip()
         if not normalized_id:
             raise ShapeDecodeError("completed LLM item has no stable id")
@@ -116,14 +109,14 @@ class ResponseIRBuilder:
             if previous != normalized_kind:
                 raise ShapeDecodeError("completed LLM item changed kind")
             return None
-        if normalized_kind == LLMResponseItemKind.TOOL_CALL and tool_call is None:
+        if normalized_kind == LLMResponseItemKind.TOOL_CALL and tool_block is None:
             raise ShapeDecodeError("completed LLM tool item has no tool call")
         self.committed_items[normalized_id] = normalized_kind
         try:
-            return LLMResponseUpdate(
+            return ResponseBlockUpdate(
                 response=self.snapshot(),
                 delta_kind=LLMResponseDeltaKind.ITEM_COMMITTED,
-                tool_call=tool_call,
+                tool_block=tool_block,
                 item_id=normalized_id,
                 item_kind=normalized_kind,
             )
@@ -131,7 +124,7 @@ class ResponseIRBuilder:
             self.committed_items.pop(normalized_id, None)
             raise
 
-    def snapshot(self) -> LLMResponseIR:
+    def snapshot(self) -> ResponseBlockSnapshot:
         replay = None
         if self.replay_payload:
             replay = ReplayEnvelope(
@@ -142,7 +135,7 @@ class ResponseIRBuilder:
                 source_payload=self.replay_source_payload,
             )
         state = MessageState.COMPLETE if self.complete else MessageState.IN_PROGRESS
-        message = LLMMessageIR(
+        message = ResponseBlockMessage(
             role=MessageRole.ASSISTANT,
             parts=tuple(self.parts),
             message_id=self.message_id,
@@ -158,7 +151,7 @@ class ResponseIRBuilder:
                 ]
             },
         )
-        return LLMResponseIR(
+        return ResponseBlockSnapshot(
             message=message,
             finish_reason=self.finish_reason,
             usage=self.usage,
@@ -174,16 +167,16 @@ class ResponseIRBuilder:
         kind: LLMResponseDeltaKind,
         *,
         text_delta: str = "",
-        tool_call: ToolCallIR | None = None,
-    ) -> LLMResponseUpdate:
-        return LLMResponseUpdate(
+        tool_block: ResponseBlock | None = None,
+    ) -> ResponseBlockUpdate:
+        return ResponseBlockUpdate(
             response=self.snapshot(),
             delta_kind=kind,
             text_delta=text_delta,
-            tool_call=tool_call,
+            tool_block=tool_block,
         )
 
-    def finish(self) -> LLMResponseIR:
+    def finish(self) -> ResponseBlockSnapshot:
         if not self.complete:
             self.complete = True
         response = self.snapshot()

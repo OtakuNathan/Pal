@@ -645,7 +645,7 @@ def _append_runtime_root_binds(
     ):
         if path.exists():
             _append_bind_path(args, path, read_only=True)
-    for dir_name in ("data/lsp", "plugins", "SKILL"):
+    for dir_name in ("data/lsp", "plugins", "SKILL", "llm/models", "llm/providers", "llm/endpoints"):
         path = runtime_root / dir_name
         if path.exists():
             _append_dir_scaffold(args, path)

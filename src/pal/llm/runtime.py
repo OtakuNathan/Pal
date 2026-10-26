@@ -15,7 +15,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from pal.llm.contracts import (
     LLMGenerationResult,
@@ -25,8 +25,9 @@ from pal.llm.contracts import (
     LLMProjectionPort,
     LLMSideTurn,
 )
-from pal.llm.credentials import LLMCredentialResolver, LLMCredentialUnavailableError
-from pal.llm.endpoint import ShapeEndpointInvoker
+from pal.llm.credentials import LLMCredentialUnavailableError
+from pal.llm.endpoint_factory import build_default_endpoint_invoker
+from pal.llm.invocation_contracts import LLMEndpointInvokerPort, ManagedEndpointInvokerPort
 from pal.llm.endpoint_spec import LLMEndpointSpec
 from pal.llm.request_contracts import LLMPreparedPlan, PreparedLLMRequest, LLMProgressEvent
 from pal.llm.ir import (
@@ -74,7 +75,6 @@ from pal.llm.chatgpt import QUOTA_CODE, exception_error, is_chatgpt
 from pal.llm.shapes.base import ShapeDecodeError
 from pal.llm.transport import (
     RequestSubmission,
-    DirectEndpointTransport,
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,
     LLMStreamControl,
@@ -89,15 +89,6 @@ _DEFAULT_TIMEOUT_SECONDS = 600.0
 _CALL_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
     "llm_call_event_sink", default=None,
 )
-
-
-def _native_sink_collector(box: dict[str, Any]) -> Callable[[Any], None]:
-    """Single-slot box the invoker deposits the attempt's native capture in."""
-
-    def collect(candidate: Any) -> None:
-        box.setdefault("native", candidate)
-
-    return collect
 
 
 class LLMEndpointInvocationError(RuntimeError):
@@ -170,44 +161,6 @@ class EndpointResolver:
         return next((item for item in self.endpoints if item.endpoint_id == preferred_endpoint_id), None)
 
 
-class LLMEndpointInvokerPort(Protocol):
-    def invoke(
-        self,
-        endpoint: LLMEndpointModel,
-        request: LLMRequestIR,
-        *,
-        stream: bool = False,
-        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-    ) -> tuple[LLMResponseIR, tuple[LLMResponseUpdate, ...]]:
-        ...
-
-    def invoke_updates(
-        self,
-        endpoint: LLMEndpointModel,
-        request: LLMRequestIR,
-        *,
-        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
-        stream_control: LLMStreamControl | None = None,
-    ) -> Iterator[LLMResponseUpdate]:
-        ...
-
-
-def build_default_endpoint_invoker(
-    *,
-    credentials: LLMCredentialResolver | None = None,
-    runtime_root: str | Path | None = None,
-    response_hooks: ProviderResponseHookRegistry | None = None,
-) -> ShapeEndpointInvoker:
-    _ = runtime_root
-    resolver = credentials or LLMCredentialResolver()
-    return ShapeEndpointInvoker(
-        transport=DirectEndpointTransport(
-            credential_resolver=resolver.resolve_api_key,
-        ),
-        response_hooks=response_hooks or ProviderResponseHookRegistry.builtin(),
-    )
-
-
 @dataclass
 class LLMRuntime:
     endpoint_resolver: EndpointResolver
@@ -229,6 +182,7 @@ class LLMRuntime:
     cache_profile_generation: int = field(default=1, init=False)
     model_hooks: ModelHookRegistry = field(init=False)
     provider_response_hooks: ProviderResponseHookRegistry = field(init=False)
+    _response_hook_defaults: ProviderResponseHookRegistry = field(init=False, repr=False)
     _detached_stream_tasks: set[asyncio.Task[Any]] = field(
         default_factory=set,
         init=False,
@@ -247,19 +201,23 @@ class LLMRuntime:
     def __post_init__(self) -> None:
         runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
         self.model_hooks = ModelHookRegistry.load(runtime_root)
-        self.provider_response_hooks = ProviderResponseHookRegistry.builtin()
+        managed = self._managed_invoker()
+        self._response_hook_defaults = (
+            managed.response_hooks if managed is not None else ProviderResponseHookRegistry.builtin()
+        )
+        self.provider_response_hooks = ProviderResponseHookRegistry.load(
+            runtime_root, defaults=self._response_hook_defaults,
+        )
         if self.endpoint_invoker is None:
             self.endpoint_invoker = build_default_endpoint_invoker(
                 runtime_root=runtime_root,
                 response_hooks=self.provider_response_hooks,
             )
-        elif isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
-            # Initial decoding and post-continuation normalization are two
-            # passes through one immutable provider-response pipeline.
-            self.provider_response_hooks = self.endpoint_invoker.response_hooks
-        if isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
-            self.endpoint_invoker.attempt_sink = self.usage_ledger.record_attempt
-            self.endpoint_invoker.prepare_endpoints(self.endpoint_resolver.endpoints)
+        managed = self._managed_invoker()
+        if managed is not None:
+            managed.configure_response_hooks(self.provider_response_hooks)
+            managed.configure_attempt_sink(self.usage_ledger.record_attempt)
+            managed.prepare_endpoints(self.endpoint_resolver.endpoints)
         self.endpoint_retry_attempts = max(
             1,
             int(getattr(self.config, "llm_endpoint_retry_attempts", self.endpoint_retry_attempts) or 1),
@@ -352,8 +310,9 @@ class LLMRuntime:
         child.last_projection_receipt = None
         child._projection_sessions = {}
         child._detached_stream_tasks = set()
-        if isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
-            child.endpoint_invoker = self.endpoint_invoker.fork_transient()
+        managed = self._managed_invoker()
+        if managed is not None:
+            child.endpoint_invoker = managed.fork_transient()
         return child
 
     def prepare_generation_plan(
@@ -589,13 +548,18 @@ class LLMRuntime:
                 activate(endpoint.endpoint_id)
 
     def refresh_llm_endpoints(self) -> dict[str, Any]:
+        runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
+        model_hooks = ModelHookRegistry.load(runtime_root)
+        response_hooks = ProviderResponseHookRegistry.load(
+            runtime_root, defaults=self._response_hook_defaults,
+        )
         before = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         self.endpoint_resolver.refresh()
         refresh_settings = getattr(self.settings_repository, "refresh", None)
         if callable(refresh_settings):
             refresh_settings()
-        runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
-        self.model_hooks = ModelHookRegistry.load(runtime_root)
+        self.model_hooks = model_hooks
+        self.provider_response_hooks = response_hooks
         self.cache_profile_generation += 1
         refresh_credentials = getattr(
             self.endpoint_invoker,
@@ -607,8 +571,10 @@ class LLMRuntime:
             if callable(refresh_credentials)
             else False
         )
-        if isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
-            self.endpoint_invoker.prepare_endpoints(self.endpoint_resolver.endpoints)
+        managed = self._managed_invoker()
+        if managed is not None:
+            managed.configure_response_hooks(response_hooks)
+            managed.prepare_endpoints(self.endpoint_resolver.endpoints)
         self.refresh_runtime_settings()
         after = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         primary = self.active_endpoint()
@@ -622,14 +588,16 @@ class LLMRuntime:
             "primary_endpoint_id": primary.endpoint_id if primary else None,
             "primary_model_id": primary.model_id if primary else None,
             "model_hook_count": len(self.model_hooks.hooks),
+            "provider_response_hook_count": len(self.provider_response_hooks.hooks),
+            "endpoint_response_hook_count": len(self.provider_response_hooks.endpoint_hooks),
             "credentials_refreshed": credentials_refreshed,
         }
 
     def resume_subscription(self, endpoint_id: str) -> None:
         """Explicit user action, deliberately separate from endpoint activation."""
         endpoint = self._endpoint_by_id(endpoint_id)
-        invoker = self._invoker()
-        if endpoint is not None and isinstance(invoker, ShapeEndpointInvoker):
+        invoker = self._managed_invoker()
+        if endpoint is not None and invoker is not None:
             invoker.resume_subscription(endpoint)
 
     def set_active_endpoint(self, endpoint_id: str) -> str:
@@ -902,49 +870,26 @@ class LLMRuntime:
                 response = _text_response("stub response", LLMFinishReason.STUB)
                 return self._success(endpoint, response)
             for attempt in range(self.endpoint_retry_attempts):
-                native_box: dict[str, Any] = {}
                 try:
                     invoke_kwargs: dict[str, Any] = {
                         "stream": False,
                         "timeout_seconds": self._timeout_seconds(effective),
                     }
                     attempt_projection = None
-                    if isinstance(self._invoker(), ShapeEndpointInvoker):
+                    if self._managed_invoker() is not None:
                         attempt_projection = self._projection_for_endpoint(
                             endpoint, projection, projection_binding)
                         if on_submitted is not None:
                             invoke_kwargs["submission_sink"] = on_submitted
                         if attempt_projection is not None:
                             invoke_kwargs["projection"] = attempt_projection
-                        # F3: the codec-level native capture for THIS attempt
-                        # travels back with the send receipt.
-                        invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
                     response, _ = self._invoker().invoke(
                         endpoint,
                         effective,
                         **invoke_kwargs,
                     )
                     if response.finish_reason == LLMFinishReason.LENGTH:
-                        first = response
                         response = self._recover_length(endpoint, effective, response)
-                        recovery_rewrote = response is not first
-                        # Recovery merges multiple already-decoded pieces, so
-                        # the merged response crosses the same provider
-                        # decorator once more. Non-recovered responses were
-                        # normalized by the endpoint iterator already.
-                        response = self._normalize_completed_response(
-                            endpoint,
-                            effective,
-                            response,
-                        )
-                        if recovery_rewrote:
-                            # R2 (review 95373ef): recovery rewrote the
-                            # contribution (merged continuations or discarded
-                            # the first attempt).  The first attempt's codec
-                            # capture no longer represents the accepted
-                            # output — revoke it so the receipt cannot freeze
-                            # a half response as this turn's native lineage.
-                            native_box.clear()
                     if response.finish_reason == LLMFinishReason.ERROR:
                         raise _accounted_response_error(endpoint, response)
                     receipt = self._projection_send_receipt(
@@ -953,7 +898,6 @@ class LLMRuntime:
                         projection=projection,
                         binding=projection_binding,
                         applied=attempt_projection is not None,
-                        native_box=native_box,
                     )
                     if receipt is not None:
                         self.last_projection_receipt = receipt
@@ -1025,20 +969,18 @@ class LLMRuntime:
         projection: "EncodedRequest | None",
         binding: "EndpointBinding | None",
         applied: bool,
-        native_box: dict[str, Any] | None = None,
     ) -> ProjectionSendReceipt | None:
         """F2: build the typed send receipt when a projection was offered.
 
         No projection offered → no receipt (None); offered but dropped →
         applied=False with the resolved endpoint that actually served, so
         the owner rejects the round instead of freezing a payload the
-        provider never saw.  Native material only rides an APPLIED
-        receipt — a cold send's capture authorizes nothing.
+        provider never saw. Response content is derived from the owner's
+        accepted message separately; the send proof carries no response copy.
         """
 
         if projection is None or binding is None or not str(attempt_id or "").strip():
             return None
-        candidate = (native_box or {}).get("native") if applied else None
         return ProjectionSendReceipt(
             attempt_id=str(attempt_id),
             resolved_endpoint_id=str(endpoint.endpoint_id),
@@ -1047,7 +989,6 @@ class LLMRuntime:
             applied=bool(applied),
             detail="sent" if applied else "projection_dropped_for_endpoint",
             binding=binding,
-            native=candidate,
         )
 
     def _projection_for_endpoint(
@@ -1189,13 +1130,12 @@ class LLMRuntime:
             semantic_seen = False
             for attempt in range(self.endpoint_retry_attempts):
                 last_update: LLMResponseUpdate | None = None
-                native_box: dict[str, Any] = {}
                 attempt_projection = None
                 try:
                     invoke_kwargs: dict[str, Any] = {
                         "timeout_seconds": self._timeout_seconds(effective),
                     }
-                    if isinstance(self._invoker(), ShapeEndpointInvoker):
+                    if self._managed_invoker() is not None:
                         invoke_kwargs["stream_control"] = stream_control
                         attempt_projection = self._projection_for_endpoint(
                             endpoint, projection, projection_binding)
@@ -1203,8 +1143,6 @@ class LLMRuntime:
                             invoke_kwargs["submission_sink"] = on_submitted
                         if attempt_projection is not None:
                             invoke_kwargs["projection"] = attempt_projection
-                        # F3: native capture travels back with the receipt.
-                        invoke_kwargs["native_sink"] = _native_sink_collector(native_box)
                     for update in self._invoker().invoke_updates(
                         endpoint,
                         effective,
@@ -1224,24 +1162,12 @@ class LLMRuntime:
                         yield update
                     completed = last_update.response if last_update is not None else _text_response("", LLMFinishReason.ERROR)
                     if completed.finish_reason == LLMFinishReason.LENGTH:
-                        first = completed
                         recovered = self._recover_length(
                             endpoint,
                             effective,
                             completed,
                             allow_discarded_retry=False,
                         )
-                        recovery_rewrote = recovered is not first
-                        recovered = self._normalize_completed_response(
-                            endpoint,
-                            effective,
-                            recovered,
-                        )
-                        if recovery_rewrote:
-                            # R2: the merged continuation is not represented
-                            # by the first attempt's capture; revoke it
-                            # rather than freezing a half response.
-                            native_box.clear()
                         if recovered.finish_reason == LLMFinishReason.ERROR:
                             raise _accounted_response_error(endpoint, recovered)
                         recovery_updates = tuple(stream_recovery_updates(completed, recovered))
@@ -1255,7 +1181,6 @@ class LLMRuntime:
                         projection=projection,
                         binding=projection_binding,
                         applied=attempt_projection is not None,
-                        native_box=native_box,
                     )
                     if receipt is not None:
                         self.last_projection_receipt = receipt
@@ -1607,7 +1532,7 @@ class LLMRuntime:
         for endpoint in self.endpoint_resolver.endpoints:
             policy = thaw_json((getattr(endpoint, "capabilities_blob", None) or {}).get("prompt_cache") or {})
             hook = self.model_hooks.hooks.get(str(endpoint.model_id))
-            explicit = "mode" in policy or "cache_profile" in policy or "dialect" in policy or policy.get("enabled") is False
+            explicit = any(key in policy for key in ("mode", "cache_profile", "dialect", "protocol")) or policy.get("enabled") is False
             if not explicit and hook is not None and hook.cache_profile_ref:
                 policy["cache_profile"] = hook.cache_profile_ref
                 policy["origin"] = "model_hook"
@@ -1919,40 +1844,6 @@ class LLMRuntime:
         )
         return exhausted
 
-    def _normalize_completed_response(
-        self,
-        endpoint: LLMEndpointModel,
-        request: LLMRequestIR,
-        response: LLMResponseIR,
-    ) -> LLMResponseIR:
-        updates = tuple(
-            self.provider_response_hooks.normalize(
-                endpoint_id=str(endpoint.endpoint_id),
-                provider_id=str(endpoint.provider),
-                model_id=str(endpoint.model_id),
-                wire_shape=WireShape(str(endpoint.wire_shape)),
-                request=request,
-                updates=(
-                    LLMResponseUpdate(
-                        response=response,
-                        delta_kind=LLMResponseDeltaKind.STATE,
-                    ),
-                ),
-            )
-        )
-        if not updates:
-            raise ProviderResponseHookError(
-                f"provider response hook produced no output for {endpoint.endpoint_id}"
-            )
-        normalized = updates[-1].response
-        if response.message.replay is not None and normalized.message.replay is None:
-            if normalized.message.tool_calls != response.message.tool_calls:
-                raise ProviderResponseHookError("recovery changed accepted tool inventory")
-            normalized = replace(normalized, message=replace(
-                normalized.message, replay=response.message.replay,
-            ))
-        return normalized
-
     def _success(
         self,
         endpoint: LLMEndpointModel,
@@ -1981,7 +1872,7 @@ class LLMRuntime:
             provider=endpoint.provider,
             usage=response.usage,
             provider_response_count=response.provider_response_count,
-            usage_accounted=bool(response.attempt_ids) and isinstance(self._invoker(), ShapeEndpointInvoker),
+            usage_accounted=bool(response.attempt_ids) and self._managed_invoker() is not None,
         )
 
     def _record_failure(self, endpoint: LLMEndpointModel, exc: Exception, attempt: int, *, provider_attempt: bool = True) -> str:
@@ -2041,6 +1932,10 @@ class LLMRuntime:
         sink = _CALL_EVENT_SINK.get() or self.event_sink
         if sink is not None:
             sink(dict(event))
+
+    def _managed_invoker(self) -> ManagedEndpointInvokerPort | None:
+        invoker = self.endpoint_invoker
+        return invoker if isinstance(invoker, ManagedEndpointInvokerPort) else None
 
     def _invoker(self) -> LLMEndpointInvokerPort:
         if self.endpoint_invoker is None:

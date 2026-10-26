@@ -16,6 +16,8 @@ Package layout:
 
 All built-in roles, including Architect, run through the Pal worker and use
 Pal's configured LLM endpoints and tool surface.
+Sandboxed workers mount `llm/models`, `llm/providers`, and `llm/endpoints`
+read-only so the shared LLM runtime loads the same hook configuration as Pal.
 
 `start_workflow.execution_mode` defaults to `planned`. For software-engineering
 `new_requirement` workflows, `direct` binds the complete task to one repository

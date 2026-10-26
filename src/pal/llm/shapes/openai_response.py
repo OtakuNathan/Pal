@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.foundation.diagnostics import diagnostic_text
 
 from pal.shared.tool_protocol import ToolCallIR
+from pal.llm.response_blocks import ResponseBlock, ResponseBlockSnapshot, ResponseBlockUpdate
 
 import json
 from dataclasses import dataclass, replace
@@ -15,8 +16,6 @@ from pal.llm.ir import (
     LLMRequestIR,
     LLMResponseDeltaKind,
     LLMResponseItemKind,
-    LLMResponseIR,
-    LLMResponseUpdate,
     MessageRole,
     ReasoningPartIR,
     TextPartIR,
@@ -34,10 +33,10 @@ from pal.llm.shapes.base import (
     request_parameter_supported,
 )
 from pal.llm.shapes.builder import (
-    ResponseIRBuilder,
+    ResponseBlockBuilder,
     canonical_finish_reason,
 )
-from pal.llm.shapes.common import json_object, responses_tool_definition, tool_results
+from pal.llm.shapes.common import responses_tool_definition, tool_results
 from pal.shared.json_values import thaw_json
 from pal.llm.chatgpt import ChatGPTError, UNSUPPORTED_PARAMETERS, is_chatgpt, response_error
 
@@ -186,12 +185,12 @@ class OpenAIResponseDecoder:
     def __init__(self, context: ShapeContext, *, subscription: bool | None = None) -> None:
         self.context = context
         self.subscription = subscription if subscription is not None else is_chatgpt(context.capabilities)
-        self.builder = ResponseIRBuilder(context)
+        self.builder = ResponseBlockBuilder(context)
         self.tool_drafts: dict[int, dict[str, Any]] = {}
         self.replay_items: dict[int, dict[str, Any]] = {}
         self.complete = False
 
-    def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
+    def feed(self, frame: _JSONFrame) -> tuple[ResponseBlockUpdate, ...]:
         if self.subscription:
             event = str(frame.payload.get("type") or "")
             if not event:
@@ -223,7 +222,7 @@ class OpenAIResponseDecoder:
             self.builder.discard_tool_calls()
             self.complete = True
             return (self.builder.mark_complete("error"),)
-        updates: list[LLMResponseUpdate] = []
+        updates: list[ResponseBlockUpdate] = []
         if event_type in {"response.output_text.delta", "response.refusal.delta"}:
             text = str(payload.get("delta") or "")
             if text:
@@ -274,7 +273,7 @@ class OpenAIResponseDecoder:
             self.complete = True
         return tuple(updates)
 
-    def finish(self) -> LLMResponseIR:
+    def finish(self) -> ResponseBlockSnapshot:
         if self.subscription and not self.complete:
             self.builder.discard_tool_calls()
             raise ChatGPTError("stream_interrupted")
@@ -288,8 +287,8 @@ class OpenAIResponseDecoder:
         self._refresh_replay()
         return self.builder.finish()
 
-    def _feed_complete_response(self, payload: dict[str, Any]) -> tuple[LLMResponseUpdate, ...]:
-        updates: list[LLMResponseUpdate] = []
+    def _feed_complete_response(self, payload: dict[str, Any]) -> tuple[ResponseBlockUpdate, ...]:
+        updates: list[ResponseBlockUpdate] = []
         output = list(payload.get("output") or [])
         status = str(payload.get("status") or "").strip().lower()
         failed = status in {"failed", "error", "cancelled", "canceled"}
@@ -337,19 +336,16 @@ class OpenAIResponseDecoder:
                 if not call_id:
                     self.replay_items.pop(index, None)
                     continue
-                tool_update = self.builder.append_tool_call(
+                tool_update = self.builder.append_tool_block(
                     call_id=call_id,
                     name=str(item.get("name") or ""),
-                    arguments=json_object(
-                        item.get("arguments") or {},
-                        label="Responses tool arguments",
-                    ),
+                    arguments=item.get("arguments") or {}, label="Responses tool arguments",
                 )
                 updates.append(tool_update)
                 committed = self.builder.commit_item(
                     item_id=_response_item_id(self.builder.message_id, index, item),
                     item_kind=LLMResponseItemKind.TOOL_CALL,
-                    tool_call=tool_update.tool_call,
+                    tool_block=tool_update.tool_block,
                 )
                 if committed is not None:
                     updates.append(committed)
@@ -394,7 +390,7 @@ class OpenAIResponseDecoder:
         if isinstance(delta, str):
             draft["arguments"].append(delta)
 
-    def _finish_item(self, payload: Mapping[str, Any]) -> list[LLMResponseUpdate]:
+    def _finish_item(self, payload: Mapping[str, Any]) -> list[ResponseBlockUpdate]:
         index = _output_index(payload)
         item = payload.get("item")
         if isinstance(item, Mapping):
@@ -406,13 +402,13 @@ class OpenAIResponseDecoder:
                 if item.get("arguments") is not None:
                     draft["arguments"] = [str(item.get("arguments") or "")]
         kind = str(dict(item or {}).get("type") or self.replay_items.get(index, {}).get("type") or "")
-        updates: list[LLMResponseUpdate] = []
-        tool_call = None
+        updates: list[ResponseBlockUpdate] = []
+        tool_block = None
         if kind == "function_call":
             tool_updates = self._finalize_tool(index)
             updates.extend(tool_updates)
             if tool_updates:
-                tool_call = tool_updates[-1].tool_call
+                tool_block = tool_updates[-1].tool_block
             item_kind = LLMResponseItemKind.TOOL_CALL
         elif kind == "reasoning":
             item_kind = LLMResponseItemKind.REASONING
@@ -427,13 +423,13 @@ class OpenAIResponseDecoder:
                 dict(item or self.replay_items.get(index) or {}),
             ),
             item_kind=item_kind,
-            tool_call=tool_call,
+            tool_block=tool_block,
         )
         if committed is not None:
             updates.append(committed)
         return updates
 
-    def _finalize_tool(self, index: int) -> list[LLMResponseUpdate]:
+    def _finalize_tool(self, index: int) -> list[ResponseBlockUpdate]:
         draft = self.tool_drafts.pop(index, None)
         if draft is None:
             return []
@@ -442,19 +438,17 @@ class OpenAIResponseDecoder:
             self.replay_items.pop(index, None)
             return []
         name = str(draft.get("name") or "").strip()
-        if not name:
-            raise ShapeDecodeError("Responses stream tool call has no name")
         arguments = "".join(str(value) for value in draft.get("arguments") or []) or "{}"
         return [
-            self.builder.append_tool_call(
+            self.builder.append_tool_block(
                 call_id=call_id,
                 name=name,
-                arguments=json_object(arguments, label=f"tool {name} arguments"),
+                arguments=arguments, label=f"tool {name} arguments",
             )
         ]
 
-    def _finalize_tools(self) -> list[LLMResponseUpdate]:
-        updates: list[LLMResponseUpdate] = []
+    def _finalize_tools(self) -> list[ResponseBlockUpdate]:
+        updates: list[ResponseBlockUpdate] = []
         for index in sorted(tuple(self.tool_drafts)):
             updates.extend(self._finalize_tool(index))
         return updates
@@ -502,13 +496,14 @@ def _semantic_response_items(parts: list[Any]) -> list[dict[str, Any]]:
             }
         )
     for part in parts:
-        if isinstance(part, ToolCallIR):
+        if isinstance(part, ResponseBlock):
             items.append(
                 {
                     "type": "function_call",
                     "call_id": part.call_id,
                     "name": part.name,
-                    "arguments": json.dumps(thaw_json(part.arguments), ensure_ascii=False),
+                    "arguments": (part.arguments if isinstance(part.arguments, str)
+                                  else json.dumps(thaw_json(part.arguments), ensure_ascii=False)),
                 }
             )
     return items

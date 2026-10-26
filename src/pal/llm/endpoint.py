@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Any
 from uuid import uuid4
 
@@ -25,6 +26,8 @@ from pal.llm.endpoint_components import EndpointCodec, LLMEndpoint, compile_endp
 from pal.llm.endpoint_spec import LLMEndpointSpec, endpoint_spec_fingerprint
 from pal.llm.prompt_cache import PromptCacheCoordinator
 from pal.llm.response_hooks import ProviderResponseHookRegistry
+from pal.llm.response_hook_contracts import ProviderResponseHookContext
+from pal.llm.response_blocks import decode_response_blocks, materialize_replay
 from pal.llm.request_hooks import apply_provider_request_hooks
 from pal.llm.shapes.base import EncodedRequest, ShapeDecodeError
 from pal.llm.transport import (
@@ -55,14 +58,17 @@ class ShapeEndpointInvoker:
     prompt_cache: PromptCacheCoordinator = field(default_factory=PromptCacheCoordinator)
     attempt_sink: Callable[[LLMAttemptResult], Any] | None = None
     _codecs: dict[str, tuple[str, EndpointCodec]] = field(default_factory=dict, init=False, repr=False)
+    _binding_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if isinstance(self.transport, DirectEndpointTransport):
+            self.transport.configure_response_hooks(self.response_hooks)
             return
         if self.credential_resolver is not None:
             self.transport = DirectEndpointTransport(
                 credential_resolver=self.credential_resolver,
                 sdk_transport=self.transport or SDKJSONTransport(),
+                response_hooks=self.response_hooks,
             )
             return
         if self.transport is None:
@@ -85,36 +91,51 @@ class ShapeEndpointInvoker:
         """Borrow transport/usage reporting without retaining side content in the host."""
         from copy import copy
 
-        child = copy(self)
-        child.prompt_cache = self.prompt_cache.fork_transient()
-        child._codecs = dict(self._codecs)
+        with self._binding_lock:
+            child = copy(self)
+            child.prompt_cache = self.prompt_cache.fork_transient()
+            child._codecs = dict(self._codecs)
+        child._binding_lock = RLock()
         return child
 
     def close(self) -> None:
         close = getattr(self.transport, "close", None)
         if callable(close):
             close()
-        self._codecs.clear()
+        with self._binding_lock:
+            self._codecs.clear()
 
     def prepare_endpoints(self, endpoints: Iterable[LLMEndpointModel]) -> None:
-        if isinstance(self.transport, DirectEndpointTransport):
-            self.transport.prepare_endpoints(endpoints)
-        else:
-            self._codecs = {
-                str(endpoint.endpoint_id): (endpoint_spec_fingerprint(endpoint),
-                    compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint)))
-                for endpoint in endpoints
-            }
+        with self._binding_lock:
+            if isinstance(self.transport, DirectEndpointTransport):
+                self.transport.prepare_endpoints(endpoints)
+            else:
+                self._codecs = {
+                    str(endpoint.endpoint_id): (endpoint_spec_fingerprint(endpoint),
+                        compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint), self.response_hooks))
+                    for endpoint in endpoints
+                }
 
     def _binding(self, endpoint: LLMEndpointModel) -> EndpointCodec:
-        if isinstance(self.transport, DirectEndpointTransport):
-            return self.transport.bind(endpoint)
-        fingerprint = endpoint_spec_fingerprint(endpoint)
-        current = self._codecs.get(str(endpoint.endpoint_id))
-        if current is None or current[0] != fingerprint:
-            current = (fingerprint, compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint)))
-            self._codecs[str(endpoint.endpoint_id)] = current
-        return current[1]
+        with self._binding_lock:
+            if isinstance(self.transport, DirectEndpointTransport):
+                return self.transport.bind(endpoint)
+            fingerprint = endpoint_spec_fingerprint(endpoint)
+            current = self._codecs.get(str(endpoint.endpoint_id))
+            if current is None or current[0] != fingerprint:
+                current = (fingerprint, compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint), self.response_hooks))
+                self._codecs[str(endpoint.endpoint_id)] = current
+            return current[1]
+
+    def configure_response_hooks(self, registry: ProviderResponseHookRegistry) -> None:
+        with self._binding_lock:
+            self.response_hooks = registry
+            self._codecs.clear()
+            if isinstance(self.transport, DirectEndpointTransport):
+                self.transport.configure_response_hooks(registry)
+
+    def configure_attempt_sink(self, sink: Callable[[LLMAttemptResult], Any]) -> None:
+        self.attempt_sink = sink
 
     def invoke(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,
@@ -212,6 +233,29 @@ class ShapeEndpointInvoker:
         last_event_type = ""
         failure_capture = DecodeFailureCapture()
 
+        def save_failure(exc: BaseException) -> None:
+            capture_path = failure_capture.save(
+                exc, endpoint_id=str(endpoint.endpoint_id), model_id=str(endpoint.model_id),
+                wire_shape=shape.value, attempt_id=request_id, streaming=stream,
+                provider_generation_id=evidence.provider_generation_id,
+                actual_provider=evidence.actual_provider,
+                returned_model=evidence.returned_model,
+                request_context=request.metadata.get("failure_context"),
+                turn_id=str(request.metadata.get("turn_id") or ""),
+                llm_round_index=request.metadata.get("llm_round_index"),
+            )
+            # Raw response frames and R stay in the private capture. Service
+            # logs identify the attempt and preserve the redacted exception.
+            logger.warning(
+                "LLM %s failed endpoint=%s model=%s shape=%s attempt=%s "
+                "generation=%s frames=%s last_event=%r reason=%r capture=%s failed_at=%s\n%s",
+                "decode" if isinstance(exc, ShapeDecodeError) else "response",
+                endpoint.endpoint_id, endpoint.model_id, shape.value, request_id,
+                evidence.provider_generation_id, frame_count, last_event_type,
+                diagnostic_text(exc, limit=500), capture_path or "unavailable",
+                datetime.now(timezone.utc).isoformat(), exception_report(exc),
+            )
+
         def observed_frames():
             nonlocal frames, frame_count, last_event_type
             frames = iter(binding.frames(transport_request) if isinstance(binding, LLMEndpoint)
@@ -229,65 +273,53 @@ class ShapeEndpointInvoker:
         from pal.llm.native_capture import decode_with_capture
 
         capture = decode_with_capture(
-            codec.decode(observed_frames(), context),
+            codec.split(observed_frames(), context),
             endpoint_id=str(endpoint.endpoint_id),
             model_id=str(endpoint.model_id),
         )
 
         try:
-            decoded = self.response_hooks.normalize(
-                endpoint_id=str(endpoint.endpoint_id), provider_id=str(endpoint.provider),
-                model_id=str(endpoint.model_id), wire_shape=shape, request=request,
-                updates=capture,
+            hook_context = ProviderResponseHookContext(
+                str(endpoint.endpoint_id), str(endpoint.provider), str(endpoint.model_id), shape, request,
             )
+            decoded = decode_response_blocks(binding.response_hooks.normalize_blocks(hook_context, capture))
             for update in decoded:
                 response = replace(update.response, attempt_ids=(request_id,))
-                if response.message.state == MessageState.COMPLETE:
+                if (response.message.state == MessageState.COMPLETE
+                        and response.finish_reason not in {LLMFinishReason.ERROR, LLMFinishReason.CONTENT_FILTER}):
                     from pal.llm.replay_acceptance import bind_accepted_replay
 
                     response = replace(response, message=bind_accepted_replay(
-                        response.message, capture.replay, provider_id=str(endpoint.provider),
+                        response.message,
+                        materialize_replay(response.message.replay or capture.replay, response.tool_calls),
+                        provider_id=str(endpoint.provider),
                     ))
                 last = replace(update, response=response)
                 yield last
             if last is None or (not last.response.message.parts and last.response.finish_reason not in {LLMFinishReason.LENGTH, LLMFinishReason.ERROR}):
                 raise RuntimeError("LLM stream completed without semantic output")
             status = "failed" if last.response.finish_reason == LLMFinishReason.ERROR else "success"
+            if status == "failed":
+                save_failure(RuntimeError("Provider returned finish_reason=error"))
         except BaseException as exc:
             status = "cancelled" if isinstance(exc, (GeneratorExit, asyncio.CancelledError, LLMStreamCancelledError)) or bool(
                 stream_control and stream_control.cancelled
             ) else "failed"
             error_type = type(exc).__name__
-            if isinstance(exc, ShapeDecodeError):
-                capture_path = failure_capture.save(
-                    exc, endpoint_id=str(endpoint.endpoint_id), model_id=str(endpoint.model_id),
-                    wire_shape=shape.value, attempt_id=request_id, streaming=stream,
-                    provider_generation_id=evidence.provider_generation_id,
-                    actual_provider=evidence.actual_provider,
-                    returned_model=evidence.returned_model,
-                )
-                # This attempt failed; the runtime decides whether generation
-                # can recover. Keep the redacted exception chain in service logs;
-                # raw response frames remain in the private capture.
-                logger.warning(
-                    "LLM decode failed endpoint=%s model=%s shape=%s attempt=%s "
-                    "generation=%s frames=%s last_event=%r reason=%r capture=%s failed_at=%s\n%s",
-                    endpoint.endpoint_id, endpoint.model_id, shape.value, request_id,
-                    evidence.provider_generation_id, frame_count, last_event_type,
-                    diagnostic_text(exc, limit=500), capture_path or "unavailable",
-                    datetime.now(timezone.utc).isoformat(), exception_report(exc),
-                )
+            if status == "failed":
+                save_failure(exc)
             # Preserve the original exception type for existing retry policy.
             with contextlib.suppress(AttributeError, TypeError):
                 exc.llm_attempt_recorded = self.attempt_sink is not None
             raise
         finally:
-            # F3 (review af51d74): hand the validated-capture candidate for
-            # THIS attempt to the runtime's receipt collector BEFORE any
-            # accounting work can drop it; only successful attempts deliver.
-            if native_sink is not None and status == "success":
+            # Compatibility observer: expose a derived view of accepted replay,
+            # never the independent pre-hook capture used for diagnostics.
+            if native_sink is not None and status == "success" and last is not None:
                 try:
-                    candidate = capture.result()
+                    from pal.llm.replay_acceptance import native_candidate_from_accepted_message
+
+                    candidate = native_candidate_from_accepted_message(last.response.message)
                 except Exception:
                     candidate = None
                 if candidate is not None:

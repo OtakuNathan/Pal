@@ -31,10 +31,19 @@ MODEL_TTL_SECONDS: Mapping[tuple[str, str], int] = MappingProxyType({})
 _REQUEST_TTL_SECONDS = {"5m": 300, "30m": 1800, "1h": 3600}
 
 
-def reminder_ttl(provider: str, model: str, *, requested_ttls: tuple[str, ...] = ()) -> tuple[int, str]:
+def reminder_ttl(
+    provider: str, model: str, *, requested_ttls: tuple[str, ...] = (),
+    ttl_seconds: int | None = None, general: bool = False,
+) -> tuple[int, str]:
     requested = [_REQUEST_TTL_SECONDS[value] for value in requested_ttls if value in _REQUEST_TTL_SECONDS]
     if requested:
+        if ttl_seconds is not None and ttl_seconds < min(requested):
+            return ttl_seconds, "endpoint_policy"
         return min(requested), "request_cache_ttl"
+    if ttl_seconds is not None:
+        return ttl_seconds, "endpoint_policy"
+    if general:
+        return DEFAULT_REMINDER_TTL_SECONDS, "fallback_policy"
     provider = provider.strip().lower()
     model_rule = MODEL_TTL_SECONDS.get((provider, model))
     if model_rule is not None:
@@ -71,7 +80,11 @@ def reminder_basis(request: LLMRequestIR, context: ShapeContext, encoded: Encode
                    *, mode: str, requested_ttls: tuple[str, ...] = ()) -> CacheReminderBasis | None:
     if mode == "disabled" or not request.logical_scope_id:
         return None
-    ttl, source = reminder_ttl(context.provider_id, context.model_id, requested_ttls=requested_ttls)
+    options = context.capabilities.get("prompt_cache") or {}
+    ttl, source = reminder_ttl(
+        context.provider_id, context.model_id, requested_ttls=requested_ttls,
+        ttl_seconds=options.get("reminder_ttl_seconds"), general=options.get("protocol") == "general",
+    )
     return CacheReminderBasis(
         logical_scope_id=request.logical_scope_id,
         binding=reminder_binding(endpoint_id=context.endpoint_id, model_id=context.model_id,

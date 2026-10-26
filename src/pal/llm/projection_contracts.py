@@ -272,10 +272,9 @@ class ProjectionSendReceipt:
     encode that went on the wire — a dropped projection (endpoint fallback,
     spec refresh, unsupported invoker) reports ``applied=False`` so the
     owner rejects the round instead of freezing a payload the provider
-    never saw.  ``native`` carries the codec-level native candidate
-    captured for THIS attempt (F3) so the owner can apply the real
-    continuation policy; ``binding`` is the binding the projection was
-    prepared against (present whenever a projection was offered).
+    never saw. ``binding`` is the binding the projection was prepared
+    against (present whenever a projection was offered). Response content
+    belongs to the accepted L1 message, never to this transport proof.
     """
 
     attempt_id: str
@@ -285,7 +284,6 @@ class ProjectionSendReceipt:
     applied: bool
     detail: str = ""
     binding: "EndpointBinding | None" = None
-    native: "NativeCandidate | None" = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.attempt_id, "projection attempt id")

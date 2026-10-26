@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
+
+import pytest
 
 from pal.llm.endpoint import ShapeEndpointInvoker
 from pal.llm.ir import (
@@ -27,6 +30,7 @@ from pal.llm.response_hooks import (
     ProviderResponseHookRegistry,
 )
 from pal.llm.shapes.base import _JSONFrame
+from pal.llm.shapes.base import ShapeDecodeError
 from pal.shared.enums import LLMFinishReason
 from pal.shared.tool_protocol import ToolCallIR, ToolDefinitionIR
 
@@ -143,7 +147,7 @@ def _anthropic_character_stream(text: str, *, stop_reason: str = "stop") -> list
 
 
 class DeepSeekProviderResponseHookTests(unittest.TestCase):
-    def test_observed_dsml_variant_becomes_structured_tool_call_and_strips_internal_projection(self) -> None:
+    def test_observed_dsml_variant_splits_tool_envelope_and_preserves_body(self) -> None:
         leaked = (
             "<closed_tool_interaction>\n"
             "Historical tool evidence\n"
@@ -159,9 +163,9 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
         response, updates = invoker.invoke(_endpoint(), _request())
 
         self.assertEqual(response.finish_reason, LLMFinishReason.TOOL_CALLS)
-        self.assertEqual(response.text, "")
+        self.assertEqual(response.text, leaked[:leaked.index(f"<{_OBSERVED_TOKEN}tool_calls>")].rstrip())
         self.assertNotIn("DSML", response.text)
-        self.assertNotIn("closed_tool_interaction", response.text)
+        self.assertIn("closed_tool_interaction", response.text)
         self.assertEqual(len(response.tool_calls), 1)
         self.assertEqual(response.tool_calls[0].name, "search_tools")
         self.assertEqual(response.tool_calls[0].args, {"namespace": "introspection", "top_k": 3})
@@ -199,7 +203,7 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
         self.assertTrue(any("DSML" in update.text_delta for update in updates))
         self.assertEqual(updates[-1].response.tool_calls, ())
 
-    def test_zhipu_rejects_internal_projection_instead_of_exposing_it(self) -> None:
+    def test_zhipu_preserves_internal_marker_mentions_as_body_text(self) -> None:
         raw = (
             "<closed_tool_interaction>historical tool evidence"
             "</closed_tool_interaction>"
@@ -209,15 +213,12 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
             transport=_FramesTransport(_anthropic_character_stream(raw)),  # type: ignore[arg-type]
         )
 
-        with self.assertRaisesRegex(ProviderResponseHookError, "structured tool items"):
-            tuple(
-                invoker.invoke_updates(
-                    _endpoint(provider="zhipu"),
-                    _request(),
-                )
-            )
+        updates = tuple(invoker.invoke_updates(_endpoint(provider="zhipu"), _request()))
+        self.assertEqual(updates[-1].response.text, raw)
+        self.assertEqual(updates[-1].response.tool_calls, ())
+        self.assertEqual("".join(u.text_delta for u in updates), raw)
 
-    def test_zhipu_rejects_textual_tool_call_but_preserves_native_call(self) -> None:
+    def test_zhipu_keeps_textual_example_separate_from_native_call(self) -> None:
         textual = ShapeEndpointInvoker(
             credential_resolver=lambda endpoint: "secret",
             transport=_FramesTransport(_anthropic_complete("<tool_call>fake</tool_call>")),  # type: ignore[arg-type]
@@ -233,8 +234,9 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
             ),
             policy=_request().policy,
         )
-        with self.assertRaises(ProviderResponseHookError):
-            textual.invoke(_endpoint(provider="zhipu"), request)
+        response, _ = textual.invoke(_endpoint(provider="zhipu"), request)
+        self.assertEqual(response.text, "<tool_call>fake</tool_call>")
+        self.assertEqual(response.tool_calls, ())
 
         native = ShapeEndpointInvoker(
             credential_resolver=lambda endpoint: "secret",
@@ -355,7 +357,7 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
         )
         self.assertEqual(response.tool_calls[1].args, {"message": "hello"})
 
-    def test_internal_projection_is_removed_even_without_dsml(self) -> None:
+    def test_internal_marker_examples_are_preserved_without_dsml(self) -> None:
         raw = (
             "Before\n"
             "<closed_tool_interaction>secret historical tool result</closed_tool_interaction>\n"
@@ -371,9 +373,8 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
 
         self.assertIn("Before", response.text)
         self.assertIn("After", response.text)
-        self.assertNotIn("closed_tool_interaction", response.text)
-        self.assertNotIn("old tool result", response.text)
-        self.assertFalse(any("closed_tool_interaction" in update.text_delta for update in updates))
+        self.assertEqual(response.text, raw)
+        self.assertEqual("".join(update.text_delta for update in updates), raw)
 
     def test_structured_reasoning_and_textual_thinking_both_normalize(self) -> None:
         structured = ShapeEndpointInvoker(
@@ -530,7 +531,7 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
                 response = LLMResponseIR(
                     message=LLMMessageIR(
                         MessageRole.ASSISTANT,
-                        (TextPartIR("before <｜DSML｜tool_"),),
+                        (TextPartIR("before\n<｜DSML｜tool_"),),
                     ),
                     finish_reason=finish_reason,
                 )
@@ -591,7 +592,7 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
         self.assertNotIn("DSML", normalized[-1].response.text)
         self.assertNotIn("wrong_mirror", normalized[-1].response.text)
 
-    def test_dsml_in_reasoning_is_rejected_before_it_can_stream(self) -> None:
+    def test_dsml_in_reasoning_stays_reasoning(self) -> None:
         response = LLMResponseIR(
             message=LLMMessageIR(
                 MessageRole.ASSISTANT,
@@ -599,17 +600,16 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
             ),
             finish_reason=LLMFinishReason.STOP,
         )
-        with self.assertRaises(ProviderResponseHookError):
-            tuple(
-                ProviderResponseHookRegistry.builtin().normalize(
-                    endpoint_id="ep",
-                    provider_id="deepseek",
-                    model_id="model",
-                    wire_shape=WireShape.ANTHROPIC_MESSAGES,
-                    request=_request(thinking=ThinkingLevel.HIGH),
-                    updates=(LLMResponseUpdate(response, LLMResponseDeltaKind.STATE),),
-                )
+        updates = tuple(
+            ProviderResponseHookRegistry.builtin().normalize(
+                endpoint_id="ep", provider_id="deepseek", model_id="model",
+                wire_shape=WireShape.ANTHROPIC_MESSAGES,
+                request=_request(thinking=ThinkingLevel.HIGH),
+                updates=(LLMResponseUpdate(response, LLMResponseDeltaKind.STATE),),
             )
+        )
+        self.assertEqual(updates[-1].response.reasoning_text, _dsml_call())
+        self.assertEqual(updates[-1].response.tool_calls, ())
 
     def test_ordinary_deepseek_text_still_streams_incrementally(self) -> None:
         invoker = ShapeEndpointInvoker(
@@ -628,5 +628,101 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
         self.assertEqual("".join(text_updates), "plain response")
 
 
-if __name__ == "__main__":
-    unittest.main()
+@pytest.mark.parametrize("provider", ["zhipu", "openai", "anthropic", "other", "DeepSeek"])
+@pytest.mark.parametrize("shape", list(WireShape))
+def test_reasoning_examples_and_native_calls_keep_their_block_types(provider, shape):
+    reasoning = "I am studying this protocol:\n" + _dsml_call()
+    text = "Example only:\n```xml\n" + _dsml_call() + "\n```"
+    native = {"id": "native-id", "type": "tool_use", "name": "read_file", "input": {"target": 5}}
+    if shape == WireShape.ANTHROPIC_MESSAGES:
+        frames = [{"content": [
+            {"type": "thinking", "thinking": reasoning},
+            {"type": "text", "text": text}, native,
+        ], "stop_reason": "tool_use"}]
+    elif shape == WireShape.OPENAI_COMPLETION:
+        frames = [{"choices": [{"message": {
+            "reasoning_content": reasoning, "content": text,
+            "tool_calls": [{"id": "native-id", "type": "function", "function": {
+                "name": "read_file", "arguments": '{"target":5}',
+            }}],
+        }, "finish_reason": "tool_calls"}]}]
+    else:
+        frames = [{"output": [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": reasoning}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]},
+            {"type": "function_call", "call_id": "native-id", "name": "read_file", "arguments": '{"target":5}'},
+        ]}]
+    invoker = ShapeEndpointInvoker(
+        credential_resolver=lambda _: "secret", transport=_FramesTransport(frames),
+    )
+    request = replace(_request(), tools=(ToolDefinitionIR(
+        name="read_file", description="Read a file.", input_schema={"type": "object"},
+    ),))
+    response, _ = invoker.invoke(_endpoint(provider=provider, wire_shape=shape.value), request)
+    assert response.reasoning_text == reasoning
+    assert response.text == text
+    assert response.tool_calls == (ToolCallIR("native-id", "read_file", {"target": 5}),)
+
+
+@pytest.mark.parametrize("shape", list(WireShape))
+@pytest.mark.parametrize("provider", ["zhipu", "openai", "anthropic", "other"])
+def test_dsml_body_conversion_is_exclusive_to_deepseek(provider, shape):
+    response = LLMResponseIR(
+        LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR(_dsml_call()),)), LLMFinishReason.STOP,
+    )
+    update = LLMResponseUpdate(response, LLMResponseDeltaKind.STATE)
+    assert tuple(ProviderResponseHookRegistry.builtin().normalize(
+        endpoint_id="ep", provider_id=provider, model_id="any", wire_shape=shape,
+        request=_request(), updates=(update,),
+    )) == (update,)
+
+
+@pytest.mark.parametrize("provider", ["zhipu", "deepseek"])
+@pytest.mark.parametrize("example", [
+    "Inline `<｜DSML｜tool_calls>example</｜DSML｜tool_calls>`.",
+    "```xml\n" + _dsml_call() + "\n```",
+    "~~~xml\n" + _dsml_call() + "\n~~~",
+    "    " + _dsml_call().replace("\n", "\n    "),
+    "> " + _dsml_call().replace("\n", "\n> "),
+    "`multiline code\n" + _dsml_call() + "\n`",
+])
+def test_examples_survive_character_by_character_streaming(provider, example):
+    invoker = ShapeEndpointInvoker(
+        credential_resolver=lambda _: "secret",
+        transport=_FramesTransport(_anthropic_character_stream(example)),
+    )
+    updates = list(invoker.invoke_updates(_endpoint(provider=provider), _request()))
+    assert updates[-1].response.text == example
+    assert updates[-1].response.tool_calls == ()
+    assert "".join(u.text_delta for u in updates if u.delta_kind == LLMResponseDeltaKind.TEXT) == example
+
+
+def test_deepseek_can_split_real_envelope_after_fenced_example():
+    example = "```xml\n" + _dsml_call(name="example", token=_OBSERVED_TOKEN) + "\n```\nNow I will search.\n"
+    invoker = ShapeEndpointInvoker(
+        credential_resolver=lambda _: "secret",
+        transport=_FramesTransport(_anthropic_character_stream(example + _dsml_call())),
+    )
+    updates = list(invoker.invoke_updates(_endpoint(), _request()))
+    assert updates[-1].response.text == example.rstrip()
+    assert [call.name for call in updates[-1].response.tool_calls] == ["search_tools"]
+
+
+def test_tool_argument_delta_cannot_change_a_text_block_into_a_tool_call():
+    frames = [
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+    ]
+    invoker = ShapeEndpointInvoker(credential_resolver=lambda _: "secret", transport=_FramesTransport(frames))
+    with pytest.raises(ShapeDecodeError, match="does not match block 0 type 'text'"):
+        list(invoker.invoke_updates(_endpoint(provider="zhipu"), _request()))
+
+
+def test_deepseek_preserves_redacted_reasoning_block():
+    invoker = ShapeEndpointInvoker(credential_resolver=lambda _: "secret", transport=_FramesTransport([{
+        "content": [{"type": "redacted_thinking", "data": "opaque"}, {"type": "text", "text": "answer"}],
+        "stop_reason": "stop",
+    }]))
+    response, _ = invoker.invoke(_endpoint(), _request())
+    assert response.message.parts[0] == ReasoningPartIR("", redacted=True)
+    assert response.text == "answer"

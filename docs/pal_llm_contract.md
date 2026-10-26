@@ -1,8 +1,8 @@
 # Pal LLM Contract
 
 The `llm` subsystem is a provider-neutral input/output boundary. Pal owns one
-immutable IR; endpoint codecs alone translate between that IR and provider
-wire JSON.
+immutable IR. Endpoint codecs encode requests and split response envelopes;
+bound protocol hooks adapt response blocks before common semantic decoding.
 
 ## Ownership
 
@@ -15,7 +15,8 @@ wire JSON.
   `anthropic_messages`;
 - JSON-frame normalization for streaming and single-shot SDK responses;
 - exact-model request hooks;
-- built-in provider response-syntax hooks after codec decoding.
+- provider defaults and endpoint response hooks between envelope splitting and
+  common semantic decoding.
 
 It does not own durable conversation policy, tool execution, capability
 governance, memory ranking, or channel delivery.
@@ -25,6 +26,8 @@ All provider-neutral tool protocol values live in
 the tagged invocation result, and `ToolExecutionResult`. The LLM package only
 embeds calls/results as message parts and translates them to provider shapes;
 it does not define or privately wrap tool protocol values.
+Pre-semantic response blocks carry undecoded wire values, are not executable
+tool protocol objects, and remain inside the LLM boundary.
 
 ## L1 and turn settlement
 
@@ -212,25 +215,107 @@ message or tool-definition tuples. The generation policy, endpoint, provider,
 credential, shape, routing metadata, and every other request field are
 read-only to hooks. Hooks perform no I/O. Duplicate model IDs fail loading.
 
-## Provider response hooks
+## Provider and endpoint response hooks
 
-Provider response hooks run after the selected wire codec and before any
-response update reaches Core, L1, or Channel. They may only transform response
-updates into the same immutable IR. They cannot change requests, endpoint
-routing, credentials, generation policy, or codec selection.
+Inbound processing is:
 
-The built-in `deepseek` hook recognizes DeepSeek's textual DSML tool protocol.
-It is an incremental decorator over the codec-owned update iterator: ordinary
-content streams immediately, while a small cross-chunk prefix gate retains any
-possible DSML tag. Native structured tool calls pass through unchanged and
+`transport frames -> wire-shape envelope splitting -> provider hook -> endpoint hook -> common semantic decoding -> IR`
+
+Envelope splitting identifies text, reasoning, tool input and item/response
+closure. It retains complete tool input as an unparsed JSON value/string in a
+non-executable `ResponseBlock`. Both hook layers consume and return immutable
+`ResponseBlockUpdate` streams. The common decoder then validates tool JSON and
+constructs the shared `ToolCallIR`. Partial tool drafts stay inside the codec
+until their provider-confirmed closure; they cannot become executable items.
+`codec.decode()` remains a convenience for split plus common decoding without
+protocol hooks. Production endpoint inference executes the bound composition.
+
+Provider defaults run first for every endpoint with that provider identity.
+An exact-endpoint hook then handles deployment/proxy-specific differences.
+Both are bound into the immutable endpoint composition at assembly time;
+refresh creates new bindings while in-flight requests retain their old hooks.
+Hook functions receive request context but cannot change routing, credentials,
+generation policy, request messages, or codec selection. Their iterator state
+belongs to one attempt and must not be kept in shared module globals.
+
+Runtime configuration uses trusted Python modules under the selected runtime:
+
+- `llm/providers/*.py` exports `PROVIDER_ID` and `normalize_blocks(context, updates)`.
+- `llm/endpoints/*.py` exports `ENDPOINT_ID` and `normalize_blocks(context, updates)`.
+
+Provider identities are case-insensitive; endpoint identities match exactly.
+Files beginning with `_` are ignored. A configured provider hook replaces that
+provider's built-in default; an endpoint hook composes after the inherited
+provider hook. Duplicate identities within a directory, invalid exports and
+import errors fail loading. Startup and `refresh_llm_endpoints` load both
+directories; deleting a configured hook restores its inherited default on
+refresh. Invalid hook reloads leave the previous response-hook registry in use.
+These response hooks are separate from the existing exact-model outgoing
+message/tool hooks under `llm/models`.
+Sandboxed Bunshin workers receive read-only mounts of all three hook
+directories and use the same loader and bound processing pipeline as Pal.
+
+The built-in `deepseek` hook recognizes DeepSeek's textual DSML tool protocol
+only for endpoints whose provider identity is `deepseek`. Other providers,
+including Zhipu/GLM, do not scan reasoning or body text for DSML or textual
+tool markers. Their tool calls come only from native structured tool items.
+
+Codecs classify block types before normalization, including streamed deltas.
+Reasoning remains reasoning, even when it quotes a complete DSML envelope.
+The DeepSeek compatibility hook is an incremental decorator over the
+response-block iterator: ordinary content streams immediately, while a
+cross-chunk prefix gate retains a possible top-level `tool_calls` envelope at
+a body line boundary. Inline mentions, Markdown fences, quotes and indented
+code remain body text. An unquoted, top-level DSML envelope is treated as the
+DeepSeek compatibility protocol; callers should fence literal envelope examples.
+Native structured tool calls pass through unchanged and
 take precedence over textual mirrors. A complete DSML response with no native
-call is parsed into reasoning/text/tool-call parts and assigned internal call
-IDs at this Pal-owned adapter boundary. Raw DSML and echoed historical
-tool-projection markers are discarded. Malformed, unsuccessful, filtered, or
+call is split into text/tool blocks and assigned internal call
+IDs at this Pal-owned adapter boundary. DSML inside an existing native tool
+input is translated into a standard argument object while retaining the
+provider's call ID. Body content around a recovered
+envelope is kept separate from executable tool items. Malformed, unsuccessful, filtered, or
 unterminated DSML fails the provider attempt and follows normal bounded
 same-endpoint retry handling. A length-truncated DSML block stays hidden while
-output recovery joins its continuation, then the complete response passes
-through the same hook instance again.
+output recovery joins its continuation through the same bound protocol
+pipeline. Merged IR is not sent through endpoint hooks a second time. Native
+source material is captured before either hook; normalized tool input
+can be materialized after common decoding while preserving original source
+payloads and opaque reasoning/signatures. An adapter must explicitly mark
+`protocol_tool_inventory_adapted` when synthesizing tool blocks from body text;
+generic replay binding uses that receipt rather than provider-specific rules.
+
+Accepted L1 messages, including their replay envelopes, are the sole response
+authority. Projection send receipts prove which request was sent and carry no
+response payload. After finalization, Core derives native projection material
+from the accepted message's replay and verifies its tool IDs, names and
+arguments against semantic IR. Original pre-hook captures and
+`replay.source_payload` remain evidence; they never supply an independent
+response to freeze. Opaque reasoning/signatures remain unchanged within accepted
+replay. Degraded continuation refuses projection freezing rather than replacing
+the accepted message or silently dropping native fields.
+
+Runtime depends on `LLMEndpointInvokerPort`, whose outputs are already adapted,
+validated semantic IR. `ManagedEndpointInvokerPort` additionally supplies
+endpoint lifecycle, hook configuration, attempt accounting and typed projection
+and submission receipts. These capabilities are structural contracts;
+Runtime does not branch on a concrete invoker class. Custom raw implementations
+plug into the frame transport or block pipeline before common decoding. Custom
+semantic invokers own acceptance of their IR. Neither their output nor merged
+continuation IR is converted back into protocol blocks by Runtime.
+
+Failed attempts save private diagnostic JSON under
+`<PAL_LOG_ROOT>/llm-decode-failures/` (default `/tmp/pal/llm-decode-failures/`).
+This covers codec, response-hook and transport exceptions and terminal error
+responses. Captures include observed SDK frames from the start of that attempt,
+the exception chain, endpoint/attempt identities, and Core's immutable
+pre-submission R snapshot with turn, round and L/R cut identity when available.
+The snapshot precedes submission because successful submission advances the
+live cut. Failed output is diagnostic evidence and never becomes accepted L1.
+Full requests, authentication headers and credential configuration are omitted.
+Response frames and R each have a 2 MiB retention bound; dropped/truncated data
+is explicitly marked. At most 20 captures are kept, with directory mode 0700
+and file mode 0600. Success and cancellation do not create failure captures.
 
 ## Invariants
 
@@ -398,6 +483,42 @@ including failures and output recovery, separately from logical request success.
 Cache profile selection is frozen at turn start. See
 [prompt-cache v2 offline repair](archive/prompt_cache/prompt_cache_v2_offline_repair.md) for selection
 precedence, diagnostics, conservative compaction behavior, and offline validation.
+
+Endpoint cache capabilities are bound once per shape context before policy
+execution. Provider/model compatibility presets preserve existing defaults;
+an explicit `capabilities_blob.prompt_cache.protocol` takes precedence over
+every preset. Unknown endpoints, including DeepSeek without a declared cache
+protocol, use `general`: implicit provider caching with no local wire controls
+or assumed explicit-cache support. Generic cache policy consumes these bound
+capabilities, not provider/URL/model heuristics.
+
+For example, an endpoint whose cache behavior is not yet known can declare:
+
+```json
+{"prompt_cache": {"protocol": "general", "mode": "implicit", "reminder_ttl_seconds": 1800}}
+```
+
+Use `pal llm add <endpoint> --replace --cache-protocol general --cache-mode
+implicit --cache-reminder-ttl-seconds 1800 --runtime-root <dir>` to update an
+existing endpoint through the CLI. Omitted cache fields are preserved, and
+protocol/shape mismatches are rejected before the endpoint is written.
+
+`protocol` also accepts the existing cache dialect names, such as
+`openai_chat_explicit`, `openai_responses_explicit`,
+`openrouter_openai_explicit`, `anthropic_explicit`, and
+`openrouter_anthropic_explicit`. The declared protocol must match `wire_shape`;
+it is independent of the provider label and model alias. `mode` continues to
+select implicit, explicit or supported hybrid behavior; declaring an explicit
+capability alone does not opt into sending explicit cache controls.
+`protocol: general` also prevents an exact-model hook from installing a cache
+profile implicitly. `enabled: false` disables caching controls and reminders.
+
+`reminder_ttl_seconds` is an optional positive integer scheduling estimate. An
+explicit wire cache TTL takes precedence when it expires sooner. This parameter
+never establishes confirmed cache coverage or authorizes a hot-only compaction;
+without an override, existing provider estimates remain available, while an
+explicit `general` policy uses the general estimate. These additions do not
+rewrite runtime endpoint configuration.
 
 ## ChatGPT plan access (SIWC)
 

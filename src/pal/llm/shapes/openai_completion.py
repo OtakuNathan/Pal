@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR
+from pal.llm.response_blocks import ResponseBlock, ResponseBlockSnapshot, ResponseBlockUpdate
 
 import json
 from dataclasses import dataclass, replace
@@ -11,8 +12,6 @@ from pal.llm.ir import (
     LLMFinishReason,
     LLMRequestIR,
     LLMResponseDeltaKind,
-    LLMResponseIR,
-    LLMResponseUpdate,
     MessageRole,
     PromptRegionIR,
     ReasoningPartIR,
@@ -30,11 +29,10 @@ from pal.llm.shapes.base import (
     request_parameter_supported,
 )
 from pal.llm.shapes.builder import (
-    ResponseIRBuilder,
+    ResponseBlockBuilder,
     canonical_finish_reason,
 )
 from pal.llm.shapes.common import (
-    json_object,
     openai_content,
     openai_tool_definition,
     role_value,
@@ -259,7 +257,7 @@ def _merge_instruction_text(left: str, right: str) -> str:
 class OpenAICompletionDecoder:
     def __init__(self, context: ShapeContext) -> None:
         self.context = context
-        self.builder = ResponseIRBuilder(context)
+        self.builder = ResponseBlockBuilder(context)
         self.tool_drafts: dict[int, dict[str, Any]] = {}
         self.tool_calls_finalized = False
         self.native_message: dict[str, Any] = {}
@@ -267,7 +265,7 @@ class OpenAICompletionDecoder:
         self.tool_indices_by_id: dict[str, int] = {}
         self.tool_ids_by_index: dict[int, str] = {}
 
-    def feed(self, frame: _JSONFrame) -> tuple[LLMResponseUpdate, ...]:
+    def feed(self, frame: _JSONFrame) -> tuple[ResponseBlockUpdate, ...]:
         self.builder.observe_frame(frame)
         payload = dict(frame.payload)
         choices = list(payload.get("choices") or [])
@@ -284,7 +282,7 @@ class OpenAICompletionDecoder:
         if delta.get("tool_calls"):
             delta = {**delta, "tool_calls": self._indexed_tool_deltas(delta["tool_calls"])}
         self._capture_delta(delta)
-        updates: list[LLMResponseUpdate] = []
+        updates: list[ResponseBlockUpdate] = []
         reasoning = delta.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
             self.builder.append_reasoning(reasoning)
@@ -313,7 +311,7 @@ class OpenAICompletionDecoder:
             updates.append(self.builder.mark_complete(reason))
         return tuple(updates)
 
-    def finish(self) -> LLMResponseIR:
+    def finish(self) -> ResponseBlockSnapshot:
         if not self.builder.complete:
             self.tool_drafts.clear()
             self.tool_calls_finalized = True
@@ -332,9 +330,9 @@ class OpenAICompletionDecoder:
             )
         return reason
 
-    def _feed_complete_message(self, message: dict[str, Any], finish_reason: Any) -> tuple[LLMResponseUpdate, ...]:
+    def _feed_complete_message(self, message: dict[str, Any], finish_reason: Any) -> tuple[ResponseBlockUpdate, ...]:
         self.native_message = thaw_json(message)
-        updates: list[LLMResponseUpdate] = []
+        updates: list[ResponseBlockUpdate] = []
         reason = self._terminal_reason(finish_reason, has_tools=bool(message.get("tool_calls")))
         reasoning = message.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
@@ -370,10 +368,10 @@ class OpenAICompletionDecoder:
             call_id = str(item.get("id") or "").strip()
             if not call_id:
                 continue
-            call = self.builder.append_tool_call(
+            call = self.builder.append_tool_block(
                 call_id=call_id,
                 name=str(function.get("name") or ""),
-                arguments=json_object(function.get("arguments") or {}, label="tool arguments"),
+                arguments=function.get("arguments") or {}, label="tool arguments",
             )
             updates.append(call)
         self.tool_calls_finalized = True
@@ -440,24 +438,22 @@ class OpenAICompletionDecoder:
             elif isinstance(arguments, Mapping):
                 draft["arguments"].append(json.dumps(thaw_json(arguments), ensure_ascii=False))
 
-    def _finalize_tools(self) -> list[LLMResponseUpdate]:
+    def _finalize_tools(self) -> list[ResponseBlockUpdate]:
         if self.tool_calls_finalized:
             return []
-        updates: list[LLMResponseUpdate] = []
+        updates: list[ResponseBlockUpdate] = []
         for index in sorted(self.tool_drafts):
             draft = self.tool_drafts[index]
             call_id = str(draft.get("call_id") or "").strip()
             if not call_id:
                 continue
             name = str(draft.get("name") or "").strip()
-            if not name:
-                raise ShapeDecodeError("OpenAI stream tool call has no name")
             raw_arguments = "".join(str(item) for item in draft.get("arguments") or []) or "{}"
             updates.append(
-                self.builder.append_tool_call(
+                self.builder.append_tool_block(
                     call_id=call_id,
                     name=name,
-                    arguments=json_object(raw_arguments, label=f"tool {name} arguments"),
+                    arguments=raw_arguments, label=f"tool {name} arguments",
                 )
             )
         self.tool_calls_finalized = True
@@ -520,7 +516,7 @@ class OpenAICompletionDecoder:
         message.setdefault("role", "assistant")
         source = None
         if self.tool_calls_finalized and message.get("tool_calls"):
-            accepted = {part.call_id for part in self.builder.parts if isinstance(part, ToolCallIR)}
+            accepted = {part.call_id for part in self.builder.parts if isinstance(part, ResponseBlock)}
             calls = [item for item in message["tool_calls"] if str(item.get("id") or "") in accepted]
             if calls != message["tool_calls"]:
                 source = {"message": thaw_json(message)}

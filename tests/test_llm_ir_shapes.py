@@ -29,7 +29,7 @@ from pal.llm.ir import (
 )
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext, ShapeDecodeError, _JSONFrame as JSONFrame
-from pal.llm.shapes.builder import ResponseIRBuilder
+from pal.llm.shapes.builder import ResponseBlockBuilder
 from pal.llm.serde import part_from_payload, response_from_payload, response_to_payload
 from pal.llm.http_transport import _iter_json_frames
 from pal.shared import LLMFinishReason
@@ -236,7 +236,7 @@ class LLMIRShapeTests(unittest.TestCase):
             )
 
     def test_builder_rejects_malformed_commit_without_mutating_item_ledger(self) -> None:
-        builder = ResponseIRBuilder(_context(WireShape.OPENAI_RESPONSE))
+        builder = ResponseBlockBuilder(_context(WireShape.OPENAI_RESPONSE))
 
         with self.assertRaisesRegex(ShapeDecodeError, "has no tool call"):
             builder.commit_item(
