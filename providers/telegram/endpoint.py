@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -233,11 +234,18 @@ def _truncate_telegram_text(text: str, *, limit: int) -> str:
     return f"{normalized[:prefix_end].rstrip()}{suffix}"
 
 
+def _has_telegram_message_text(text: str) -> bool:
+    # str.strip() preserves format controls such as U+200B. Telegram rejects
+    # messages consisting only of these characters as empty. Keep controls
+    # inside real text, including joiners used by scripts and emoji.
+    return any(not character.isspace() and unicodedata.category(character) != "Cf" for character in text)
+
+
 def _telegram_text_segments(text: str, *, limit: int) -> list[_TelegramTextSegment]:
     """Render and split one completed reply into independently sendable messages."""
 
     normalized = _flatten_gfm_tables_for_telegram(str(text or "")).strip()
-    if not normalized:
+    if not _has_telegram_message_text(normalized):
         return []
     effective_limit = max(min(int(limit), _TELEGRAM_MAX_MESSAGE_UTF16), 1)
     try:
@@ -256,7 +264,7 @@ def _telegram_text_segments(text: str, *, limit: int) -> list[_TelegramTextSegme
                 parse_mode="MarkdownV2",
             )
             for chunk_text, chunk_entities in chunks
-            if str(chunk_text or "").strip()
+            if _has_telegram_message_text(str(chunk_text or ""))
         ]
         if rendered:
             return rendered
@@ -270,6 +278,7 @@ def _telegram_text_segments(text: str, *, limit: int) -> list[_TelegramTextSegme
             parse_mode=None,
         )
         for part in _segment_text(normalized, limit=effective_limit)
+        if _has_telegram_message_text(part)
     ]
 
 
