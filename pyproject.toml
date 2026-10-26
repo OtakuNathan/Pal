@@ -51,7 +51,8 @@ local-embeddings = [
 ]
 test = [
     "mypy>=1.15,<2",
-    "hypothesis>=6.100,<7",
+    # hypothesis-jsonschema uses private many.more(); 6.168.0 is the verified compatible upper bound.
+    "hypothesis>=6.100,<=6.168.0",
     "hypothesis-jsonschema>=0.23,<1",
     "pytest>=8,<9",
 ]

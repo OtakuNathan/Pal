@@ -2137,8 +2137,9 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ok")
         manager = handle.channel_provider_manager
-        self.assertEqual(set(manager.providers), {"socket", "telegram", "websocket_bridge"})
+        self.assertEqual(set(manager.providers), {"socket", "telegram", "websocket_bridge", "null_channel"})
         self.assertEqual(manager.endpoint_type_to_provider["telegram"], "telegram")
+        self.assertEqual(manager.endpoint_type_to_provider["null"], "null_channel")
         self.assertFalse(result.structured["scan_errors"])
 
     def test_channel_provider_rescan_leaves_loaded_provider_running(self) -> None:
