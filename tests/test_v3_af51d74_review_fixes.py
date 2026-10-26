@@ -6,8 +6,8 @@ F1 — live projection must encode the EFFECTIVE compiled request against a
 F2 — only a typed send receipt (attempt id, resolved binding, applied flag)
       may authorize observe_commit; sync stale-spec refresh must keep the
       projection arguments like the stream path does.
-F3 — the captured native candidate must reach the projection owner and be
-      committed byte-true when the continuation contract preserves it.
+F3 — native continuation derives from accepted L1 replay and is committed
+      byte-true when the continuation contract preserves it.
 F4 — projection commit happens after the canonical acceptance boundary
       (finalization_only discard/replacement), never merely after provider
       success.
@@ -321,9 +321,9 @@ class F2SendReceiptTests(unittest.TestCase):
 
 
 class F3NativeContinuationTests(unittest.TestCase):
-    """F3: captured native material reaches the owner and freezes byte-true."""
+    """F3: accepted L1 replay is the owner's sole native authority."""
 
-    def test_native_candidate_survives_commit_on_projected_round(self):
+    def test_accepted_replay_survives_commit_on_projected_round(self):
         memory = MemoryService()
         memory.begin_l1_turn("T", user_message=user("Q1", "q1"))
         transport = CapturingTransport(["A1 answer"])
@@ -333,11 +333,15 @@ class F3NativeContinuationTests(unittest.TestCase):
         outcome = _drive(ex, _request_for(memory, ()))
         receipt = getattr(outcome.payload, "projection_receipt", None)
         self.assertIsNotNone(receipt)
-        native = getattr(receipt, "native", None)
-        self.assertIsNotNone(native,
-                             "a captured, codec-envelope-backed candidate must "
-                             "travel with the receipt")
-        self.assertIn("A1 answer", native.payload_json)
+        self.assertTrue(receipt.applied)
+        self.assertFalse(hasattr(receipt, "native"),
+                         "the send proof must not carry a parallel response copy")
+        accepted = [message for turn in memory.l1_store.turns.turns
+                    for message in turn.messages if message.role == MessageRole.ASSISTANT]
+        self.assertEqual(len(accepted), 1)
+        self.assertIsNotNone(accepted[0].replay)
+        replay = thaw_json(accepted[0].replay.payload)
+        self.assertEqual(replay, {"message": {"role": "assistant", "content": "A1 answer"}})
 
         session = runtime.endpoint_projection_session("pal:resident")
         chunk = session.chunks[0]
@@ -346,14 +350,15 @@ class F3NativeContinuationTests(unittest.TestCase):
         self.assertIsNotNone(stored,
                              "the projection owner must keep the native "
                              "material for the committed attempt")
-        self.assertEqual(stored["payload_json"], native.payload_json)
+        self.assertEqual(json.loads(stored["payload_json"]), replay,
+                         "projection material must derive from accepted L1 replay")
         # Byte-true freeze: the chunk carries the native-derived assistant
         # item (openai_completion wire items ARE the message object).
         items = [thaw_json(item) for item in chunk.items]
-        self.assertTrue(any(
+        self.assertEqual(sum(
             item.get("role") == "assistant" and item.get("content") == "A1 answer"
             for item in items
-        ))
+        ), 1)
 
 
 class F4AcceptanceBoundaryTests(unittest.TestCase):
