@@ -6,7 +6,7 @@
 > [current documentation index](../../README.md).
 
 Status: historical hardening plan. The current implementation sync point is
-[Pal Bunshin V1 gate loop](../../pal_bunshin_v1.md#gate-loop). The implemented system is profile-driven:
+[Pal Bunshin V1 gate loop](pal_bunshin_v1.md#gate-loop). The implemented system is profile-driven:
 profiles declare `[gate_policy] gates = [...]`, runtime expands those names into
 `GateSpec` values, and the review orchestrator schedules gates after milestone
 result events.

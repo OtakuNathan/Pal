@@ -5,7 +5,7 @@
 > original work, not the current checkout or running host. See the
 > [current documentation index](../../README.md).
 
-OpenAI explicit 的后续交接实现见 [Explicit cache handoff](prompt_cache_handoff.md)。下文保留 v2 诊断与对照方案；显式策略已改为读取证据通过后推进，不能再把提交位置当成有效经济基线。
+For the subsequent handoff implementation of the OpenAI explicit strategy, see [Explicit cache handoff](prompt_cache_handoff.md). The v2 diagnostics and comparison scheme are preserved below; the explicit policy has been changed so that advancement only happens after read evidence passes, and the commit position can no longer be treated as a valid economic baseline.
 
 This branch repairs cache evidence, request diagnostics, and attempt accounting on
 PR1–PR3 (`09ec6d4`), with the socket interruption/backpressure fix cherry-picked

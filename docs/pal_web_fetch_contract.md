@@ -1,38 +1,38 @@
 # Pal Browser Contract
 
-> `web_fetch` 是由 Pal 随包提供、由 Plugin Hub 管理的第一方 RAII 插件；它对外发布的是会话级浏览器能力，而不是 fetch provider family。
+> `web_fetch` is a first-party RAII plugin bundled with Pal and managed by the Plugin Hub; what it exposes externally is session-level browser capability, not a fetch provider family.
 
 ## Ownership
 
-插件拥有：
+The plugin owns:
 
-- 经 token 认证的本地 browser sidecar 及其全部子进程
-- 固定版本 `@playwright/cli@0.1.19` 与对应 Chromium 的按需安装
-- 每个主对话独立的持久 profile，以及每个 Bunshin workflow 的临时 session
-- 浏览器命令白名单、结果裁剪、截图 artifact 写入和 profile 回收
-- 声明式 builtin skill `pal.web.browser`
+- A token-authenticated local browser sidecar and all of its child processes
+- On-demand installation of the pinned-version `@playwright/cli@0.1.19` and its matching Chromium
+- A separate persistent profile per main conversation, plus a temporary session per Bunshin workflow
+- The browser command whitelist, result trimming, screenshot artifact writing, and profile reclamation
+- The declarative builtin skill `pal.web.browser`
 
-插件不拥有 web search、任意 HTTP client、LLM 决策或 Bunshin 的角色授权。`web_search` 继续是独立 provider family。
+The plugin does not own web search, arbitrary HTTP clients, LLM decisions, or Bunshin role authorization. `web_search` remains a separate provider family.
 
 ## Lifecycle
 
-`web_fetch` 遵循 `raii.v1`：插件实例先创建资源，能力后发布；detach 时能力先撤下，再关闭 sidecar、CLI daemon 和浏览器。模块自己的 attach/detach 能力不对外注册，生命周期入口是 `manage_plugin(name="web_fetch", operation=...)`。attach 保留已加载实例；reload 在一次调用中卸载并重新加载。
+`web_fetch` follows `raii.v1`: the plugin instance creates resources first and publishes capabilities afterward; on detach, capabilities are withdrawn first, then the sidecar, CLI daemon, and browser are shut down. The module's own attach/detach capability is not registered externally; the lifecycle entry point is `manage_plugin(name="web_fetch", operation=...)`. Attach reuses an already-loaded instance; reload unloads and reloads in a single call.
 
-sidecar 空闲后会退出，下一次调用按需重建。主对话 profile 不随 sidecar、插件刷新或 Pal 重启删除；`manage_browser_session(operation=close)` 只释放活进程，operation=reset 且 confirm=true 才删除当前对话 profile。
+The sidecar exits after being idle and is rebuilt on demand for the next call. Main conversation profiles are not deleted on sidecar exit, plugin refresh, or Pal restart; `manage_browser_session(operation=close)` only releases live processes, and only operation=reset with confirm=true deletes the current conversation profile.
 
 ## Session model
 
-- 主 Pal：以 logical execution lifetime 派生不可逆 session key，profile 持久化。
-- Bunshin：以 workflow run id 派生临时 session，不持久化。
-- 同一 session 串行执行，不同 session 受全局并发上限约束。
-- profile 最长保留 30 天，总预算 2 GiB；只按 LRU 删除不活跃 profile。
-- 网页 URL 必须是绝对 `http` / `https` URL；已挂载扩展允许对应 ID 的 `chrome-extension://` 页面，不能浏览 `file://`。
+- Main Pal: derives an irreversible session key from the logical execution lifetime; the profile is persistent.
+- Bunshin: derives a temporary session from the workflow run id; not persistent.
+- The same session executes serially; different sessions are bounded by the global concurrency limit.
+- Profiles are retained for at most 30 days, with a total budget of 2 GiB; only inactive profiles are deleted, by LRU.
+- Web page URLs must be absolute `http` / `https` URLs; mounted extensions allow `chrome-extension://` pages of the corresponding ID, and `file://` cannot be browsed.
 
 ## Public capabilities
 
-`read_browser_page` 默认直接暴露，合并打开页面与读取正文：提供 url 时打开页面，省略时读取当前页面。其他浏览器工具通过 `search_tools(domain="browser", query=...)` 发现并使用 `call_tool` 调用；仅在缺少契约信息时补 `read_tool`。发现或查询状态不要求先导航。
+`read_browser_page` is exposed directly by default and merges opening a page with reading its body: when a url is provided it opens the page; when omitted it reads the current page. Other browser tools are discovered via `search_tools(domain="browser", query=...)` and invoked with `call_tool`; `read_tool` is only added when contract information is missing. Discovery or status queries do not require prior navigation.
 
-间接暴露的读取、交互及管理路径：
+Indirectly exposed read, interaction, and management paths:
 
 - `read_browser_page`, `capture_browser_snapshot`, `find_browser_text`
 
@@ -43,51 +43,51 @@ sidecar 空闲后会退出，下一次调用按需重建。主对话 profile 不
 - `inspect_browser_layout`, `capture_browser_screenshot`, `inspect_browser_status`
 - `manage_browser_session`, `manage_browser_extension`
 
-`manage_browser_session(operation=clear_cache)` 只清理当前对话浏览器的 HTTP 缓存，保留 cookies、localStorage、IndexedDB 和 service-worker CacheStorage。它不提供密码管理，也不负责退出登录。浏览器尚未启动时会使用原 profile 打开空白页，不恢复旧 URL；只有浏览器确认清理后才报告成功。清理后是否重新导航或刷新由当前任务决定。
+`manage_browser_session(operation=clear_cache)` only clears the current conversation browser's HTTP cache, preserving cookies, localStorage, IndexedDB, and service-worker CacheStorage. It does not provide password management and is not responsible for logging out. If the browser has not been started, it opens a blank page with the original profile without restoring old URLs; success is only reported after the browser confirms the cleanup. Whether to re-navigate or refresh afterward is decided by the current task.
 
-### 本地扩展开发
+### Local extension development
 
-浏览器使用当前固定 Playwright CLI 所配套的完整 Chromium（当前为 153 / revision 1243），以 `channel=chromium` 无头运行；安装器使用 `playwright install chromium --no-shell`。不使用系统 Chromium，也不依赖旧 Python Playwright 缓存。
+The browser uses the full Chromium that matches the currently pinned Playwright CLI (currently 153 / revision 1243), running headless with `channel=chromium`; the installer uses `playwright install chromium --no-shell`. System Chromium is not used, and the old Python Playwright cache is not relied upon.
 
-`manage_browser_extension(operation=mount, path=...)` 挂载含 `manifest.json` 的本地 Manifest V3 扩展目录；`reload` 和 `unmount` 使用 `inspect_browser_status` 返回的 `extension_id`。配置按当前持久化对话 profile 隔离，最多 16 个；不支持临时 Bunshin 浏览器或商店安装。扩展源码保留在开发目录中，修改后显式 reload。
+`manage_browser_extension(operation=mount, path=...)` mounts a local Manifest V3 extension directory containing `manifest.json`; `reload` and `unmount` use the `extension_id` returned by `inspect_browser_status`. Configuration is isolated per current persistent conversation profile, up to 16; temporary Bunshin browsers and store installs are not supported. Extension source stays in the development directory; after changes, reload explicitly.
 
-配置变更先确认关闭当前浏览器，再保存配置；所有标签会关闭，但登录资料保留。下一次导航按新配置启动。`inspect_browser_status` 区分配置清单与观察到的 service worker；worker 缺失可能是休眠或扩展没有后台 worker，不能据此断言加载失败。用目标页面验证内容脚本，也可通过 `read_browser_page(url=...)` 访问已挂载 ID 的 `chrome-extension://` 页面（包括 manifest、popup、options）。未挂载 ID 不允许作为导航目标。
+On configuration changes, first confirm the current browser is closed, then save the configuration; all tabs will close, but login data is retained. The next navigation starts with the new configuration. `inspect_browser_status` distinguishes the configuration manifest from the observed service worker; a missing worker may mean it is dormant or the extension has no background worker, and cannot by itself be asserted as a load failure. Verify content scripts with the target page, or access `chrome-extension://` pages of mounted IDs via `read_browser_page(url=...)` (including manifest, popup, options). Unmounted IDs are not allowed as navigation targets.
 
-扩展目录或 manifest 损坏时仍可查询配置并 unmount。扩展的浏览器运行结果才是加载与功能证据，挂载返回仅确认配置成功。当前不提供统一的扩展后台错误收集工具。
+If the extension directory or manifest is corrupted, configuration can still be queried and unmounted still works. The extension's browser runtime results are the evidence of loading and functionality; a mount return only confirms successful configuration. There is currently no unified tool for collecting extension background errors.
 
-canonical path 统一为 `op_browser_*`；状态查询仍是模块 introspection。旧的 `read_web`、`inspect_web_layout`、`screenshot_web` 及 `web_fetch_provider_*` 名称不保留兼容别名。
+Canonical paths are unified as `op_browser_*`; status queries remain module introspection. The old `read_web`, `inspect_web_layout`, `screenshot_web`, and `web_fetch_provider_*` names have no compatibility aliases.
 
-写操作均为 indirect、non-idempotent、reconcile-first；失败后必须重新检查页面，不能自动重复。截图是受治理的本地 artifact 写入。reset 是明确确认后的不可恢复本地写入。
+All write operations are indirect, non-idempotent, and reconcile-first; after failure the page must be re-checked and cannot be automatically repeated. Screenshots are governed local artifact writes. Reset is an unrecoverable local write after explicit confirmation.
 
-页面正文、链接、snapshot 和 layout 结果均有调用级上限；单张截图超过 32 MiB 会被拒绝，避免 sidecar 把异常页面放大成主进程内存压力。
+Page body, links, snapshot, and layout results all have per-call limits; a single screenshot over 32 MiB is rejected, to prevent the sidecar from amplifying an abnormal page into main-process memory pressure.
 
 ## Restricted surface
 
-`evaluate_browser_script` 在当前页面执行调用者提供的 JavaScript 函数，可读取页面内部状态或使用当前 origin 的 fetch；优先只读表达式，写入需要已授权意图，且受页面权限和 CORS 约束。`manage_browser_network_capture` 用注入 hook 观察 fetch/XHR；导航后必须重新 start，并确认 installed=true。它不提供网络拦截或修改。
+`evaluate_browser_script` executes a caller-provided JavaScript function on the current page, able to read page-internal state or use fetch with the current origin; prefer read-only expressions, writes require already-authorized intent, and are subject to page permissions and CORS. `manage_browser_network_capture` observes fetch/XHR with injected hooks; after navigation it must be started again, with installed=true confirmed. It does not provide network interception or modification.
 
-插件没有专用上传、cookie/storage 编辑、录制、trace、video、PDF 或 dashboard 工具。原始 HTTP 足够时使用主 Pal 的 `run_shell` 与 curl；需要浏览器登录态时才考虑页面内 fetch。
+The plugin has no dedicated upload, cookie/storage editing, recording, trace, video, PDF, or dashboard tools. When raw HTTP suffices, use the main Pal's `run_shell` with curl; only consider in-page fetch when browser login state is needed.
 
 ## Dependency and repair
 
-运行环境需要 Node.js 20+ 和 npm。正式安装通过公共 `pal package prepare web_fetch` 流程准备依赖；CLI 与完整 Chromium 安装在 runtime root 的 `data/web_fetch/` 下，不写项目依赖、用户级 npm 或 Pal 的 Python 环境。匹配的 Node/npm 会复用，否则准备插件管理的 Node。首次缺失或 Chromium build 漂移时 sidecar 调用同一准备流程，并返回可重试的 `dependency_installing`。安装和运行时修复共享跨进程锁；`inspect_browser_status` 与 doctor 使用相同的版本/路径检查。验证只启动临时 profile 和测试 MV3 扩展，不恢复或清理用户会话。详见 [插件安装协议](pal_package_installation.md)。
+The runtime environment requires Node.js 20+ and npm. Official installation prepares dependencies through the public `pal package prepare web_fetch` flow; the CLI and full Chromium are installed under the runtime root's `data/web_fetch/`, without writing to project dependencies, user-level npm, or Pal's Python environment. A matching Node/npm is reused; otherwise a plugin-managed Node is prepared. On first-missing or Chromium build drift, the sidecar invokes the same preparation flow and returns a retryable `dependency_installing`. Installation and runtime repair share a cross-process lock; `inspect_browser_status` and doctor use the same version/path checks. Validation only starts a temporary profile and a test MV3 extension, and does not restore or clean user sessions. See [Plugin installation protocol](pal_package_installation.md).
 
-不再有 Python Playwright provider 或 plain-HTTP fallback。只有主 Pal 在 navigate/read 失败且原始 HTTP 足够时会得到 curl 提示；插件本身不会偷偷改变执行语义。Bunshin 必须报告证据缺口。
+There is no longer a Python Playwright provider or a plain-HTTP fallback. Only the main Pal receives a curl hint when navigate/read fails and raw HTTP suffices; the plugin itself never secretly changes execution semantics. Bunshin must report evidence gaps.
 
-代理配置继承 `http_proxy` / `https_proxy`（含大写形式）与 `no_proxy`，并交给 Chromium。具体直连、分流规则仍由用户的代理服务负责。
+Proxy configuration inherits `http_proxy` / `https_proxy` (including uppercase forms) and `no_proxy`, and passes them to Chromium. The specific direct-connection and routing rules remain the responsibility of the user's proxy service.
 
 ## Bunshin boundary
 
-Bunshin participant 不直接获得交互浏览器。只有启用 external research 的 software-engineering architect 可通过 host broker 使用 `read_browser_page`；其他角色保持 search/read-only 边界，不能 click、fill 或启动自己的持久 profile。
+Bunshin participants do not directly get an interactive browser. Only the software-engineering architect with external research enabled can use `read_browser_page` via the host broker; other roles keep the search/read-only boundary and cannot click, fill, or start their own persistent profile.
 
 ## Upgrade
 
-`pal setup --upgrade --runtime-root ...` 删除退休的 `web_fetch_providers` 表和 `active_web_fetch_provider_id`。非默认旧 provider 会先以权限 `0600` 归档到 `data/web_fetch/legacy_provider_backup.json`。
+`pal setup --upgrade --runtime-root ...` deletes the retired `web_fetch_providers` table and `active_web_fetch_provider_id`. Non-default legacy providers are first archived to `data/web_fetch/legacy_provider_backup.json` with permission `0600`.
 
 ## Invariants
 
-- Plugin Hub 是 `web_fetch` 生命周期的唯一 owner。
-- 插件 detach 后没有残留公共能力或受管浏览器进程。
-- 主对话之间不共享 profile；Bunshin 不继承主对话登录状态。
-- 页面写操作永不自动重放。
-- CLI 版本固定、安装原子切换，安装进程也受 RAII 回收。
-- 浏览器失败不会退回旧 provider；curl 只是显式建议。
+- Plugin Hub is the sole owner of the `web_fetch` lifecycle.
+- After the plugin detaches, there are no residual public capabilities or managed browser processes.
+- Profiles are not shared between main conversations; Bunshin does not inherit main conversation login state.
+- Page write operations are never automatically replayed.
+- CLI version is pinned, installation switches atomically, and the installation process is also subject to RAII reclamation.
+- Browser failures never fall back to the old provider; curl is only an explicit suggestion.

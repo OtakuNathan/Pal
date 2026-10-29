@@ -1,118 +1,118 @@
-# Browser 工具面收口计划
+# Browser Tool Surface Consolidation Plan
 
-日期：2026-10-15
-状态：已按确认范围实施到源码；定向验证见[实施记录](pal_tool_consolidation_implementation.md)。尚未安装或激活。
+Date: 2026-10-15
+Status: Implemented into source code per the confirmed scope; see the [implementation record](pal_tool_consolidation_implementation.md) for targeted verification. Not yet installed or activated.
 
-## 设计原则
+## Design Principles
 
-目标是减少重复入口和模型需要协调的参数关系，保持日常浏览操作的明确语义。工具数量减少不等于模型使用效果必然提升。
+The goal is to reduce duplicate entry points and the parameter relationships the model must coordinate, while preserving clear semantics for everyday browsing operations. Reducing the number of tools does not necessarily improve how effectively the model uses them.
 
-- 一个枚举表达几种清晰操作、参数基本共用时，可以合并。
-- 含义稳定、可以自然组合的参数可以保留，例如截图尺寸和是否全页。
-- 不同操作切换整套必填、互斥字段时，暂缓合并。
-- 能由 runtime 推导或处理的恢复行为不增加模型参数。
-- Inspection 默认查询模块及当前会话摘要；指定内部对象时返回该对象的充分诊断信息，不默认展开全部对象详情。
-- 保留有实际意义的状态设置、证据类型、执行分类及失败语义。
+- When one enum can express several clear operations and the parameters are largely shared, they can be merged.
+- Parameters with stable meaning that combine naturally can be kept, e.g. screenshot size and whether to capture the full page.
+- When different operations require switching an entire set of required, mutually exclusive fields, defer merging.
+- Recovery behavior that the runtime can infer or handle should not add model-facing parameters.
+- Inspection by default queries module and current session summary; when an internal object is specified, it returns sufficient diagnostics for that object, and does not by default expand the details of every object.
+- Keep state settings, evidence types, execution classifications, and failure semantics that have real meaning.
 
-## 当前能力基线
+## Current Capability Baseline
 
-依据 `src/pal/web_fetch/capabilities.py` 的公开能力声明，Browser 当前共 28 个工具，其中仅 `navigate_browser` 为常驻直调，其余 27 个为间接工具。这是源码声明口径，不代表运行实例已加载的工具快照。
+According to the public capability declarations in `src/pal/web_fetch/capabilities.py`, Browser currently has 28 tools in total, of which only `navigate_browser` is a persistent direct tool and the remaining 27 are indirect tools. This is the source-code declaration count and does not represent a snapshot of the tools loaded in a running instance.
 
-| 能力组 | 现有工具 | 数量 |
+| Capability group | Existing tools | Count |
 | --- | --- | ---: |
-| 打开与读取 | `navigate_browser`、`read_browser_page` | 2 |
-| 历史导航 | `navigate_browser_history` | 1 |
-| 页面结构与布局 | `capture_browser_snapshot`、`find_browser_text`、`inspect_browser_layout` | 3 |
-| 截图 | `capture_browser_screenshot` | 1 |
-| 鼠标与表单 | `click_browser_target`、`hover_browser_target`、`drag_browser_target`、`scroll_browser`、`fill_browser_field`、`type_browser_text`、`press_browser_key`、`select_browser_option`、`set_browser_checked_state` | 9 |
-| 标签页、视口、弹窗 | `manage_browser_tabs`、`resize_browser_viewport`、`handle_browser_dialog` | 3 |
-| 脚本与网络 | `evaluate_browser_script`、`fetch_browser_url`、`manage_browser_network_capture` | 3 |
-| 扩展 | `inspect_browser_extensions`、`manage_browser_extension` | 2 |
-| 健康度 | `inspect_browser_status` | 1 |
-| 会话维护 | `close_browser`、`clear_browser_cache`、`reset_browser` | 3 |
-| 合计 | | **28** |
+| Open and read | `navigate_browser`, `read_browser_page` | 2 |
+| History navigation | `navigate_browser_history` | 1 |
+| Page structure and layout | `capture_browser_snapshot`, `find_browser_text`, `inspect_browser_layout` | 3 |
+| Screenshot | `capture_browser_screenshot` | 1 |
+| Mouse and forms | `click_browser_target`, `hover_browser_target`, `drag_browser_target`, `scroll_browser`, `fill_browser_field`, `type_browser_text`, `press_browser_key`, `select_browser_option`, `set_browser_checked_state` | 9 |
+| Tabs, viewport, dialogs | `manage_browser_tabs`, `resize_browser_viewport`, `handle_browser_dialog` | 3 |
+| Script and network | `evaluate_browser_script`, `fetch_browser_url`, `manage_browser_network_capture` | 3 |
+| Extensions | `inspect_browser_extensions`, `manage_browser_extension` | 2 |
+| Health | `inspect_browser_status` | 1 |
+| Session maintenance | `close_browser`, `clear_browser_cache`, `reset_browser` | 3 |
+| Total | | **28** |
 
-## 已确认的收口范围：28 → 23
+## Confirmed Consolidation Scope: 28 → 23
 
-### 打开网页与读取正文：2 → 1
+### Opening pages and reading body content: 2 → 1
 
-统一为一个页面读取入口：提供 URL 时打开并读取，不提供 URL 时读取当前页。最终公开名称在实现时确定，保留一个常驻入口。
+Unify into a single page-read entry point: when a URL is provided, open and read it; when no URL is provided, read the current page. The final public name will be determined at implementation time; one persistent entry point is retained.
 
-两种现有能力底层已共用导航和正文提取路径。保留正文、元数据、链接以及完整文本和链接快照；读取预览之外内容时继续使用已有文件能力。
+The two existing capabilities already share the navigation and body-extraction path underneath. Keep body, metadata, links, and the full text and link snapshot; continue using the existing file capability for content beyond the read preview.
 
-导航已完成但正文提取失败时，应读取当前页恢复正文，不重复导航。显式 URL 跳过损坏的旧页面恢复，不通过清除登录数据规避问题。
+When navigation has completed but body extraction failed, the current page should be read to recover the body content rather than navigating again. An explicit URL skips recovery from a corrupted stale page, and does not work around the problem by clearing login data.
 
-兼顾分身现有的 `read_delegate` / broker 路径和角色授权，不能因主工具面合并而扩大分身权限或破坏代理读取。
+The Bunshin/worker's existing `read_delegate` / broker path and role authorization must be preserved; the main tool surface consolidation must not expand Bunshin/worker permissions or break delegated reads.
 
-### 模块与扩展诊断：2 → 1
+### Module and extension diagnostics: 2 → 1
 
-将 `inspect_browser_status` 与 `inspect_browser_extensions` 收口到一个 inspection 入口：
+Consolidate `inspect_browser_status` and `inspect_browser_extensions` into a single inspection entry point:
 
-- 默认返回 Browser runtime 健康度、当前会话状态及已配置扩展摘要。
-- 指定 `extension_id` 时返回该扩展的完整相关配置、可观测运行状态和诊断限制。
-- 模块级健康检查在没有会话或临时分身不支持扩展时仍可使用，不因附加扩展信息整体失败。
-- 不为检查状态启动浏览器；区分已配置、浏览器是否运行、实际观察到的 worker 和未验证的行为。
+- By default, return Browser runtime health, current session state, and a summary of configured extensions.
+- When `extension_id` is specified, return the extension's full relevant configuration, observable run state, and diagnostic limitations.
+- Module-level health checks remain usable when there is no session or a temporary Bunshin/worker does not support extensions, and do not fail wholesale because of the additional extension information.
+- Do not start a browser to check status; distinguish configured state, whether the browser is running, actually observed workers, and unverified behavior.
 
-已配置扩展不证明扩展行为正常；缺少 worker 也不证明扩展失败。保留目标页面与 manifest 验证的提示。扩展 mount / reload / unmount 继续由 `manage_browser_extension` 负责，不合入诊断工具。
+A configured extension does not prove the extension behaves correctly; the absence of a worker does not prove extension failure either. Keep the hints about target-page and manifest verification. Extension mount / reload / unmount remains the responsibility of `manage_browser_extension` and is not merged into the diagnostic tool.
 
-### 低频会话维护：3 → 1
+### Low-frequency session maintenance: 3 → 1
 
-统一到 `manage_browser_session`，使用一个必选 `operation` 枚举：
+Unify into `manage_browser_session` with a single required `operation` enum:
 
-| operation | 行为 |
+| operation | Behavior |
 | --- | --- |
-| `close` | 关闭当前会话浏览器，保留 profile 和登录态；已关闭时幂等成功 |
-| `clear_cache` | 清 HTTP 缓存，保留 cookies 和站点存储；不隐含刷新、登出或删除 service-worker CacheStorage |
-| `reset` | 关闭并删除当前会话 profile，包括登录态；继续要求现有显式 `confirm=true` |
+| `close` | Close the current session's browser, keeping the profile and login state; idempotent success if already closed |
+| `clear_cache` | Clear the HTTP cache, keeping cookies and site storage; does not imply refresh, logout, or deletion of service-worker CacheStorage |
+| `reset` | Close and delete the current session's profile, including login state; continues to require the existing explicit `confirm=true` |
 
-不设置隐含的默认维护动作。保留各动作的执行约束和错误语义，实现时核对现有执行分类的表示方式。runtime 的恢复与资源管理路径继续独立负责自动兜底，不能把 profile 删除引入普通故障恢复。
+No implicit default maintenance action is set. Keep each action's execution constraints and error semantics; verify how existing execution classifications are represented at implementation time. The runtime's recovery and resource management paths continue to independently handle automatic fallback; profile deletion must not be introduced into ordinary failure recovery.
 
-### 撤掉独立浏览器 fetch：1 → 0
+### Retiring the standalone browser fetch: 1 → 0
 
-`fetch_browser_url` 退出模型工具面：
+`fetch_browser_url` is removed from the model tool surface:
 
-- 普通 HTTP/API 请求由主 Pal 通过 `run_shell` 调用 curl。
-- 必须复用浏览器登录态时，由 `evaluate_browser_script` 在页面中执行 fetch。
-- 页面内请求仍受浏览器的来源、cookies 和 CORS 规则约束，不能宣称普通 curl 自动等价。
-- 角色没有 shell 或脚本权限时继续遵守原权限边界，报告能力缺口，不借替代路径扩大授权。
+- Ordinary HTTP/API requests are made by the main Pal via `run_shell` calling curl.
+- When reusing the browser login state is required, `evaluate_browser_script` executes fetch inside the page.
+- In-page requests are still constrained by the browser's origin, cookies, and CORS rules; you cannot claim that plain curl is automatically equivalent.
+- When a role has no shell or script permissions, continue to respect the original permission boundaries and report the capability gap; do not expand authorization via alternative paths.
 
-该调整减少一个入口，但登录态请求需要模型生成 JavaScript，不能直接宣称任务准确率提高。撤销前更新相关指导和恢复提示；写请求结果不确定时先核实实际状态，不盲目重试。记录专门工具与通用脚本在参数校验、错误报告上的差异，并纳入验证。
+This adjustment removes one entry point, but login-state requests require the model to generate JavaScript, so you cannot directly claim improved task accuracy. Before the removal, update the related guidance and recovery prompts; when a write request's outcome is uncertain, verify the actual state first rather than blindly retrying. Record the differences between dedicated tools and general scripting in parameter validation and error reporting, and include them in validation.
 
-## 待定设计，不计入 23 个的收益
+## Pending designs, not counted toward the 23-tool benefits
 
-### 截图支持可选视口尺寸
+### Screenshot support for optional viewport size
 
-支持“调整视口后截图”的组合工作流：提供尺寸时先调整实际视口再截图，不提供尺寸时沿用当前视口。尺寸变化会影响响应式布局及后续交互，不是只缩放输出图片；需要时重新取得页面结构和有效 ref。
+Support the combined workflow of "resize the viewport then screenshot": when a size is provided, adjust the actual viewport first and then screenshot; when no size is provided, keep the current viewport. A size change affects responsive layouts and subsequent interactions; it is not just scaling the output image; re-fetch the page structure and valid refs when needed.
 
-仍需明确仅调整视口、不截图的调用路径。不能为了撤掉 `resize_browser_viewport`，强制每次调整都生成图片；也不能未经设计就把尺寸字段扩散到所有会话维护操作。因此本轮暂保留独立 resize，其撤销不计入确定收益。
+A call path that resizes without screenshotting still needs to be specified. Do not force every resize to generate an image just to remove `resize_browser_viewport`, and do not spread the size field to all session maintenance operations without design. Therefore the standalone resize is retained for now, and its removal is not counted as a confirmed benefit.
 
-### 页面快照与文本过滤
+### Page snapshot and text filtering
 
-`capture_browser_snapshot` 返回页面结构及可交互元素 ref，不是像素截图。若 `find_browser_text` 可以作为同一份结构快照的过滤能力收口，且保持范围限制和有效 ref，可进一步合并。
+`capture_browser_snapshot` returns the page structure and refs for interactive elements, not a pixel screenshot. If `find_browser_text` can be consolidated as a filtering capability over the same structural snapshot while preserving scope limits and valid refs, further merging is possible.
 
-如果实现仅变成 snapshot/find 模式分支，并要求模型协调两套不同参数契约，则暂不合并。该项还需核对现有 snapshot/find 底层语义，不预设过滤行为等价。
+If the implementation merely becomes a snapshot/find mode branch and requires the model to coordinate two different parameter contracts, do not merge for now. This item also requires verifying the underlying semantics of the existing snapshot/find; do not presume the filtering behavior is equivalent.
 
-## 本轮保留的边界
+## Boundaries retained this round
 
-- `fill_browser_field`、`select_browser_option`、`set_browser_checked_state` 不合成切换三套参数契约的通用表单工具。设置勾选状态不能退化为点击切换。
-- `type_browser_text` 与 `press_browser_key` 暂不合并；前者向当前焦点输入文本，后者发送按键或组合键。
-- click、hover、drag、scroll 保留独立入口，避免混合目标、坐标和动作专用参数。
-- 结构快照、布局检查、截图分别提供控件结构、样式几何和像素证据；不默认同时返回全部内容。
-- 历史导航、标签页、弹窗及扩展管理已有按对象组织的枚举，保持现有边界。
-- 脚本执行与网络捕获用途不同，不继续强行合并。
+- `fill_browser_field`, `select_browser_option`, and `set_browser_checked_state` are not to be synthesized into a universal form tool that toggles between three parameter contracts. Setting checkbox state must not degrade into click toggling.
+- `type_browser_text` and `press_browser_key` are not merged for now; the former types text into the current focus, the latter sends keys or key combinations.
+- click, hover, drag, and scroll keep separate entry points, avoiding mixing targets, coordinates, and action-specific parameters.
+- The structural snapshot, layout inspection, and screenshot provide control structure, style geometry, and pixel evidence respectively; do not return all content together by default.
+- History navigation, tabs, dialogs, and extension management already have object-oriented enumerations; keep the existing boundaries.
+- Script execution and network capture serve different purposes; do not force further merging.
 
-## 实施与验证
+## Implementation and validation
 
-1. 对齐最终公开名称、输入契约、执行分类和角色投影，再调整公开能力及搜索指导；同步清理旧工具提示和手册引用。
-2. 保留正文快照、截图 artifact、会话与登录状态的所有权及现有恢复路径。
-3. 定向验证打开与重读、导航成功但正文失败、分身代理读取、无会话健康检查、扩展诊断，以及三种会话维护的实际状态变化。
-4. 验证独立 fetch 退出 native schema、搜索目录及可读取契约，覆盖普通请求和浏览器登录态请求的替代流程及权限限制。
-5. 用模型对比原方案与收口方案。除首次及补搜召回，还要检查操作选择、参数合法性、最终页面状态、调用轮次和错误恢复；不能只按旧工具名命中或新入口命中判成功。
-6. 本地运行相关定向测试，完整 CI 交给 GitHub。未完成实现前不宣称 23 个已生效或准确率已改善。
+1. Align the final public names, input contracts, execution classification, and role projection before adjusting the public capabilities and search guidance; clean up old tool hints and manual references at the same time.
+2. Preserve the ownership of the main-text snapshot, screenshot artifacts, session and login state, and the existing recovery paths.
+3. Conduct targeted validation of open and re-read, navigation succeeding but main text failing, Bunshin/worker reads, session-less health checks, extension diagnostics, and the actual state changes of the three session maintenance operations.
+4. Verify the removal of standalone fetch from the native schema, the search catalog, and the readable contracts, covering alternative flows and permission restrictions for both plain requests and browser login-state requests.
+5. Use models to compare the original scheme with the consolidated scheme. Beyond first-attempt and follow-up search recall, also check operation selection, parameter validity, final page state, call rounds, and error recovery; success must not be judged solely by hits on old tool names or new entry points.
+6. Run the relevant targeted tests locally, leaving full CI to GitHub. Do not claim the 23 tools are in effect or that accuracy has improved before the implementation is complete.
 
-本文件保留审查时的基线与范围；已确认部分的实现状态见实施记录。待定项目仍不在本轮范围内。
+This document preserves the baseline and scope at review time; the implementation status of confirmed items is in the implementation record. Pending items remain out of scope for this round.
 
-## 相关模块计划
+## Related module plans
 
-- [情绪广播与工具面合并计划](pal_emotion_broadcast_plan.md)
-- [记忆后端维护迁入 CLI 计划](pal_memory_backend_cli_plan.md)
+- [Emotion broadcast and tool surface consolidation plan](pal_emotion_broadcast_plan.md)
+- [Plan for migrating memory backend maintenance into the CLI](pal_memory_backend_cli_plan.md)

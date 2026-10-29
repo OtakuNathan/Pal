@@ -1,44 +1,44 @@
-# 第二次工具效率采样：Petra 重启排障
+# Second Tool Efficiency Sampling: Petra Restart Troubleshooting
 
 > Historical record, archived on 2026-10-05 from `docs/tool_efficiency_sample_20260923_petra.md`.
 > Statements about implementation, deployment and test results describe the
 > original work, not the current checkout or running host. See the
 > [current documentation index](../../README.md).
 
-来源：`/tmp/pal/pal.log`，mtime 2026-09-23 17:44 BST。本文件是最后一次请求的上下文及回复快照，不是逐请求计时 trace；以下只能统计可见历史，不能推算精确 LLM 时延、费用或 compact 前完整轮次。
+Source: `/tmp/pal/pal.log`, mtime 2026-09-23 17:44 BST. This file is a snapshot of context and replies from the last request, not a per-request timing trace; the following can only count visible history and cannot infer precise LLM latency, cost, or complete rounds before compaction.
 
-## 关键结论
+## Key Findings
 
-样本仍使用旧版 checklist 指导、包含完整 echo 的工具结果，以及无 filter_suggestions 的空搜索结果。本轮源码修改尚未在这些调用中体现，不能当作优化后的对照样本。
+The sample still used the old checklist guidance, tool results containing full echo output, and empty search results without filter_suggestions. The source code changes from this round are not reflected in these calls, so this cannot be treated as a post-optimization comparison sample.
 
-重启任务从消息索引 31 的用户“重启一下”开始，到索引 74 的回复结束。其间有 20 个带 tool_call 的 assistant 消息，每个恰好一个工具调用，另有最终文字答复。不是完整 provider attempt 数，重试无法从该快照恢复。
+The restart task starts with the user's "restart it" at message index 31 and ends with the reply at index 74. In between there are 20 assistant messages with tool_call, each with exactly one tool call, plus a final text reply. This is not the full provider attempt count; retries cannot be recovered from this snapshot.
 
-| 类别 | 工具调用轮数 | 观察 |
+| Category | Tool-call rounds | Observations |
 | --- | ---: | --- |
-| 行为/手册路径 | 7 | advise_behavior、3 次 search_tools、read_tool、skill_search、skill_inject |
-| checklist 管理 | 5 | upsert、3 次 check、clear；全部单独占轮 |
-| 健康工具发现 | 2 | family=endpoint 导致空结果，第二次放宽找到目标 |
-| 远端执行与复查 | 4 | 查服务、重启、等待复查、原生采样 |
-| channel 查询 | 2 | 列出 endpoint，再查已知 petra 的 bridge health |
+| Behavior/manual path | 7 | advise_behavior, 3x search_tools, read_tool, skill_search, skill_inject |
+| Checklist management | 5 | upsert, 3x check, clear; each occupying its own round |
+| Health tool discovery | 2 | family=endpoint caused empty results; the second, relaxed search found the target |
+| Remote execution and recheck | 4 | inspect service, restart, wait-and-recheck, native sampling |
+| Channel queries | 2 | list endpoints, then query bridge health for the known petra |
 
-## 具体浪费来源
+## Specific Sources of Waste
 
-1. **发现筛选分类与日常直觉不一致。** skill_search 是 operation namespace，模型却先用 inspect/introspection；两次错误筛选后才改用 action 找到。search_tools 的现有描述把 inspect 解释为查状态、action 解释为做事，并不能准确预测 owner 注册分类。健康检查也再次误用 family=endpoint。已经实现的零结果恢复建议能缓解，但更直接的指导是未知分类时省略 namespace/family，不能根据“只读”猜 namespace。
-2. **已知名称仍走完整搜索链。** 开始发现时，查询已明确包含 pal.self.maintenance；找到 skill_inject 且知道 name 参数后，仍 read_tool(skill_search) → skill_search → skill_inject。查阅运维约束本身有理由，问题是到达手册前的多余步骤。skill_guide 只给陌生场景的 search→inject 路径，缺少同样明确的已知名称直达路径。
-3. **advise_behavior 没有给出相关建议。** 输入已写明 target、launchd、权限和验证方案，返回却是 Minion 记忆吸收、文件读取、edit_file、file_state。说明本次路由匹配质量不足；不能据此断言全部 behavior 都无用，也不能把它当作有价值的前置检查。样本中的历史“必须问是否吸收记忆”规则与当前任务无关，应收窄来源规则适用范围。
-4. **清单维护单独消耗轮次。** 前一段调查甚至在证据收集后才 upsert 三个 pending 项，再连续 check 三次、clear 一次。对于收尾补记，没有增加调查信息。新自动 clear 可消除末尾一轮，其他更新仍应与实际工作同轮，或在不需要清单的简单任务上省略。
-5. **结果量来自命令本身。** 调查段三份 shell 结果约 15.5K、8.7K、11.5K 字符，包含重复原生栈和广泛 SQLite 全仓搜索；并未获得具体 Python 调用者/数据库归属。分页不是范围规划的替代品。应围绕“下一条证据能否区分假设”选择采样和代码搜索范围，而非再加静默截断。
+1. **Discovery filter categories diverge from everyday intuition.** skill_search is in the operation namespace, yet the model first used inspect/introspection; only after two wrong filter attempts did it switch to action and find it. The existing descriptions of search_tools interpret inspect as checking status and action as doing things, which does not accurately predict owner-registered categories. The health check also again misused family=endpoint. The already-implemented zero-result recovery suggestions can mitigate this, but more direct guidance is to omit namespace/family for unknown categories and not guess the namespace from "read-only".
+2. **Known names still went through the full search chain.** At the start of discovery, the query already explicitly contained pal.self.maintenance; after finding skill_inject and knowing the name parameter, it still did read_tool(skill_search) → skill_search → skill_inject. Consulting the operational constraints itself was justified; the problem is the extra steps before reaching the manual. skill_guide only gives the search→inject path for unfamiliar scenarios and lacks an equally explicit direct path for known names.
+3. **advise_behavior returned no relevant suggestions.** The input already specified target, launchd, permissions, and the verification plan, yet the return was Minion memory absorption, file reads, edit_file, and file_state. This shows the routing match quality was insufficient this time; one cannot conclude from this that all behaviors are useless, nor treat it as a valuable pre-check. The historical "must ask whether to absorb memories" rule in the sample is unrelated to the current task and the rule's scope of application should be narrowed.
+4. **Checklist maintenance consumed rounds on its own.** The preceding investigation even upserted three pending items only after evidence gathering, then checked three times in a row and cleared once. For end-of-work bookkeeping, this added no investigation information. The new automatic clear can eliminate the final round; other updates should still share a round with actual work, or be omitted on simple tasks that do not need a checklist.
+5. **Result volume came from the commands themselves.** The three shell results in the investigation segment were about 15.5K, 8.7K, and 11.5K characters, containing repeated native stacks and broad SQLite whole-repository searches; no specific Python caller/database attribution was obtained. Pagination is not a substitute for scope planning. Sampling and code search scope should be chosen around "can the next piece of evidence distinguish hypotheses", rather than adding more silent truncation.
 
-## 有效行为
+## Effective Behaviors
 
-- run_shell 使用已配置 target=3，没有绕去手写 SSH。
-- 本地同文件多段读取用了 read_file(ranges=...)，且三个文件同轮调用。
-- 真正只重启一次；PID 变化得到验证，未将 bridge healthy 宣称为主运行时恢复。
-- 重启后原生采样验证同一忙点复现，有诊断价值。
-- 后续用户说“又卡死”时，把进程检查与采样合在一次 run_shell 中，只用了一个工具 round。这说明工具本身不要求之前那条冗长路径。
+- run_shell used the configured target=3 and did not detour to hand-written SSH.
+- Multiple-range reads of the same local file used read_file(ranges=...), with three files called in the same round.
+- The restart was genuinely performed only once; the PID change was verified, and bridge healthy was not claimed as main-runtime recovery.
+- After the restart, native sampling verified that the same busy point recurred, which has diagnostic value.
+- When the user later said "it's stuck again", the process check and sampling were combined into a single run_shell, using only one tool round. This shows the tools themselves do not require the earlier verbose path.
 
-## 下一步取舍
+## Next Trade-offs
 
-优先激活已完成的工具修正，再做可比较采样。进一步可收紧 namespace/family 说明、已知技能名直达指导和 behavior 的不相关候选；无需增加另一套通用编排框架。重启这类已有目标与授权的任务，可将流程规划为少量具有实际依赖的步骤，但不保证固定轮数，也不跳过必要的首次运维约束检查。
+Prioritize activating the completed tool fixes, then do comparable sampling. Further tightening of namespace/family descriptions, direct-path guidance for known skill names, and irrelevant candidates for behavior is possible; no need to add another general-purpose orchestration framework. For tasks like restarts that already have a target and authorization, the process can be planned as a small number of steps with real dependencies, but a fixed round count is not guaranteed, nor are necessary first-time operational constraint checks skipped.
 
-本次只分析本地记录；没有连接 Petra、重启进程、检查或修改其数据库。SQLite 原生栈仍不足以证明数据库损坏。
+This analysis used only local records; there was no connection to Petra, no process restart, and no checking or modification of its database. The SQLite native stack is still insufficient to prove database corruption.

@@ -9,7 +9,7 @@ provider credentials.
 
 ## Run
 
-- Task: `task_38807641e2a94053badfa349690548e2` — Pal public proof demo 报告（general 技术写作/评审 dogfood）
+- Task: `task_38807641e2a94053badfa349690548e2` — Pal public proof demo report (general technical writing/review dogfood)
 - Workflow: `wf_dfe41605761c45928e7fb6eceef02c53`
 - Family/profile: `general` / `generic`
 - State: `ACTIVE` / `human_review`

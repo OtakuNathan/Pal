@@ -1,41 +1,41 @@
 # Provider Continuation Contract Matrix
 
-**状态：P0 事实基线 + 待验证项（TBD）。未知一律标 TBD，不填 none。**
-**日期：2026-09-18。基线：`7e0b1f74`。数据来源：`~/.pal/pal.sqlite3` 表 `llm_endpoints`（只读查询，未含密钥）、`~/.pal/config.toml` 活动端点、PLAN.md [W1]–[W3] 引用的官方续接文档。**
+**Status: P0 factual baseline + items pending verification (TBD). Unknowns are always marked TBD, never filled with none.**
+**Date: 2026-09-18. Baseline: `7e0b1f74`. Data sources: `~/.pal/pal.sqlite3` table `llm_endpoints` (read-only queries, no keys), `~/.pal/config.toml` active endpoints, and the official continuation documentation referenced by PLAN.md [W1]–[W3].**
 
-## 使用规则
+## Usage Rules
 
-1. `provider_id`/endpoint_id 只作为**已配置的 policy selector**；不从厂商名字推断完整兼容性（PLAN §7）。
-2. 同一厂商 + shape 可因模型版本、网关、thinking/tool 配置而不同；本矩阵按 endpoint 逐行记录。
-3. TBD 项必须在 P2 用真实 fixture（10.4 规范：脱敏、不新增付费调用）验证后才能改写为结论。
-4. 本矩阵只覆盖 ContinuationContract 轴；PromptCacheProfile（implicit/hybrid/explicit）是独立轴，另行记录。
+1. `provider_id`/endpoint_id serve only as **configured policy selectors**; full compatibility is not inferred from vendor names (PLAN §7).
+2. The same vendor + shape can differ due to model version, gateway, or thinking/tool configuration; this matrix records one row per endpoint.
+3. TBD items must not be rewritten as conclusions until verified in P2 with real fixtures (spec 10.4: sanitized, no new paid calls).
+4. This matrix covers only the ContinuationContract axis; PromptCacheProfile (implicit/hybrid/explicit) is a separate axis, recorded elsewhere.
 
-## 现役舰队（11 个 enabled 端点）
+## Active Fleet (11 enabled endpoints)
 
-| endpoint_id | model_id | wire_shape | 必需 native 续接（已验证/待验证） | 缺失时行为（目标） |
+| endpoint_id | model_id | wire_shape | Required native continuation (verified/pending verification) | Behavior when missing (target) |
 |---|---|---|---|---|
-| **deepseek-v4.1-flash ★ACTIVE** | deepseek-flash | anthropic_messages | Anthropic-compat thinking 块：thinking 开启时须回传完整未修改 thinking 块（含 signature/redacted、原顺序）[W2 类比]；DeepSeek thinking+tools 要求 reasoning_content 完整回传 [W3]。**TBD-P2**：本网关 anthropic-compat 是否实际下发 signature 字段（fixture 验证） | ContinuationUnavailable；不得静默剥 thinking 继续 |
-| deepseek-reasoner | deepseek-v4.1-pro | anthropic_messages | 同上家族；reasoner 为 thinking-first 模型，[W3] 约束更强。**TBD-P2**：signature 下发行为 | 同上 |
-| glm-5.3 | glm-5.3 | openai_completion | **TBD-P2**：Zhipu chat-completions 的 reasoning 字段续接要求未核对（Zhipu 官方文档尚未如 W1–W3 那样引用核对；response_hooks.py 已有 Zhipu normalizer 可参考解码侧） | 验证前按 RequiredNative 保守处理 |
-| glm-5.3-bigmodel | glm-5.3 | openai_completion | 同 glm-5.3 | 同上 |
-| glm-5.3-bigmodel-anthropic | glm-5.3 | anthropic_messages | 同家族 anthropic 形态。**TBD-P2**：thinking 块/signature 行为 | 同上 |
-| glm-5.3-flash | glm-5.3-flash | openai_completion | 同 glm-5.3 | 同上 |
-| glm-5.3-flash-bigmodel | glm-5.3-flash | openai_completion | 同 glm-5.3 | 同上 |
-| openrouter-gpt-5.6-luna | openai/gpt-5.6-luna | openai_response | OpenAI reasoning：stateless 续接靠 output items 中 `encrypted_content`；不能只存可读 summary [W1]。**TBD-P2**：openrouter 透传 encrypted_content 的完整性 | 同上 |
-| openrouter-gpt-5.6-terra | openai/gpt-5.6-terra | openai_response | 同 luna | 同上 |
-| openrouter-gpt-5.6-sol | openai/gpt-5.6-sol | openai_response | 同 luna | 同上 |
-| gpt-6-astra | openai/gpt-6-astra | openai_response | 同 [W1] 家族。**注**：astra 的 cache 路线（automatic/hybrid/explicit）切换决策已被 Nathan 搁置（2026-09-17，case_f3f42d3777b1），本矩阵只记录续接契约，不触发 cache 路线变更 | 同上 |
+| **deepseek-v4.1-flash ★ACTIVE** | deepseek-flash | anthropic_messages | Anthropic-compat thinking blocks: when thinking is enabled, the complete unmodified thinking block must be returned (including signature/redacted, original order) [W2 analogy]; DeepSeek thinking+tools requires reasoning_content to be returned in full [W3]. **TBD-P2**: whether this gateway's anthropic-compat actually issues a signature field (fixture verification) | ContinuationUnavailable; must not silently strip thinking and continue |
+| deepseek-reasoner | deepseek-v4.1-pro | anthropic_messages | Same family as above; reasoner is a thinking-first model, so [W3] constraints are stricter. **TBD-P2**: signature issuance behavior | Same as above |
+| glm-5.3 | glm-5.3 | openai_completion | **TBD-P2**: the reasoning field continuation requirements for Zhipu chat-completions have not been checked (Zhipu official docs have not yet been consulted and cross-referenced as W1–W3 were; response_hooks.py already has a Zhipu normalizer usable as a reference on the decoding side) | Treated conservatively as RequiredNative until verified |
+| glm-5.3-bigmodel | glm-5.3 | openai_completion | Same as glm-5.3 | Same as above |
+| glm-5.3-bigmodel-anthropic | glm-5.3 | anthropic_messages | Same family, anthropic shape. **TBD-P2**: thinking block/signature behavior | Same as above |
+| glm-5.3-flash | glm-5.3-flash | openai_completion | Same as glm-5.3 | Same as above |
+| glm-5.3-flash-bigmodel | glm-5.3-flash | openai_completion | Same as glm-5.3 | Same as above |
+| openrouter-gpt-5.6-luna | openai/gpt-5.6-luna | openai_response | OpenAI reasoning: stateless continuation relies on `encrypted_content` in output items; storing only the readable summary is insufficient [W1]. **TBD-P2**: integrity of encrypted_content passthrough on openrouter | Same as above |
+| openrouter-gpt-5.6-terra | openai/gpt-5.6-terra | openai_response | Same as luna | Same as above |
+| openrouter-gpt-5.6-sol | openai/gpt-5.6-sol | openai_response | Same as luna | Same as above |
+| gpt-6-astra | openai/gpt-6-astra | openai_response | Same [W1] family. **Note**: the decision to switch astra's cache route (automatic/hybrid/explicit) has been shelved by Nathan (2026-09-17, case_f3f42d3777b1); this matrix only records the continuation contract and does not trigger a cache route change | Same as above |
 
-★ACTIVE：`~/.pal/config.toml` 的 `endpoint_id` 与 `review_endpoint_id` 均为 deepseek-v4.1-flash。**现役端点走 anthropic_messages shape，[W2]/[W3] 类契约直接约束生产路径**——这是本改造优先级的现实依据。
+★ACTIVE: both `endpoint_id` and `review_endpoint_id` in `~/.pal/config.toml` are deepseek-v4.1-flash. **The active endpoint uses the anthropic_messages shape, so [W2]/[W3]-type contracts directly constrain the production path** — this is the practical basis for the priority of this refactor.
 
-## 现状（v1 机制）与目标（v2）的映射
+## Mapping from Current State (v1 mechanism) to Target (v2)
 
-- 现状：每条 assistant 消息的 `ReplayEnvelope`（shape+endpoint+model+payload）即事实上的 native 存储，随 L1 快照整体持久化；同端点重放，协议修理时置空。它对上表三 shape 都"存了"，但**没有按协议验证字段完整性**（例如不会校验 encrypted_content/signature 是否存在），也不区分 required/optional。
-- 目标（PLAN §3/§7）：`NativeContinuationStore` 按 ContinuationContract 做类型化验证存储；unknown 字段不得伪装成已知；切换端点销毁 active lineage 数据。
-- 迁移（PLAN §8.2）：旧 ReplayEnvelope 数据按实际 active binding 与协议一致性筛选迁移，缺必需字段的明确报告，不造假空签名。
+- Current state: each assistant message's `ReplayEnvelope` (shape+endpoint+model+payload) is the de facto native storage, persisted wholesale with the L1 snapshot and zeroed out on protocol repair during same-endpoint replay. It "stores" data for all three shapes in the table above, but **does not validate field completeness per protocol** (e.g., it never checks whether encrypted_content/signature exist), nor does it distinguish required/optional.
+- Target (PLAN §3/§7): `NativeContinuationStore` performs typed, validated storage per ContinuationContract; unknown fields must not masquerade as known; switching endpoints destroys active lineage data.
+- Migration (PLAN §8.2): legacy ReplayEnvelope data is migrated by filtering on actual active binding and protocol consistency; missing required fields are explicitly reported, with no fabricated empty signatures.
 
-## 验证义务（进入 P2 前）
+## Verification Obligations (before entering P2)
 
-1. 每个 TBD 行产出脱敏 fixture 或明确标注"无法离线验证，需 P7 canary 单独授权"。
-2. fixture 分两类：synthetic-opaque（只证明"不被改动"）与 provider-real（声称 provider 端可接受）；后者才是 contract 证据。
-3. 本矩阵的任何行从 TBD 变为结论时，须引用 fixture 文件与测试名。
+1. Each TBD row must produce a sanitized fixture or be explicitly marked "cannot be verified offline; requires separate P7 canary authorization".
+2. Fixtures come in two kinds: synthetic-opaque (proves only "not modified") and provider-real (claims provider-side acceptability); only the latter counts as contract evidence.
+3. Whenever any row of this matrix changes from TBD to a conclusion, the fixture file and test name must be cited.

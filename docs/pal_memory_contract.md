@@ -50,19 +50,19 @@ Storage boundary:
 - Reusable procedure -> skill candidate.
 - Repair lesson or reusable task experience -> propose memory or skill candidate first unless explicitly approved.
 
-> 目标：把 `L1 / L2 / L3`、memory lifecycle 和 memory action contract 一次写死。
+> Goal: pin down `L1 / L2 / L3`, memory lifecycle, and the memory action contract all at once.
 
-## 目标
+## Goals
 
-`Memory` 不是聊天缓存，也不是随手塞数据库的事实堆。
+`Memory` is not a chat cache, nor a pile of facts dumped casually into a database.
 
-`Memory` 是 `Pal` 的分层记忆系统：
+`Memory` is the `Pal`'s layered memory system:
 
-- `L1` 保存当前逻辑会话的完整工作集，以及预算触发后替换该工作集的 compact continuity
-- `L2` 保存当前 runtime 真正需要的 hot context
-- `L3` 保存长期可检索的 durable memory
+- `L1` holds the full working set of the current logical session, plus the compact continuity that replaces that working set once the budget is triggered
+- `L2` holds the hot context the current runtime actually needs
+- `L3` holds durable memory that is retrievable long term
 
-## 三层结构
+## Three-Layer Structure
 
 ```mermaid
 flowchart LR
@@ -74,113 +74,113 @@ flowchart LR
 
 ## L1
 
-### 定义
+### Definition
 
-`L1` 是当前 logical conversation / role session 的完整工作集。输入、闭合的
-tool call/result 批次和回复增量进入 L1；只有真实 context budget 要求时才做
-semantic compact，并原子地以一个 continuity checkpoint 替换冻结的旧 L1。
+`L1` is the complete working set of the current logical conversation / role session. Inputs, closed
+tool call/result batches, and reply deltas enter L1; semantic compact is done only when the real context budget
+demands it, and atomically replaces the frozen old L1 with a continuity checkpoint.
 
-### 内容
+### Contents
 
 - current input and completed turns
 - closed tool protocol
-- compact continuity checkpoint（发生 compact 后）
+- compact continuity checkpoint (after a compact occurs)
 
-### 边界
+### Boundaries
 
-- `L1` 属于 runtime memory
-- 运行中的 `L1` 以 RAM 内工作集为唯一权威来源；本体使用加密基线和增量日志保存恢复副本
-- resident Pal 在 L 提交时追加恢复记录，每轮模型响应与工具结果闭合后补存 R；最后一轮、turn 结算和中断也保存。
-  流式碎片不逐条落盘。正常停机保存完整基线，不调用 LLM。
-- 下次启动在 channel 接入前恢复并保留有效恢复点，未结束 turn 标记为 interrupted，不重放旧工具。
-  突然退出最多恢复到最近一次成功持久化的边界；写入失败时继续保留 RAM 进展并报告降级。
-  durable Bunshin role session 继续按自己的 checkpoint 合约恢复 L1。
-- `L1` 不属于 Core durable state
-- `L1` 不是 summary bucket
+- `L1` belongs to runtime memory
+- A running `L1` treats the in-RAM working set as the single authoritative source; the body keeps a recovery copy using an encrypted baseline plus incremental logs
+- A resident Pal appends recovery records when L is committed, and back-fills R after each model response round and tool result closure; the final round, turn settlement, and interruptions are also saved.
+  Streaming fragments are not written to disk one by one. Normal shutdown saves a full baseline without calling the LLM.
+- On next startup, valid recovery points are restored and retained before channel attachment; unfinished turns are marked interrupted, and old tools are not replayed.
+  A sudden exit recovers at most to the most recent successfully persisted boundary; if writes fail, RAM progress is kept and degradation is reported.
+  A durable Bunshin role session continues to restore its L1 according to its own checkpoint contract.
+- `L1` is not part of Core durable state
+- `L1` is not a summary bucket
 
 ### Runtime Shape
 
-`L1` 更接近 logical process working set，而不是业务队列。
+`L1` is closer to a logical process working set than a business queue.
 
-它的职责是：
+Its responsibilities are:
 
-- 承接当前逻辑会话的完整执行连续性
-- 作为 `compact` 唯一语义输入
+- Carrying the full execution continuity of the current logical session
+- Serving as the sole semantic input to `compact`
 
-它不应被建模成：
+It should not be modeled as:
 
 - task queue
 - durable log
-- 独立业务对象仓库
+- A repository of independent business objects
 
 ## L2
 
-### 定义
+### Definition
 
-`L2` 是 hot runtime working set。
+`L2` is the hot runtime working set.
 
-它保存当前推理和工作真正需要的提炼上下文，而不是长期真相源。
+It holds the distilled context that current reasoning and work actually need, not a long-term source of truth.
 
-`L2` 的真相结构以 entry set 为主，而不是一组 durable buckets。
+The truth structure of `L2` is primarily an entry set, not a set of durable buckets.
 
-也就是说：
+That is:
 
-- 决定 memory 行为的是 entry 内部 metadata
-- bucket 主要服务于 runtime 组织和 prompt 投影
-- HOT 是运行时记忆状态，不触发自动 prompt 正文投影；召回正文只通过工具结果及其分页交付
+- What decides memory behavior is the metadata inside entries
+- Buckets mainly serve runtime organization and prompt projection
+- HOT is a runtime memory state and does not trigger automatic prompt body projection; recalled bodies are delivered only via tool results and their pagination
 
-### 内容
+### Contents
 
 - compacted working facts
 - recalled entries (HOT)
 - conversation summary
 - case candidates
 
-### 边界
+### Boundaries
 
-- `L2` 属于 runtime memory
-- `L2` 只存在 RAM
-- 进程重启后 `L2` 丢失
-- `L2` 不绑在 durable conversation host 上
-- `L2` 的一等结构是 entry set，不是 durable conversation record
+- `L2` belongs to runtime memory
+- `L2` exists only in RAM
+- `L2` is lost after a process restart
+- `L2` is not bound to a durable conversation host
+- The first-class structure of `L2` is an entry set, not a durable conversation record
 
 ### Runtime Shape
 
-`L2` 更接近 hot entry set + lifecycle state machine，而不是队列。
+`L2` is closer to a hot entry set + lifecycle state machine than a queue.
 
-也就是说：
+That is:
 
-- 它是当前热记忆的集合
-- HOT prompt projection 是 HOT memory 条目的 prompt 投影视图；当前实现不再使用一个通用 `Working Memory` 标签
-- 它不应被理解成先进先出的业务队列
+- It is a collection of current hot memory
+- HOT prompt projection is the prompt projection view of a HOT memory entry; the current implementation no longer uses a generic `Working Memory` label
+- It should not be understood as a FIFO business queue
 
-### Scope 原则
+### Scope Principle
 
-`task-wise memory` 是 scope，不是 bucket。
+`task-wise memory` is a scope, not a bucket.
 
-也就是说：
+That is to say:
 
-- 内容分类回答“这是什么”
-- scope 回答“这属于当前 task 还是 system”
+- Content classification answers "what is this"
+- Scope answers "does this belong to the current task or to the system"
 
-更进一步说：
+To put it further:
 
-- `kind` 只回答 `fact | case`
-- `task` 不是第三种 memory kind
-- `task_id` 只是把同一种 memory 放到 task scope 下
+- `kind` only answers `fact | case`
+- `task` is not a third memory kind
+- `task_id` merely places the same kind of memory under the task scope
 
-因此 memory 的最小心智模型是：
+Therefore, the minimal mental model of memory is:
 
 - `system-scoped fact`
 - `task-scoped fact`
 - `system-scoped case`
 - `task-scoped case`
 
-### Entry Metadata 原则
+### Entry Metadata Principle
 
-决定 `L2` 条目行为的关键信息应放在 entry 内部，而不是塞进 bucket 名字里。
+Key information that determines `L2` entry behavior should be placed inside the entry, not stuffed into the bucket name.
 
-至少包括：
+At a minimum it includes:
 
 - `kind`
 - `scope`
@@ -192,28 +192,28 @@ semantic compact，并原子地以一个 continuity checkpoint 替换冻结的�
 - `summary`
 - `rendered`
 
-其中：
+Where:
 
-- `source_kind` 决定这条内容来自 `L1 compact`、`L3 recall` 还是显式 `commit`
-- `candidate_state` 决定它是否还是候选态
-- `retire` 是否回写 `L3` 应主要看 entry metadata，而不是看 bucket 名字
+- `source_kind` determines whether this content comes from `L1 compact`, `L3 recall`, or an explicit `commit`
+- `candidate_state` determines whether it is still in candidate state
+- Whether `retire` writes back to `L3` should mainly be determined by entry metadata, not by the bucket name
 
-因此：
+Therefore:
 
-- `recalled_cases` 不应成为一等 bucket
-- `case_candidate` 更适合作为 entry 的状态标记
+- `recalled_cases` should not become a first-class bucket
+- `case_candidate` is better suited as a state marker on the entry
 
 ### `L2Entry` Unified Runtime Shape
 
-虽然 `L3` 的 durable truth model 是异构的，但 `L2` 应保持同构。
+Although the durable truth model of `L3` is heterogeneous, `L2` should remain homogeneous.
 
-也就是说：
+That is to say:
 
-- `L3` 可以拆成 `memory_facts` 和 `memory_cases`
-- `L2` 不照搬 truth table 形状
-- `L2` 保存统一的 runtime projection entry
+- `L3` can be split into `memory_facts` and `memory_cases`
+- `L2` does not copy the shape of the truth table
+- `L2` stores a unified runtime projection entry
 
-推荐最小结构：
+Recommended minimal structure:
 
 - `entry_id`
 - `kind`
@@ -228,17 +228,17 @@ semantic compact，并原子地以一个 continuity checkpoint 替换冻结的�
 - `rendered`
 - `payload`
 
-字段语义：
+Field semantics:
 
 - `kind = fact | case`
 - `scope = system | task`
 - `source_kind = l1_compaction | l3_recall | explicit_commit | correction`
-- `source_ref` 在 `l3_recall` 时指向 durable truth row
+- `source_ref` at `l3_recall` time points to the durable truth row
 - `candidate_state = candidate | stable`
-- `rendered` 是面向 prompt 的投影文本
-- `payload` 是 runtime 使用的结构化补充信息
+- `rendered` is the prompt-facing projection text
+- `payload` is structured supplementary information used at runtime
 
-对 `payload` 的解释由 `kind` 决定：
+The interpretation of `payload` is determined by `kind`:
 
 #### `fact` entry payload
 
@@ -253,99 +253,99 @@ semantic compact，并原子地以一个 continuity checkpoint 替换冻结的�
 - `result`
 - optional extra fields
 
-因此：
+Therefore:
 
-- `L3` 异构
-- `L2` 同构
-- `retire` 时再根据 `kind` 决定落到 `memory_facts` 或 `memory_cases`
+- `L3` is heterogeneous
+- `L2` is homogeneous
+- At `retire` time, `kind` again determines whether it lands in `memory_facts` or `memory_cases`
 
 ### L2 Lifecycle Contract: HOT / GHOST / DORMANT
 
-`L2` 条目有明确的生命周期状态，不再是只进不出的 LRU 缓存。
+`L2` entries have explicit lifecycle states and are no longer an LRU cache that only takes in and never lets out.
 
 ```
 DORMANT ──recall/commit──→ HOT       (renewal_count = 0)
-HOT      ──hot_ttl到期──→ GHOST       (renewal_count 不变)
-GHOST    ──再次recall──→ HOT          (renewal_count += 1)
-GHOST    ──ghost_ttl到期──→ DORMANT
-HOT      ──再次recall──→ HOT          (renewal_count 不变，只刷新 ttl)
+HOT      ──hot_ttl expired──→ GHOST       (renewal_count unchanged)
+GHOST    ──recalled again──→ HOT          (renewal_count += 1)
+GHOST    ──ghost_ttl expired──→ DORMANT
+HOT      ──recalled again──→ HOT          (renewal_count unchanged, only ttl refreshed)
 ```
 
-**HOT 代表”当前被真正用上的东西”**，不是”刚被写出来的东西”。
+**HOT represents "things actually being used right now"**, not "things just written out".
 
-状态转换规则：
+State transition rules:
 
-- DORMANT → HOT: renewal_count = 0，hot_ttl = 5
-- HOT refresh（recall 命中已在 HOT 的条目）: renewal_count 不变，只重置 hot_ttl
-- HOT → GHOST: renewal_count 不变，ghost_ttl = 3
+- DORMANT → HOT: renewal_count = 0, hot_ttl = 5
+- HOT refresh (recall hits an entry already in HOT): renewal_count unchanged, only hot_ttl is reset
+- HOT → GHOST: renewal_count unchanged, ghost_ttl = 3
 - GHOST → HOT: renewal_count += 1
-- renewal_count >= MAX_RENEWAL_COUNT (3) 时，HOT 过期直接 DORMANT，跳过 GHOST
+- When renewal_count >= MAX_RENEWAL_COUNT (3), an expired HOT entry goes directly to DORMANT, skipping GHOST
 
-三条铁规则：
+Three iron rules:
 
-1. TTL 续命封顶 3 次（防永久驻留）
-2. GHOST 只存 entry_id + heat_level + ghost_ttl（轻量）
-3. “再次召回” = 真正进入 working set，不是搜索命中
+1. TTL extension is capped at 3 times (to prevent permanent residence)
+2. GHOST stores only entry_id + heat_level + ghost_ttl (lightweight)
+3. "Recall again" means truly entering the working set, not a search hit
 
-TTL 是 turn-based，不是 function-call-based。`tick_heat()` 在 turn 结束时调用，不在 `build_pack()` 里调用。
+TTL is turn-based, not function-call-based. `tick_heat()` is called at the end of a turn, not inside `build_pack()`.
 
 ### HOT Prompt Projection
 
-HOT prompt projection 是 L2 中所有 HOT memory 条目的 prompt 投影。当前实现渲染为 XML-style user-context blocks，而不是一个通用 `Working Memory` block。
+The HOT prompt projection is the prompt projection of all HOT memory entries in L2. The current implementation renders it as XML-style user-context blocks, not a single generic `Working Memory` block.
 
-核心原则：
+Core principles:
 
-- HOT prompt projection 只包含 HOT memory 条目
-- 无 HOT 条目时不注入任何 L2 块
-- GHOST 条目不渲染
-- compact 只更新 L1，不直接触发 HOT
+- The HOT prompt projection contains only HOT memory entries
+- When there are no HOT entries, no L2 block is injected
+- GHOST entries are not rendered
+- compact only updates L1 and does not directly trigger HOT
 
-触发 HOT 的动作：
+Actions that trigger HOT:
 
-- `commit`（写入后自动进入 HOT）
-- `recall` 命中后进入 working set
+- `commit` (automatically enters HOT after a write)
+- `recall` enters the working set after a hit
 
-### 在线写入与 Dreaming
+### Online Writes and Dreaming
 
-`remember` 不再通过向量相似、title 或 topic 重叠覆盖已有记忆。相同请求的重试
-通过 mutation ID 幂等；只有身份、范围、正文和检索信息全部相同才允许机械去重。
-case 的机械去重还要求明确的同一事件标识。canonical key 按 kind / scope /
-task_id 定义身份；相同 key、不同正文返回冲突和已有引用，要求显式 update。
+`remember` no longer overwrites existing memories based on vector similarity, title, or topic overlap. Retries of the same request
+are idempotent via the mutation ID; mechanical deduplication is allowed only when identity, scope, body, and retrieval information are all identical.
+Mechanical deduplication of a case additionally requires an explicit same-event identifier. The canonical key defines identity by kind / scope /
+task_id; the same key with a different body returns a conflict and a reference to the existing record, requiring an explicit update.
 
-`update` 产生新 ID 和递增的 content_revision，保留旧正文及后继关系。旧引用不能
-静默修改后继记录。使用次数、访问时间不会改变内容版本。
+`update` produces a new ID and an incremented content_revision, preserving the old body and successor relationships. Old references must not
+silently modify successor records. Usage counts and access times do not change the content version.
 
-Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 复核后发布。
-没有获准修改时以 no_changes 完成，不改正文、不生成新 generation。
-运行、归档、迁移和恢复约束见 [Dreaming](pal_memory_dreaming.md)。
+Dreaming merges only confirmed duplicates of the same fact or the same event, published after independent LLM review.
+When no modification is approved, it finishes as no_changes, without changing the body and without generating a new generation.
+For run, archive, migration, and recovery constraints, see [Dreaming](pal_memory_dreaming.md).
 
 ## L3
 
-### 定义
+### Definition
 
-`L3` 是外挂、可插拔、searchable durable memory engine。
+`L3` is an external, pluggable, searchable durable memory engine.
 
-它不是 prompt 常驻层，而是长期可检索的 document/index system。
+It is not a prompt-resident layer, but a long-term retrievable document/index system.
 
-### 内容
+### Content
 
 - durable facts
 - durable cases
 - searchable memory documents
 - related indexes
 
-### 边界
+### Boundary
 
-- 只有 `L3` durable
-- `L3` 才是长期真相源
-- `L3` 不直接整层进入 prompt
-- `L3` 通过 recall 刷新 `L2`
+- Only `L3` is durable
+- Only `L3` is the long-term source of truth
+- `L3` never enters the prompt as a whole layer
+- `L3` refreshes `L2` via recall
 
-## L3 的搜索引擎模型
+## The Search Engine Model of L3
 
-`L3` 以 search engine 思维管理，而不是“记忆桶”思维。
+`L3` is managed with a search engine mindset, not a "memory bucket" mindset.
 
-它至少包括：
+It includes at least:
 
 - document store
 - lexical recall
@@ -353,36 +353,36 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 - topic lookup
 - ranking and fusion
 
-`L3` 是可插拔 provider，因此其实现可以替换，但行为契约必须固定。
+`L3` is a pluggable provider, so its implementation can be replaced, but the behavioral contract must remain fixed.
 
 ## L3 Truth Model
 
-`L3` 的 durable truth model 不再建议把 `fact` 和 `case` 混在同一张大表中。
+The durable truth model of `L3` no longer recommends mixing `fact` and `case` in the same large table.
 
-新的基线是：
+The new baseline is:
 
 - `memory_facts`
 - `memory_cases`
 
-拆分原因：
+Reasons for the split:
 
-- `fact` 和 `case` 的内容结构天然不同
-- `case` 的结构化字段不应和 `payload_blob` 双重存储
-- `fact_kind` 在旧设计中过载过多语义
-- `preference / core_policy / top_of_mind` 不应继续伪装成 `L3 fact`
+- The content structures of `fact` and `case` are naturally different
+- The structured fields of `case` should not be stored redundantly alongside `payload_blob`
+- `fact_kind` was overloaded with too many semantics in the old design
+- `preference / core_policy / top_of_mind` should no longer masquerade as `L3 facts`
 
-这里还要强调一条：
+One more point to emphasize here:
 
-- `task` 不是第三张 truth table
-- `task` 只是 `fact` 或 `case` 的 scope
-- `tasking` 拥有 task 对象本身
-- `memory` 只通过 `task_id` 轻量引用 task scope
+- `task` is not a third truth table
+- `task` is only a scope of `fact` or `case`
+- `tasking` owns the task object itself
+- `memory` only lightly references a task scope via `task_id`
 
 ### `memory_facts`
 
-`memory_facts` 保存 durable reusable facts。
+`memory_facts` stores durable reusable facts.
 
-建议最小字段：
+Recommended minimal fields:
 
 - `fact_id`
 - `task_id`
@@ -398,17 +398,17 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 - `created_at`
 - `updated_at`
 
-说明：
+Notes:
 
-- `task_id` 为空表示 system scope
-- `payload_blob` 只允许承载扩展属性，不应重复主列内容
-- `canonical_key` 用于有作用域的显式 identity；正文冲突要求显式 update
+- Empty `task_id` means system scope
+- `payload_blob` may only carry extension attributes and must not duplicate main column content
+- `canonical_key` is used for scoped explicit identity; body conflicts require an explicit update
 
 ### `memory_cases`
 
-`memory_cases` 保存 durable reusable cases。
+`memory_cases` stores durable reusable cases.
 
-建议最小字段：
+Recommended minimal fields:
 
 - `case_id`
 - `task_id`
@@ -427,17 +427,17 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 - `created_at`
 - `updated_at`
 
-说明：
+Notes:
 
-- `case` 的核心真相字段是 `situation/task/action/result`
-- `payload_blob` 只允许保存非核心扩展信息
-- 不允许在 `payload_blob` 里重复存一份 `situation/task/action/result`
+- The core truth fields of a `case` are `situation/task/action/result`
+- `payload_blob` may only hold non-core extension information
+- Duplicating a copy of `situation/task/action/result` inside `payload_blob` is not allowed
 
 ## L3 Index Model
 
-`L3` 的 truth tables 分开，但 retrieval/index layer 仍应统一。
+The truth tables of `L3` are separate, but the retrieval/index layer should still be unified.
 
-推荐至少保留这几层：
+It is recommended to keep at least these layers:
 
 - `memory_document_projection`
 - `memories_fts`
@@ -446,11 +446,11 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 
 ### `memory_document_projection`
 
-`memory_document_projection` 是统一检索投影层。
+`memory_document_projection` is the unified retrieval projection layer.
 
-它不是真相源，而是把 `memory_facts` / `memory_cases` 投影成统一 document shape，供 recall 使用。
+It is not the source of truth; it projects `memory_facts` / `memory_cases` into a unified document shape for recall to use.
 
-建议最小字段：
+Recommended minimal fields:
 
 - `document_id`
 - `owner_kind`
@@ -465,42 +465,42 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 - `created_at`
 - `updated_at`
 
-其中：
+Where:
 
 - `owner_kind = fact | case`
-- `owner_id` 指回对应 truth row
+- `owner_id` points back to the corresponding truth row
 
-如果实现更偏向 view 或 materialized projection，也允许不是物理表，但统一 document projection 这个契约应保留。
+If the implementation leans toward a view or materialized projection, it does not have to be a physical table, but the unified document projection contract should be preserved.
 
 ### `memories_fts`
 
-`memories_fts` 是 lexical index。
+`memories_fts` is the lexical index.
 
-它应该面向统一 document projection，而不是直接耦合某一张 truth table。
+It should target the unified document projection rather than being directly coupled to any single truth table.
 
 ### `memory_topics`
 
-旧的 `tags` / `memory_tags` / `topic_tags_blob` 统一收敛为：
+The old `tags` / `memory_tags` / `topic_tags_blob` are converged into:
 
 - `memory_topics`
 
-建议最小字段：
+Recommended minimal fields:
 
 - `document_id`
 - `topic`
 - `normalized_topic`
 - `created_at`
 
-语义：
+Semantics:
 
-- 它不是抽象 tag system
-- 它是 `topic -> memory document` 的反向索引
+- It is not an abstract tag system
+- It is a reverse index from `topic -> memory document`
 
 ### `memory_embeddings`
 
-`memory_embeddings` 是 detachable derived index，不是真相源。
+`memory_embeddings` is a detachable derived index, not a source of truth.
 
-建议最小字段：
+Recommended minimal fields:
 
 - `embedding_id`
 - `document_id`
@@ -513,144 +513,144 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 - `created_at`
 - `updated_at`
 
-约束：
+Constraints:
 
-- embedding model 变更时，不做“自动同步”
-- 正确路径是 reindex / migration script
-- recall 必须允许在 embedding 不可用时退化到 FTS + topics
+- When the embedding model changes, no "automatic sync" is performed
+- The correct path is a reindex / migration script
+- Recall must be allowed to degrade to FTS + topics when embeddings are unavailable
 
 ## Proposed Table Shapes
 
-下面这版是当前推荐直接落到 markdown 里的 memory schema baseline。
+The following version is the currently recommended memory schema baseline to put directly into markdown.
 
-先强调两条：
+First, emphasize two points:
 
-- `L1` 和 `L2` 是 runtime structures，不是 durable tables
-- 需要正式落表的主要是 `L3` 和它的 index layer
+- `L1` and `L2` are runtime structures, not durable tables
+- What mainly needs formal tables is `L3` and its index layer
 
-以下表结构定义在本版本中视为推荐基线，而不是随意举例。
+The table structures below are regarded in this version as the recommended baseline, not arbitrary examples.
 
 ### `memory_facts`
 
 | Column | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `fact_id` | `TEXT` | yes | fact 主键 |
-| `task_id` | `TEXT` | no | 为空表示 system scope；不为空表示 task scope |
-| `title` | `TEXT` | yes | 面向检索和展示的短标题 |
-| `summary` | `TEXT` | yes | 主摘要 |
-| `search_text` | `TEXT` | yes | lexical search 的归一化检索文本 |
-| `canonical_key` | `TEXT` | no | 有作用域的显式 identity；不授权自动覆盖 |
-| `dedupe_fingerprint` | `TEXT` | no | 退火/归档时的去重指纹 |
-| `payload_blob` | `JSON TEXT` | no | 扩展属性；不得重复主列信息 |
+| `fact_id` | `TEXT` | yes | Primary key of the fact |
+| `task_id` | `TEXT` | no | Empty means system scope; non-empty means task scope |
+| `title` | `TEXT` | yes | Short title for retrieval and display |
+| `summary` | `TEXT` | yes | Main summary |
+| `search_text` | `TEXT` | yes | Normalized retrieval text for lexical search |
+| `canonical_key` | `TEXT` | no | Scoped explicit identity; does not authorize automatic overwrite |
+| `dedupe_fingerprint` | `TEXT` | no | Deduplication fingerprint used during annealing/archiving |
+| `payload_blob` | `JSON TEXT` | no | Extension attributes; must not duplicate main column information |
 | `lifecycle` | `TEXT` | yes | `active | archived` |
-| `use_count` | `INTEGER` | yes | 被 recall / 使用的次数 |
-| `last_used_at` | `TEXT` | no | 最近一次被使用时间 |
-| `created_at` | `TEXT` | yes | 创建时间 |
-| `updated_at` | `TEXT` | yes | 更新时间 |
+| `use_count` | `INTEGER` | yes | Number of times it has been recalled / used |
+| `last_used_at` | `TEXT` | no | Time of the most recent use |
+| `created_at` | `TEXT` | yes | Creation time |
+| `updated_at` | `TEXT` | yes | Update time |
 
-推荐约束：
+Recommended constraints:
 
 - `PRIMARY KEY (fact_id)`
-- `FOREIGN KEY (task_id) REFERENCES tasks(task_id)`，如果 tasking schema 保持外键
+- `FOREIGN KEY (task_id) REFERENCES tasks(task_id)`, if the tasking schema keeps foreign keys
 - `CHECK (lifecycle IN ('active', 'archived'))`
 
-推荐索引：
+Recommended indexes:
 
 - `(task_id, updated_at DESC)`
-- `(canonical_key)`，带 `WHERE canonical_key IS NOT NULL`
-- `(dedupe_fingerprint)`，带 `WHERE dedupe_fingerprint IS NOT NULL`
+- `(canonical_key)`, with `WHERE canonical_key IS NOT NULL`
+- `(dedupe_fingerprint)`, with `WHERE dedupe_fingerprint IS NOT NULL`
 
 ### `memory_cases`
 
 | Column | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `case_id` | `TEXT` | yes | case 主键 |
-| `task_id` | `TEXT` | no | 为空表示 system scope；不为空表示 task scope |
-| `title` | `TEXT` | yes | case 标题 |
-| `summary` | `TEXT` | yes | case 摘要 |
-| `situation_text` | `TEXT` | yes | 情境 |
-| `task_text` | `TEXT` | yes | 任务 |
-| `action_text` | `TEXT` | yes | 动作 |
-| `result_text` | `TEXT` | yes | 结果 |
-| `search_text` | `TEXT` | yes | 聚合后的检索文本 |
-| `dedupe_fingerprint` | `TEXT` | no | case 去重指纹 |
-| `payload_blob` | `JSON TEXT` | no | 非核心扩展属性；不得重复 STAR 主字段 |
+| `case_id` | `TEXT` | yes | case primary key |
+| `task_id` | `TEXT` | no | Empty means system scope; non-empty means task scope |
+| `title` | `TEXT` | yes | case title |
+| `summary` | `TEXT` | yes | case summary |
+| `situation_text` | `TEXT` | yes | Situation |
+| `task_text` | `TEXT` | yes | Task |
+| `action_text` | `TEXT` | yes | Action |
+| `result_text` | `TEXT` | yes | Result |
+| `search_text` | `TEXT` | yes | Aggregated retrieval text |
+| `dedupe_fingerprint` | `TEXT` | no | case dedupe fingerprint |
+| `payload_blob` | `JSON TEXT` | no | Non-core extension attributes; must not duplicate the main STAR fields |
 | `lifecycle` | `TEXT` | yes | `active | archived` |
-| `use_count` | `INTEGER` | yes | 被 recall / 使用的次数 |
-| `last_used_at` | `TEXT` | no | 最近一次被使用时间 |
-| `created_at` | `TEXT` | yes | 创建时间 |
-| `updated_at` | `TEXT` | yes | 更新时间 |
+| `use_count` | `INTEGER` | yes | Number of times recalled / used |
+| `last_used_at` | `TEXT` | no | Time of most recent use |
+| `created_at` | `TEXT` | yes | Creation time |
+| `updated_at` | `TEXT` | yes | Update time |
 
-推荐约束：
+Recommended constraints:
 
 - `PRIMARY KEY (case_id)`
-- `FOREIGN KEY (task_id) REFERENCES tasks(task_id)`，如果 tasking schema 保持外键
+- `FOREIGN KEY (task_id) REFERENCES tasks(task_id)`, if the tasking schema keeps foreign keys
 - `CHECK (lifecycle IN ('active', 'archived'))`
 
-推荐索引：
+Recommended indexes:
 
 - `(task_id, updated_at DESC)`
-- `(dedupe_fingerprint)`，带 `WHERE dedupe_fingerprint IS NOT NULL`
+- `(dedupe_fingerprint)`, with `WHERE dedupe_fingerprint IS NOT NULL`
 
 ### `memory_document_projection`
 
-`memory_document_projection` 更推荐作为 `VIEW` 或 materialized projection，而不是新的 truth table。
+`memory_document_projection` is better suited as a `VIEW` or materialized projection rather than a new truth table.
 
 | Column | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `document_id` | `TEXT` | yes | 统一 document 主键 |
+| `document_id` | `TEXT` | yes | Unified document primary key |
 | `owner_kind` | `TEXT` | yes | `fact | case` |
-| `owner_id` | `TEXT` | yes | 指向 `fact_id` 或 `case_id` |
-| `task_id` | `TEXT` | no | scope 维度 |
-| `title` | `TEXT` | yes | document 标题 |
-| `summary` | `TEXT` | yes | document 摘要 |
-| `search_text` | `TEXT` | yes | document 检索文本 |
-| `lifecycle` | `TEXT` | yes | 当前生命周期 |
-| `use_count` | `INTEGER` | yes | 用于 ranking |
-| `last_used_at` | `TEXT` | no | 最近使用时间 |
-| `created_at` | `TEXT` | yes | 创建时间 |
-| `updated_at` | `TEXT` | yes | 更新时间 |
+| `owner_id` | `TEXT` | yes | Points to `fact_id` or `case_id` |
+| `task_id` | `TEXT` | no | Scope dimension |
+| `title` | `TEXT` | yes | document title |
+| `summary` | `TEXT` | yes | document summary |
+| `search_text` | `TEXT` | yes | document retrieval text |
+| `lifecycle` | `TEXT` | yes | Current lifecycle |
+| `use_count` | `INTEGER` | yes | Used for ranking |
+| `last_used_at` | `TEXT` | no | Time of most recent use |
+| `created_at` | `TEXT` | yes | Creation time |
+| `updated_at` | `TEXT` | yes | Update time |
 
-说明：
+Notes:
 
-- fact 和 case 都先投影成统一 document，再接 FTS / topics / embeddings
-- recall 排序主要面对 document，而不是直接面对 truth row
+- Both fact and case are first projected into a unified document, then wired to FTS / topics / embeddings
+- recall ranking operates primarily on documents, not directly on truth rows
 
 ### `memories_fts`
 
-`memories_fts` 是挂在 `memory_document_projection` 上的 lexical index。
+`memories_fts` is a lexical index attached to `memory_document_projection`.
 
-建议索引字段：
+Suggested indexed fields:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `title` | FTS | 高权重标题 |
-| `summary` | FTS | 中高权重摘要 |
-| `search_text` | FTS | 主检索文本 |
+| `title` | FTS | Title with high weight |
+| `summary` | FTS | Summary with medium-high weight |
+| `search_text` | FTS | Main retrieval text |
 
-如果 case 检索效果需要更强，也可以在 projection 层提前把：
+If case retrieval effectiveness needs to be stronger, the projection layer can also pre-combine:
 
 - `situation_text`
 - `task_text`
 - `action_text`
 - `result_text`
 
-拼入 `search_text`，而不是再让 FTS 表额外持有一套 case 专属列。
+into `search_text`, instead of having the FTS table additionally hold a set of case-specific columns.
 
 ### `memory_topics`
 
 | Column | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `document_id` | `TEXT` | yes | 指向统一 document |
-| `topic` | `TEXT` | yes | 原始话题文本 |
-| `normalized_topic` | `TEXT` | yes | 归一化话题文本 |
-| `created_at` | `TEXT` | yes | 创建时间 |
+| `document_id` | `TEXT` | yes | Points to a unified document |
+| `topic` | `TEXT` | yes | Original topic text |
+| `normalized_topic` | `TEXT` | yes | Normalized topic text |
+| `created_at` | `TEXT` | yes | Creation time |
 
-推荐约束：
+Recommended constraints:
 
 - `PRIMARY KEY (document_id, normalized_topic)`
 
-推荐索引：
+Recommended indexes:
 
 - `(normalized_topic, document_id)`
 
@@ -658,101 +658,101 @@ Dreaming 只合并确认重复的同一事实或同一事件，经过独立 LLM 
 
 | Column | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `embedding_id` | `TEXT` | yes | embedding 记录主键 |
-| `document_id` | `TEXT` | yes | 指向统一 document |
-| `embedding_kind` | `TEXT` | yes | 如 `primary | context | resolution` |
-| `model_name` | `TEXT` | yes | embedding 模型名 |
-| `model_revision` | `TEXT` | no | 模型版本或 revision |
-| `source_text_hash` | `TEXT` | yes | 当前 embedding 对应的源文本 hash |
-| `embedding_blob` | `JSON/BLOB` | yes | 向量本体 |
-| `embedding_norm` | `REAL` | no | 向量 norm |
-| `created_at` | `TEXT` | yes | 创建时间 |
-| `updated_at` | `TEXT` | yes | 更新时间 |
+| `embedding_id` | `TEXT` | yes | Primary key of the embedding record |
+| `document_id` | `TEXT` | yes | Points to a unified document |
+| `embedding_kind` | `TEXT` | yes | Such as `primary | context | resolution` |
+| `model_name` | `TEXT` | yes | Name of the embedding model |
+| `model_revision` | `TEXT` | no | Model version or revision |
+| `source_text_hash` | `TEXT` | yes | Hash of the source text corresponding to the current embedding |
+| `embedding_blob` | `JSON/BLOB` | yes | The vector itself |
+| `embedding_norm` | `REAL` | no | Vector norm |
+| `created_at` | `TEXT` | yes | Creation time |
+| `updated_at` | `TEXT` | yes | Update time |
 
-推荐约束：
+Recommended constraints:
 
 - `PRIMARY KEY (embedding_id)`
 - `UNIQUE (document_id, embedding_kind, model_name, model_revision)`
 
-推荐索引：
+Recommended indexes:
 
 - `(document_id)`
 - `(embedding_kind, model_name, model_revision)`
 
 ## Tables We Intentionally Do Not Keep
 
-下面这些不再作为新基线表保留：
+The following are no longer kept as new baseline tables:
 
 - `tags`
 - `memory_tags`
 - `pal_memories`
 
-下面这些不再作为新基线字段保留：
+The following are no longer kept as new baseline fields:
 
 - `user_pal_id`
 - `fact_kind`
 - `prompt_pin`
 - `topic_tags_blob`
 
-下面这些默认不进入最小基线，只在确认需要时再加回：
+The following are not included in the minimal baseline by default and are only added back once confirmed to be needed:
 
 - `confirmed_count`
 - `superseded_by`
 
 ## L3 Single-Pal Assumption
 
-由于新架构中 `Pal` 是单主体、单用户、单实例治理系统，`L3` truth tables 不再需要 `user_pal_id` 这类 multitenancy partition key。
+Since in the new architecture `Pal` is a single-subject, single-user, single-instance governance system, the `L3` truth tables no longer need multitenancy partition keys such as `user_pal_id`.
 
-也就是说：
+That is:
 
-- `task_id` 仍然保留，用于表达 task scope
-- `user_pal_id` 从 `L3` truth schema 中移除
+- `task_id` is still kept, used to express task scope
+- `user_pal_id` is removed from the `L3` truth schema
 
 ## Memory And Tasking Boundary
 
-`memory` 和 `tasking` 必然有关，但不应结构耦合。
+`memory` and `tasking` are necessarily related, but should not be structurally coupled.
 
-边界应固定为：
+The boundary should be fixed as:
 
-- `tasking` 拥有 task / work order / checkpoint / ledger
-- `memory` 拥有 `fact` / `case`
-- `memory` 只通过 `task_id` 表达 scope
+- `tasking` owns task / work order / checkpoint / ledger
+- `memory` owns `fact` / `case`
+- `memory` expresses scope only through `task_id`
 
-因此：
+Therefore:
 
-- `task` 不是 memory kind
-- `memory` 不拥有 task 对象
-- `tasking` 也不拥有 durable memory truth
+- `task` is not a memory kind
+- `memory` does not own task objects
+- `tasking` does not own durable memory truth either
 
 ## L3 Redundancy Cleanup
 
-相较于当前实现，新的 `L3` 基线应去掉或迁出这些冗余语义：
+Compared with the current implementation, the new `L3` baseline should remove or migrate out these redundant semantics:
 
-- 通用 `tags`
+- Generic `tags`
 - `memory_tags`
 - `topic_tags_blob`
 - `prompt_pin`
 - `fact_kind`
 - `user_pal_id`
 
-对于下面这些字段，默认不进入最小基线：
+For the following fields, they are not included in the minimal baseline by default:
 
 - `confirmed_count`
 - `superseded_by`
 
-只有在后续确认确实需要“正式确认机制”或“immutable revision chain”时，再作为扩展能力加回。
+Only when it is later confirmed that a "formal confirmation mechanism" or an "immutable revision chain" is truly needed are they added back as extension capabilities.
 
 ## Memory Actions
 
 ## compact
 
-`compact` 表示：
+`compact` means:
 
-- 冻结当前 L1
-- 从该 L1 生成结构化 continuity
-- 原子替换 L1，并清理依赖该旧 prompt generation 的投影
+- Freeze the current L1
+- Generate structured continuity from that L1
+- Atomically replace L1 and clean up projections that depend on the old prompt generation
 
-Memory 的 compact 提交是 RAM 内 L1 替换。本体在提交前加密暂存旧 L 的归档内容，提交后更新恢复基线，再发布每日历史文件；Bunshin 保留现有 checkpoint 合约。
+Memory's compact commit is an in-RAM L1 replacement. Memory itself encrypts and stages the archive content of the old L before the commit, updates the recovery baseline after the commit, and then publishes the daily history file; Bunshin keeps its existing checkpoint contract.
 
 ### Resident history and recovery
 
@@ -851,142 +851,142 @@ state retains its existing truth owners. Memory contains maintained, distilled
 information and remains available through recall. There is no automatic vector
 indexing or historical record deletion.
 
-当前实现由 Core 的共享 compaction engine 负责预算防护、完整冻结 L 源材料、模型尝试、结果校验和提交编排；源材料超窗时失败，不静默裁剪。Memory 只接收已经由 host policy 校验并渲染好的 `summary_entry`，然后原子替换 L1、清理依赖的 L2 projection；提交失败时必须整体回滚。
+The current implementation relies on Core's shared compaction engine for budget protection, fully freezing L source material, model attempts, result validation, and commit orchestration; it fails when the source material exceeds the window and does not silently trim. Memory only receives a `summary_entry` already validated and rendered by host policy, then atomically replaces L1 and cleans up dependent L2 projections; on commit failure it must roll back as a whole.
 
-共享 engine 通过 `pal.core.compaction` 标准日志记录每次失败及整轮结果；systemd 部署可在 journal 中按 `compact attempt_failed` / `compact finished` 检索。记录运行 ID、尝试次数、耗时、endpoint、错误分类、校验原因和输出预算，不写入对话正文、模型输出或原始异常消息。未知自定义校验异常仅记录通用分类。
+The shared engine logs every failure and full-round result via standard `pal.core.compaction` logging; under systemd deployment these can be searched in the journal by `compact attempt_failed` / `compact finished`. It records the run ID, attempt count, duration, endpoint, error category, validation reason, and output budget, and does not write conversation text, model output, or raw exception messages. Unknown custom validation exceptions are logged only as a generic category.
 
-本体生成的压缩块明确说明其用途是延续先前对话；正常回复应静默使用，不反复提及摘要或压缩过程。用户询问压缩或确需解释上下文缺失时可以说明。已有已渲染的摘要不自动重写，这条说明随后续成功 compact 生效。
+Compression blocks generated by Memory itself explicitly state that their purpose is to continue a previous conversation; normal replies should use them silently and not repeatedly mention the summary or the compression process. Explanation is allowed when the user asks about compression or when missing context truly needs explaining. Existing rendered summaries are not automatically rewritten; this note takes effect with subsequent successful compacts.
 
-Pal 与 Bunshin 共用 `pal.compaction.continuity.v1`，由 Core 的同一策略实现提示词、源材料包装、校验和渲染。`kind` 区分宿主；`summary.summary` 保存当前话题或目标、用户意图和总体状态，`continuity` 包含四个字符串数组：
+Pal and Bunshin share `pal.compaction.continuity.v1`, with the same Core policy implementation handling prompting, source material wrapping, validation, and rendering. `kind` distinguishes the host; `summary.summary` holds the current topic or goal, user intent, and overall status, and `continuity` contains four string arrays:
 
-- `constraints`：仍有效的约束及必要用户原话。
-- `state`：进展、事实、验证和错误证据、不确定性、阻塞及待回答的问题。
-- `decisions`：当前决定、简短依据、必要纠正及排除方案。
-- `references`：必要路径、提交号、命令、链接和产物引用；引用不延长资源寿命，也不恢复文件编辑权限。
+- `constraints`: constraints still in effect plus necessary verbatim user quotes.
+- `state`: progress, facts, verification and error evidence, uncertainty, blockers, and open questions.
+- `decisions`: current decisions, brief rationale, necessary corrections, and rejected alternatives.
+- `references`: necessary paths, commit hashes, commands, links, and artifact references; a reference neither extends resource lifetime nor restores file edit permissions.
 
-不生成 `search_text`（内部通用记录需要时直接使用摘要正文），也不另存 `open_items` 或重复的近期／较早对话。执行从当前 checklist 继续，摘要保留执行所需现场。普通聊天不要求创建清单。摘要只是历史参考，不是新请求、权限或执行证据。
+Do not generate `search_text` (internal shared records use the summary body directly when needed), nor save a separate `open_items` or duplicated recent/earlier conversations. Execution continues from the current checklist; the summary preserves the context needed for execution. Ordinary chat does not require creating a checklist. The summary is a historical reference only — not a new request, permission, or evidence of execution.
 
-Pal 可附加最多五条 `memory_candidates`，自动与手动 compact 的候选仍需审批后进入 L3。Bunshin 不生成候选；角色输入、合同、workspace 和工作清单仍由运行时提供，摘要不能重写这些来源。旧 Pal v2 / Bunshin v3 摘要恢复时保留已存正文，下一次成功 compact 才生成新结构。
+Pal may attach up to five `memory_candidates`; candidates from both automatic and manual compact still require approval before entering L3. Bunshin does not generate candidates; role input, contract, workspace, and working checklist are still provided by the runtime, and the summary must not rewrite these sources. When old Pal v2 / Bunshin v3 summaries are restored, the stored body is preserved; a new structure is only generated at the next successful compact.
 
-普通手动／自动 compact 优先复用合法的原请求前缀：保持工具定义、system/developer、冻结 L 的原生历史和已解析思考配置，在末尾追加 user 压缩要求。R 不进入源材料；不为了保留缓存重放过期指导。JSON 格式要求只写在末尾，不新增请求级输出 schema。OpenAI 两种 shape 保留工具定义并设置 tool_choice=none；所有 compact 返回的工具调用均不执行。普通 compact 无法复用时走冷路径；显式趁热入口仍受 epoch/期限保护，失效停止而不降级。
+Ordinary manual/automatic compact prefers reusing a legitimate original request prefix: keep tool definitions, system/developer, the frozen L's native history, and the resolved thinking configuration, appending the user compaction request at the end. R does not enter the source material; expired guidance is not replayed to preserve cache. JSON format requirements are written only at the end, without adding a request-level output schema. For OpenAI's two shapes, keep the tool definitions and set tool_choice=none; tool calls returned by any compact are never executed. When ordinary compact cannot be reused, fall back to the cold path; the explicit warm entry remains protected by epoch/expiry, stopping on invalidation rather than degrading.
 
-[缓存期限提醒](pal_cache_reminder.md) 从成功响应返回时开始，按模型/provider 策略预估期限；未知 provider 默认 30 分钟，提前 5 分钟提示。该预估提醒按钮走普通手动 compact，不作为热缓存证据。
+[Cache expiry reminder](pal_cache_reminder.md) starts when a successful response returns, estimating expiry per model/provider policy; unknown providers default to 30 minutes with a prompt 5 minutes in advance. This estimated-reminder button runs an ordinary manual compact and does not count as evidence of a hot cache.
 
-前缀材料按逻辑会话隔离，Pal 与 Bunshin 使用同一读取路径；eager tail 策略从实际规划的闭合边界保存前缀，不依赖已废弃的经济学 anchor 字段或服务端 ACK。保留材料不保证服务端命中。
+Prefix materials are isolated by logical session; Pal and Bunshin use the same read path. The eager tail policy saves prefixes from actually planned closed boundaries, without relying on the deprecated economics anchor field or server-side ACK. Retaining materials does not guarantee a server-side cache hit.
 
-Pal checklist 作为独立运行时模块随既有加密退出 checkpoint 保存，compact 不修改清单，reset 清空。旧 checkpoint 只允许“增加空 checklist 模块”这一受模块集合与旧 spec hash 校验的迁移；损坏的新清单或其他模块差异不能被忽略。Bunshin 继续使用已有持久化工作清单。
+The Pal checklist is saved as an independent runtime module with the existing encrypted exit checkpoint; compact does not modify the checklist, and reset clears it. Old checkpoints only allow the migration of "adding an empty checklist module", validated against the module set and old spec hash; a corrupted new checklist or other module differences cannot be ignored. Bunshin continues to use its existing persisted working checklist.
 
-手动 compact 不再传入固定的 8,192 tokens 输入预算，而由 endpoint preflight 解析真实预算。未知预算先以 20,000 tokens 的可见摘要上限准备请求；取得预算后重新构建并检查，小窗口模型仍受其实际预算约束。
+Manual compact no longer passes a fixed 8,192 tokens input budget; instead, endpoint preflight resolves the real budget. With an unknown budget, requests are first prepared with a visible summary cap of 20,000 tokens; once the budget is obtained, the request is rebuilt and checked, and small-window models remain bound by their actual budget.
 
-复用请求保留原思考档位、手动思考预算和温度；不重新应用 model hook。若原手动预算无法容纳于本次总输出额度，判为不可复用，而非悄悄调低预算。冷路径继续使用 endpoint 的 `lowest_supported`，不修改普通对话设置。
+Reused requests keep the original thinking tier, manual thinking budget, and temperature; the model hook is not re-applied. If the original manual budget cannot fit within this request's total output allowance, it is judged non-reusable rather than silently lowering the budget. The cold path continues to use the endpoint's `lowest_supported`, without modifying ordinary conversation settings.
 
-可见摘要上限 `V` 仍为目标输入预算的一半、最多 20,000 tokens（未知输入预算时为 20,000）。每次请求总输出额度为 `V + max(2048, ceil(V / 4))`，再受引擎显式上限及实际 endpoint 上限约束；preflight 使用相同额度。输入预算反馈改变 `V` 后重新计算，不再直接申请 provider 的全部输出额度。该余量供推理及序列化使用，不保证 provider 的思考用量；截断仍走既有有限重试，失败不提交摘要。
+The visible summary cap `V` remains half of the target input budget, at most 20,000 tokens (20,000 when the input budget is unknown). Each request's total output allowance is `V + max(2048, ceil(V / 4))`, further constrained by the engine's explicit cap and the actual endpoint cap; preflight uses the same allowance. When input budget feedback changes `V`, recalculate instead of directly requesting the provider's full output allowance. This allowance is for reasoning and serialization use and does not guarantee the provider's thinking usage; truncation still goes through the existing limited retries, and failures do not commit the summary.
 
-例如，`V=4,096` 时申请总输出 `6,144` tokens；`V=20,000` 时申请 `25,000`，实际仍服从 endpoint 的输出上限。这个额度包含可见输出和可能计入总输出的思考，不是预先承诺的消费量，也不是手动 `thinking_budget_tokens`。
+For example, with `V=4,096` the total output requested is `6,144` tokens; with `V=20,000` it is `25,000`, still subject in practice to the endpoint's output cap. This allowance includes visible output and thinking that may count toward total output; it is neither a pre-committed consumption amount nor a manual `thinking_budget_tokens`.
 
-冷路径的最低档位取声明集合的语义最小值，不取列表第一项：`[high, low]` 选择 `low`，`[high, off, low]` 选择 `off`。replay 保留原消息、闭合工具协议及原思考配置；是否省钱仍需比较实际总用量、缓存和耗时。各格式的直传字段、`off` 行为与预算校验见 [LLM 合约](pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)。
+The cold path's lowest tier takes the semantic minimum of the declared set, not the first item of the list: `[high, low]` selects `low`, and `[high, off, low]` selects `off`. Replay preserves original messages, closed tool protocols, and the original thinking configuration; whether money is actually saved still requires comparing actual total usage, cache, and elapsed time. For direct-pass fields per format, `off` behavior, and budget validation, see [LLM contract](pal_llm_contract.md#thinking-selection-validation-and-wire-encoding).
 
-自动 compact 只由真实 context budget 触发；Pal 的 committed user-turn clock 和 Bunshin 的 successful consumable LLM-round clock 仅用于 hot tail、checkpoint 和诊断。
+Automatic compact is triggered only by the real context budget; Pal's committed user-turn clock and Bunshin's successful consumable LLM-round clock are used only for hot tail, checkpoints, and diagnostics.
 
-### Compact JSON 与纠错
+### Compact JSON and error correction
 
-两边提示词共用完整 JSON 模板，Pal 附加 fact/case 候选说明。每轮最多提出 **5 条最有用**的候选，按长期价值排序，允许零条，不按最近发生顺序凑数。连续性摘要的必填结构仍需完整；候选是可选产物，单条不合法会被跳过并记录无正文诊断，不拖垮整个 compact。
+Both sides' prompts share the full JSON template, with Pal additionally attaching fact/case candidate instructions. Each round proposes at most the **5 most useful** candidates, ranked by long-term value; zero candidates are allowed, and recent-occurrence order must not be used to pad the count. The required structure of the continuity summary must still be complete; candidates are optional outputs, and an individually invalid candidate is skipped with a no-body diagnostic recorded, without dragging down the whole compact.
 
-解析器容忍外围说明、Markdown fence 和字符串外的尾逗号；正文缺字段、类型错误或出现未声明键会被拒绝并进入有限重试；拒绝重复 JSON 键、多个对象、截断对象和非有限数值。正文字符串的换行、缩进和标点不做紧凑化。渲染完整展示所有已接受条目，不按 12／16 项截断；超出 token 预算时重新生成更短的完整摘要。case 缺少完整 STAR 时不编造补全。
+The parser tolerates surrounding commentary, Markdown fences, and trailing commas outside strings; a body with missing fields, type errors, or undeclared keys is rejected and enters limited retries; duplicate JSON keys, multiple objects, truncated objects, and non-finite numbers are rejected. Newlines, indentation, and punctuation in body strings are not compacted. Rendering displays all accepted entries in full, without truncating to 12/16 items; when the token budget is exceeded, a shorter complete summary is regenerated. Cases lacking complete STAR are not fabricated or filled in.
 
-结构错误和输出截断的下一次请求携带最近一次失败的**可见输出**、具体错误及原始源材料，不携带推理内容；不累积所有失败版本。源材料优先于失败输出：若两者超过上下文预算，先省去失败输出。输出截断要求更短的完整 JSON，不接续残缺输出，不仅因 schema 错误删掉源历史。保留三次有限尝试和现有 endpoint 预算；重试沿用本次所选的前缀复用或冷路径思考规则。
+The next request after a structural error or output truncation carries the last failed **visible output**, the specific error, and the original source material, but not reasoning content; it does not accumulate all failed versions. Source material takes priority over failed output: if both exceed the context budget, the failed output is omitted first. Output truncation requires a shorter complete JSON, not continuing the truncated output, and does not delete source history merely because of schema errors. Keep the three limited attempts and the existing endpoint budget; retries follow this request's chosen prefix-reuse or cold-path thinking rules.
 
-### 本体统一记忆提案审核
+### Ontology unified memory proposal review
 
-MemoryReviewService 接收 compact 与 Bunshin 的 MemoryProposalBatch，将草稿、来源、路由、逐项决定及 revision 持久化到记忆管理库的 memory_reviews。自动 compact 在恢复对话前保存草稿，展示可等到该回合结束；/memory_review [batch_id] 可恢复未完成批次。
+MemoryReviewService receives MemoryProposalBatch from compact and Bunshin, persisting drafts, sources, routing, per-item decisions, and revision into memory_reviews of the memory management store. Automatic compact saves the draft before resuming the conversation; display can wait until the end of that turn; /memory_review [batch_id] can resume an unfinished batch.
 
-每条候选可以接受、跳过、查看完整内容或修正。修正是选字段后提交完整替换文本，不调用 LLM 重写；正文、检索文本和 STAR 保留原始空白。修改过的条目回到待确认。所有候选决定完毕后，整批概览才出现“提交已接受项”；最后一次点击前不写 L3。旧的一键 Accept 投影只会导入逐项草稿，超过五条的旧草稿不被截掉。
+Each candidate can be accepted, skipped, viewed in full, or corrected. A correction submits complete replacement text after selecting fields, without invoking LLM rewriting; body, retrieval text, and STAR preserve original whitespace. Modified items return to pending confirmation. Only after all candidates are decided does the whole-batch overview show "commit accepted items"; L3 is not written before the final click. The old one-click Accept projection only imports per-item drafts; old drafts exceeding five items are not truncated.
 
-op_memory_commit_candidates(batch_id) 只接受已由最终用户操作授权且内容 hash 仍匹配的批次。普通候选标记不构成授权，模型调用该能力不能绕过审核。活跃 provider 改变或不支持原子批量提交时保留草稿并报错，不退回逐条写入。
+op_memory_commit_candidates(batch_id) only accepts batches that have been authorized by an end-user action and whose content hash still matches. Ordinary candidate flags do not constitute authorization, and the model invoking that capability cannot bypass review. If the active provider changed or does not support atomic batch commit, the draft is kept and an error raised, without falling back to per-item writes.
 
-SQLite L3 在同一 generation 事务内保存所有接受项、topics、FTS、embedding 待处理状态和 memory_batch_receipts；任一项冲突则整批回滚。L2 只在事务成功后投影。收据与 generation 一起复制，跨重试、进程恢复、后续显式更新及遗忘仍保持提交幂等。提交后审核状态保存失败时按收据恢复，不重建已删除条目。完成的审核草稿清空正文，仅保留来源引用、计数和结果引用；跳过全部时不调用 L3。
+SQLite L3 saves all accepted items, topics, FTS, embedding pending states, and memory_batch_receipts within the same generation transaction; any conflict rolls back the whole batch. L2 is only projected after the transaction succeeds. Receipts are replicated together with the generation, keeping commit idempotency across retries, process recovery, later explicit updates, and forgetting. If saving review status fails after commit, recover from the receipt without rebuilding deleted entries. Completed review drafts are cleared of their body, keeping only source references, counts, and result references; when everything is skipped, L3 is not called.
 
-Bunshin 的 propose_memories（canonical op_bunshin_memory_candidate_write）只替换当前 invocation 的最多五条候选，候选随其 checkpoint 保存。本体通过 Manager 的 Task 持久化交付路径展示，使用同一审核服务；Task 身份由 Manager 绑定，不能由候选正文指定。保留 generation、引用及来源依赖，提交前拒绝已遗忘来源或失效/无法验证的依赖。已接受的工作产物不等于人类接受记忆；仅有引用的 AcceptedModuleMemoryCandidateArtifact 不被当作记忆正文自动导入。
+Bunshin's propose_memories (canonical op_bunshin_memory_candidate_write) only replaces the current invocation's up-to-five candidates, saved with its checkpoint. The ontology presents them through Manager's Task persistence delivery path, using the same review service; Task identity is bound by Manager and cannot be specified by candidate body content. Generation, references, and source dependencies are preserved; forgotten sources or invalid/unverifiable dependencies are rejected before commit. Accepted work products are not the same as human-accepted memories; an AcceptedModuleMemoryCandidateArtifact with only references is not automatically imported as memory body.
 
-Telegram 用 inline keyboard 和绑定消息的 ForceReply 完成字段编辑；TTY 提供预填多行编辑器，Ctrl-S 保存、Esc 返回；desktop_avatar 用原生列表与表单。所有输入走控制路径，不进入 L1，不启动对话 LLM。审核绑定原 endpoint 与已知用户/聊天身份；Socket 重连通过恢复命令取得新 revision，过期按钮不可修改草稿。
+Telegram uses inline keyboard and a ForceReply bound to a message for field editing; TTY provides a prefilled multi-line editor with Ctrl-S to save and Esc to go back; desktop_avatar uses native lists and forms. All input goes through the control path, never into L1, and never starts a conversational LLM. Review is bound to the original endpoint and known user/chat identities; Socket reconnection obtains a new revision via a restore command, and expired buttons cannot modify the draft.
 
-本次 resident Memory/Core/control/Socket 实现需外部完整重启后激活；仅复制文件、provider reload 或 endpoint restart 不等于整套功能生效。桌宠属于独立仓库，还需安装其 channel 文件、重载 provider 并刷新浏览器。数据库表按现有初始化路径增量创建，不改变用户 endpoint 配置。
+This resident Memory/Core/control/Socket implementation requires a full external restart to activate; merely copying files, a provider reload, or an endpoint restart does not mean the whole feature set is in effect. The desktop pet is a separate repository, additionally requiring installation of its channel file, a provider reload, and a browser refresh. Database tables are created incrementally via the existing initialization path, without changing user endpoint configuration.
 
 ## retire
 
-`retire` 表示：
+`retire` means:
 
-- 从 `L2` 退火到 `L3`
-- 将已经足够稳定、值得长期保留的内容 durable 化
+- Annealing from `L2` to `L3`
+- Making content that is stable enough and worth long-term retention durable
 
-`retire` 是 `L2 -> L3` 的路径。
+`retire` is the `L2 -> L3` path.
 
 ## recall
 
-`recall` 表示：
+`recall` means:
 
-- 从 `L3` 检索候选
-- 经过搜索引擎策略排序
-- 将结果刷新到 `L2`
+- Retrieving candidates from `L3`
+- Ranking via the search engine strategy
+- Refreshing the results into `L2`
 
-`recall` 是 `L3 -> L2` 的路径。
+`recall` is the `L3 -> L2` path.
 
-`recall` 带 `level`。
+`recall` takes a `level`.
 
-允许值固定为：
+Allowed values are fixed as:
 
 - `seed`
 - `warm`
 - `deep`
 
-### Recall 触发策略
+### Recall trigger strategy
 
-不是所有问题都应该触发 recall。以下规则约束模型何时应主动 recall，何时直接回答。
+Not every question should trigger recall. The following rules constrain when the model should proactively recall and when it should answer directly.
 
-应该触发 recall：
+Should trigger recall:
 
-- 关于用户本人的事实、偏好、历史
-- 关于 Pal 自身的来源、设定、过去事件
-- 用户显式引用过去（之前/上次/记得/回忆/以前/那次）
-- 影响后续行为的承诺或约定
+- Facts, preferences, and history about the user themselves
+- Sources, settings, and past events about Pal itself
+- The user explicitly referring to the past (before/last time/remember/recollect/previously/that time)
+- Commitments or agreements that affect subsequent behavior
 
-不应触发 recall：
+Should not trigger recall:
 
-- 不依赖用户或 Pal 特定存储事实的通用知识问题
-- 不涉及特定过去事件或存储事实的闲聊
+- General knowledge questions that do not rely on user- or Pal-specific stored facts
+- Small talk that does not involve specific past events or stored facts
 
-模糊时偏向 recall——当答案可能依赖存储的个人或系统事实时，优先 recall。
+Bias toward recall when uncertain—when an answer may depend on stored personal or system facts, prefer recall.
 
-### Recall Promotion 阈值
+### Recall Promotion Threshold
 
-recall 返回的所有 hit 都会投影到 L2，但只有 final score >= `RECALL_PROMOTION_THRESHOLD`（当前 0.3）的条目才进入 HOT 状态。低于阈值的条目存入 L2 但不进 HOT prompt projection，避免低相关性噪音污染 prompt。
+All hits returned by recall are projected to L2, but only entries with a final score >= `RECALL_PROMOTION_THRESHOLD` (currently 0.3) enter the HOT state. Entries below the threshold are stored in L2 but excluded from the HOT prompt projection, preventing low-relevance noise from polluting the prompt.
 
 ## commit
 
-`commit` 表示：
+`commit` means:
 
-- 用户显式要求 `Pal` 记住某件事
-- 这是一条显式写入路径
-- 它不是 compact，也不是被动 retire
+- The user explicitly asks the `Pal` to remember something
+- This is an explicit write path
+- It is neither a compact nor a passive retire
 
-语义约束：
+Semantic constraints:
 
-- `commit` 必然影响当前 runtime 的 memory view
-- `commit` 的 durable 目标是 `L3`
-- `commit` 不带 `level`
-- `commit` 成功后立即进入 L2 HOT 状态
-- `commit` 允许语义重复，向量与 topic 只用于 dreaming 候选发现，不授权在线覆盖
+- `commit` necessarily affects the current runtime's memory view
+- The durable target of `commit` is `L3`
+- `commit` does not take a `level`
+- After a successful `commit`, the entry immediately enters the L2 HOT state
+- `commit` allows semantic duplicates; vectors and topics are used only for dreaming candidate discovery and do not authorize online overwriting
 
 ## correct
 
-`correct` 表示：
+`correct` means:
 
-- 用户或系统对已有 memory 做修正
-- 这是对已有 memory truth 的显式更正
+- The user or system corrects an existing memory
+- This is an explicit correction of existing memory truth
 
 ## Memory Service Contract
 
-`MemoryService` 至少暴露：
+`MemoryService` exposes at minimum:
 
 - `prepare_turn_context`
 - `record_turn`
@@ -998,7 +998,7 @@ recall 返回的所有 hit 都会投影到 L2，但只有 final score >= `RECALL
 
 ## L3 Provider Contract
 
-`L3Provider` 至少提供：
+`L3Provider` provides at minimum:
 
 - read
 - search
@@ -1008,21 +1008,21 @@ recall 返回的所有 hit 都会投影到 L2，但只有 final score >= `RECALL
 - health
 - introspection surface
 
-## Page Fault 废弃
+## Page Fault Deprecation
 
-`page_fault` 机制在新架构中不再保留。
+The `page_fault` mechanism is no longer retained in the new architecture.
 
-原因是：
+The reasons are:
 
-- 它依赖“模型静默决定该回忆什么”的旧哲学
-- 缺少用户可理解的治理边界
-- 已被 `L1/L2/L3` 分级 memory contract 取代
+- It relied on the old philosophy of "the model silently deciding what to recall"
+- It lacked a user-comprehensible governance boundary
+- It has been replaced by the tiered `L1/L2/L3` memory contract
 
-新架构中：
+In the new architecture:
 
-- 浅层上下文依赖 `L1/L2`
-- 深度 recall 通过 `recall(level=...)`
-- memory 控制由 `commit / correct / recall / retire / compact` 明确定义
+- Shallow context relies on `L1/L2`
+- Deep recall goes through `recall(level=...)`
+- Memory control is clearly defined by `commit / correct / recall / retire / compact`
 
 ## Prompt Projection Rule
 
@@ -1037,27 +1037,27 @@ change does not delete L2/L3 records or alter memory admission and retirement.
 
 ## Invariants
 
-- `L1/L2` 只存在 RAM。
-- `L3` 是唯一 durable memory layer。
-- `L1` 是当前 logical process 的完整工作集，也是 compact 唯一真相源。
-- L1 中每个 tool-call batch 必须在同一 transcript 内闭合；orphan、
-  incomplete 或 late unmatched tool result 不得进入 L1。
-- `L2` 的真相结构以 entry metadata + lifecycle state 为主。
-- `L1 -> compact continuity -> L1` 叫 compact。
-- `L2 -> L3` 叫 retire。
-- `L3 -> L2` 叫 recall。
-- `commit` 是显式写入，不带 `level`。
-- HOT prompt projection 仅包含 HOT memory 条目，不是 durable bucket。
-- L2 条目有 HOT / GHOST / DORMANT 生命周期，TTL 续命封顶 3 次。
-- `task-wise memory` 是 scope，不是 bucket。
-- `page_fault` 正式废弃。
-- 在线语义去重由独立的 dreaming 流程替代。
-- recall 只在涉及用户/Pal 特定事实、过去事件引用、行为承诺时触发，不用于通用知识问题。
-- recall 结果中 final score < 0.3 的条目不进入 HOT，避免低相关性噪音污染 prompt。
+- `L1/L2` exist only in RAM.
+- `L3` is the only durable memory layer.
+- `L1` is the complete working set of the current logical process and the single source of truth for compact.
+- Each tool-call batch in L1 must close within the same transcript; orphans,
+  incomplete or late-unmatched tool results must not enter L1.
+- The truth structure of `L2` is primarily entry metadata + lifecycle state.
+- `L1 -> compact continuity -> L1` is called compact.
+- `L2 -> L3` is called retire.
+- `L3 -> L2` is called recall.
+- `commit` is an explicit write and does not take a `level`.
+- The HOT prompt projection contains only HOT memory entries; it is not a durable bucket.
+- L2 entries have a HOT / GHOST / DORMANT lifecycle, with TTL renewal capped at 3 times.
+- `task-wise memory` is a scope, not a bucket.
+- `page_fault` is formally deprecated.
+- Online semantic deduplication is replaced by a separate dreaming process.
+- recall is triggered only for user/Pal-specific facts, references to past events, or behavioral commitments; it is not used for general knowledge questions.
+- Entries in recall results with a final score < 0.3 do not enter HOT, preventing low-relevance noise from polluting the prompt.
 
 ## Non-Goals
 
-- 不在本文件定义 L3 的具体数据库 schema
-- 不在本文件定义具体 embedding 模型
-- 不在本文件定义 UI 如何展示 memory
-- 不把 `profile / preference / identity contract` 混入 `L3` 作为默认规则
+- This document does not define the specific L3 database schema
+- This document does not define the specific embedding model
+- This document does not define how the UI displays memory
+- Do not mix `profile / preference / identity contract` into `L3` as default rules

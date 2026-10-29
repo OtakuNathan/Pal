@@ -1,47 +1,47 @@
 # Pal Web Search Contract
 
-> 目标：定义 `web_search` 子系统的职责、对象模型，以及与 capability forest 的集成方式。
+> Goal: define the responsibilities and object model of the `web_search` subsystem, and how it integrates with the capability forest.
 
-## 目标
+## Goals
 
-`web_search` 负责让 `Pal` 获得网络搜索能力。
+`web_search` is responsible for giving `Pal` web search capability.
 
-它不等于通用 HTTP client，也不等于浏览器。
+It is not a general-purpose HTTP client, nor is it a browser.
 
-它负责：
+It is responsible for:
 
-- 结构化网页搜索
-- 多 provider fallback（Brave Search、DuckDuckGo）
-- provider 健康检查与状态报告
-- 搜索 provider 的生命周期管理
+- structured web search
+- multi-provider fallback (Brave Search, DuckDuckGo)
+- provider health checks and status reporting
+- lifecycle management of search providers
 
 ## Owns
 
 - web search provider registry
-- search query 执行
-- provider fallback 链
-- active provider 选择
-- provider health / auth 状态
+- search query execution
+- provider fallback chain
+- active provider selection
+- provider health / auth status
 
 ## Does Not Own
 
-- HTTP transport 实现（由各 provider 自行负责）
-- LLM 调用决策
-- 搜索结果的后续处理
-- channel 传输
+- HTTP transport implementation (each provider is responsible for its own)
+- LLM invocation decisions
+- post-processing of search results
+- channel transport
 
-## 核心对象
+## Core Objects
 
 ### WebSearchProvider
 
-搜索 provider 是一个可替换后端。
+A search provider is a replaceable backend.
 
-当前已实现：
+Currently implemented:
 
-- `BraveSearchProvider` — Brave Search API，需要 API key
-- `DuckDuckGoSearchProvider` — DuckDuckGo Instant Answer API，无需 key，作为 best-effort fallback
+- `BraveSearchProvider` — Brave Search API, requires an API key
+- `DuckDuckGoSearchProvider` — DuckDuckGo Instant Answer API, no key required, serves as a best-effort fallback
 
-每个 provider 实现 `WebSearchProviderPort` 协议：
+Each provider implements the `WebSearchProviderPort` protocol:
 
 ```python
 class WebSearchProviderPort(Protocol):
@@ -51,76 +51,76 @@ class WebSearchProviderPort(Protocol):
 
 ### WebSearchService
 
-核心服务层。负责：
+The core service layer. Responsible for:
 
-- 维护 provider 注册表
-- 按 priority 和 enabled 状态选择 provider
-- 执行搜索，失败时自动 fallback 到下一个 provider
-- 追踪最近错误（`last_errors`）
+- maintaining the provider registry
+- selecting providers by priority and enabled status
+- executing searches, automatically falling back to the next provider on failure
+- tracking recent errors (`last_errors`)
 
 ### WebSearchProviderModel
 
-数据库模型，存储 provider 配置：
+The database model, storing provider configuration:
 
-- `provider_id` — 唯一标识
-- `provider_kind` — 对应哪种实现
-- `enabled` — 是否启用
-- `priority` — 优先级（数字越小越优先）
-- `settings_blob` — provider 特定配置
-- `auth_material_blob` — 认证信息（如 API key）
+- `provider_id` — unique identifier
+- `provider_kind` — which implementation it corresponds to
+- `enabled` — whether it is enabled
+- `priority` — priority (lower number means higher priority)
+- `settings_blob` — provider-specific configuration
+- `auth_material_blob` — authentication material (e.g. API key)
 
-## 与 Capability Forest 的集成
+## Integration with the Capability Forest
 
-`web_search` 通过 `IntrospectionProvider` 注册到 capability forest。
+`web_search` registers into the capability forest via `IntrospectionProvider`.
 
-### 模型工具面
+### Model Tool Surface
 
-| 工具 | 入口 | 作用 |
+| Tool | Entry point | Purpose |
 |------|------|------|
-| `search_web(query, limit?, region?, safe_search?)` | 常驻直调 | 搜索；由 service 选择 provider 并执行 fallback |
-| `inspect_web_search()` | 间接只读 | 无参数，一次返回 Hub 与全部 provider 的诊断 |
+| `search_web(query, limit?, region?, safe_search?)` | always-on direct call | Search; the service selects the provider and performs fallback |
+| `inspect_web_search()` | indirect read-only | No parameters; returns diagnostics for the Hub and all providers at once |
 
-诊断始终采用同一个返回结构，不根据参数切换语义，也不分页或截取 provider：
+Diagnostics always use the same return structure, without switching semantics based on parameters, and without paging or truncating providers:
 
-- Hub：mounted/degraded、provider 数量、启用数量、配置首选和有效首选。
-- `providers`：每个 provider 的公开配置、认证是否齐全、最近请求健康度。
-- `diagnostics`：观测时间、来源、部分不可用的 section；单 provider 的独立
-  auth/health 读取失败不会丢失其他已知信息。
+- Hub: mounted/degraded, provider count, enabled count, configured preferred and effective preferred.
+- `providers`: each provider's public configuration, whether auth is complete, and recent request health.
+- `diagnostics`: observation time, source, and sections that are partially unavailable; an independent failure
+  to read a single provider's auth/health does not lose other known information.
 
-这是配置和最近请求的被动观测，不发起联网探测。有效首选表示当前候选顺序
-中的首位，不保证该 provider 的网络或认证可用；搜索结果报告实际执行的后端。
-认证材料值不返回。模型可见的错误报告去除 traceback，并限制每条 600 字符；
-完整最近请求报告继续保留在 resident service，不被摘要覆盖。
+This is passive observation of configuration and recent requests; it does not initiate network probes. The effective preferred means the first position in the current candidate order,
+and does not guarantee that provider's network or auth availability; search results report the backend actually executed.
+Authentication material values are not returned. Model-visible error reports have tracebacks removed and are limited to 600 characters per entry;
+the full recent request report remains in the resident service and is not overwritten by summaries.
 
-旧 `inspect_web_search_state`、`list_web_search_providers` 和
-`inspect_web_search_provider` 不再发布。原 provider 维护 handler 可供内部
-兼容调用；配置、认证、启停和首选切换通过 `pal web-search` CLI 完成，模型
-工具不提供这些写操作。
+The old `inspect_web_search_state`, `list_web_search_providers`, and
+`inspect_web_search_provider` are no longer published. The original provider maintenance handler remains available for internal
+compatibility calls; configuration, authentication, enable/disable, and preferred switching are done via the `pal web-search` CLI, and model
+tools do not provide these write operations.
 
-## 插件集成
+## Plugin Integration
 
-`web_search` 通过 `plugins_builtin/web_search/` 作为第一方插件加载。
+`web_search` is loaded as a first-party plugin via `plugins_builtin/web_search/`.
 
-`plugin.toml` 声明插件元数据，`runtime.py` 的 `build_plugin(context: PluginBuildContext)` 负责创建 service 并注册到 core context。
+`plugin.toml` declares plugin metadata, and `build_plugin(context: PluginBuildContext)` in `runtime.py` creates the service and registers it with the core context.
 
-## Supervisor 默认配置
+## Supervisor Default Configuration
 
-`supervisor` 的 `seed_defaults()` 会预置两个 provider：
+The `supervisor`'s `seed_defaults()` presets two providers:
 
-1. `brave_search_default` — Brave Search，priority 0，需要配置 API key
-2. `duckduckgo_search_default` — DuckDuckGo，priority 10，无需 key
+1. `brave_search_default` — Brave Search, priority 0, requires an API key to be configured
+2. `duckduckgo_search_default` — DuckDuckGo, priority 10, no key required
 
-活跃 provider 默认为 `brave_search_default`。
+The active provider defaults to `brave_search_default`.
 
 ## Invariants
 
-- `web_search` 提供 fallback-capable provider family。
-- 搜索失败时自动尝试下一个 provider。
-- Provider 的 `auth_material_blob` 中的敏感信息不应明文暴露给 LLM。
-- 搜索结果经过标准化后才返回给 LLM。
+- `web_search` provides a fallback-capable provider family.
+- When a search fails, the next provider is tried automatically.
+- Sensitive information in a provider's `auth_material_blob` must not be exposed in plaintext to the LLM.
+- Search results are normalized before being returned to the LLM.
 
 ## Non-Goals
 
-- 不在本文件定义搜索结果的后处理和摘要策略
-- 不在本文件定义搜索缓存策略
-- 不在本文件定义 rate limiting 实现
+- Post-processing and summarization policies for search results are not defined in this document
+- Search caching policies are not defined in this document
+- Rate limiting implementation is not defined in this document

@@ -1,28 +1,31 @@
 # Turn Runtime Structure
 
-This document describes the current turn-runtime skeleton and the code paths to
-read when debugging a Pal conversation turn.
+This document maps current turn execution. Pal and Bunshin use the same
+`AgentTurnRuntime` kernel with host-owned ports and task policy. Resident
+admission remains a separate Core scheduler responsibility.
 
 ## Reading Order
 
 Recommended entry points:
 
-1. [core/runtime.py](../src/pal/core/runtime.py)
+1. [core/agent_turn_runtime.py](../src/pal/core/agent_turn_runtime.py)
+   - shared prompt assembly, history/projection and effect execution seams
+2. [core/runtime.py](../src/pal/core/runtime.py)
    - `PalCore`
    - `TurnManager`
    - `MainLoop`
-2. [core/turns.py](../src/pal/core/turns.py)
+3. [core/turns.py](../src/pal/core/turns.py)
    - turn programs
    - effect requests/results
    - channel turn program
-3. [channel/runtime.py](../src/pal/channel/runtime.py)
+4. [channel/runtime.py](../src/pal/channel/runtime.py)
    - mailbox
    - outbox
    - reply delivery boundary
-4. [core/tool_stagnation.py](../src/pal/core/tool_stagnation.py)
+5. [core/tool_stagnation.py](../src/pal/core/tool_stagnation.py)
    - repeated-tool-loop detection
    - finalization-only transition
-5. [llm/contracts.py](../src/pal/llm/contracts.py) and
+6. [llm/contracts.py](../src/pal/llm/contracts.py) and
    [memory/contracts.py](../src/pal/memory/contracts.py)
    - turn-time preflight, compact, and commit contracts
 
@@ -32,12 +35,15 @@ A normal user message follows this path:
 
 1. A channel provider normalizes platform input.
 2. The normalized `ChannelEnvelope` enters the channel mailbox.
-3. `MainLoop` polls mailbox-backed sources.
+3. `MainLoop` drains mailbox-backed sources after async wakeups; it does not
+   poll module-private queues on an idle timer.
 4. `TurnEventHandler` passes conversational ingress to
    `PalCore.process_channel_turn(...)`.
 5. Runtime-private control ingress, such as slash commands, is handled
    deterministically and does not enter the LLM prompt or L1.
-6. `TurnManager` creates and drives a generator-style `TurnProgram`.
+6. Core checks resident admission and `TurnManager` drives the generator-style
+   `TurnProgram` under the shared agent kernel. Scheduler ownership continues
+   through effect completion, cancellation and teardown.
 7. The turn program yields effects such as:
    - LLM preflight
    - memory compaction when required
@@ -58,6 +64,13 @@ Important consequences:
 - The LLM can observe governance state, not raw matched control command text.
 
 ## Key Responsibilities
+
+### `src/pal/core/agent_turn_runtime.py`
+
+Owns the shared agent kernel used by resident and Bunshin hosts. Host policy
+provides task-source semantics and ports, rather than a second prompt compiler
+or turn executor. Compaction uses frozen LEFT, shared continuity policy and
+transactional installation; pending RIGHT remains outside the replacement.
 
 ### `src/pal/core/runtime.py`
 
@@ -135,26 +148,38 @@ Effects:
 This guarantees that a turn can close even when the model/tool loop becomes
 unproductive.
 
-## Current Non-Stub Areas
+## Admission, Side Turns And Proactive Work
 
-The runtime is no longer just a skeleton:
+All normal channel messages share one resident mailbox, conversation and
+execution lifetime. The opening message's `TurnDeliveryBinding` retains reply
+authority. Later interjections do not create per-channel agent scopes.
 
-- LLM generation and streaming use real endpoint invocation paths.
-- Tool call/results are persisted into the turn transcript in protocol order.
-- Memory compaction and L1 commit are active runtime effects.
-- Channel mailbox/outbox boundaries are implemented.
-- Recognized control slash commands bypass the LLM path. Slash-like text with no registered command match is re-emitted as an ordinary `user.message`.
+The [resident scheduler](core_turn_scheduling.md) admits chat, proactive and
+background completion work. Proactive waits while resident work is busy and
+queued user input takes priority. Admitted proactive runs use isolated model
+context; they cannot compact resident history to make room for themselves.
 
-Remaining areas may still be intentionally minimal or provider-dependent:
+`/btw` uses an immutable captured L and independent temporary history/execution
+state. It does not claim the resident writer or publish into resident L1.
+Reset, compaction, maintenance and shutdown have their own admission barriers;
+program completion alone is not idle while teardown is pending.
 
-- detailed approval UX
-- provider-specific channel delivery behavior
-- full cross-provider streaming parity
-- richer memory compaction policies
+## Accepted History And Recovery
+
+LLM codecs and response hooks keep provider drafts private until validated IR
+is accepted. Accepted L1 messages, including native replay, are the response
+truth; projection send receipts prove admission only. Rebuilding a projection
+must derive from accepted history, not a separate pre-hook response capture.
+
+Resident admission and completed-round boundaries save encrypted recovery.
+Restart restores interrupted context without replaying tools. Compact/reset
+archive removed dialogue separately; tool-output files remain governed by L1
+references and Execution's delivery/permission transaction.
 
 ## Common Confusions
 
-- `active_turns` stores continuations, not the full business state for a turn.
+- `active_turns` stores continuations; scheduler phases/barriers own admission
+  and stay busy through teardown. Neither is workflow business truth.
 - `reply.delivered` and `reply.failed` do not decide whether the turn completed.
 - Prompt assembly still goes through prompt fragment providers.
 - Channel inbox is a normalized mailbox view, not the raw adapter input queue.

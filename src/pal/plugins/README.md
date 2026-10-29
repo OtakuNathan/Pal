@@ -36,3 +36,25 @@ and queued delivery across generation replacement. See the
 [channel plugin contract](../channel/README.md). Legacy runtime-root
 `channel/providers/*/provider.toml` packages are adapted without moving their
 files or endpoint data. Manage them with the same plugin tools as other bundles.
+
+Plugin lifecycle:
+- Source builtin manifests live in `src/pal/plugins_builtin/`. Provisioning syncs
+  manifests into `<runtime_root>/plugins/_builtin/`; implementations still load
+  from the installed Pal package. Editing a copied manifest does not update code.
+- New community bundles use `<runtime_root>/plugins/community/<plugin_id>/plugin.toml`.
+  `build_plugin(context)` constructs an instance without starting resources;
+  `start(scope)` acquires resources and returns a `ModuleHandle`.
+- `rescan_plugins` discovers metadata. Attach loads an enabled detached plugin
+  and preserves an attached instance; reload replaces its generation; enable
+  also activates a disabled plugin. There is no automatic filesystem reload.
+- Publication waits for successful startup. Cleanup runs in reverse ownership
+  order; failed cleanup keeps ownership for retry. Failed reload is not a
+  promise of rollback. Inspect lifecycle results, errors and representative
+  behavior before claiming activation.
+- Resident modules and shared implementation changes need an external host
+  restart; plugin reload cannot replace their imported dependencies.
+
+Package preparation and online installation can already perform activation;
+inspect their result before adding another lifecycle request. See
+[package installation](../../../docs/pal_package_installation.md) and the
+[self-maintenance manual](../skill/builtin_skills.py).

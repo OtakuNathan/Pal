@@ -1,17 +1,17 @@
-# 情绪广播与工具面合并计划
+# Emotion Broadcast and Tool Surface Consolidation Plan
 
-日期：2026-10-15
-状态：已按确认范围实施到源码；定向验证见[实施记录](pal_tool_consolidation_implementation.md)。尚未安装或激活。
+Date: 2026-10-15
+Status: Implemented into source code per the confirmed scope; see [implementation notes](pal_tool_consolidation_implementation.md) for targeted verification. Not yet installed or activated.
 
-## 目标与范围
+## Goals and Scope
 
-将实体 face 面板和 desktop avatar 的情绪动作统一成一个广播入口。模型只表达情绪，不负责选择设备、安排动画时长或恢复显示状态。
+Unify the emotion actions of the entity face panel and the desktop avatar into a single broadcast entry point. The model only expresses an emotion; it is not responsible for selecting devices, scheduling animation duration, or restoring the display state.
 
-本轮覆盖 `st7789_face` 和 `desktop_avatar_emotion`。两者仍保留独立的设备实现、配置、生命周期和诊断能力；合并的是面向模型的动作入口。已退役的 OLED emotion 不在范围内，OLED status 保持状态显示职责。
+This round covers `st7789_face` and `desktop_avatar_emotion`. Both keep their independent device implementations, configuration, lifecycle, and diagnostics; what is consolidated is the model-facing action entry point. The retired OLED emotion is out of scope, and OLED status keeps its status display responsibility.
 
-## 已确定的公开契约
+## Established Public Contract
 
-只保留一个情绪动作工具：
+Keep only one emotion action tool:
 
 ```json
 {
@@ -22,101 +22,101 @@
 }
 ```
 
-- 输入只有 `emotion`，不提供 `duration`、设备选择或 channel 参数。
-- 默认广播给所有已挂载、启用的情绪渲染端，包括多个 desktop avatar endpoint。
-- 情绪词表取这些渲染端上报的支持值的并集，不取交集，也不以 face 的词表作为全局门禁。
-- 各渲染端自行处理本地别名和状态映射，例如 `sleeping` / `sleepy`。
-- 某个渲染端不认识该情绪时直接跳过，不改变它当前的显示，不自动替换成其他情绪。
-- 连接、传输和执行失败仍作为失败报告，不能被当作“不支持”而吞掉。
+- The only input is `emotion`; no `duration`, device selection, or channel parameters are provided.
+- By default it broadcasts to all mounted, enabled emotion renderers, including multiple desktop avatar endpoints.
+- The emotion vocabulary is the union of the supported values reported by these renderers, not the intersection, and the face vocabulary is not used as a global gate.
+- Each renderer handles its own local aliases and state mappings, e.g. `sleeping` / `sleepy`.
+- If a renderer does not recognize the emotion, it is skipped directly; its current display is not changed and it is not automatically replaced with another emotion.
+- Connection, transport, and execution failures are still reported as failures and must not be swallowed as "unsupported".
 
-目前的三个公开动作入口收为一个：
+The current three public action entry points are consolidated into one:
 
-| 现有入口 | 处理方式 |
+| Existing entry point | Handling |
 | --- | --- |
-| `show_emotion` | 保留名称，改为统一广播语义，移除公开的 duration 参数 |
-| `show_panel_emotion` | 撤出模型工具面，面板渲染保留为内部能力 |
-| `show_expression` | 撤出模型工具面，其广播职责迁移到统一入口 |
+| `show_emotion` | Keep the name, change it to unified broadcast semantics, and remove the public duration parameter |
+| `show_panel_emotion` | Withdraw from the model tool surface; panel rendering remains an internal capability |
+| `show_expression` | Withdraw from the model tool surface; its broadcast responsibility migrates to the unified entry point |
 
-预期减少两个常驻动作工具。旧名称不能继续作为可搜索的公开别名，否则仍会产生重复选择。必要的内部兼容方法可以保留，但不发布为模型工具。
+This is expected to reduce two resident action tools. The old names must not remain searchable public aliases, otherwise duplicate selection still occurs. Necessary internal compatibility methods may be kept, but are not published as model tools.
 
-## Runtime 的职责
+## Runtime Responsibilities
 
-每个设备 runtime 自行管理：
+Each device runtime manages on its own:
 
-- 动画时长、循环和结束时机。
-- 动画结束后恢复的基础状态。
-- 手动情绪与 thinking、working、sleeping、错误状态之间的优先级。
-- 设备自身支持的表现方式和情绪别名。
+- Animation duration, looping, and end timing.
+- The base state restored after an animation ends.
+- The priority between manual emotions and thinking, working, sleeping, and error states.
+- The device's own supported expressions and emotion aliases.
 
-不要求不同设备使用相同动画长度。统一情绪工具也不重新实现设备已有的状态机。日常 thinking / working 等活动状态继续由运行时事件驱动，不增加模型调用。
+Different devices are not required to use the same animation lengths. The unified emotion tool also does not re-implement the state machines devices already have. Day-to-day activity states such as thinking / working continue to be driven by runtime events, without additional model calls.
 
-## 分发与插件边界
+## Dispatch and Plugin Boundaries
 
-增加独立的轻量协调入口，由两个设备插件提供渲染能力，避免由 face 插件持有全局广播工具。停用或卸载 face 后，desktop avatar 仍应能单独使用统一入口，反之亦然。
+Add an independent lightweight coordinator entry point, with rendering capability provided by the two device plugins, avoiding the face plugin holding the global broadcast tool. After the face plugin is disabled or uninstalled, the desktop avatar should still be able to use the unified entry point on its own, and vice versa.
 
-实施时先确定协调入口的归属和注册接口，优先使用独立插件或现有稳定扩展点。约束如下：
+During implementation, first determine the ownership and registration interface of the coordinator entry point, preferring a standalone plugin or an existing stable extension point. Constraints:
 
-1. 协调入口只负责登记渲染端、汇总词表、广播和收集结果。
-2. 每个插件负责自己的硬件、sidecar 或 channel endpoint 通信；face 不再代替 desktop 插件遍历和调用桌面端点。
-3. 词表由插件上报，公开工具说明或允许值随当前注册表生成；不在多个模块手工复制同一份词表。
-4. 插件卸载、停用或 reload 时及时撤销旧注册，避免重复广播或调用旧 generation 的对象。
-5. 生成工具契约只读取声明，不启动设备或通过实时硬件探测生成词表。
-6. 一个接收端失败不阻止其他接收端尝试执行。
+1. The coordinator entry point only handles registering renderers, aggregating the vocabulary, broadcasting, and collecting results.
+2. Each plugin handles its own hardware, sidecar, or channel endpoint communication; face no longer iterates over and calls desktop endpoints on behalf of the desktop plugin.
+3. The vocabulary is reported by the plugins, and the public tool description or allowed values are generated from the current registry; the same vocabulary is not manually duplicated across multiple modules.
+4. On plugin uninstall, disable, or reload, promptly revoke old registrations to avoid duplicate broadcasts or calling objects from an old generation.
+5. Generating the tool contract only reads declarations; it does not start devices or generate the vocabulary through live hardware probing.
+6. A failure in one recipient does not prevent other recipients from attempting execution.
 
-## 返回结果
+## Return Results
 
-返回足够判断本次广播结果的信息，并保持简短：
+Return enough information to judge the outcome of this broadcast, while keeping it brief:
 
-- 哪些渲染端接受了请求。
-- 哪些因不支持该情绪而跳过。
-- 哪些发生实际失败及简短原因。
+- Which renderers accepted the request.
+- Which were skipped because they do not support the emotion.
+- Which had actual failures and a brief reason.
 
-“接受请求”不等于已经验证屏幕完成渲染，不使用未经确认的 displayed 成功声明。
+"Accepted the request" does not mean the screen has been verified to finish rendering; do not use unconfirmed displayed success claims.
 
-| 情况 | 对外含义 |
+| Situation | External meaning |
 | --- | --- |
-| 至少一个接收端接受，其他端不支持 | 已接受；不支持的端跳过 |
-| 部分接受、部分执行失败 | 部分成功，保留失败信息 |
-| 所有接收端都不支持 | 未执行，原因是 unsupported；不能宣称已显示 |
-| 没有已挂载、启用的接收端 | 不可用，原因是无渲染端 |
-| 所有接收端均执行失败 | 失败，报告实际原因 |
+| At least one recipient accepted, others unsupported | Accepted; unsupported recipients skipped |
+| Partially accepted, partially failed execution | Partial success, failure information retained |
+| All recipients unsupported | Not executed, reason: unsupported; must not claim it was displayed |
+| No mounted, enabled recipients | Unavailable, reason: no renderers |
+| All recipients failed execution | Failure, report the actual reasons |
 
-不向模型返回内部 IPC 标识、注册表 generation、传输游标或完整错误堆栈。
+Do not return internal IPC identifiers, registry generation, transport cursors, or full error stack traces to the model.
 
-## 当前实现依据
+## Basis in the Current Implementation
 
-- `~/.pal/plugins/community/st7789_face/face_introspection.py`：已有面板工具和 `show_expression` 广播，但协调逻辑属于 face，广播前使用面板词表校验。
-- `../desktop_avatar/plugin/desktop_avatar_emotion_introspection.py`：已有 `show_emotion`，公开 duration；目前按当前桌面会话或唯一可用桌面端点选择目标。
-- 新方案明确将上述“当前/唯一桌面端点”语义改为广播给所有启用的渲染端。
-- 目前 face 核对的是安装目录中的文件。实施前确定其权威源码位置及打包方式，不能把只修改安装目录作为最终交付。
+- `~/.pal/plugins/community/st7789_face/face_introspection.py`: already has panel tools and `show_expression` broadcast, but the coordination logic belongs to the face, and the panel vocabulary is validated before broadcasting.
+- `../desktop_avatar/plugin/desktop_avatar_emotion_introspection.py`: already has `show_emotion`, exposing duration; it currently selects the target by the current desktop session or the only available desktop endpoint.
+- The new plan explicitly changes the above "current/only desktop endpoint" semantics to broadcasting to all enabled render endpoints.
+- Currently face checks against files in the installation directory. Before implementation, determine the authoritative source location and packaging method; merely modifying the installation directory must not be the final deliverable.
 
-## 实施顺序
+## Implementation Order
 
-1. 确定协调入口的模块归属，定义最小渲染端接口、支持词表和三类结果：接受、不支持、失败。
-2. 将 face、desktop 的渲染与别名映射接入该接口，保留各自 runtime 的时长和状态优先级策略。
-3. 发布只有 `emotion` 参数的统一 `show_emotion`，使用注册词表并集描述可用情绪。
-4. 撤销另外两个动作工具，更新相关 guidance、工具提示、插件说明及旧入口引用。
-5. 生成工具清单，核对常驻入口确实由三个减少为一个；保留必要的设备诊断。
-6. 完成定向回归和模型选工具验证后，再安排插件激活。
+1. Determine the module ownership of the coordination entry point, define the minimal render endpoint interface, supported vocabulary, and three result types: accepted, unsupported, failed.
+2. Hook the face and desktop rendering and alias mappings into this interface, preserving each runtime's duration and state priority policies.
+3. Publish a unified `show_emotion` with only the `emotion` parameter, using the union of registered vocabularies to describe available emotions.
+4. Retire the other two action tools, and update related guidance, tool hints, plugin documentation, and references to the old entry points.
+5. Generate the tool inventory and verify that the resident entry points have indeed been reduced from three to one; retain necessary device diagnostics.
+6. Only after completing targeted regression and model tool-selection verification, schedule plugin activation.
 
-## 验收条件
+## Acceptance Criteria
 
-- 模型只看到一个情绪动作工具，schema 不再包含 duration 或设备选择参数。
-- 仅安装 face、仅安装 desktop、同时安装两者时均能正常工作。
-- 多个 desktop endpoint 都收到一次广播，没有遗漏或重复投递。
-- 设备 A 独有和设备 B 独有的情绪都能进入统一入口；不支持的设备跳过且保持原显示。
-- 全部不支持或没有渲染端时，不返回虚假的显示成功。
-- 单个设备断连时，其他设备仍能接受请求，失败也不会被隐藏。
-- 自动活动状态、手动情绪、系统错误状态的优先级及动画恢复行为保持有效。
-- reload、停用、卸载不会遗留旧注册；重新挂载后词表并集正确更新。
-- 搜索和模型选择不再在三个同类动作工具之间摇摆。评测应覆盖日常情绪及单设备独有情绪，区分检索命中与设备执行结果。
+- The model sees only one emotion action tool, and the schema no longer contains duration or device selection parameters.
+- Works correctly with only face installed, only desktop installed, and both installed.
+- Every desktop endpoint receives exactly one broadcast, with no omissions or duplicate deliveries.
+- Emotions exclusive to device A and exclusive to device B can both enter the unified entry point; unsupported devices skip and keep their original display.
+- When all devices are unsupported or there are no render endpoints, no false display success is returned.
+- When a single device is disconnected, other devices can still accept the request, and failures are not hidden.
+- The priorities of automatic activity state, manual emotion, and system error state, as well as animation recovery behavior, remain effective.
+- reload, deactivation, and uninstall leave no stale registrations; after remounting, the vocabulary union updates correctly.
+- Search and model selection no longer oscillate among three similar action tools. Evaluations should cover everyday emotions and device-exclusive emotions, distinguishing retrieval hits from device execution results.
 
-## 验证与激活边界
+## Verification and Activation Boundaries
 
-文档落盘不代表实现或线上行为已经改变。实现阶段先跑涉及插件和协调入口的定向测试，全量检查交给 GitHub CI。
+Writing this document to disk does not mean the implementation or live behavior has changed. During implementation, first run targeted tests covering the involved plugins and the coordination entry point; full checks are left to GitHub CI.
 
-激活前按仓库要求阅读 `pal.self.maintenance`。已有插件代码更新通过 `manage_plugin(operation="reload")` 生效；rescan 只发现元数据，attach 不代替 reload。若协调入口涉及 resident core / execution 实现变更，另行安排宿主激活；Pal 忙时延期。
+Before activation, read `pal.self.maintenance` as required by the repository. Updates to existing plugin code take effect via `manage_plugin(operation="reload")`; rescan only discovers metadata, and attach does not substitute for reload. If the coordination entry point involves changes to resident core / execution implementations, arrange host activation separately; defer if Pal is busy.
 
-本计划不同时开展 Shell、Proactive 等其他模块的工具合并。
+This plan does not proceed simultaneously with tool consolidation in other modules such as Shell or Proactive.
 
-其他模块的决定单独记录，见[记忆后端维护迁入 Pal CLI 计划](pal_memory_backend_cli_plan.md)。
+Decisions for other modules are recorded separately, see [Plan for Migrating Memory Backend Maintenance into the Pal CLI](pal_memory_backend_cli_plan.md).

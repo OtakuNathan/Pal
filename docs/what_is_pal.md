@@ -42,6 +42,11 @@ Pal -> durable Workflow -> Architect/Reviewer -> module DAG
                                             -> human review or delivery
 ```
 
+For a settled software repository task, [direct mode](bunshin_direct_mode.md)
+uses one Coder/Verifier pair without architecture planning or approval. Planned
+mode keeps the graph and architecture review path above. Both use the same
+durable engine and verified publication boundary.
+
 Bunshin persists workflow state independently of any single model turn or
 worker process. Roles work through bounded contracts and durable checklists;
 leases and fencing protect ownership; dependencies control parallel work;
@@ -68,7 +73,9 @@ loaded again after a process restart.
 Setup always provisions a Unix socket as a local and recovery channel.
 Optional providers, such as Telegram or a WebSocket bridge, attach to the same
 runtime. Channels own transport and presentation; they do not redefine memory,
-task, or execution semantics.
+task, or execution semantics. The built-in `null` endpoint is an explicit silent
+output sink; the recovery socket remains a communication channel with buffering,
+ACK and replay behavior.
 
 ### Governed capabilities
 
@@ -146,5 +153,6 @@ model itself.
 - [Runtime Stack](pal_runtime_stack.md)
 - [Bootstrap and Process Contract](pal_bootstrap_and_process.md)
 - [Control Plane](pal_control_plane.md)
-- [Bunshin V2 Contract Orchestration](bunshin_contract_orchestration.md)
+- [Bunshin Contract Orchestration](bunshin_contract_orchestration.md)
+- [Bunshin Direct Mode](bunshin_direct_mode.md)
 - [Channel Contract](pal_channel_contract.md)

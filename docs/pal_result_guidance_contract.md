@@ -1,165 +1,165 @@
-# Result Guidance Contract — 工具指导分层与结果侧 Affordance
+# Result Guidance Contract — Tool Guidance Layering and Result-Side Affordance
 
-版本:v2 实施 · 2026-09-24 · 任务包 `../pal-result-guidance/origin/`(v2.0)
+Version: v2 implementation · 2026-09-24 · Task package `../pal-result-guidance/origin/` (v2.0)
 
-## 三路分工
+## Three-Way Division of Responsibility
 
-指导信息按"何时需要"分三处存放,由三个不同的 owner 负责:
+Guidance information is stored in three places according to "when it is needed", with three different owners responsible:
 
-| 通路 | 存放位置 | Owner | 进入模型视图的时机 |
+| Channel | Storage Location | Owner | When It Enters the Model View |
 |---|---|---|---|
-| 静态能力理解 | descriptor(`purpose/use_when/do_not_use_when` + `NextToolHint`) | 工具作者 | 编译进稳定描述;`read_tool` 同源展示 |
-| 失败恢复 | 结果侧 `recovery_hint` + `affordances` | 业务 owner 优先;声明 fallback 兜底 | 仅真实失败结果,择优单源渲染 |
-| 本次行动建议 | 结果侧 `affordances`(绑定真实参数) | 业务 owner 按本次事实判断 | 仅结果特定事实支撑时 |
+| Static capability understanding | descriptor (`purpose/use_when/do_not_use_when` + `NextToolHint`) | Tool author | Compiled into the stable description; displayed via the same source by `read_tool` |
+| Failure recovery | Result-side `recovery_hint` + `affordances` | Business owner first; declared fallback as backstop | Only real failure results; the best single source is rendered |
+| Action suggestion for this occasion | Result-side `affordances` (bound to real arguments) | Business owner judges based on the facts of this occasion | Only when supported by result-specific facts |
 
-**默认行为**:成功结果的 `affordances=[]`、`recovery_hint=""`。成功、换 workspace、
-出现路径/ID、首次见到工具,都不构成建议理由。这不是"首次提示、后续去重"——第一次
-就没有理由提示。选择不依赖任何展示历史;不存在跨轮 seen set、提示计数或 TTL。
+**Default behavior**: for successful results, `affordances=[]` and `recovery_hint=""`. Success, switching workspace,
+the appearance of a path/ID, or seeing a tool for the first time — none of these constitute a reason to suggest. This is not "prompt on first use, deduplicate afterwards" — there is
+no reason to prompt the first time either. Selection does not depend on any presentation history; there is no cross-turn seen set, prompt count, or TTL.
 
-## 类型与字段
+## Types and Fields
 
-- `ToolGuidance.failure_next_steps: str = ""` — 可选宿主侧 fallback 声明。不再进入
-  默认模型描述(`compile_tool_description` 不投影该字段)。旧非空声明继续有效。
-- `recovery_hint: str = ""` — 简短、不可表示为完整工具调用的本次修复指导。贯通
-  `CompleteResult/FailedResult/RejectedResult`、`ToolHandlerResult`、
-  `ToolExecutionError/ToolRejectedError`、`CapabilityResult`。
-- `affordances` — 已有 `ToolAffordance(tool, arguments, reason)`;`CapabilityResult`
-  新增该字段(此前会跨 normalization 丢失)。
-- 建议不构成批准、读取授权、快照 owner 或新指令层级。
+- `ToolGuidance.failure_next_steps: str = ""` — optional host-side fallback declaration. No longer enters the
+  default model description (`compile_tool_description` does not project this field). Legacy non-empty declarations remain valid.
+- `recovery_hint: str = ""` — short, this-occurrence repair guidance that cannot be represented as a full tool call. Runs through
+  `CompleteResult/FailedResult/RejectedResult`, `ToolHandlerResult`,
+  `ToolExecutionError/ToolRejectedError`, `CapabilityResult`.
+- `affordances` — the existing `ToolAffordance(tool, arguments, reason)`; `CapabilityResult`
+  gains this field (previously it was lost across normalization).
+- Suggestions do not constitute approval, read authorization, snapshot ownership, or a new instruction hierarchy.
 
-## 失败择优(§6.1 → `pal/execution/result_guidance.py`)
+## Failure Best-Source Selection (§6.1 → `pal/execution/result_guidance.py`)
 
-1. 执行前宿主拒绝(unknown tool/mode/schema/target):保留精确修正 affordance,
-   不追加业务 fallback。
-2. handler 明确指导(recovery_hint/affordances)优先。
-3. 无 handler 指导时,声明的 `failure_next_steps` 填入 `recovery_hint`,单源渲染,
-   不再拼接进正文、不再给无条件 read_tool、不再附加 recall_memory 固定段落。
-4. 无适用 fallback:只保留事实/effect/retry。
+1. Host-side rejection before execution (unknown tool/mode/schema/target): keep the precise corrective affordance,
+   do not append a business fallback.
+2. Explicit handler guidance (recovery_hint/affordances) takes priority.
+3. When there is no handler guidance, the declared `failure_next_steps` is filled into `recovery_hint`, rendered from a single source,
+   no longer concatenated into the body, no longer giving an unconditional read_tool, and no longer appending a fixed recall_memory section.
+4. No applicable fallback: keep only facts/effect/retry.
 
-## 动作身份与去重(§8 → `result_guidance.py`)
+## Action Identity and Deduplication (§8 → `result_guidance.py`)
 
-`key = (logical_alias, canonical_json(arguments))`;direct 与 `call_tool(name=...)`
-包装识别为同一目标;`read_tool(foo)` 与执行 foo 是不同动作;对象键排序、数组顺序与值
-类型差异保留;单结果内去重保留首个最具体来源。对捕获 generation 校验 alias、
-input schema、目标绑定和角色范围,按 direct/indirect 投影合法调用方式,随后取最多
-3 个有效动作。坏候选单独丢弃并记录诊断,不覆盖业务结果。归一化幂等。
+`key = (logical_alias, canonical_json(arguments))`; direct and `call_tool(name=...)`
+wrappers are recognized as the same target; `read_tool(foo)` and executing foo are different actions; object key ordering, array order, and value
+type differences are preserved; within a single result, deduplication keeps the first, most specific source. For captured generation, validate the alias,
+input schema, target binding, and role scope, projecting legal invocation forms by direct/indirect, then take at most
+3 valid actions. Bad candidates are dropped individually with diagnostics recorded, without overriding the business result. Normalization is idempotent.
 
-## 唯一出口与预算(§9 → `runtime._finalize_invocation_result`)
+## Sole Exit Point and Budget (§9 → `runtime._finalize_invocation_result`)
 
-所有 `_invoke_tool_record_sync/_async` 出口(提前拒绝、异常、builtin、call_tool
-递归)统一经过 finalizer:候选校验 → 正文与恢复信息预算。
-按 review 后用户确认的新规则,可选 `affordances` 在截断预算外完整呈现,
-不挤占正文空间,也不因正文预算被删掉。预算仍包括正文、status/effect/error/retry、
-recovery 和快照提示;包含可选建议的最终字符串允许超过配置字符数。
-native 的 normalize 后置追加发生在 finalizer 之前,遵循相同规则。
-CapabilityResult 和异常载体的坏建议会单独丢弃;失败 guidance helper 意外抛错时,
-保留原始 error/effect/retry/details,仅降级指导字段。
-`CancelledError` 继续传播,不伪造成普通失败。
+All `_invoke_tool_record_sync/_async` exits (early rejection, exceptions, builtin, call_tool
+recursion) uniformly pass through the finalizer: candidate validation → body and recovery information budget.
+Per the new rule confirmed by the user after review, optional `affordances` are presented in full outside the truncation budget,
+neither crowding out body space nor being removed due to the body budget. The budget still covers the body, status/effect/error/retry,
+recovery, and snapshot hints; the final string including optional suggestions is allowed to exceed the configured character count.
+For native, normalize post-appending happens before the finalizer and follows the same rules.
+Bad suggestions on CapabilityResult and exception carriers are dropped individually; when the failure guidance helper unexpectedly throws,
+the original error/effect/retry/details are preserved and only the guidance fields are degraded.
+`CancelledError` continues to propagate and is not disguised as an ordinary failure.
 
-## 长行提示仅认真实读取(§10 → `_budget_invocation_result`)
+## Long-Line Hints Only on Real Reads (§10 → `_budget_invocation_result`)
 
-`manifest.operation == 'read'` 且非受管快照才给源文件 shell 查看/修改说明;
-edit/write 的 diff proof_length 不再被当作源行长度;受管快照的长行只提示查看有界
-片段,不建议修改。
+Only when `manifest.operation == 'read'` and the file is not a managed snapshot is source-file shell view/modify guidance given;
+the diff proof_length of edit/write is no longer treated as source line length; for long lines in managed snapshots, only viewing a bounded
+fragment is hinted, with no modification suggestion.
 
-## 迁移清单(§4 五类分类)
+## Migration Checklist (§4 Five-Way Classification)
 
-| 来源 | 分类 | 去向 |
+| Source | Classification | Destination |
 |---|---|---|
-| `compile_tool_description` 的 Failure next steps 段 | FAILURE_FALLBACK | 移出描述;runtime 失败时填 recovery_hint |
-| `prepare_lsp_workspace` ready 分支 next_tools 菜单 + direction 尾巴 | DROP_REDUNDANT | 删除(不转 typed);ready 只报事实 |
-| `prepare_lsp_workspace` partial/failed 菜单 | RESULT_DYNAMIC | 迁为 inspect_lsp_status 绑定当前 workspace/server 的 typed affordance |
-| LSP prepare/doctor/status 静态 hints(use_when 已条件化) | STATIC_RELATION_KEEP | 保留 descriptor 投影与搜索文档 |
-| `prepare_call_hierarchy` incoming/outgoing 静态 hints | STATIC_RELATION_KEEP | 保留;单 item 结果另给位置绑定 continuation |
-| `_render_invocation_for_llm` 的 `_FAILURE_MEMORY_NEXT_STEP` 尾巴 | DROP_REDUNDANT | 删除;失败不再固定推荐 recall_memory |
-| `_default_failure_affordances` 无条件 read_tool | DROP_REDUNDANT | 删除;无 fallback 时只留事实 |
-| `_append_failure_guidance` 子串去重拼接 | FAILURE_FALLBACK | 改为 recovery_hint 单源 |
-| `details.failure_next_steps` setdefault | FAILURE_FALLBACK | 删除(recovery_hint 为唯一通道;structured 不进模型正文) |
-| `shared/tool_routing.py` 系统提示词 "description's Failure next steps" 引用 | PRECALL_KEEP(改写) | 改为引用结果侧 recovery/affordances |
-| checklist/channel/browser 的状态条件内联提示 | RESULT_DYNAMIC(保留) | 真实状态条件触发,非静态重播 |
-| plugins/package_*、memory recall、web_search 等 | 无结果侧追加 | 已合规;静态 hints 保留 |
-| `turn_executor` timeout/rpc_failed 直接合成 | PRECALL_KEEP(加界) | 异常文本头尾截断,同一有界呈现策略 |
-| bunshin `op_exec_shell` failure 文本中 "trapped 不换壳重试" | PRECALL_KEEP(迁移) | 迁入 `do_not_use_when`(调用前可见);failure 侧只留恢复流程 |
+| Failure next steps section of `compile_tool_description` | FAILURE_FALLBACK | Moved out of the description; filled into recovery_hint on runtime failure |
+| `prepare_lsp_workspace` ready-branch next_tools menu + direction tail | DROP_REDUNDANT | Remove (do not convert to typed); ready reports facts only |
+| `prepare_lsp_workspace` partial/failed menu | RESULT_DYNAMIC | Migrate to a typed inspect_lsp_status affordance bound to the current workspace/server |
+| LSP prepare/doctor/status static hints (use_when already conditional) | STATIC_RELATION_KEEP | Keep descriptor projection and search documentation |
+| `prepare_call_hierarchy` incoming/outgoing static hints | STATIC_RELATION_KEEP | Keep; single-item results additionally get a location-bound continuation |
+| `_render_invocation_for_llm`'s `_FAILURE_MEMORY_NEXT_STEP` tail | DROP_REDUNDANT | Remove; failures no longer unconditionally recommend recall_memory |
+| `_default_failure_affordances` unconditional read_tool | DROP_REDUNDANT | Remove; when there is no fallback, only facts remain |
+| `_append_failure_guidance` substring-dedup concatenation | FAILURE_FALLBACK | Change to a single source via recovery_hint |
+| `details.failure_next_steps` setdefault | FAILURE_FALLBACK | Remove (recovery_hint is the only channel; structured does not enter the model body) |
+| `shared/tool_routing.py` system prompt reference to "description's Failure next steps" | PRECALL_KEEP (rewrite) | Rewrite to reference result-side recovery/affordances |
+| checklist/channel/browser status-conditional inline hints | RESULT_DYNAMIC (keep) | Triggered by real status conditions, not static replay |
+| plugins/package_*, memory recall, web_search, etc. | No result-side additions | Already compliant; static hints kept |
+| `turn_executor` timeout/rpc_failed direct synthesis | PRECALL_KEEP (bounded) | Truncate exception text head/tail under the same bounded presentation policy |
+| bunshin `op_exec_shell` failure text "trapped, do not switch shell and retry" | PRECALL_KEEP (migrate) | Move into `do_not_use_when` (visible before invocation); failure side keeps only the recovery procedure |
 
-## 结果指导示例(交付物 4;稳定 descriptor 始终保留
-"Preparation was partial or failed … inspect_lsp_status" 条件关系)
+## Result guidance examples (deliverable 4; stable descriptors always preserved,
+"Preparation was partial or failed … inspect_lsp_status" conditional relationships)
 
-以下为实际出口产出的形态摘要:
+The following is a summary of the shapes produced by actual egress:
 
-1. **首次 prepare(A)→ready**:正文只有就绪事实(202 字符,含 status/servers);
-   `affordances=[]`、`recovery_hint=""`、无 `next_tools`、无 direction 尾巴。
-2. **跨 workspace 第二次 ready(B)**:与 1 完全同形;workspace_root/primary_server
-   作为事实保留,不构成推荐理由;descriptor 哈希不变。
-3. **两个 workspace 分别 partial(B 失败 clangd / A 失败 clangd)**:各给
-   `affordances=[inspect_lsp_status(workspace_root=<该次>, name=<失败 server>)]`,
-   reason 指向本次未就绪事实;互不压制(A partial 不因 B 提示过 doctor 而消失)。
-4. **call hierarchy 单 item**:两个 affordance 绑定产生 item 的
-   file/line/character(+可选 workspace_root/name),指向 incoming/outgoing;
-   空 item 不构造;多 item 不擅自选第一个。
-5. **ordinary failure(handler 抛错,无 handler 指导)**:错误事实 + effect + retry
-   原样;`recovery_hint` = 声明 fallback(仅此一处出现);无 read_tool 强推、
-   无 recall_memory 尾巴。
-6. **unknown effect(effect=unknown)**:retry=reconcile_first 保留;建议不把原命令
-   当作可无条件重试动作(`RetrySafetyPreserved`)。
-7. **saved-output failure(capture OSError)**:操作 status/effect/receipt 不变,
-   `output_error` 如实记录;有限预览 + "不要为取回输出重复副作用" 提示;
-   native 侧 output_ref/session_id 恢复入口保留(不重跑命令)。
-8. **long-line source read**:单行超预算且为原文件读取 → 有条件 shell 查看/修改
-   说明(不含已读授权);授权仍只覆盖实际交付区间。
-9. **snapshot read(受管快照)**:复用既有快照不复制;长行只提示查看有界片段,
-   不建议修改;无原文件编辑授权。
+1. **First prepare (A) → ready**: the body contains only readiness facts (202 characters, including status/servers);
+   `affordances=[]`, `recovery_hint=""`, no `next_tools`, no direction tail.
+2. **Cross-workspace second ready (B)**: exactly the same shape as 1; workspace_root/primary_server
+   are kept as facts and do not constitute a recommendation reason; descriptor hash unchanged.
+3. **Two workspaces each partial (B failed clangd / A failed clangd)**: each gets
+   `affordances=[inspect_lsp_status(workspace_root=<that run>, name=<failed server>)]`,
+   reason points to that run's not-ready facts; no mutual suppression (A's partial does not disappear because B's hint mentioned doctor).
+4. **call hierarchy single item**: both affordances are bound to the item's
+   file/line/character (+ optional workspace_root/name), pointing to incoming/outgoing;
+   empty items do not construct; multiple items do not arbitrarily pick the first.
+5. **ordinary failure (handler throws, no handler guidance)**: error facts + effect + retry
+   as-is; `recovery_hint` = the declared fallback (appears only here); no read_tool push,
+   no recall_memory tail.
+6. **unknown effect (effect=unknown)**: retry=reconcile_first kept; advises not treating the original command
+   as an unconditionally retryable action (`RetrySafetyPreserved`).
+7. **saved-output failure (capture OSError)**: operation status/effect/receipt unchanged,
+   `output_error` recorded faithfully; bounded preview + a "do not repeat side effects to retrieve output" hint;
+   native-side output_ref/session_id recovery entry kept (command is not re-run).
+8. **long-line source read**: single line exceeds budget and is an original-file read → conditional shell
+   view/modify note (does not include read authorization); authorization still covers only the actually delivered range.
+9. **snapshot read (managed snapshot)**: reuses the existing snapshot without copying; long lines only hint at viewing a bounded snippet,
+   modification not suggested; no original-file edit authorization.
 
-## 测试矩阵映射(v2 110 场景 → 实际测试)
+## Test matrix mapping (v2 110 scenarios → actual tests)
 
-| 矩阵组 | 测试位置 | 说明 |
+| Matrix group | Test location | Notes |
 |---|---|---|
-| A01-A10 | test_result_guidance.py::TestDescriptorLayering + test_tool_guidance.py(4,修订) | 描述/搜索契约;A06 空合法性;A07 静态投影;A09 同代稳定 |
-| B01-B16 | test_result_guidance.py::TestFailurePickBest/TestDirectResultCarriers + test_immutable_tool_facade.py(修订) | 择优/事实保真;B15 五载体参数化;B12 由 finalize 的异常降级分支保证 |
-| C01-C14 | test_result_guidance.py::TestActionIdentity/TestResolveFailureGuidance | key 归一化/去重/幂等;C08 由 finalize generation 过滤 + bunshin 角代号验证覆盖;C09-C10 由 generation 捕获语义覆盖 |
-| D01-D20 | test_result_guidance_budget.py(全部) | 两个 P2;D13 授权保持由既有 test_result_snapshots.py 覆盖;D18 快照长行 = managed 分支 |
-| E01-E10 | test_result_guidance_h.py::TestProviderLevel/TestEndToEndSequence | LSP 决策表 + 其它 producer;E06/E08/E09 由"无结果侧追加"事实 + B11/E01 泛化覆盖 |
-| F01-F12 | F01 可空默认(wire 往返测试含旧 payload 分支);F02 `test_wire_roundtrip_preserves_guidance_fields`(TOOL_INVOCATION_RESULT_ADAPTER JSON 往返);F03 冻结历史不重渲染;F04/F05 既有 snapshot/L1 测试;F06/F07/F10 native 套件(151 tests OK,含未提交 lease 断言);F08 events/observation 改走 deliver_invocation_result;F09 bunshin 角代号;F11 取消语义未触碰;F12 native 未提交 diff 完整保留 | |
-| G01-G07 | G01/G02 = TestActionIdentity/既有 snapshot 哨兵测试;G03 = 本文档离线对比;G04 搜索命中一致;G05 = 四批 CI + native 套件;G06 = 本文档;G07 迁移清单(上文) | |
-| H01-H22 | test_result_guidance_h.py(H01-H05/H07/H09-H11/H13/H14/H20/H21 显式;H06 无历史状态 = H20+无序列化;H08 = H21;H12 = `TestScopedRoleFiltering`(角色外动作被滤 + 静态关系降级);H15-H18 = producer 无结果侧追加事实 + B11/E01 泛化;H22 = 本工作区从干净基线实施,v1 未曾开工,不适用) | |
-| B12/D12 补充 | B12 = `TestGuidanceFailureDegrades`(强制 helper 异常,事实保真降级);D12 = `test_unicode_emoji_bom_budget_maps_spans_not_decorations`(emoji/CJK/BOM 预算与授权区间映射) | |
+| A01-A10 | test_result_guidance.py::TestDescriptorLayering + test_tool_guidance.py (4, revised) | Description/search contract; A06 empty legality; A07 static projection; A09 same-generation stability |
+| B01-B16 | test_result_guidance.py::TestFailurePickBest/TestDirectResultCarriers + test_immutable_tool_facade.py (revised) | Pick-best/fact fidelity; B15 five-carrier parameterization; B12 guaranteed by finalize's exception degradation branch |
+| C01-C14 | test_result_guidance.py::TestActionIdentity/TestResolveFailureGuidance | Key normalization/dedup/idempotency; C08 covered by finalize's generation filtering + bunshin role-code verification; C09-C10 covered by generation capture semantics |
+| D01-D20 | test_result_guidance_budget.py (all) | Both P2s; D13 authorization preservation covered by existing test_result_snapshots.py; D18 snapshot long line = managed branch |
+| E01-E10 | test_result_guidance_h.py::TestProviderLevel/TestEndToEndSequence | LSP decision table + other producers; E06/E08/E09 covered by the "no result-side additions" fact + B11/E01 generalization |
+| F01-F12 | F01 nullable defaults (wire round-trip test includes legacy payload branch); F02 `test_wire_roundtrip_preserves_guidance_fields` (TOOL_INVOCATION_RESULT_ADAPTER JSON round-trip); F03 frozen history is not re-rendered; F04/F05 existing snapshot/L1 tests; F06/F07/F10 native suite (151 tests OK, including uncommitted lease assertions); F08 events/observation changed to deliver_invocation_result; F09 bunshin role code; F11 cancellation semantics untouched; F12 native uncommitted diff fully preserved | |
+| G01-G07 | G01/G02 = TestActionIdentity/existing snapshot sentinel tests; G03 = offline comparison in this document; G04 search hit consistency; G05 = four CI batches + native suite; G06 = this document; G07 migration checklist (above) | |
+| H01-H22 | test_result_guidance_h.py (H01-H05/H07/H09-H11/H13/H14/H20/H21 explicit; H06 no historical state = H20 + no serialization; H08 = H21; H12 = `TestScopedRoleFiltering` (out-of-role actions filtered + static relation downgraded); H15-H18 = producer no-result-side-additions fact + B11/E01 generalization; H22 = this workspace was implemented from a clean baseline, v1 never started, not applicable) | |
+| B12/D12 supplements | B12 = `TestGuidanceFailureDegrades`(forces helper exceptions, fact fidelity degradation); D12 = `test_unicode_emoji_bom_budget_maps_spans_not_decorations`(emoji/CJK/BOM budget and authorized range mapping) | |
 
-## 初版 CI 与回归记录(§13,历史执行记录)
+## Initial-version CI and regression records (§13, historical execution records)
 
-以下是初版实施记录,不代表 review 修订后的 CI 结果。review 修订只运行针对性测试,
-未重跑 CI;其中预算断言已更新为“正文与恢复信息有界,可选动作独立呈现”。
+The following are initial-version implementation records and do not reflect CI results after the review revisions. The review revisions only ran targeted tests,
+and did not rerun CI; among these, budget assertions were updated to "body and recovery information are bounded, optional actions presented independently".
 
-| 批次/套件 | 结果 |
+| Batch/suite | Result |
 |---|---|
-| core-a(修复 2 处钉旧断言 + 补 B12/H12/D12 残留测试后的终验) | **1205 passed**, 5 skipped(首跑 1200+2 failed:`test_minimal_operating_rules_prompt_omits_route_specific_tools` 短语恢复、`test_read_tool_full_contract_is_retained_only_in_structured_channel` 按 A01/A03 反转) |
-| core-b(含 D12 残留测试的终验) | **1119 passed**, 2 skipped |
-| bunshin-a | 464 passed(含 bunshin A02 迁移验证) |
+| core-a (final verification after fixing 2 assertions pinned to old behavior + adding B12/H12/D12 residual tests) | **1205 passed**, 5 skipped (first run had 1200+2 failed: `test_minimal_operating_rules_prompt_omits_route_specific_tools` phrase recovery, `test_read_tool_full_contract_is_retained_only_in_structured_channel` inverted per A01/A03) |
+| core-b (final verification including D12 residual tests) | **1119 passed**, 2 skipped |
+| bunshin-a | 464 passed (including bunshin A02 migration verification) |
 | bunshin-b | 477 passed |
-| native tests/pal_host(unittest) | 151 tests OK(含未提交 lease/output_ref 断言;test_remote 的隔离 SSH E2E 依赖 sshd,套件自带 skip) |
-| 聚焦回归(6 个 guidance 相关文件) | 85 passed |
-| AGENTS.md 指定 test_tool_activity.py | 6 passed |
+| native tests/pal_host (unittest) | 151 tests OK (including uncommitted lease/output_ref assertions; test_remote's isolated SSH E2E depends on sshd, the suite has its own skip) |
+| Focused regression (6 guidance-related files) | 85 passed |
+| AGENTS.md-specified test_tool_activity.py | 6 passed |
 
-未运行/受限:test_remote 的隔离 SSH E2E 需要 sshd(套件自带 skip 标注);native 需本地 venv + dist wheel 提供 C++ 扩展。
+Not run/restricted: test_remote's isolated SSH E2E requires sshd (the suite has its own skip marker); native requires a local venv + dist wheel to provide the C++ extension.
 
-| 指标 | before | after |
+| Metric | before | after |
 |---|---|---|
-| provider 描述总字符 | 9,186 | 7,460(-19%) |
-| read_tool(prepare_lsp_workspace)字符 | 637 | 280(-56%) |
-| 普通成功结果最终字符 | 15 | 15(不变,零建议) |
-| 50KB 异常最终模型可见字符 | 50,727(**无界**) | 688(有界) |
-| 失败固定 recall_memory 尾巴 | 存在 | 移除 |
-| prepare(A)→ready 最终字符 | 680(含菜单词) | 202(零菜单词) |
-| prepare(B)→ready | 680(含菜单词) | 202(零菜单词) |
-| prepare(B)→partial | 0 个 typed 建议(菜单散文) | 1 个 inspect_lsp_status 绑定 B/clangd |
-| prepare(A)→partial | 0(同上) | 1 个绑定 A/clangd |
-| descriptor 哈希(序列内) | 稳定 | 稳定 |
-| 固定搜索查询命中 | — | 与 before 逐项一致(静态关系保留) |
+| Provider description total characters | 9,186 | 7,460 (-19%) |
+| read_tool (prepare_lsp_workspace) characters | 637 | 280 (-56%) |
+| Ordinary success result final characters | 15 | 15 (unchanged, zero suggestions) |
+| 50KB exception final model-visible characters | 50,727 (**unbounded**) | 688 (bounded) |
+| Failure's fixed recall_memory tail | present | removed |
+| prepare(A)→ready final characters | 680 (with menu wording) | 202 (zero menu wording) |
+| prepare(B)→ready | 680 (with menu wording) | 202 (zero menu wording) |
+| prepare(B)→partial | 0 typed suggestions (menu prose) | 1 inspect_lsp_status bound to B/clangd |
+| prepare(A)→partial | 0 (same as above) | 1 bound to A/clangd |
+| descriptor hash (within a sequence) | stable | stable |
+| Fixed search query hits | — | item-by-item identical to before (static relationships preserved) |
 
-测量脚本逻辑:同 generation 假 LSP RPC、`ToolCallBudget(max_output_chars=2000)`、
-单次 handler 调用计数。这些数据只证明投影/预算/重复控制变化,不据此声称真实模型
-调用轮数或端到端延迟下降。
+Measurement script logic: same-generation fake LSP RPC, `ToolCallBudget(max_output_chars=2000)`,
+counting a single handler call. These figures only demonstrate projection/budget/deduplication-control changes, and do not support claims about real model
+call rounds or end-to-end latency reduction.
 
-## 不变量(性质测试约束)
+## Invariants (property-test constraints)
 
-见 `tests/test_result_guidance*.py`:操作事实保真、无执行副作用、建议经捕获
-generation 校验、单结果动作 key 唯一、确定性选择、归一化幂等、成功无静态重播、
-ready prepare 零推荐、无基于历史的抑制、descriptor 同代稳定、正文与恢复信息有界。
+See `tests/test_result_guidance*.py`: operational fact fidelity, no execution side effects, suggestions validated via captured
+generation, unique action keys per result, deterministic selection, normalization idempotence, no static replay on success,
+ready prepare has zero recommendations, no history-based suppression, descriptor stable within a generation, body and recovery information bounded.

@@ -53,11 +53,11 @@ Hard boundary:
 
 ## Supervisor / Service Responsibilities
 
-The supervisor or host service manager is responsible for:
+Setup and the supervisor registration layer prepare the runtime root, database
+and migrations before the runtime starts. The OS service manager does not run
+the wizard or recreate missing configuration. Its responsibilities are:
 
-- registering a Pal instance
-- preparing the runtime root
-- ensuring the database exists
+- registering and supervising a prepared Pal instance
 - preserving the Pal launch command
 - starting Pal
 - restarting Pal after crashes
@@ -172,8 +172,9 @@ The current wizard line covers:
 
 - identity bootstrap
 - LLM endpoint rows
-- API key credential binding
-- channel selection
+- endpoint-local API credentials and supported OAuth authorization
+- channel selection plus an always-provisioned recovery socket
+- memory embedding preferences
 - policy/config generation
 - database initialization
 
@@ -217,24 +218,21 @@ The current incomplete round and progress made during storage degradation may
 still be lost after SIGKILL, power loss or OOM. Interrupted tool side effects
 require observation and reconciliation, not automatic retry.
 
-`pal.memory.persistence` owns encrypted recovery and searchable history. At the
-existing round/L-admission boundaries, it appends credential-redacted dialogue to
-`data/conversation-history/YYYY-MM-DD.jsonl` by message occurrence date in Pal's
-configured timezone. Compact ensures frozen L is recorded before retiring it,
-attaches daily file/time references, and publishes the recovery baseline afterward.
-It never moves or trims daily history. Current and compacted dialogue share those
-files; `rg` can search the entire directory, including unchanged legacy current and
-compact files. Searchable-write failure never invalidates encrypted recovery.
-`/reset` preserves searchable history and persists an empty active state before
-reporting success. Existing encrypted file paths and formats remain readable.
-Invalid complete journal records fail restoration without being silently replaced
-by later normal saves.
+`pal.memory.persistence` owns both encrypted recovery and the separate searchable
+history. Compact/reset archive only dialogue removed from L1 as credential-redacted
+daily JSONL under `data/conversation-history/`, by message date in Pal's timezone.
+Startup, shutdown and midnight do not append current working dialogue. Compact
+attaches file/time references; corrections use conversation/message identity.
+Legacy current/compact files migrate only at an archive boundary. Archive-write
+failure does not invalidate encrypted recovery. Invalid complete journal records
+fail restoration rather than being silently replaced by later normal saves.
+See [Memory persistence](pal_memory_contract.md) for format and failure boundaries.
 
 ### Worker Crash
 
-Pal or the relevant manager sidecar records the failure, marks the run/work
-order state, and decides whether retry, user approval, or final failure reporting
-is appropriate.
+Pal or the relevant manager sidecar records the failure and updates the
+Task/workflow and role-assignment state. Its recovery policy determines whether
+to retry, request user input or report a terminal failure.
 
 ## Invariants
 

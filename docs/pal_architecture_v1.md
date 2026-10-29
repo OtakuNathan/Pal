@@ -1,24 +1,23 @@
-# Pal 架构宪法 V1
+# Pal Architecture Constitution V1
 
-> 2026-04-07
->
-> 这份文档是 `Pal` 的新架构基线。
-> 它定义后续重构和实现的唯一上位约束，并直接吸收旧 `design/` 中已经成熟的稳定语义。
+> The architecture baseline began on 2026-04-07; the current implementation boundary was verified on 2026-10-29.
+> File names are kept for compatibility with existing links. For specific interfaces, refer to the code and the contracts of the owning subsystem;
+> for the current module map, see [Runtime Stack](pal_runtime_stack.md).
 
-## 目标
+## Goals
 
-`Pal` 不是“聊天壳 + 工具列表”。
+`Pal` is not a "chat shell + tool list".
 
-`Pal` 是一个：
+`Pal` is:
 
-- 事件驱动的主体
-- 以 `Pal Core` 为极薄治理中心的 runtime
-- 拥有统一能力运行时的 agent system
-- 拥有分层记忆的长期主体
-- 拥有独立控制平面的可治理系统
-- 拥有受约束的自观察、自诊断、自维护能力
+- an event-driven subject
+- a runtime with `Pal Core` as an extremely thin governance center
+- an agent system with a unified capability runtime
+- a long-lived subject with layered memory
+- a governable system with an independent control plane
+- a system with constrained self-observation, self-diagnosis, and self-maintenance capabilities
 
-## 总体分层
+## Overall Layering
 
 ```mermaid
 flowchart TD
@@ -41,7 +40,7 @@ flowchart TD
 
     subgraph EXT["Governed External Families"]
         L3["L3 Provider"]
-        TASK["Tasking Plugin Family"]
+        TASK["Bunshin Task / Workflow"]
         PRO["Proactive Plugin Family"]
     end
 
@@ -52,92 +51,94 @@ flowchart TD
 
 ### Foundation
 
-Foundation 是系统最低层：
+Foundation is the lowest layer of the system:
 
 - `Async I/O`
 - `Envelope`
 - `Persistence`
 
-它提供安全、可靠、异步、可持久化的底座，但不拥有领域语义。
+It provides a safe, reliable, asynchronous, persistable foundation, but owns no domain semantics.
 
 ### Data Plane
 
-`Pal` 的数据面固定为四个子系统：
+The resident data plane of `Pal` includes:
 
 - `LLM`
 - `Channel`
 - `Memory`
 - `Execution`
-- `Artifact`
 
-它们负责感知、表达、记忆、行动。
+They are responsible for perception, expression, memory, and action.
 
-`Artifact` owns short-lived conversation attachments. It is separate from both filesystem tools and durable memory. Channels provide normalized attachment inputs; `PalCore` registers them; the LLM sees only prompt-safe `artifact_id` references and artifact tools.
+`Artifact` is an unloadable plugin for managing conversation attachments, not a fifth resident data subsystem.
+Channel provides normalized attachments, and Core registers them via the artifact port; the model uses
+prompt-safe `artifact_id` values and artifact tools. It differs from ordinary file tools and durable memory.
+`shared` provides cross-domain contracts, and `bootstrap` handles assembly; neither serves as a source of domain truth.
 
 ### Control Plane
 
-`Control` 是独立控制平面，不属于数据面。
+`Control` is an independent control plane and is not part of the data plane.
 
-它负责：
+It is responsible for:
 
-- 显式命令
-- 审批
-- 状态切换
-- 暂停与恢复
-- 用户可理解的治理动作
+- explicit commands
+- approvals
+- state transitions
+- pause and resume
+- user-comprehensible governance actions
 
 ### Pal Core
 
-`Pal Core` 站在数据面和控制平面之上。
+`Pal Core` stands above the data plane and the control plane.
 
-它只负责：
+It is only responsible for:
 
-- 事件主循环
-- 最小控制态
-- 决策与调度
-- 跨子系统协调
+- the event main loop
+- minimal control state
+- decision-making and scheduling
+- cross-subsystem coordination
 
-`Pal Core` 不是状态仓库，也不是业务对象仓库。
+`Pal Core` is not a state repository, nor a repository of business objects.
 
-## 系统不变量
+## System Invariants
 
-1. `Pal Core` 极薄。
-2. `Execution` 是唯一副作用出口。
-3. `Tool` 是唯一执行原语。
-4. `Capability` 是给 LLM 看的语义能力面。
-5. `Plugin` 提供 `Tool` 并注册 `Capability`。
-6. `Skill` 只提供方法指导，不能覆盖 `Pal` 自身 policy，也不能注入新人格。
-7. `Control` 是独立治理平面，不直接承担开放式推理。
-8. `L1/L2` 属于 runtime memory，纯驻留 RAM，重启即丢失。
-9. `L3` 是外挂、可插拔、searchable durable memory engine。
-10. `Task`、`Proactive`、`L3` 都是外挂，但受治理。
-11. 用户与 `Pal` 在所有 channel 上的交互必须进入同一个 FIFO 治理队列。
-12. `page_fault` 机制被 `L1/L2/L3` 分级记忆完全取代。
-13. 所有子系统都必须提供 introspection surface。
-14. `Pal` 可以自观察、自诊断、自维护，但不能越过核心 identity / policy / constitutional constraints。
-15. 用户前台 channel 必须由 `Pal` 自己持有，`supervisor` 不代理正常用户消息。
-16. worker 永远不直接接触用户，只能与 `Pal` 通信。
-17. provider native tool calling 只是外部协议壳，不能绕过本地 `Execution`。
-18. `L1` 是近无损压缩后的 transcript，不是 summary bucket。
-19. `top_of_mind` 只允许作为热投影层存在，不是 durable truth。
-20. `blocked / interrupted / error` 等终态不能盲续旧执行栈，只能基于当前现场重新观察和重启。
+1. `Pal Core` is extremely thin.
+2. `Execution` is the only side-effect outlet.
+3. `Tool` is the only execution primitive.
+4. `Capability` is the semantic capability surface presented to the LLM.
+5. `Plugin` provides `Tool`s and registers `Capability`s.
+6. `Skill` only provides methodological guidance; it cannot override `Pal`'s own policy, nor inject a new personality.
+7. `Control` is an independent governance plane and does not directly handle open-ended reasoning.
+8. `L1/L2` is runtime-owned memory; resident recovery stores an encrypted baseline, admission/round journals, and clean-shutdown checkpoints, and Bunshin stores role checkpoints. Recovery of interrupted context does not automatically replay execution.
+9. `L3` is an external, pluggable, searchable durable memory engine.
+10. `Task`, `Proactive`, and `L3` are all external, but governed.
+11. Ordinary channel input shares one resident mailbox, conversation, and execution lifetime; scheduling is governed by the admission state machine. Registered control commands bypass the ordinary turn, and `/btw` uses a temporary isolated branch.
+12. The `page_fault` mechanism has been fully replaced by `L1/L2/L3` tiered memory.
+13. All subsystems must provide an introspection surface.
+14. `Pal` can self-observe, self-diagnose, and self-maintain, but must not cross core identity / policy / constitutional constraints.
+15. The user-facing channel must be held by `Pal` itself; the `supervisor` does not proxy normal user messages.
+16. A Bunshin/worker never touches users directly and can only communicate with `Pal`.
+17. Provider native tool calling is only an external protocol shell and must not bypass local `Execution`.
+18. `L1` is the source of truth for the working history, preserving accepted reasoning, the closed tool protocol, and native replay; explicit compaction replaces the frozen LEFT with lossy continuity and preserves RIGHT.
+19. `top_of_mind` is only allowed to exist as a hot projection layer and is not durable truth.
+20. Terminal states such as `blocked / interrupted / error` must not blindly resume the old execution stack; they can only re-observe and restart based on the current scene.
 
-## 主体模型
+## Subject Model
 
-`Pal` 是单主体、单用户、单治理队列的系统。
+`Pal` is a single-subject, single-user, single resident conversation system.
 
-这意味着：
+This means:
 
-- 不同 channel 只是同一主体输入流的不同接入口
-- `Pal` 不在多个 channel 上维护多个独立人格
-- 用户可以清空上下文
-- 用户不应切换到多个并行 memory conversation
+- Different channels are merely different entry points into the same subject's input stream
+- `Pal` does not maintain multiple independent personalities across channels
+- The user may clear the context
+- The user should not switch to multiple parallel memory conversations
 
-## 核心运行模型
+## Core Runtime Model
 
 ```mermaid
 flowchart LR
-    IN["Inbound Envelope"] --> Q["Single FIFO Queue"]
+    IN["Inbound Envelope"] --> Q["Resident Mailbox + Admission State Machine"]
     Q --> CORE["Pal Core"]
     CORE --> CTL["Control Plane"]
     CORE --> LLM["LLM"]
@@ -147,89 +148,72 @@ flowchart LR
     CORE --> RESP["Response Handle"]
 ```
 
-运行抽象固定为：
+The runtime abstraction is fixed as:
 
 `EventEnvelope + minimal control state -> Decision -> Capability Invocation -> Tool Effect / Follow-up Event`
 
-## Memory 总原则
+## Memory General Principles
 
-`Memory` 是独立子系统。
+`Memory` is an independent subsystem.
 
-- `L1` 是压缩后的近端对话层
-- `L2` 是 hot working set
-- `L3` 是长期 durable search engine
+- `L1` is the complete working set of the current logical session; after compaction it preserves continuity and history not yet replaced
+- `L2` is the hot working set
+- `L3` is the long-term durable search engine
 
-其中：
+Among these:
 
-- `L1/L2` 内建于 runtime
-- `L3` 是外挂 provider
-- `Pal Core` 不直接读写 memory store
+- `L1/L2` are built into the runtime
+- `L3` is an external provider
+- Core coordinates compaction and recovery; Memory owns storage and atomic replacement/rollback
+- `pal.memory.persistence` owns encrypted recovery; sanitized conversation archives from compact/reset are stored separately
+- `Pal Core` does not read or write the memory store directly
 
-## Execution 总原则
+## Execution General Principles
 
-`Execution` 是整个系统中最关键的边界层。
+`Execution` is the most critical boundary layer in the entire system.
 
-它负责：
+It is responsible for:
 
 - capability registry
 - capability routing table
 - tool registry
-- plugin runtime
+- plugin capability publication surface (code generations and resources are owned by PluginHost)
 - introspection index
 - validator pipeline
 - side-effect dispatch
 
-任何真实副作用都只能通过 `Tool` 完成。
+Any real side effect must go through `Tool`.
 
-## Provider Pattern 总原则
+## Provider Pattern General Principles
 
-`Pal` 内部存在两类 provider 模式，不应混为一谈：
+Two kinds of provider patterns exist inside `Pal` and must not be conflated:
 
-### 1. Fallback-capable providers
+### 1. Request Routing and Retry
 
-适用于：
+Providers must obey the retry semantics of their own domain and must not share an implicit fallback assumption:
 
-- `llm`
-- `web_search`
-- `web_fetch`
+- `llm` only retries the currently selected endpoint and does not automatically fall back across endpoints; provider, wire shape,
+  auth/access profile, and transport are configured separately.
+- `web_search` has its own provider selection and fallback chain.
+- `web_fetch` is a plugin that manages stateful browsers/sessions, not a general-purpose HTTP fallback registry.
 
-它们的共同点是：
+LLM model hooks and response hooks both belong to the LLM protocol adaptation boundary, not the Core event bus.
+Provider-native tool calling must still go through the common decode, Core, and Execution.
 
-- 单次请求可切换 provider
-- 切换成本低
-- 失败后可以继续尝试下一候选
+### 2. Indexing and Persistence Backend
 
-因此这类能力应采用：
+Changes to the embedding provider/model/revision/text-processing affect index consistency,
+and must be handled through explicit plan/migrate and generation validation; the embedding space must not be switched ad hoc within a single request.
+L3 provider lifecycle and embedding-space migration are different operations.
 
-- ordered provider candidates
-- priority
-- enabled / disabled state
-- fallback
+See [LLM](pal_llm_contract.md), [Web Search](pal_web_search_contract.md),
+[Memory CLI](pal_memory_cli.md).
 
-### 2. Migration-only providers
+## Control General Principles
 
-适用于：
+`Control` is the built-in governance plane.
 
-- `embedding`
-- 其他需要重建或迁移的索引型 backend
-
-它们的共同点是：
-
-- provider 一旦变化，会影响长期索引一致性
-- 不适合在单次请求中随意切换
-- 需要 migration / reindex 才能切 active version
-
-因此这类能力不应采用 runtime fallback，而应采用：
-
-- versioned provider
-- rebuild / reindex
-- promote / rollback
-
-## Control 总原则
-
-`Control` 是 built-in 治理平面。
-
-它处理：
+It handles:
 
 - slash command
 - worker approval request
@@ -237,43 +221,43 @@ flowchart LR
 - mode switch
 - explicit pause / resume / cancel / approve
 
-`approve` 是 built-in control capability。
+`approve` is a built-in control capability.
 
-## Self-Maintenance 总原则
+## Self-Maintenance General Principles
 
-`Pal` 支持：
+`Pal` supports:
 
 - self-observation
 - self-diagnosis
 - self-improvement planning
 - controlled self-repair
 
-但默认不允许：
+But by default it does not allow:
 
-- 在无关对话里顺手修改自己
-- 越过审批边界进行结构性变更
-- 覆盖核心 policy、identity 或 persona contract
+- Modifying itself casually in unrelated conversations
+- Making structural changes that cross the approval boundary
+- Overriding core policy, identity, or the persona contract
 
 ## Non-Goals
 
-以下内容不属于本架构版本的目标：
+The following are not goals of this architecture version:
 
-- 多主体并行人格系统
-- 多用户共享 `Pal` 主体
-- 对 `L1/L2` 做 durable shadow persistence
-- 继续保留 `page_fault` 型静默回忆机制
-- 让 `Skill` 成为执行层或人格注入层
-- 让 `Pal Core` 直接拥有 task、proactive、worker、memory durable state
+- Multi-agent parallel personality systems
+- Multiple users sharing one `Pal` principal
+- Treating the searchable dialogue archive as a substitute for encrypted working-state recovery
+- Continuing to keep `page_fault`-style silent recall mechanisms
+- Making `Skill` an execution layer or personality injection layer
+- Letting `Pal Core` directly own task, proactive, worker, and memory durable state
 
-## 后续文档
+## Subsequent Documents
 
-本宪法的下位文档是：
+The subordinate documents of this constitution are:
 
 - `pal_runtime_stack.md`
 - `pal_bootstrap_and_process.md`
 - `pal_execution_contract.md`
 - `pal_introspection_contract.md`
-- `pal_tasking_contract.md`
+- [Bunshin Task/workflow](bunshin_contract_orchestration.md) (the old tasking contract is kept for historical reference only)
 - `pal_proactive_contract.md`
 - `pal_control_plane.md`
 - `pal_memory_contract.md`

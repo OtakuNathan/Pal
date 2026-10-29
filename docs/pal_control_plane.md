@@ -47,31 +47,31 @@ The control panel includes **Memory proposals**. Review cards show one candidate
 
 Inline control buttons should use typed actions. Generic command buttons use `control.command.run` with `command_name`; arbitrary module-specific actions use `control.action.dispatch` and carry a typed `ControlAction` payload. Channel endpoints own platform-specific rendering such as Telegram inline keyboards and callback tokens.
 
-> 目标：定义 `control` 的职责、边界和交互契约。
+> Goal: define the responsibilities, boundaries, and interaction contract of `control`.
 
-## 目标
+## Goals
 
-`Control` 是 `Pal` 的独立控制平面。
+`Control` is the independent control plane of `Pal`.
 
-它负责让用户、bunshins 和系统能够通过显式可理解的方式治理 `Pal`，而不是把所有命令都丢进开放式 agent reasoning。
+It is responsible for enabling users, Bunshin/workers, and the system to govern `Pal` through an explicit and comprehensible approach, instead of throwing all commands into open-ended agent reasoning.
 
 ## Position
 
-`Control` 不属于数据面。
+`Control` is not part of the data plane.
 
-它位于：
+It sits:
 
-- `Channel` 之上
-- `Execution` 之外
-- `Pal Core` 旁边
+- above `Channel`
+- outside `Execution`
+- beside `Pal Core`
 
-它为 `Pal Core` 提供确定性的控制动作，而不是自由推理结果。
+It provides `Pal Core` with deterministic control actions, rather than free reasoning results.
 
 ## Owns
 
-- 显式命令语义
-- 审批语义
-- pause / resume / cancel / approve 之类的治理动作
+- explicit command semantics
+- approval semantics
+- governance actions such as pause / resume / cancel / approve
 - bunshins permission handoff
 - system control signal normalization
 - deterministic control parsing
@@ -84,27 +84,27 @@ Inline control buttons should use typed actions. Generic command buttons use `co
 - plugin implementation details
 - business object truth
 
-## 输入来源
+## Input Sources
 
-`Control` 的输入固定来自三类来源：
+The inputs of `Control` come from exactly three sources:
 
 - slash command
 - bunshins approval request
 - system control signal
 
-可选地，也可以承接：
+Optionally, it may also accept:
 
-- 明确的用户自然语言控制句
+- explicit user natural-language control sentences
 
-但进入 `Control` 后，必须先被收敛成明确控制意图，而不是继续走开放式自由推理。
+However, once they enter `Control`, they must first be converged into explicit control intents, rather than continuing through open-ended free reasoning.
 
-## 核心对象
+## Core Objects
 
 ## ControlEvent
 
-`ControlEvent` 表示进入控制平面的标准化输入。
+`ControlEvent` represents a standardized input entering the control plane.
 
-它至少包含：
+It contains at least:
 
 - `event_id`
 - `event_kind`
@@ -116,9 +116,9 @@ Inline control buttons should use typed actions. Generic command buttons use `co
 
 ## ControlAction
 
-`ControlAction` 表示控制平面产出的治理动作。
+`ControlAction` represents a governance action produced by the control plane.
 
-它至少包含：
+It contains at least:
 
 - `action_kind`
 - `target_scope`
@@ -143,7 +143,7 @@ The runtime path is:
 
 `PalCore` applies state changes and dispatches typed deliveries. Channel endpoints own platform rendering and fallback behavior.
 
-## 运行模型
+## Execution Model
 
 ```mermaid
 flowchart LR
@@ -157,7 +157,7 @@ flowchart LR
 
 ## Built-in Control Capabilities
 
-以下 capability family 必须是 built-in：
+The following capability families must be built-in:
 
 - `control.approve`
 - `control.cancel`
@@ -166,17 +166,17 @@ flowchart LR
 - `control.resume`
 - `control.mode_switch`
 
-其中：
+Among them:
 
-- `approve` 用于 bunshins 请求权限时的治理中继
-- `approve` 不等于业务工具
-- `approve` 默认不直接修改业务对象，而是释放某个受控动作的执行权
+- `approve` serves as a governance relay when Bunshin/workers request permissions
+- `approve` is not a business tool
+- `approve` by default does not directly modify business objects; instead, it releases the execution right of a controlled action
 
 ## Approval Object Contract
 
-`approve` 背后对应的是正式 approval object，而不是瞬时按钮。
+Behind `approve` stands a formal approval object, not an ephemeral button.
 
-它至少应具备这些语义：
+It should at least carry these semantics:
 
 - proposal snapshot
 - target identity or target digest
@@ -184,26 +184,26 @@ flowchart LR
 - delivery state
 - consumed state
 
-approval 的生命周期至少包含：
+The lifecycle of an approval contains at least:
 
 - pending
 - approved
 - rejected
 - consumed
 
-这保证审批既能被用户理解，也能被 tasking、bunshins replacement、failure reporting 正式引用。
+This ensures that an approval can be understood by users and can also be formally referenced by tasking, Bunshin/worker replacement, and failure reporting.
 
 ## System Control Channel Boundary
 
-来自系统层的 control signal 可以由 `supervisor` 或其他 runtime component 送入 `Control`。
+Control signals from the system layer can be delivered into `Control` by the `supervisor` or other runtime components.
 
-但这条控制链不承载：
+However, this control channel does not carry:
 
-- 正常用户消息
-- 正常用户回复
-- 普通对话 turn payload
+- normal user messages
+- normal user replies
+- ordinary conversational turn payloads
 
-也就是说，控制面可以接系统信号，但不能退化成“万能消息总线”。
+In other words, the control plane can receive system signals, but must not degrade into a "universal message bus".
 
 ## bunshins Approval Flow
 
@@ -220,51 +220,51 @@ sequenceDiagram
     C->>X: emit control-approved action
 ```
 
-## Control 与其他模块的关系
+## Relationship Between Control and Other Modules
 
-### 与 Channel
+### With Channel
 
-- `Channel` 负责接收和发送
-- `Control` 负责解释显式控制语义
+- `Channel` is responsible for receiving and sending
+- `Control` is responsible for interpreting explicit control semantics
 
-### 与 Core
+### With Core
 
-- `Core` 消费 `ControlAction`
-- `Control` 不代替 `Core` 做全局协调
+- `Core` consumes `ControlAction`
+- `Control` does not perform global coordination on behalf of `Core`
 
-### 与 Execution
+### With Execution
 
-- `Control` 不直接实施副作用
-- `Control` 产生受治理的执行许可或状态变更请求
-- 真正的 effect 仍然经 `Execution`
+- `Control` does not directly apply side effects
+- `Control` produces governed execution grants or state change requests
+- The actual effects still go through `Execution`
 
-## Determinism 原则
+## Determinism Principles
 
-`Control` 默认走 deterministic path。
+`Control` takes the deterministic path by default.
 
-这意味着：
+This means:
 
-- 优先命令语法
-- 优先显式模式切换
-- 优先确定性参数解析
-- 避免把已注册控制命令交给开放式自由生成
-- 未匹配任何已注册 command 的 `/...` 文本不是控制命令，应回落为普通用户消息
+- Prefer command syntax
+- Prefer explicit mode switching
+- Prefer deterministic parameter parsing
+- Avoid handing registered control commands over to open-ended free generation
+- `/...` text that matches no registered command is not a control command and should fall back to an ordinary user message
 
 ## Invariants
 
-- `Control` 是独立控制平面。
-- `Control` 不属于数据面。
-- `Control` 不直接实施副作用。
-- `approve` 是 built-in control capability。
-- bunshins approval 必须通过 `Control`。
-- `Control` 默认走 deterministic path。
-- 只有匹配到已注册 command 或 alias 的 slash-like 输入才被消费为控制命令。
-- 未匹配的 `/...` 输入必须回落为普通 `user.message`，不能被 control path 截断成 unknown-command reply。
-- approval 是正式对象，不是瞬时 UI 动作。
+- `Control` is an independent control plane.
+- `Control` is not part of the data plane.
+- `Control` does not directly perform side effects.
+- `approve` is a built-in control capability.
+- Bunshin approvals must go through `Control`.
+- `Control` takes the deterministic path by default.
+- Only slash-like input that matches a registered command or alias is consumed as a control command.
+- Unmatched `/...` input must fall back to an ordinary `user.message` and must not be truncated by the control path into an unknown-command reply.
+- Approval is a formal object, not a transient UI action.
 
 ## Non-Goals
 
-- 不在本文件定义命令行或 UI 细节
-- 不在本文件定义具体审批页面
-- 不让 `Control` 取代普通业务 capability
-- 不让 `Control` 承担开放式聊天推理
+- This file does not define command-line or UI details
+- This file does not define specific approval pages
+- Do not let `Control` replace ordinary business capabilities
+- Do not let `Control` take on open-ended chat reasoning

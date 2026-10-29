@@ -1,23 +1,23 @@
-# DeepSeek v4.1 Flash 与 GLM 5.3 工具召回对比
+# DeepSeek v4.1 Flash vs. GLM 5.3 Tool Recall Comparison
 
-| 指标 | GLM 5.3 | DeepSeek v4.1 Flash |
+| Metric | GLM 5.3 | DeepSeek v4.1 Flash |
 | --- | --- | --- |
-| 主工具首次单次搜索 Top-3 | 103/109（94.5%） | 106/109（97.2%） |
-| 首个模型响应搜索批次召回（包含并行） | 103/109（94.5%） | 108/109（99.1%） |
-| 最终工具及调用方式正确 | 109/109 | 109/109 |
-| 中文动作工具及关键参数正确 | 20/20 | 20/20 |
-| 无对应能力负例正确结束 | 10/10 | 9/10 |
-| 纠错场景最终通过 | 4/4 | 4/4 |
-| 主工具平均模型响应次数（含最终选择） | 2.055 | 2.018 |
+| Primary tool Top-3 on first single search | 103/109 (94.5%) | 106/109 (97.2%) |
+| First model response search batch recall (including parallel) | 103/109 (94.5%) | 108/109 (99.1%) |
+| Final tool and invocation method correct | 109/109 | 109/109 |
+| Chinese action tools and key parameters correct | 20/20 | 20/20 |
+| Negative cases with no corresponding capability correctly terminated | 10/10 | 9/10 |
+| Error-correction scenarios ultimately passed | 4/4 | 4/4 |
+| Primary tool average model response count (including final selection) | 2.055 | 2.018 |
 
-DeepSeek 有 21 个主工具样本在首个响应并行搜索。因此单次首次搜索和首批并行搜索分别计分；不把同轮并行调用当作多轮。
+DeepSeek had 21 primary tool samples that issued parallel searches in the first response. Therefore, the first single search and the first parallel search batch are scored separately; parallel calls within the same turn are not counted as multiple turns.
 
-首次单次搜索未命中的是 rebind_bunshin_task_delivery、search_artifacts、search_tools，均选错 owner domain，随后恢复；其中前者与后者在首批并行搜索中已召回。
+The misses on the first single search were rebind_bunshin_task_delivery, search_artifacts, and search_tools, all of which initially chose the wrong owner domain and then recovered; among these, the former and the latter were already recalled in the first parallel search batch.
 
-唯一失败是 negative-profile-delete：不存在删除内置 Bunshin profile 定义的专用工具。模型未选择错误替代工具，但跨 6 次响应进行了 15 次搜索，触达评估上限，没有及时承认无对应工具。此为停止行为失败，非接口故障。
+The only failure was negative-profile-delete: there is no dedicated tool for deleting a built-in Bunshin profile definition. The model did not choose a wrong alternative tool, but performed 15 searches across 6 responses, reaching the evaluation cap, and did not promptly acknowledge that no corresponding tool exists. This is a stopping-behavior failure, not an interface failure.
 
-目录、题目、prompt、Top-3、源码哈希和采样设置均与 GLM 轮次校验一致。角色工具 36 个仅作附加压力测试，不计主指标。当前端点 deepseek-v4.1-flash，配置 model_id=deepseek-flash，provider=deepseek，wire_shape=anthropic_messages。
+The catalog, questions, prompt, Top-3, source hashes, and sampling settings are all identical to the GLM round validation. The 36 role tools served only as an additional stress test and are not counted in the primary metrics. Current endpoint deepseek-v4.1-flash, with configuration model_id=deepseek-flash, provider=deepseek, wire_shape=anthropic_messages.
 
-这是每个模型各一次、基于 purpose 派生题目的覆盖评估，不能视为独立自然请求成功率或跨次确定性证明。业务调用未执行，只验证工具/调用方式/schema/关键参数；外部动态贡献和代码回归不在本轮范围。
+This is a one-run-per-model coverage evaluation based on purpose-derived questions, and cannot be treated as an independent natural-request success rate or as proof of determinism across runs. Business calls were not executed; only tools/invocation methods/schema/key parameters were verified. External dynamic contributions and code regressions are out of scope for this round.
 
-原始模型记录保存在本地忽略目录 `test-logs/discovery-{glm53,ds41flash}-current-20261015/`；本报告不包含 API 认证材料。
+The raw model records are saved in the locally ignored directory `test-logs/discovery-{glm53,ds41flash}-current-20261015/`; this report contains no API authentication material.

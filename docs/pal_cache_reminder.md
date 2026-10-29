@@ -1,43 +1,43 @@
-# 缓存期限预估提醒
+# Cache TTL Estimate Reminder
 
-提醒用于在长对话闲置时提示用户按需 compact，不表示 provider 已确认缓存命中。
-先前的提醒直接依赖严格边界证据；该证据当前不可用，导致提醒始终处于
-`boundary_evidence_unavailable`。现在提醒使用独立的本地预估，严格热缓存入口保持原有约束。
+The reminder is used to prompt the user to compact on demand during idle periods of a long conversation; it does not mean the provider has confirmed a cache hit.
+The previous reminder relied directly on strict boundary evidence; that evidence is currently unavailable, leaving the reminder permanently in
+`boundary_evidence_unavailable`. The reminder now uses an independent local estimate, and strict hot-cache entry keeps its original constraints.
 
-计时从成功响应完整返回、本地结算时开始，使用 monotonic clock；UTC 返回时间仅供诊断。
-请求生成期间、回合提交和消息投递期间的时间不会重新计入一个完整窗口。
-失败、取消、重复结算和晚到的旧请求不会延长当前窗口。只读当前 resident scope 与
-endpoint/model/provider/协议/base URL 对应的成功响应；分身或其他 endpoint 的响应不续期。
-端点禁用缓存时不提醒。
+Timing starts when a successful response has been fully returned and locally settled, using a monotonic clock; the UTC return time is for diagnostics only.
+Time spent during request generation, turn submission, and message delivery is not re-counted into a full window.
+Failures, cancellations, duplicate settlements, and late-arriving stale requests do not extend the current window. Only successful responses for the currently read resident scope and
+the matching endpoint/model/provider/protocol/base URL are counted; responses from a Bunshin/worker or another endpoint do not renew it.
+No reminder is given when the endpoint has caching disabled.
 
-TTL 选择顺序是：请求实际使用的已知缓存 TTL、精确模型规则、provider 策略、通用兜底。
-模型规则尚无条目，以后发现同一 provider 内模型期限不同时单独补充。
-内部策略集中在 `pal.llm.cache_reminder`，不更改请求的缓存参数：
+The TTL selection order is: the known cache TTL actually used by the request, exact model rules, provider policy, and the generic fallback.
+Model rules have no entries yet; they will be added separately once models within the same provider are found to have differing TTLs.
+Internal policy is centralized in `pal.llm.cache_reminder`, which does not change the request's cache parameters:
 
-| 来源 | 当前预估窗口 |
+| Source | Current estimated window |
 | --- | --- |
-| OpenAI | 30 分钟 |
-| OpenRouter | 30 分钟（本地预估，实际取决于下游 provider） |
-| Anthropic | 5 分钟；显式请求的 TTL 优先 |
-| DeepSeek | 1 小时（本地提前提醒策略，provider 未承诺固定 TTL） |
-| 其他 provider，包括未配置 TTL 的 GLM | 30 分钟 |
+| OpenAI | 30 minutes |
+| OpenRouter | 30 minutes (local estimate; actual value depends on the downstream provider) |
+| Anthropic | 5 minutes; an explicitly requested TTL takes priority |
+| DeepSeek | 1 hour (local early-reminder policy; the provider has not committed to a fixed TTL) |
+| Other providers, including GLM without a configured TTL | 30 minutes |
 
-默认提前 5 分钟提醒，且上下文至少 32,768 tokens。未知 provider 因此在成功返回约
-25 分钟后提醒。若整个 TTL 不长于提前量，则立即进入提醒窗口。
-优先使用 provider 返回的输入 token 总量；缺失时使用本地编码估算。
-提醒状态仅在内存保存，受 coordinator 容量限制；进程重启后等待下一次成功响应。
+The reminder fires 5 minutes early by default, and only when the context is at least 32,768 tokens. Unknown providers therefore remind about
+25 minutes after a successful return. If the entire TTL is no longer than the lead time, the reminder window begins immediately.
+The input token total returned by the provider is preferred; when missing, a local encoding estimate is used.
+Reminder state is kept only in memory and subject to the coordinator capacity limit; after a process restart it waits for the next successful response.
 
-新用户活动清除旧提醒；成功回合结束后按最新响应重新安排。提醒到期会撤回，按钮仍受
-当前 epoch、过期时间、运行中回合和一次性消费校验。提醒文案明确标注“预计”。点击该
-预估提醒执行普通手动 compact；普通 compact 依照已有规则尝试合法的前缀复用，必要时走冷路径。
-预估信息不会授权严格热缓存 compact，也不保证缓存命中或节省费用。
+New user activity clears old reminders; after a successful turn ends, rescheduling follows the latest response. An expired reminder is withdrawn, and the button remains subject to
+the current epoch, expiration time, running turns, and one-time consumption validation. The reminder text explicitly marks it as an "estimate". Clicking this
+estimated reminder performs a normal manual compact; the normal compact attempts legitimate prefix reuse according to existing rules, falling back to the cold path when necessary.
+The estimate does not authorize a strict hot-cache compact, nor does it guarantee a cache hit or cost savings.
 
-只读状态与参数配置仍使用 `pal core cache-reminder show/configure`，不增加模型工具。
-这次修改包含 resident core/LLM 代码，源码更新后需要独立重启运行中的 Pal 才会加载；
-插件 reload 无法激活这些变更。此次实现未重启在线实例，也未修改运行配置。
+Read-only status and parameter configuration still use `pal core cache-reminder show/configure`, with no new model tools added.
+This change includes resident core/LLM code; after the source is updated, running Pal instances must be restarted independently to load it;
+plugin reload cannot activate these changes. This implementation did not restart online instances and did not modify the running configuration.
 
-策略依据：[OpenAI 缓存文档](https://developers.openai.com/api/docs/guides/prompt-caching)、
-[Anthropic 缓存文档](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)、
-[DeepSeek 缓存文档](https://api-docs.deepseek.com/guides/kv_cache/)、
-[OpenRouter 缓存文档](https://openrouter.ai/docs/guides/best-practices/prompt-caching)。
-这些文档描述 provider 行为；上表的调度估计不是 provider 的保留承诺。
+Policy basis: [OpenAI caching documentation](https://developers.openai.com/api/docs/guides/prompt-caching),
+[Anthropic caching documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+[DeepSeek caching documentation](https://api-docs.deepseek.com/guides/kv_cache/),
+[OpenRouter caching documentation](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+These documents describe provider behavior; the scheduling estimates in the table above are not retention commitments by the providers.

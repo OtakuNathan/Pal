@@ -2,7 +2,10 @@
 
 These reports and structured results describe the original review checkouts.
 They do not establish a regression result for the current source. Historical
-commands, absolute paths and log references in the reports remain unchanged.
+commands, absolute paths and log references in the reports retain their original
+scope. Human-readable reports are English translations; structured evidence and
+raw-output checksums remain unchanged. Original report wording is available in
+Git history.
 
 The review findings are recorded in `review.txt`, `nightly_review.txt`,
 `deep_review.txt`, `comprehensive_review.txt` and `precommit_review.txt`.

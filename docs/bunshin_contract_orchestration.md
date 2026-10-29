@@ -1,6 +1,9 @@
 # Bunshin Contract-Driven Orchestration
 
-Status: active clean cutover as of 2026-07-30.
+Status: current Task/workflow contract. The clean cutover was completed on
+2026-07-30; subsequent direct-mode, input-binding, recovery and verified-delivery
+behavior is included below. The August public-proof failure remains historical
+evidence and does not describe current workflow readiness.
 
 Bunshin is a contract graph executor. A Family selects the problem domain and
 pins one Architect, Reviewer, Implementation, and Verifier binding. The graph

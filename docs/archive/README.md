@@ -15,10 +15,13 @@ or deployment belong to the work described in each report. Use the
 | Tool efficiency | [2026-09-23 affordance audit](tool_efficiency/tool_affordance_audit_20260923.md), [Petra sample](tool_efficiency/tool_efficiency_sample_20260923_petra.md), [2026-09-24 sample](tool_efficiency/tool_efficiency_sample_20260924.md), [2026-09-27 audit](tool_efficiency/tool_efficiency_audit_20260927.md), [harness validation](tool_efficiency/harness_efficiency_validation.md) |
 | Tool contract review | [Original review](tool_contract_review/Pal_tool_contract_review.txt), [remediation record](tool_contract_review/pal_tool_contract_review_status.txt) |
 
-The original tool-contract review is preserved byte-for-byte. The archived
-Markdown reports carry historical-status notices and updated document links.
-Original implementation paths, line references and commands inside historical
-reports remain evidence of their original checkout.
+Human-readable reports are maintained as English translations, including the
+original tool-contract review. Their original wording remains available in Git
+history. Translation does not turn a historical finding into a current status
+claim: dates, source revisions, implementation paths, commands and reported
+results retain their original scope. Machine-readable evidence and relocated
+raw test outputs are not translated; recorded checksums still identify those
+original captures, not the English rendering of a report.
 
 Formal models, implementation contract matrices and public-proof evidence remain
 with their owning directories under `spec/`, `docs/llm_projection_refactor/` and

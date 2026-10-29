@@ -1,5 +1,11 @@
 # 2026-08-14 Pal Public Proof Dogfood
 
+> Historical evidence from the named run and revision. The failure below is not
+> current Bunshin status. Current Task/workflow behavior is documented in
+> [orchestration](../../bunshin_contract_orchestration.md) and
+> [direct mode](../../bunshin_direct_mode.md). The captured JSON records remain
+> unchanged; Markdown views use English display text.
+
 This directory preserves two metadata-only captures from one real workflow:
 
 - [`recovery-checkpoint.md`](recovery-checkpoint.md) was captured after the

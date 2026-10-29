@@ -1,113 +1,113 @@
-# P0 BASELINE — refactor/full-context-compaction-v2（合并树）
+# P0 BASELINE — refactor/full-context-compaction-v2 (merge tree)
 
 > Historical record, archived on 2026-10-05 from `BASELINE.md`.
 > Statements about implementation, deployment and test results describe the
 > original work, not the current checkout or running host. See the
 > [current documentation index](../../README.md).
 
-生成：2026-09-19（Pal 实施者）。依据 `pal_compaction_handoff_v2` HANDOFF P0 要求。
-本文件只记录已核实事实；「现成/需改/未接」判定以 HANDOFF §12 语义为准。
+Generated: 2026-09-19 (Pal implementer). Per the P0 requirements of the `pal_compaction_handoff_v2` HANDOFF.
+This file records only verified facts; the "ready/needs change/not connected" verdicts follow the HANDOFF §12 semantics.
 
-## 1. 环境
+## 1. Environment
 
-| 项 | 值 |
+| Item | Value |
 |---|---|
 | worktree | `/home/nathan/Documents/coding/Pal-full-compaction-v2` |
-| 分支 | `refactor/full-context-compaction-v2` |
-| 基线 | `0e33220e75c9bd011ac06005517161bded66c4e8`（origin/refactor/llm-projection-session-v2，已核对一致） |
-| main 合并 | `4daab5f086d5b08753cb254fa7ed2f222874516e`（origin/main，已核对一致） |
+| Branch | `refactor/full-context-compaction-v2` |
+| Base | `0e33220e75c9bd011ac06005517161bded66c4e8` (origin/refactor/llm-projection-session-v2, verified identical) |
+| main merge | `4daab5f086d5b08753cb254fa7ed2f222874516e` (origin/main, verified identical) |
 | merge commit | `614529e347de03719ee00d6ef3b55fa743555def` |
 | merge tree | `4a47e242f8b96c8db2c796ffcf9d08d5f3b83012` |
-| merge 冲突 | 无（ort 干净合并；main 侧 5 文件：telegram endpoint/provider/pyproject、turn_executor 2 行删除、bootstrap 测试 +186 行） |
-| Python | 3.13.5（系统解释器） |
+| merge conflicts | none (clean ort merge; main side 5 files: telegram endpoint/provider/pyproject, turn_executor 2-line deletion, bootstrap tests +186 lines) |
+| Python | 3.13.5 (system interpreter) |
 | pytest | 9.0.3 |
 | `pal.__file__` | `/home/nathan/Documents/coding/Pal-full-compaction-v2/src/pal/__init__.py` |
-| 测试命令 | `cd <worktree> && PYTHONPATH=$PWD/src python3 -m pytest tests/test_X.py -q`（worktree 内一切测试必须 PYTHONPATH=$PWD/src） |
-| 测试文件数 | 153 |
+| Test command | `cd <worktree> && PYTHONPATH=$PWD/src python3 -m pytest tests/test_X.py -q` (all tests inside the worktree must use PYTHONPATH=$PWD/src) |
+| Number of test files | 153 |
 
-## 2. P0 五问结论（HANDOFF「先执行P0」第4条）
+## 2. P0 five-question conclusions (HANDOFF "execute P0 first" item 4)
 
-### 2.1 actual durable inbox / ACK —— 缺位，需新增
+### 2.1 actual durable inbox / ACK — missing, must be added
 
-- 入口队列 = `core/runtime.py::pending_channel_turns`（内存 deque；`_schedule_admitted_channel_turn_async` L823-844 busy 时 append，L842）。
-- 出队 = `_start_next_queued_turn_async` L793-806（持 `channel_turn_transition_lock`，查 `resident_quiescing` + active）。
-- 插话注入 = `core/interjection.py::inject_pending_interjection_async` L14-138：初次 snapshot 持锁（L28-31），最终 append+ack 重取锁并复查队列头身份（L82-108），append 幂等按 message_id，异常后用 `contains_l1_message`/active turn 兜底判「已提交」（L174-205）。
-- **没有任何 durable staging**：进程崩溃即丢 pending；没有独立 event receipt 表——判重依赖 L1 中原文存在，compact 把原文压掉后跨重启判重失效（Q08/R03 直接命中的缺口）。
-- 结论：需在现有持久化设施上加最小 staging/receipt（不允许新消息总线）。可用挂点：`RuntimeSnapshotCoordinator`（见 2.2）或 memory 模块既有持久层；P1 定方案。
+- Ingress queue = `core/runtime.py::pending_channel_turns` (in-memory deque; `_schedule_admitted_channel_turn_async` appends when busy at L823-844, L842).
+- Dequeue = `_start_next_queued_turn_async` L793-806 (holds `channel_turn_transition_lock`, checks `resident_quiescing` + active).
+- Interjection injection = `core/interjection.py::inject_pending_interjection_async` L14-138: initial snapshot under lock (L28-31), final append+ack re-acquires the lock and re-checks queue-head identity (L82-108), append is idempotent by message_id, and on exception it falls back to `contains_l1_message`/active turn to judge "already committed" (L174-205).
+- **There is no durable staging whatsoever**: a process crash loses pending items; there is no separate event receipt table — dedup relies on the original text existing in L1, and once compaction compresses the original text away, cross-restart dedup breaks (the gap hit directly by Q08/R03).
+- Conclusion: a minimal staging/receipt must be added on top of the existing persistence facilities (no new message bus allowed). Possible hooks: `RuntimeSnapshotCoordinator` (see 2.2) or the memory module's existing persistence layer; the plan is decided in P1.
 
-### 2.2 runtime snapshot 根 —— 骨架现成，install 级原子性需接线验证
+### 2.2 runtime snapshot root — skeleton exists, install-level atomicity needs wiring and verification
 
-- `core/runtime_state.py`：`RuntimeStatePort`（snapshot/prepare/install/reset 四方法，L13-27）；`RuntimeSnapshotIdentity` 含 `incarnation`/`sequence`/`producer_fencing_token`（L32-64，防 ABA 的身份已有）；`RuntimeSnapshotCoordinator.snapshot/restore/reset`（L66-118），restore 逐模块 schema+身份校验 fail-closed（L85-116，`validate_runtime_snapshot` L152）。
-- memory 模块 port：`memory/runtime_state.py::MemoryRuntimeStatePort`（L28-139）——快照/恢复 l1_turns（含 per-turn revision/state）+ l2 entries + top_of_mind + heat。
-- 调用方：`runtime_app.py` L161/L221（应用级 save/restore）、`core/runtime.py` L1665（soft reset）、`bunshin/runner.py` L2883（worker 级）。
-- 结论：durable root 骨架现成；「seed+新空段+epoch+receipt 一次原子提交」所需的单事务多字段写入在 coordinator 层可行，但当前 compact install 路径（见 2.3/§3）完全没走它——P2 需把 install 接到该根并验证原子性。
+- `core/runtime_state.py`: `RuntimeStatePort` (snapshot/prepare/install/reset, four methods, L13-27); `RuntimeSnapshotIdentity` contains `incarnation`/`sequence`/`producer_fencing_token` (L32-64, the anti-ABA identity already exists); `RuntimeSnapshotCoordinator.snapshot/restore/reset` (L66-118), restore validates each module's schema+identity fail-closed (L85-116, `validate_runtime_snapshot` L152).
+- memory module port: `memory/runtime_state.py::MemoryRuntimeStatePort` (L28-139) — snapshots/restores l1_turns (including per-turn revision/state) + l2 entries + top_of_mind + heat.
+- Callers: `runtime_app.py` L161/L221 (application-level save/restore), `core/runtime.py` L1665 (soft reset), `bunshin/runner.py` L2883 (worker level).
+- Conclusion: the durable root skeleton exists; the single-transaction multi-field write needed for "seed + new empty segment + epoch + receipt committed atomically in one shot" is feasible at the coordinator layer, but the current compact install path (see 2.3/§3) does not go through it at all — P2 must wire install to that root and verify atomicity.
 
-### 2.3 epoch owner —— memory 级 context epoch 不存在，需新增单字段
+### 2.3 epoch owner — memory-level context epoch does not exist, a single field must be added
 
-- projection 侧已有完整 fencing：`llm/projection_checkpoint.py` 的 `history_epoch`（frontier 与 L1 cursor 一致性校验 L224-237）+ `owner_fence`（现值与历史 receipt 源 fence 分离，L90-93/429-490，B4/C2 已加固）。
-- 但 projection 的 epoch 语义是「投影 cursor 代」，不是 memory owner 的语义上下文代。`memory/service.py::compact`（L512-561）与 `compact_transactionally`（L563-584）无 epoch 概念；`L1TurnStore.replace_all`（`memory/turn_ir.py` L459-473）无容器级 CAS（只有 per-turn `replace` 强制 revision 递增 L441-447、`restore_turn` expected 校验 L449-457）。
-- 结论：按 PLAN §2 在 memory checkpoint 根加**一个**整型 context epoch（成功安装+1、reset 换身份），复用 RuntimeSnapshotIdentity.incarnation 防 epoch=0 ABA；不得在 executor/summary/provider 各造一套。
+- The projection side already has complete fencing: `history_epoch` in `llm/projection_checkpoint.py` (frontier vs. L1 cursor consistency check L224-237) + `owner_fence` (current value separated from historical receipt source fences, L90-93/429-490, hardened in B4/C2).
+- But the projection epoch semantics is "projection cursor generation", not the memory owner's semantic context generation. `memory/service.py::compact` (L512-561) and `compact_transactionally` (L563-584) have no epoch concept; `L1TurnStore.replace_all` (`memory/turn_ir.py` L459-473) has no container-level CAS (only per-turn `replace` enforcing revision increments L441-447 and `restore_turn` expected checks L449-457).
+- Conclusion: per PLAN §2, add **one** integer context epoch to the memory checkpoint root (+1 on successful install, identity change on reset), reusing RuntimeSnapshotIdentity.incarnation to guard against epoch=0 ABA; do not build a separate one in executor/summary/provider.
 
-### 2.4 final provider payload capture —— resident idle 段现成，active cut 段缺位
+### 2.4 final provider payload capture — resident idle segment exists, active cut segment missing
 
-- `turn_executor.py::_resident_compaction_replay_request`（L2041-2113）：读 `llm_runtime.prompt_cache_confirmed_anchor_request`，continuity_id 校验后，从 `build_pack(include_l1_recent_context=False)` 的 **settled** turns 投影 anchor 之后缀消息——active turn 完全不在 suffix（W02/F10 缺口属实）。
-- 触发条件 `logical_scope_id == "pal:resident" and continuation is None`（L1915）——即只有 resident idle 手动路径有 warm replay。
-- hot-gated：`cache_warm_deadline.claim_compaction(cache_epoch)`（runtime.py L1698）+ engine `replay_guard`（L2014-2026，TTL/epoch 复查）——hot-only 不偷转 cold 的骨架已在。
-- 前缀/覆盖双证明（PrefixProof/CoverageProof）不存在；实际最终 payload 级对比（tools/thinking/hooks 不变性）无捕获点。P3 需加 after-hook final payload capture。
-- `_scope_safe_snapshot`（compaction.py L188-200）已做：剥离 pal_authored developer context、replay 内过期指令直接弃 warm。
+- `turn_executor.py::_resident_compaction_replay_request` (L2041-2113): reads `llm_runtime.prompt_cache_confirmed_anchor_request`, validates continuity_id, then projects the suffix messages after the anchor from the **settled** turns of `build_pack(include_l1_recent_context=False)` — the active turn is entirely absent from the suffix (the W02/F10 gap is real).
+- Trigger condition `logical_scope_id == "pal:resident" and continuation is None` (L1915) — i.e., only the resident idle manual path has warm replay.
+- hot-gated: `cache_warm_deadline.claim_compaction(cache_epoch)` (runtime.py L1698) + engine `replay_guard` (L2014-2026, TTL/epoch recheck) — the hot-only skeleton that does not steal cold is already in place.
+- Prefix/Coverage dual proof (PrefixProof/CoverageProof) does not exist; there is no capture point for actual final payload-level comparison (tools/thinking/hooks invariance). P3 must add an after-hook final payload capture.
+- `_scope_safe_snapshot` (compaction.py L188-200) already: strips pal_authored developer context and discards warm replay entirely if stale instructions are inside the replay.
 
-### 2.5 Bunshin scope gate —— 单任务 worker 自洽，跨 scope coordinator 需 scope 化
+### 2.5 Bunshin scope gate — single-task worker self-consistent, cross-scope coordinator needs scoping
 
-- `bunshin/runner.py`：worker 用独立 TurnExecutor + `BunshinCompactionPolicy`（L1517）、`compaction_clock_provider=llm_round_count`（L1518）；compaction purpose 请求跳过 llm_round 计数/心跳（`is_compaction` L259-279，满足「compact 请求不计成普通工具轮」）。
-- scope 身份：`control_scope_key=f"bunshin:{run_id}"`（L872/876）；compact_memory_async 的 scope 解析已分 `pal:resident`/`bunshin:<id>`（executor L1880-1893）。
-- 缺：coordinator/ticket 尚不存在（本轮新增），设计时按 scope 键隔离（I17/Q15）；Manager proxy 无明文 private checkpoint 通道的现状保持。
+- `bunshin/runner.py`: workers use an independent TurnExecutor + `BunshinCompactionPolicy` (L1517), `compaction_clock_provider=llm_round_count` (L1518); compaction-purpose requests skip llm_round counting/heartbeat (`is_compaction` L259-279, satisfying "compact requests are not counted as ordinary tool rounds").
+- Scope identity: `control_scope_key=f"bunshin:{run_id}"` (L872/876); compact_memory_async's scope resolution already distinguishes `pal:resident`/`bunshin:<id>` (executor L1880-1893).
+- Missing: coordinator/ticket does not yet exist (added this round); design it with isolation by scope key (I17/Q15); keep the status quo that the Manager proxy has no plaintext private checkpoint channel.
 
-## 3. HANDOFF §12 接线地图逐行判定
+## 3. Line-by-line verdicts on the HANDOFF §12 wiring map
 
-| 行 | 实际位置（本树行号） | 判定 |
+| Line | Actual location (line numbers in this tree) | Verdict |
 |---|---|---|
-| `agent_turn_program` | turns.py L231-309：preflight advice COMPACT_REQUIRED（L245）与 finish_reason COMPACT_REQUIRED（L281）双触发；`compact_generation_count>=3` 上限（L246/282）；MemoryCompactEffect L93 | 现成；需改：safe-round 触发点接 `_after_tool_batch_async` 边界、epoch 变化不清计数的问题按 I11 处理 |
-| `_handle_llm_preflight` | turn_executor.py L160-202：`_is_hard_budget_overflow` → `context_budget_exhausted` 失败信号（L180-201，文案即「active 不能压」旧语义） | 需改：拆「不可压缩底座超窗」vs「active 可压缩超窗」，预留交接余量（B01/B02） |
-| `_handle_memory_compact`/`compact_memory_async` | executor L204-268 / L1837-2039（claim/snapshot/generate/install/release 目前全内联在 engine.run，无 ticket/gate） | 需改：抽共用入口+ticket（本包核心）；L1 要求 `_ensure_l1_turn_async` settled 才继续（L206-218，round-safe 的一部分） |
-| `_resident_compaction_replay_request` | executor L2041-2113 | 需改：覆盖 active cut 的 anchor+suffix、显式 prefix/coverage proof（W01-W03） |
-| `core/compaction.py` | capture L84-128（active 过滤 L102-113）；engine.run L214+（max_attempts=3/timeout180s/max_output 64k）；`_shrink` L635-664（pop(0) 头部丢 unit——「静默缩源」现行行为）；`_commit` L667-720（acompact_transactionally+after_commit=retire diff L1984-2012） | 需改：capture 含 active、source stamp、warm 配置继承；**禁止** _shrink 用于全压安装（S03：source_too_large） |
-| `memory/service.py` / contracts | compact L512-561（`replace_all([summary_turn, *active_turns])` L543——active 原文保留）；compact_transactionally L563-584（内存回滚，非 durable CAS） | 需改：source-aware install、新空段+revision+epoch、receipt、durable 接线（§2.2/2.3） |
-| `memory/turn_ir.py` / continuity | replace L441-447 / restore_turn L449-457 / replace_all L459-473；`_close_incomplete` L257+（interrupt 共用闭合 normalize） | 现成：闭合/回滚/revision 语义可复用；需改：容器级换代 CAS、fresh 段 metadata 白名单复制（F24） |
-| `core/runtime.py` / ingress | 队列 L823-844、出队 L793-806、manual compact L1687-1773（双查 active L1690/1714 但 **claim 与检查不同临界区**——A08/F01 竞态属实）、reset quiesce L1645-1685（`resident_quiescing` bool，finally 无条件 False——Q13/F08 命中现有反模式） | 需改：manual 原子 claim、start gate、release 后 drain、stop/reset 优先（P1 主体） |
-| `core/interjection.py` | snapshot L28-31 + 最终临界区 L82-108（结构上正是「两处查门」要的形状，只差 ticket 检查） | 需改：两处加同 ticket 门（Q03/Q04）；不重造 |
-| `bunshin/runner.py` | is_compaction L259-279、policy L1517、coordinator L2883 | 需改：同一 coordinator、role scope gate、checkpoint 恢复接 epoch（P4） |
-| runtime_state / checkpoint ports | 见 §2.2 | 需接线：install 原子根（P2）、pending inbox 恢复（P4） |
-| cache tracker / projection owner | `prompt_cache_confirmed_anchor_request`/`cache_warm_deadline`（claim_compaction/clear_for_compaction/ignore） | 现成（idle hot 流程）；需改：handoff 独立 consumer、安装后失效旧 lineage（W08）、anchor 覆盖 active（P3） |
+| `agent_turn_program` | turns.py L231-309: preflight advice COMPACT_REQUIRED (L245) and finish_reason COMPACT_REQUIRED (L281) dual triggers; `compact_generation_count>=3` cap (L246/282); MemoryCompactEffect L93 | ready; needs change: wire the safe-round trigger point to the `_after_tool_batch_async` boundary, and handle the issue that the count is not cleared on epoch change per I11 |
+| `_handle_llm_preflight` | turn_executor.py L160-202: `_is_hard_budget_overflow` → `context_budget_exhausted` failure signal (L180-201, the wording is the old "active cannot be compacted" semantics) | needs change: split "incompressible base over-window" vs "active compressible over-window", reserving handoff headroom (B01/B02) |
+| `_handle_memory_compact`/`compact_memory_async` | executor L204-268 / L1837-2039 (claim/snapshot/generate/install/release are currently all inlined in engine.run, no ticket/gate) | needs change: extract a shared entry + ticket (the core of this package); L1 requires `_ensure_l1_turn_async` to be settled before continuing (L206-218, part of round-safety) |
+| `_resident_compaction_replay_request` | executor L2041-2113 | needs change: cover the active cut's anchor+suffix, explicit prefix/coverage proof (W01-W03) |
+| `core/compaction.py` | capture L84-128 (active filtering L102-113); engine.run L214+ (max_attempts=3/timeout180s/max_output 64k); `_shrink` L635-664 (pop(0) drops head units — the current "silent source-shrinking" behavior); `_commit` L667-720 (acompact_transactionally+after_commit=retire diff L1984-2012) | needs change: capture includes active, source stamp, warm config inheritance; **forbid** _shrink for full-compaction install (S03: source_too_large) |
+| `memory/service.py` / contracts | compact L512-561 (`replace_all([summary_turn, *active_turns])` L543 — active original text preserved); compact_transactionally L563-584 (in-memory rollback, not durable CAS) | needs change: source-aware install, new empty segment + revision + epoch, receipt, durable wiring (§2.2/2.3) |
+| `memory/turn_ir.py` / continuity | replace L441-447 / restore_turn L449-457 / replace_all L459-473; `_close_incomplete` L257+ (closing normalize shared with interrupt) | ready: the closing/rollback/revision semantics are reusable; needs change: container-level generation CAS, fresh-segment metadata whitelist copy (F24) |
+| `core/runtime.py` / ingress | queue L823-844, dequeue L793-806, manual compact L1687-1773 (double-checks active L1690/1714 but **claim and check are in different critical sections** — the A08/F01 race is real), reset quiesce L1645-1685 (`resident_quiescing` bool, unconditionally False in finally — Q13/F08 hits this existing anti-pattern) | needs change: manual atomic claim, start gate, drain after release, stop/reset priority (P1 main body) |
+| `core/interjection.py` | snapshot L28-31 + final critical section L82-108 (structurally exactly the shape the "two-gate checks" want, only missing the ticket check) | Needs change: add the same ticket gate in both places (Q03/Q04); do not rebuild |
+| `bunshin/runner.py` | is_compaction L259-279, policy L1517, coordinator L2883 | Needs change: same coordinator, role scope gate, checkpoint restore tied to epoch (P4) |
+| runtime_state / checkpoint ports | see §2.2 | Needs wiring: install atomic root (P2), pending inbox restore (P4) |
+| cache tracker / projection owner | `prompt_cache_confirmed_anchor_request`/`cache_warm_deadline` (claim_compaction/clear_for_compaction/ignore) | Ready-made (idle hot flow); needs change: handoff as an independent consumer, invalidate the old lineage after install (W08), anchor override of active (P3) |
 
-## 4. 现行行为基线（改动前语义快照）
+## 4. Current Behavior Baseline (Semantic Snapshot Before Changes)
 
-- capture 排除 active turn（compaction.py L102-113）；install 保留 active 原文（service.py L543）——即「全量换代」两端都未实现。
-- manual compact 仅 idle（runtime.py L1690/1714 busy 拒绝）；hot 提醒 hot-only（L1696-1713 + replay_guard）。
-- auto compact 在 turn 内经 preflight/finish_reason 双触发，3 次上限/turn。
-- compact 请求 purpose 标记使 Bunshin 不计轮次；resident 无此区分（时钟 kind=USER_TURN）。
-- 退役 tool results：install 成功后按 call_id 差集 `retire_tool_results`（executor L1984-2012，经 after_commit 事务边界）。
-- 成功后 `clear_execution_cursors(continuation)`（L2038）。
+- capture excludes the active turn (compaction.py L102-113); install preserves the active turn's original text (service.py L543) — i.e., "full generational replacement" is unimplemented at both ends.
+- manual compact only when idle (runtime.py L1690/1714 rejects when busy); hot reminders are hot-only (L1696-1713 + replay_guard).
+- auto compact triggers within a turn via both preflight/finish_reason, capped at 3 per turn.
+- compact request purpose marking makes Bunshin not count rounds; resident has no such distinction (clock kind=USER_TURN).
+- Retiring tool results: after install succeeds, `retire_tool_results` by call_id set difference (executor L1984-2012, via the after_commit transaction boundary).
+- After success, `clear_execution_cursors(continuation)` (L2038).
 
-## 5. 已知失败 / 环境项（合并树组合基线跑前声明）
+## 5. Known Failures / Environment Items (Declared Before Running the Merged-Tree Composite Baseline)
 
-沿用 0e33220 全量回归已定性的两枚环境项：
-1. `tests/test_package_installation*.py`：setuptools 环境性 fail（基线已知）。
-2. `tests/test_tool_schema_properties.py`：缺 `hypothesis_jsonschema`，EXIT 5（基线已知）。
-3. `tests/test_bootstrap_and_repositories.py` 固有 >10 分钟（每 test 全量 provision runtime），per-file timeout 需 ≥1800s。
+Carrying over the two environment items already characterized by the 0e33220 full regression:
+1. `tests/test_package_installation*.py`: environmental setuptools fail (known baseline).
+2. `tests/test_tool_schema_properties.py`: missing `hypothesis_jsonschema`, EXIT 5 (known baseline).
+3. `tests/test_bootstrap_and_repositories.py` inherently takes >10 minutes (full runtime provision per test); per-file timeout must be ≥1800s.
 
-## 6. 组合基线回归结果
+## 6. Composite Baseline Regression Results
 
-命令：per-file 隔离 `PYTHONPATH=$PWD/src python3 -m pytest tests/test_<name>.py -q`，每文件 timeout 600s（bootstrap 1800s），日志 `/tmp/fullcomp_v2_baseline.log`。
+Command: per-file isolated `PYTHONPATH=$PWD/src python3 -m pytest tests/test_<name>.py -q`, timeout 600s per file (1800s for bootstrap), log `/tmp/fullcomp_v2_baseline.log`.
 
-状态：**DONE（2026-09-19，套件在 61c87db 修复前跑完，修复后受影响面复跑全绿）**。
+Status: **DONE (2026-09-19; the suite finished before the 61c87db fix, and the affected scope was re-run all green after the fix)**.
 
-- 157 文件全部执行完毕：**2743 passed + 461 subtests passed，3 failed**。
-- 非 PASS 文件 4 个，全部可归因：
-  1. `test_architecture_skeleton`（1 failed）→ 真 bug①：`_round_safe_for_compaction` 的 `has_open_round` 检查在真实 auto 路径上永真（L1 流式簿记在终端响应后仍开）→ auto claim 永拒。**61c87db 修复**（删该准入检查，保留 store 方法），复跑绿。
-  2. `test_runtime_stability`（1 failed）→ 真 bug②：P1 注入在 turn 首个 preflight 即吸干同 scope burst 队列（与 `inject_pending_interjection_async` docstring 的 "after a tool batch" 语义不符），合成 prompt 触发 compact_required，stub 端点无法产出 compact JSON → 单条 recovery 回复。**61c87db 修复**（注入 admission 加 `llm_round_index >= 1`；compact 后 `_after_compaction` drain 不变），复跑绿。
-  3. `test_package_installation`（1 failed）→ §5 环境项①，基线已知。
-  4. `test_tool_schema_properties`（EXIT 5）→ §5 环境项②，基线已知（缺 hypothesis_jsonschema，收集失败不计 failed）。
-- 修复验证（61c87db 后受影响面复跑）：stability + interjection_injection + compaction_gate + architecture_skeleton = 167 passed；full_compaction_source + warm_handoff + control_plane + cache_wire + memory_l1_ir_service = 125 passed。
-- `test_bootstrap_and_repositories` 141 passed / ~13min，timeout 1800s 下正常完成。
-- 两枚真 bug 均为直连内部方法的单元/barrier 测试无法发现、只有 process_channel_turn 全链路形态逼出的接线缺陷（同族：P4 已修的 waiting_effect_id 自我拒绝）。
-- 剩余已知缺口（对应 acceptance NOT_RUN 项）：无——P6（2026-09-20，c47d79c..14a3918 共 11 提交）把 25 项 NOT_RUN 全部实现或钉测完毕，acceptance 108/108 PASS；P6 收尾全复跑（15 文件含 stability/architecture_skeleton）286 passed。E05 基准数字：800 项 capture 57.8ms；5000 项全压 612.9ms 总/RSS +7.2MB；500 次 durable admission 8330ms（fsync 主导）。durable outbox（崩溃窗口完全封闭）与目标机重测 E05 仍是待拍板项。
+- All 157 files finished running: **2743 passed + 461 subtests passed, 3 failed**.
+- 4 non-PASS files, all attributable:
+  1. `test_architecture_skeleton` (1 failed) → real bug ①: the `has_open_round` check in `_round_safe_for_compaction` was always true on the real auto path (L1 streaming bookkeeping still open after terminal response) → auto claim always rejected. **Fixed in 61c87db** (removed that admission check, kept the store method); re-run green.
+  2. `test_runtime_stability` (1 failed) → real bug ②: P1 injection drained the same-scope burst queue at the turn's first preflight (inconsistent with the "after a tool batch" semantics of the `inject_pending_interjection_async` docstring); the synthetic prompt triggered compact_required, and the stub endpoint could not produce compact JSON → a single recovery reply. **Fixed in 61c87db** (injection admission now adds `llm_round_index >= 1`; the `_after_compaction` drain after compact unchanged), re-run green.
+  3. `test_package_installation` (1 failed) → §5 environment item ①, known baseline.
+  4. `test_tool_schema_properties` (EXIT 5) → §5 environment item ②, known baseline (missing hypothesis_jsonschema; collection failure not counted as failed).
+- Fix verification (affected scope re-run after 61c87db): stability + interjection_injection + compaction_gate + architecture_skeleton = 167 passed; full_compaction_source + warm_handoff + control_plane + cache_wire + memory_l1_ir_service = 125 passed.
+- `test_bootstrap_and_repositories` 141 passed / ~13min, completed normally under a 1800s timeout.
+- Both real bugs are wiring defects that unit/barrier tests calling internal methods directly could not find — only the full process_channel_turn chain could force them out (same family: the waiting_effect_id self-rejection already fixed in P4).
+- Remaining known gaps (corresponding to acceptance NOT_RUN items): none — P6 (2026-09-20, 11 commits from c47d79c..14a3918) implemented or pin-tested all 25 NOT_RUN items; acceptance 108/108 PASS; P6 wrap-up full re-run (15 files including stability/architecture_skeleton) 286 passed. E05 benchmark numbers: 800-item capture 57.8ms; 5000-item full sweep 612.9ms total / RSS +7.2MB; 500 durable admissions 8330ms (fsync-dominated). Durable outbox (crash window fully closed) and E05 re-test on the target machine remain pending decisions.

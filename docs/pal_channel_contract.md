@@ -1,25 +1,25 @@
 # Pal Channel Contract
 
-> 目标：定义 `channel` 子系统的职责、交互契约，以及 IM 场景下的 ingress acknowledgement UX。
+> Goal: define the responsibilities and interaction contract of the `channel` subsystem, plus the ingress acknowledgement UX in IM scenarios.
 
-## 目标
+## Goals
 
-`channel` 子系统负责：
+The `channel` subsystem is responsible for:
 
-- 接收外部输入
-- 归一化输入
-- 为 `Pal Core` 创建标准 envelope
-- 根据 channel 规则发送最终回复
-- 维护用户可理解的接收中与处理中反馈
-- 提供 channel-owned interaction realization
+- receiving external input
+- normalizing input
+- creating standard envelopes for `Pal Core`
+- sending final replies according to channel rules
+- maintaining user-comprehensible receiving and processing feedback
+- providing channel-owned interaction realization
 
-它不负责：
+It is NOT responsible for:
 
 - agent reasoning
-- memory 逻辑
-- capability 执行
-- control 决策
-- 决定某个平台的交互 UI 应该长什么样
+- memory logic
+- capability execution
+- control decisions
+- letting Core/Control decide a platform's interaction UI (realization is owned by the channel provider)
 
 ## Owns
 
@@ -37,8 +37,8 @@
 
 ## Does Not Own
 
-- prompt 组装
-- llm provider 调用
+- prompt assembly
+- llm provider invocation
 - memory lifecycle
 - capability routing
 - tool execution
@@ -62,57 +62,57 @@ Rules:
 
 For the full managed artifact lifecycle, see [artifact_manager.md](artifact_manager.md).
 
-## 简化结论
+## Simplified Conclusion
 
-`channel` 在新架构中的统一形状应尽量简单。
+The unified shape of `channel` in the new architecture should be kept as simple as possible.
 
-它只需要做到：
+It only needs to:
 
-1. 从外部世界收消息
-2. normalize 成统一 `ChannelEnvelope`
-3. 投递到 mailbox
-4. 在 envelope 自带的 respond/status 接口上完成回复
+1. receive messages from the external world
+2. normalize them into a unified `ChannelEnvelope`
+3. deliver them to the mailbox
+4. route replies/status through the envelope's response handle, completed by the runtime/endpoint queue
 
-换句话说：
+In other words:
 
-- `Pal Core` 不应理解 Telegram、stdio 等平台细节
-- `channel` 也不应反过来承担业务推理
-- 如需写 ingress / egress log，应由具体 channel 实例自己完成
-- 不再需要把 channel route durability 做成 memory 或 core 的一等真相源
-- 交互可以是统一概念，但具体 realization 必须留给 channel provider
+- `Pal Core` should not understand platform details such as Telegram or stdio
+- `channel` should not, in turn, carry business reasoning
+- if ingress / egress logs need to be written, the concrete channel instance should do it itself
+- channel route durability no longer needs to be a first-class source of truth in memory or core
+- interaction can be a unified concept, but the concrete realization must be left to the channel provider
 
-## 核心对象
+## Core Objects
 
 ### `ChannelEndpointProviderManager`
 
-`ChannelEndpointProviderManager` 是 channel 子系统对 core、execution 和 LLM 暴露的统一入口。
+`ChannelEndpointProviderManager` is the unified entry point that the channel subsystem exposes to core, execution, and LLM.
 
-它负责：
+It is responsible for:
 
-- 注册 builtin channel provider
-- 扫描 runtime root 中的 channel provider
-- 将 endpoint 解析到负责它的 provider
-- 暴露 provider / endpoint introspection capability
-- 将 attach、detach、restart、reload 这类管理动作转发给 provider
+- registering builtin channel providers
+- receiving channel extensions installed by PluginHost, and maintaining provider registration and Hub topology
+- resolving endpoints to the provider that owns them
+- exposing the provider / endpoint introspection capability
+- forwarding endpoint attach, detach, restart, and introspection to providers; provider code reload belongs to PluginHost
 
-它不负责：
+It is NOT responsible for:
 
-- 直接实现 Telegram、socket、stdio 或任何具体平台行为
-- 决定某个 channel 的交互 UI 形态
-- 持有 channel secret 的业务含义
-- 绕过 provider 直接创建 platform SDK client
+- directly implementing Telegram, socket, stdio, or any concrete platform behavior
+- deciding the interaction UI form of a channel
+- holding the business meaning of channel secrets
+- bypassing providers to directly create platform SDK clients
 
-推荐心智模型是：
+The recommended mental model is:
 
-- manager 是统一注册表与 LLM 可见管理入口
-- provider 是 endpoint 的实际 owner
-- endpoint 是数据库中可持久化、可 attach 的 channel 实例
+- the manager is the unified registry and the LLM-visible management entry point
+- the provider is the actual owner of an endpoint
+- the endpoint is a persistable, attachable channel instance in the database
 
 ### `ChannelProvider`
 
-每个 channel provider 必须拥有自己的 endpoint lifecycle 和 introspection 语义。
+Each channel provider must own its own endpoint lifecycle and introspection semantics.
 
-Provider 至少应表达：
+A provider should express at least:
 
 - `provider_id`
 - `endpoint_types`
@@ -125,23 +125,37 @@ Provider 至少应表达：
 - `inspect_backlog(endpoint_id, context)`
 - `inspect_health(endpoint_id, context)`
 
-Runtime-root provider 还可以实现代码生命周期级 `attach(context)` /
-`detach(context)`，或在 build context 上调用 `register_cleanup(callback)`。
-这些资源由 manager 以 RAII 方式管理：加载时建立资源，卸载时逆序清理；
-进程正常 shutdown 也必须经过同一边界。
+A runtime-root provider can also implement code lifecycle-level `attach(context)` /
+`detach(context)`, or call `register_cleanup(callback)` on the build context.
+These resources are managed by the PluginHost generation in a RAII fashion; the manager is responsible for wiring the channel
+contribution into the resident Hub. Both unloading and graceful shutdown must go through the same cleanup boundary.
 
-这些方法返回统一 `IntrospectionResult`，但结果内容由 provider 自己决定。
+These methods return a unified `IntrospectionResult`, but the content of the result is decided by the provider itself.
 
-这条规则很重要：
+This rule is important:
 
-- manager 不能假设 endpoint 是 Telegram
-- manager 不能假设 auth/backlog/health 的字段
-- manager 不能假设 attach/detach 的具体副作用
-- provider 才知道如何解释自己的 endpoint 状态
+- the manager must not assume the endpoint is Telegram
+- the manager must not assume the fields of auth/backlog/health
+- the manager must not assume the specific side effects of attach/detach
+- only the provider knows how to interpret its own endpoint state
 
 ### Runtime Provider Layout
 
-Runtime root 中的动态 channel provider 使用固定目录形状：
+A new channel provider uses the ordinary plugin layout:
+
+```text
+<runtime_root>/plugins/community/<plugin_id>/
+  plugin.toml
+  <plugin implementation>
+```
+
+The Manifest declares `lifecycle_protocol = "raii.v1",
+`requires_ports = ["channel:provider_manager"]` and `[channel] endpoint_types`.
+`build_plugin(context)` returns the instance; `start(scope)` returns a
+`ModuleHandle` containing `channel_extension=ChannelExtension(provider=...)`.
+See [channel plugin contract](../src/pal/channel/README.md) for details.
+
+The following legacy provider layout remains compatible in place; existing files are not required to migrate:
 
 ```text
 <runtime_root>/channel/providers/<provider_id>/
@@ -149,7 +163,7 @@ Runtime root 中的动态 channel provider 使用固定目录形状：
   runtime.py
 ```
 
-`provider.toml` 至少包含：
+`provider.toml` must contain at least:
 
 ```toml
 provider_id = "example"
@@ -159,159 +173,115 @@ enabled = true
 reload_modules = []
 ```
 
-`runtime.py` 必须导出：
+`runtime.py` must export:
 
 ```python
 def build_channel_provider(context):
     ...
 ```
 
-`context` 包含 runtime root、provider 目录、manifest，以及 manager/runtime/repository/secret resolver 等 channel provider 需要的边界对象。
+`context` contains the runtime root, the provider directory, the manifest, and the boundary objects a channel provider needs, such as the manager/runtime/repository/secret resolvers.
 
-Channel provider 代码由 PluginHost 管理；ChannelRuntime 和 EndpointHub 常驻。
-新 provider 使用普通 `plugin.toml` 的 `[channel] endpoint_types` 声明，并通过
-`ModuleHandle.channel_extension = ChannelExtension(provider=...)` 提供实现。
-上面的 `provider.toml` / `build_channel_provider(context)` 是原地兼容的旧格式。
+Channel provider code is managed by the PluginHost; ChannelRuntime and EndpointHub are resident.
+A new provider declares via the ordinary `plugin.toml` `[channel] endpoint_types`, and provides the implementation through
+`ModuleHandle.channel_extension = ChannelExtension(provider=...)`.
+The `provider.toml` / `build_channel_provider(context)` above is the legacy format kept compatible in place.
 
-`rescan_plugins` 扫描元数据，不自动导入或重载新增第三方 provider。
-原生声明可在扫描时建立 Hub；旧格式的 endpoint types 在首次 `manage_plugin(operation=attach)` 时发现。
-`manage_plugin(name=provider_id, operation=attach)` 加载 provider 并恢复符合持久化 attach 意图的 endpoints；
-operation=reload 执行 detach → unload → load → attach。
-operation=disable/enable 管理代码启用状态，旧 manifest 的 enabled 仅用于首次发现。
-解析失败保留已知 provider，不作为物理删除处理。
+`rescan_plugins` scans metadata and does not automatically import or reload newly added third-party providers.
+Native declarations may establish a Hub at scan time; legacy-format endpoint types are discovered on the first `manage_plugin(operation=attach)`.
+`manage_plugin(name=provider_id, operation=attach)` loads the provider and restores endpoints that match the persisted attach intent;
+operation=reload performs detach → unload → load → attach.
+operation=disable/enable manages the code-enabled state; enabled in legacy manifests is only used for first discovery.
+A failed resolution keeps the known provider and is not treated as physical deletion.
 
-每个物理 endpoint id 在 ChannelRuntime 中有稳定 EndpointHub。
-插件或 endpoint detach 都保留 Hub 和 backlog；endpoint detach 不卸载所属插件。
-物理删除或卸载插件才移除 Hub，并把待投递内容转移到 recovery socket，持久化 row 保留。
-清理失败保留旧代次的所有权，阻止并行加载，允许重试。
-`manage_channel_endpoint(name=endpoint_id, operation="restart")` 只重建 transport，不重新导入 provider code。
+Each physical endpoint id has a stable EndpointHub in ChannelRuntime.
+Both plugin detach and endpoint detach preserve the Hub and backlog; endpoint detach does not unload the owning plugin.
+Only physical deletion of a provider package removes the Hub, transfers pending deliveries to the recovery socket, and keeps the persisted row.
+A normal plugin detach/disable is a generation exit, not a physical deletion.
+If cleanup fails, the old generation's ownership is retained, parallel loading is blocked, and retry is allowed.
+`manage_channel_endpoint(name=endpoint_id, operation="restart")` only rebuilds the transport and does not re-import provider code.
 
-attach 用于恢复明确 detached 的 endpoint。稳定的已 attached transport 重复 attach
-保持原实例，返回 `changed=false` / `transport_restarted=false` 和无副作用 receipt；
-成功只表示 attached，不表示连接健康。有连接故障时结果提供有条件的 health / restart
-affordance，由模型按原任务决定下一步。网络连接断开不等于 endpoint 已被 detach。
-核心 endpoint attach 同样保留实例；核心 endpoint reload 对已有实例走 restart。
+attach is used to restore an explicitly detached endpoint. Repeated attach on a stable already-attached transport
+keeps the original instance and returns `changed=false` / `transport_restarted=false` with a side-effect-free receipt;
+success only means attached, not connection health. When there is a connection failure, the result provides a conditional health / restart
+affordance, and the model decides the next step according to the original task. A broken network connection does not mean the endpoint has been detached.
+Core endpoint attach likewise preserves the instance; core endpoint reload routes an existing instance through restart.
 
-Hub 接管旧 endpoint outbox；transport 不可用期间的新 reply、stream、status 和 attachment
-进入同一有序缓冲。新 transport 可投递后 Hub 进入 `draining`，按序清空后才进入
-`attached` 并发布到 LLM execution registry。detach 先撤 capability，再停 transport。
+The Hub takes over the old endpoint outbox; new replies, streams, statuses, and attachments during transport unavailability
+enter the same ordered buffer. Once the new transport can deliver, the Hub enters `draining`, and only after draining in order does it enter
+`attached` and publish to the LLM execution registry. detach first revokes the capability, then stops the transport.
 
-1024 items / 4 MiB 是可观测 soft high-water mark；critical delivery
-不会因超过该阈值而被静默丢弃。可合并的 ephemeral status 和相邻纯文本 delta 会被
-coalesce。预期 lifecycle gap 不会上升为 Safe Mode failure。队列只保存在进程内；
-跨进程 restart 是明确硬边界，不引入持久化队列或复杂 runtime generation。
+1024 items / 4 MiB is an observable soft high-water mark; critical delivery
+is not silently dropped for exceeding this threshold. Mergeable ephemeral statuses and adjacent plain-text deltas are
+coalesced. Expected lifecycle gaps do not escalate to Safe Mode failure. The queue is kept in-process only;
+cross-process restart is an explicit hard boundary, without introducing a persistent queue or complex runtime generations.
 
 ### `EndpointConfig`
 
-描述一个可接收、可回复的 channel endpoint。
-
-至少包含：
+The current immutable config DTO is defined in
+[shared/agent_io.py](../src/pal/shared/agent_io.py), with fields:
 
 - `endpoint_id`
 - `channel_kind`
-- `binding_metadata`
-- `enabled`
+- `binding_key`
 - `send_policy`
-- `reply_policy`
 
-其中 `send_policy` 至少应表达：
-
-- `max_message_chars`
-- `preferred_parse_mode`
-- `segment_by_default`
-- `preserve_code_blocks`
-- `supports_typing`
-- `supports_receipt_marker`
-- `supports_message_edit`
-
-也就是说，channel 数据库中必须有“单条输出上限”这一类发送约束配置，而不应把它硬编码在 `Pal Core` 中。
-
-`channel_kind` 是 endpoint 持久化与反序列化用的类型 discriminator。
-
-它不是 channel 抽象的中心，也不应该被 core 用来推断平台行为。运行期行为应由 provider 的 `endpoint_types` 和 endpoint 归属关系决定。
+Enabled/detached state and private binding metadata belong to the persisted endpoint row/transport,
+and are not invented fields of this DTO. Length, segmentation, parse mode, and typing rules are interpreted by the endpoint/provider
+and must not be placed in Core. `channel_kind` is only used for persisted type matching, not for deciding platform behavior.
 
 ### `ResponseHandle`
 
-描述如何把回复送回原来源。
-
-至少包含：
-
-- `respond(text: str)`
-- `set_status(kind: str)`
-- `capabilities`
-
-其中：
-
-- `respond(text: str)` 接收最终回复文本本身
-- `set_status(kind: str)` 用于 `typing`、`received` 之类的轻量状态反馈
-- chunk、parse mode、MarkdownV2、平台长度限制都在 handle 内部完成
-
-`ResponseHandle` 是对旧版 `DeliveryRoute.reply_handle + adapter.send(...)` 的简化收口。
+Immutable routing values with fields `endpoint_id` and `reply_target`; there is no `respond()` or
+`set_status()` method. Core enqueues replies, status, streams,
+and attachments via the agent I/O/runtime port; the actual sending is done by the endpoint. The immutable
+`TurnDeliveryBinding` of the opening message holds this turn's reply authority, and later input on other channels must not steal it.
 
 ### `ChannelEnvelope`
 
-`channel` 创建并投递给主循环的统一入口对象。
+Composed of `event: EventEnvelope`, `endpoint: EndpointConfig`,
+`response_handle: ResponseHandle`, and an optional `opening_delivery_binding`.
+Normalized payload, correlation, and occurrence time live in the event, not as a parallel source of truth on the envelope.
 
-它至少表达：
-
-- `channel_kind`
-- `endpoint_id`
-- `message_id`
-- normalized payload
-- `ResponseHandle`
-- correlation id
-- created_at
-
-推荐心智模型是：
-
-- `ChannelEnvelope` 是主循环唯一需要理解的 channel 输入
-- 主循环不再需要理解 platform route 细节
-- 回复路径完全通过 `ResponseHandle` 回到 channel 实例
+The main loop only handles typed envelopes/events, not raw objects such as Telegram callbacks.
 
 ## Unified Channel Interface
 
-推荐每个 channel endpoint 对外都收成同一组语义：
+Concrete endpoint implementations implement `ChannelEndpointQueueBase`; the main boundaries are:
 
-- `start()`
-- `stop()`
-- `iter_inbound() -> AsyncIterator[ChannelEnvelope]`
-- `normalize(raw) -> ChannelEnvelope`
-- `respond(handle, text: str)`
-- `send_message(text: str) -> ChannelMessageReceipt`
-- `set_status(handle, kind: str)`
+- `start_async()` / `stop_async()`:transport lifecycle
+- `normalize_raw(raw)` / `poll()`: normalization and mailbox ingress
+- `queue_reply(...)` / `queue_status(...)` / `queue_stream_update(...)`: accept data pending delivery
+- `flush_outbox()` and other flush methods: trigger the actual sending
+- `send_reply(handle, text)`: the provider's reply transport hook
+- `send_message(message)`: the proactive sending contract
+- `inspect_health()` / `inspect_auth_state()`:provider-owned diagnostics
 
-如果某个实现更喜欢把最后两步收进 handle 自身，也可以等价理解成：
-
-- `envelope.response_handle.respond(text)`
-- `envelope.response_handle.set_status(kind)`
-
-关键不是面向对象风格，而是统一语义：
-
-- 输入统一成 envelope
-- 输出统一成 respond/status
-- 具体平台差异留在 channel provider / endpoint 内部
+Async SDKs may run within the endpoint's own worker/event loop. Queue acceptance and
+actual remote delivery are separate: end of turn does not wait for platform acknowledgment. No invented
+`AsyncIterator[ChannelEnvelope]` interface is required here, and routing values are not treated as callable transports.
 
 ### Active Message Contract
 
-主动发消息与当前 turn 的 reply 是两个契约：
+Proactive messaging and the current turn's reply are two separate contracts:
 
-- LLM 只调用 `send_channel_message(channel_id, message)`
-- `channel_id` 是 `list_channel_endpoints` 返回的已配置 endpoint id
-- `ChannelRuntime` 负责解析 endpoint，并机械检查 attached/enabled 状态
-- endpoint 内部只接收 `send_message(message)`，收件人由 endpoint 的持久化 binding 决定
-- Telegram chat id、WebSocket peer URL 等 provider-specific target 不得出现在 LLM 输入中
-- 没有唯一默认收件人的 endpoint 必须返回 `active_send_unsupported`
-- `send_reply(ResponseHandle, text)` 仍只用于回复已有 ingress turn，不能与主动发送混为一谈
+- The LLM only calls `send_channel_message(channel_id, message)`
+- `channel_id` is a configured endpoint id returned by `list_channel_endpoints`
+- `ChannelRuntime` is responsible for resolving the endpoint and mechanically checking attached/enabled state
+- Inside the endpoint, only `send_message(message)` is received; the recipient is determined by the endpoint's persisted binding
+- Provider-specific targets such as Telegram chat ids or WebSocket peer URLs must not appear in LLM input
+- An endpoint without a unique default recipient must return `active_send_unsupported`
+- `send_reply(ResponseHandle, text)` remains only for replying to an existing ingress turn, and must not be conflated with proactive sending
 
-主动发送是 non-idempotent external write。失败且无法确认实际发送结果时不得自动重试，
-应先与接收端 reconcile。返回的 receipt 表达 endpoint 已接受或已完成本次发送；它不伪造
-底层平台不存在的 delivery guarantee。
+Proactive sending is a non-idempotent external write. On failure, if the actual send result cannot be confirmed, it must not be retried automatically;
+reconcile with the receiving side first. The returned receipt expresses that the endpoint has accepted or completed this send; it does not fabricate
+a delivery guarantee that the underlying platform does not have.
 
 ## Interaction Contract
 
-Interaction 是统一语义，不是统一 UI。
+Interaction is unified semantics, not unified UI.
 
-Core、control、bunshin、tasking 等模块可以产生 typed interaction intent，例如：
+Modules such as Core, control, and Bunshin may produce typed interaction intents, for example:
 
 - command list
 - confirmation
@@ -320,51 +290,51 @@ Core、control、bunshin、tasking 等模块可以产生 typed interaction inten
 - choice action
 - status update
 
-Channel provider 负责将这些 intent 变成自己的平台 realization。
+The channel provider is responsible for turning these intents into its own platform realization.
 
-例如：
+For example:
 
-- Telegram 可以使用 inline keyboard、callback query、message edit、reaction、typing
-- socket channel 可以使用结构化 JSON event
-- CLI / stdio channel 可以使用文本菜单或命令回传
-- Web channel 可以使用 native button、toast、panel 或 form
+- Telegram may use inline keyboards, callback queries, message edits, reactions, typing
+- A socket channel may use structured JSON events
+- A CLI / stdio channel may use text menus or command round-trips
+- A Web channel may use native buttons, toasts, panels, or forms
 
-共同约束是：
+The shared constraints are:
 
-- provider 必须把平台 callback 归一化成 typed interaction result
-- core 不接收 Telegram callback payload 之类的平台 raw object
-- 已注册 slash command、button callback、menu choice 都应在进入 core 前被 channel/control 解析成明确 action
-- 未匹配任何已注册 command 或 alias 的 `/...` 文本应回落成普通 `user.message`，不能被 control path 当作 unknown-command 截断
-- provider 可以决定如何展示，但不能改变 action 的业务语义
-- interaction state、token mapping、message edit、delivery retry 属于 provider implementation concern
+- The provider must normalize platform callbacks into typed interaction results
+- Core does not receive platform raw objects such as Telegram callback payloads
+- Registered slash commands, button callbacks, and menu choices must all be resolved by channel/control into explicit actions before entering core
+- `/...` text that matches no registered command or alias should fall back to a plain `user.message`, and must not be truncated by the control path as an unknown command
+- The provider may decide how to present things, but must not change the business semantics of an action
+- Interaction state, token mapping, message edits, and delivery retries are provider implementation concerns
 
-换句话说：
+In other words:
 
-- `interaction` 是 Pal 内部的 typed contract
-- `inline keyboard` 只是 Telegram provider 的一种 realization
-- manager 不应该硬编码任何 interaction UI
-- channel provider 必须提供自己的 interaction rendering、status update 和 result normalization
+- `interaction` is Pal's internal typed contract
+- `inline keyboard` is just one realization of the Telegram provider
+- managers should not hard-code any interaction UI
+- channel providers must provide their own interaction rendering, status update, and result normalization
 
-### 可修订的列表与字段输入
+### Revision-capable lists and field inputs
 
-InteractionMessageSpec 保留原有 text/buttons，另有可选 revision、items 和 inputs。
-InteractionItemSpec 包含 item ID、标题、完整正文、状态和按钮；
-InteractionInputSpec 包含 input ID、字段名、当前值、多行标记及提交按钮。
+InteractionMessageSpec retains the original text/buttons, plus optional revision, items, and inputs.
+InteractionItemSpec contains an item ID, title, full body, status, and buttons;
+InteractionInputSpec contains an input ID, field name, current value, multi-line flag, and submit button.
 
-共享 projection 生成仅含标签和不透明 token 的公开 JSON；action key、参数、用户身份检查和提交授权留在服务端。客户端回传 interaction_id/button_token，字段提交另带 input_values，其键必须与该 token 声明的 input ID 完全一致、值必须是字符串。普通按钮不可夹带字段值；revision 变化后旧 token 失效，业务服务也校验 revision。不得把浏览器或 Telegram 发来的任意 action 参数当成授权。
+The shared projection produces public JSON containing only labels and opaque tokens; action keys, parameters, user identity checks, and submission authorization stay server-side. Clients return interaction_id/button_token, and field submissions additionally carry input_values, whose keys must exactly match the input IDs declared by that token and whose values must be strings. Ordinary buttons must not smuggle field values; after a revision change, old tokens become invalid, and the business service also validates the revision. Arbitrary action parameters from browsers or Telegram must not be treated as authorization.
 
-Telegram 将 input 投影为持久绑定的 ForceReply，匹配聊天、线程和已知用户；过期输入被控制路径消费并提示恢复，不回落为普通聊天。TTY 和桌宠按完整文本提交，不能 trim 或压平数据。客户端发送失败应保留编辑内容并允许重试，服务端草稿通过 /memory_review 恢复。普通文本 provider 至少显示条目的完整文本。
+Telegram projects inputs as persistent ForceReply bound to the chat, thread, and known user; expired inputs are consumed by the control path with a recovery prompt and do not fall back to ordinary chat. TTY and desktop pet submit the full text and must not trim or flatten data. On client send failure, edited content should be preserved and retry allowed; server drafts are recovered via /memory_review. Plain text providers must at least display the full text of the item.
 
 ## Tagged Message Contract
 
-正常的用户可见消息可以携带可选的语义标签和结构化 payload。`text` 始终是完整兜底；
-provider 可以增强自己认识的标签，未知标签必须按普通文本消息投递。标签不属于 status、
-control interaction 或 LLM delta，也不允许 Core 根据 `channel_kind` 选择平台行为。
+Normal user-visible messages may carry optional semantic tags and structured payloads. `text` is always the complete fallback;
+providers may enhance tags they recognize, and unknown tags must be delivered as plain text messages. Tags do not belong to status,
+control interactions, or LLM deltas, and Core is not allowed to choose platform behavior based on `channel_kind`.
 
-Checklist 使用 `tag=checklist` 投递完整快照。Telegram 可原位编辑一条消息，桌面客户端可投影为
-独立面板，其他端点继续发送同一条 fallback text。
+Checklist is delivered with `tag=checklist` as a full snapshot. Telegram may edit one message in place, and desktop clients may project it as a
+separate panel, while other endpoints keep sending the same fallback text.
 
-## 主路径
+## Main Path
 
 ```mermaid
 sequenceDiagram
@@ -384,212 +354,212 @@ sequenceDiagram
 
 ## Ingress Acknowledgement
 
-`channel` 在接收到用户消息并成功入队后，应尽快给出一个轻量、明确、低打扰的“已收到”反馈。
+After receiving a user message and successfully enqueuing it, `channel` should promptly give a lightweight, clear, low-disturbance "received" acknowledgment.
 
-这个反馈的目标不是回复业务内容，而是告诉用户：
+The goal of this acknowledgment is not to reply with business content, but to tell the user:
 
-- 消息已被 `Pal` 收到
-- 已经进入处理队列
-- 不是丢了，也不是机器人没有看见
+- the message was received by `Pal`
+- it has entered the processing queue
+- it was not lost, nor unseen by the bot
 
-## Ingress Feedback 三阶段
+## Ingress Feedback Three Stages
 
-IM channel 的默认反馈流程固定为：
+The default feedback flow for IM channels is fixed as:
 
 1. `ingress accepted`
 2. `processing visible`
 3. `final response delivered`
 
-也就是说：
+That is:
 
-- 一入队先做“已接收”反馈
-- 然后切到 typing / processing 状态
-- 最后再发送正式回复
+- give the "received" acknowledgment immediately upon enqueue
+- then switch to a typing / processing status
+- finally send the formal reply
 
 ## Telegram Realization
 
-对于 Telegram 这类 IM channel，默认 realization 定为：
+For IM channels such as Telegram, the default realization is:
 
-1. 消息成功进入 `Pal` 队列后，立即给用户消息打一个 `eyes` 标记
-2. 随后切换到 typing indicator
-3. 等 `Pal Core` 产出最终回复后，再按 Telegram policy 分流并发送成品内容
+1. After the message successfully enters the `Pal` queue, immediately mark the user's message with an `eyes` reaction
+2. Then switch to the typing indicator
+3. Once `Pal Core` produces the final reply, route and send the finished content according to Telegram policy
 
-这样做的原因是：
+The reasons for this are:
 
-- bot 自己发出的消息天然有双勾，无法表达“是否已收到用户消息”
-- 眼睛标记更像 receipt marker，而不是额外噪音消息
-- typing 适合表达“Pal 正在处理”
-- 最终回复仍保持干净，不混入临时确认文本
-- 长回复和复杂格式应由 Telegram 侧分流策略负责安全拆分
+- messages sent by the bot itself naturally have double checkmarks and cannot express "whether the user's message was received"
+- the eyes reaction is more like a receipt marker rather than an extra noise message
+- typing is well suited to express "Pal is processing"
+- the final reply stays clean, without temporary confirmation text mixed in
+- long replies and complex formats should be safely split by the Telegram-side routing policy
 
 ## Why Not Raw Delta Streaming
 
-IM channel 默认不应直接承接 provider raw stream。
+IM channels by default should not directly carry the provider raw stream.
 
-原因包括：
+Reasons include:
 
-- 分段限制
-- edit/send 频率限制
-- Markdown / code block 截断
-- 半成品文本抖动
+- segment length limits
+- edit/send rate limits
+- Markdown / code block truncation
+- flickering of half-finished text
 
-因此：
+Therefore:
 
-- `llm` 内部可以 streaming
-- `channel` 默认只做 status/typing 呈现
-- 最终成品再由 `channel` 按 send policy 输出
+- `llm` may stream internally
+- `channel` by default only presents status/typing
+- the finished result is then output by `channel` according to the send policy
 
 ## Channel-Specific UX Rule
 
-`channel` 子系统允许为不同 IM 平台定义各自的 acknowledgement UX。
+The `channel` subsystem allows defining a separate acknowledgement UX for each IM platform.
 
-但必须满足共同约束：
+But common constraints must be satisfied:
 
-- 不额外污染对话流
-- 不假装已经完成理解或执行
-- 不与正式业务回复混淆
-- 不替代 typing/status
+- No extra pollution of the conversation flow
+- No pretending that understanding or execution is already complete
+- No confusion with formal business replies
+- No replacement of typing/status
 
-Telegram 的 `eyes` 标记是其中一种 channel-specific 实现，而不是全局强制 UI。
+Telegram's `eyes` marker is one channel-specific implementation of this, not a globally mandated UI.
 
 ## Segment Send Rule
 
-最终回复一旦形成，应由 `channel` 根据 endpoint policy 决定：
+Once the final reply has been formed, the `channel` should decide according to endpoint policy:
 
-- 一次性发送
-- 分段发送
-- 是否需要拆 code block
-- 是否需要按平台限制截断重组
+- Send in a single message
+- Send in multiple segments
+- Whether code blocks need to be split
+- Whether truncation and reassembly are needed to fit platform limits
 
-这一步发生在最终回复阶段，而不是 provider streaming 阶段。
+This step happens at the final reply stage, not at the provider streaming stage.
 
-更一般地说：
+More generally:
 
-- 如果某个 channel 的输出侧存在单条消息上限
-- 或者存在严格的格式完整性要求
+- If a channel's output side has a per-message size limit
+- Or has strict format integrity requirements
 
-那么该 channel 就必须拥有自己的 response segmentation 逻辑。
+Then that channel must own its own response segmentation logic.
 
-也就是说，是否分流的判定不应写死在 `Pal Core`，而应由 channel policy 决定。
+In other words, the decision of whether to split should not be hardcoded in `Pal Core`, but should be determined by channel policy.
 
-推荐的配置来源就是 endpoint 对应的 `send_policy.max_message_chars`。
+The recommended configuration source is the endpoint's `send_policy.max_message_chars`.
 
 ### Telegram Segmentation Rule
 
-Telegram 默认应使用 channel-owned response segmentation。
+Telegram should use channel-owned response segmentation by default.
 
-也就是说：
+That is:
 
-- `Pal Core` 产出的是统一 final response
-- `channel` 负责把它按 Telegram 限制拆成安全消息段
-- 分流后的每段仍然属于同一次正式回复，而不是新的业务事件
+- `Pal Core` produces a unified final response
+- The `channel` is responsible for splitting it into safe message segments according to Telegram limits
+- Each segment after splitting still belongs to the same formal reply, not a new business event
 
-Telegram 分流策略至少应考虑：
+The Telegram splitting strategy should consider at least:
 
-- 单条消息长度限制
-- Markdown / code block 完整性
-- 列表与引用块不要在中间被破坏
-- 尽量在语义边界处分段，而不是机械按字符截断
-- 多段消息的发送顺序必须稳定
+- Per-message length limits
+- Markdown / code block integrity
+- Not breaking lists or quote blocks in the middle
+- Splitting at semantic boundaries where possible, rather than mechanically truncating by character count
+- The send order of multi-segment messages must be stable
 
-推荐行为：
+Recommended behavior:
 
-- 优先按段落、标题、代码块边界拆分
-- 超长代码块单独成段
-- 如有必要，在后续分段中保留最小上下文提示
+- Prefer splitting at paragraph, heading, and code block boundaries
+- Put overly long code blocks into their own segment
+- If necessary, retain a minimal context hint in subsequent segments
 
-这样可以避免：
+This avoids:
 
-- Telegram 截断成半截消息
-- 代码块闭合错误
-- 多段回复顺序混乱
-- 用户误以为是多次独立回复
+- Telegram truncating messages halfway
+- Unclosed code blocks
+- Disordered ordering of multi-segment replies
+- Users mistaking them for multiple independent replies
 
 ## Current Telegram Implementation Alignment
 
-当前仓库里的 Telegram 适配器实现位于：
+The Telegram adapter implementation in the current repository is located at:
 
 - [runtime.py](../providers/telegram/runtime.py)
 - [endpoint.py](../providers/telegram/endpoint.py)
 
-当前依赖位于：
+The current dependency is located at:
 
 - [pyproject.toml](../pyproject.toml)
 
-当前实现已明确依赖：
+The current implementation explicitly depends on:
 
 - `python-telegram-bot>=20.7,<22`
 - `telegramify-markdown>=1.2,<2`
 
-当前 Markdown 渲染路径是：
+The current Markdown rendering path is:
 
-1. Telegram endpoint 在收到终态完整文本后，将 Markdown 转成 plain text 与 typed entities
-2. 按 Telegram 的 UTF-16 长度限制切分 entities，并为每段独立生成闭合的 MarkdownV2
-3. 通过 endpoint 的 ordered send chain 顺序发送所有分段
-4. 某段 MarkdownV2 发送失败时，仅将该段回退为 plain text
+1. After the Telegram endpoint receives the terminal complete text, it converts Markdown into plain text and typed entities
+2. It splits the entities according to Telegram's UTF-16 length limits and independently generates well-formed MarkdownV2 for each segment
+3. It sends all segments in order via the endpoint's ordered send chain
+4. If a segment's MarkdownV2 send fails, only that segment falls back to plain text
 
-这说明：
+This means:
 
-- Telegram 输出格式本身就是 channel-owned concern
-- 分段逻辑也应继续由 Telegram endpoint/provider 自己负责
-- inline keyboard、callback token、message edit 也属于 Telegram provider realization
+- The Telegram output format is itself a channel-owned concern
+- The segmentation logic should also remain the responsibility of the Telegram endpoint/provider itself
+- inline keyboards, callback tokens, and message edits also belong to the Telegram provider realization
 
 ## Logging Boundary
 
-如果需要记录 channel ingress / egress log，应由 channel 实例自己负责。
+If channel ingress / egress logs are needed, they should be handled by the channel instance itself.
 
-例如：
+For example:
 
-- 原始 inbound message receipt
+- raw inbound message receipts
 - response send attempts
 - segmentation outcome
 - status/receipt marker failures
 
-这些 log 的归属是 channel implementation concern，而不是 `Pal Core` concern。
+Ownership of these logs is a channel implementation concern, not a `Pal Core` concern.
 
-这条边界的意义是：
+The significance of this boundary is:
 
-- 不让 core 理解 Telegram/stdio 的发送细节
-- 不让 memory / tasking 背负 channel delivery 现场
-- 保留每个 channel 对自己平台特性的自治处理能力
+- prevent core from understanding Telegram/stdio sending details
+- prevent memory / tasking from carrying channel delivery context
+- preserve each channel's autonomy in handling its own platform characteristics
 
-## Telegram SDK Helper 结论
+## Telegram SDK Helper Conclusion
 
-- `python-telegram-bot` 负责 Telegram API 交互与有序发送。
-- `telegramify-markdown` 负责 Markdown parsing、typed entity projection 与 entity-safe splitting。
-- 何时结算完整回复、分段发送顺序和逐段失败回退仍由 Telegram endpoint 持有。
+- `python-telegram-bot` handles Telegram API interaction and ordered sending.
+- `telegramify-markdown` handles Markdown parsing, typed entity projection, and entity-safe splitting.
+- When to settle the complete reply, the segmented sending order, and per-segment failure fallback remain held by the Telegram endpoint.
 
 ## Invariants
 
-- `channel` 只做 I/O、normalize、route、interaction realization 和 UX feedback。
-- `ChannelEndpointProviderManager` 是统一入口，不是平台行为 owner。
-- provider 拥有自己的 endpoint lifecycle、attach/detach/restart 和 introspection。
-- `ChannelEnvelope + ResponseHandle` 是 channel 与主循环之间的统一接口。
-- interaction 是 typed contract；具体 UI realization 由 channel provider 决定。
-- `channel_kind` 是 endpoint 持久化 discriminator，不是 core 推断平台行为的依据。
-- ingress accepted 后必须尽快给出 receipt-like feedback。
-- IM channel 默认采用 `receipt marker -> typing -> final reply` 的三阶段 UX。
-- Telegram 默认使用 `eyes` 作为 ingress receipt marker。
-- 任何存在单条输出上限的 channel 都必须实现自己的 response segmentation。
-- Telegram 最终回复默认由 channel 自己按平台规则分流。
-- channel ingress / egress log 如有需要，由 channel 实例自己记录。
-- raw provider streaming 不直接进入 channel 用户输出。
-- 最终回复才是 channel send 的正式输入。
+- `channel` only does I/O, normalize, route, interaction realization, and UX feedback.
+- `ChannelEndpointProviderManager` is the unified entry point, not the owner of platform behavior.
+- Each provider owns its own endpoint lifecycle, attach/detach/restart, and introspection.
+- `ChannelEnvelope + ResponseHandle` is the unified interface between the channel and the main loop.
+- Interaction is a typed contract; the concrete UI realization is decided by the channel provider.
+- `channel_kind` is the endpoint persistence discriminator, not a basis for core to infer platform behavior.
+- After ingress is accepted, receipt-like feedback must be given as soon as possible.
+- IM channels default to the three-stage UX of `receipt marker -> typing -> final reply`.
+- Telegram uses `eyes` as the default ingress receipt marker.
+- Any channel with a per-message output limit must implement its own response segmentation.
+- By default, Telegram final replies are routed by the channel itself according to platform rules.
+- Channel ingress / egress logs, if needed, are recorded by the channel instance itself.
+- Raw provider streaming does not go directly into channel user output.
+- Only the final reply is the formal input to channel send.
 
 ## Non-Goals
 
-- 不在本文件定义 Telegram API 细节
-- 不在本文件定义具体 reaction/typing SDK 调用
-- 不在本文件定义 UI 样式
-- 不让 `channel` 承担业务解释或 agent 推理
-- 不让 manager 硬编码某个 provider 的 interaction realization
+- Do not define Telegram API details in this document
+- Do not define concrete reaction/typing SDK calls in this document
+- Do not define UI styling in this document
+- Do not let `channel` perform business interpretation or agent reasoning
+- Do not let the manager hard-code the interaction realization of any particular provider
 
-## Core 状态观察
+## Core State Observation
 
-Channel 订阅 Core bus，而不是拥有 sleeping 等系统状态。通过
-`on_runtime_state` 向 endpoint 投影最新快照，通过可选的 `on_core_event`
-投影瞬时通知；两者只入队、不执行阻塞 I/O，不进入普通投递失败恢复或历史。
-完整事件与插件订阅约定见 [Core system observations](pal_core_events.md)。
+Channels subscribe to the Core bus rather than owning system states like sleeping. Through
+`on_runtime_state`, the latest snapshot is projected to the endpoint; through the optional `on_core_event`,
+ephemeral notifications are projected. Both only enqueue and do not perform blocking I/O, and do not enter normal delivery failure recovery or history.
+See [Core system observations](pal_core_events.md) for the full events and plugin subscription conventions.
 
 ## Typing lifetime
 
@@ -627,3 +597,27 @@ step, with each step shortened to 160 characters and omitted counts shown. This
 presentation limit does not shorten the stored plan or `read_checklist` result.
 Clear events carry no plan or completion markdown, so a long checklist cannot
 suppress cleanup. Channel control metadata stays out of the LLM-facing text.
+
+## Silent Output
+
+The built-in `null_channel` plugin provides an endpoint named `null` that accepts reply, stream, status,
+attachment, and interaction and silently discards them, creating no transport I/O, callback state, or replay.
+On load it only creates the default row when the endpoint does not exist; reload preserves the existing enabled/detached state.
+
+A silent proactive task uses
+`set_proactive_destination(name=TASK, out_channel_name="null")`.
+the string `"null"` to select the sink, while JSON null clears the destination; the two are different.
+Run history and the execution/approval boundary are still preserved; the sink cannot provide a review UI.
+The recovery socket has a finite buffer, ACK timeout, and unconfirmed frame replay, and cannot substitute for `/dev/null`.
+
+## Tool Activity Presentation
+
+Desktop-avatar turns can show an ephemeral tool workspace below the checklist:
+actual tool names, folded arguments, execution status, and structured `edit_file` /
+`write_file` diffs. Native shell sessions still running appear as background work.
+This optional channel projection does not alter tool results, approvals, result
+paging, or conversation history. It retains at most 100 calls per turn; argument
+and diff previews are limited to 8 KiB and 64 KiB respectively. Explicit sensitive
+argument keys are redacted in the display copy; arbitrary text and diffs are not
+secret-scanned. The workspace clears when the turn ends. The matching updated
+`desktop_avatar` provider and client are required; other channels are unchanged.

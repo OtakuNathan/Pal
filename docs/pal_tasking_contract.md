@@ -1,93 +1,93 @@
 # Pal Tasking Contract
 
-> 历史设计，已被当前 Bunshin contract orchestration 替代。下文的 task/work-order 模型及工具名称不代表现行接口。当前任务、角色和执行契约见 [bunshin_contract_orchestration.md](bunshin_contract_orchestration.md)，公开工具以 [pal_tool_surface.md](pal_tool_surface.md) 和当前注册表为准。
+> Historical design, superseded by the current Bunshin contract orchestration. The task/work-order model and tool names below do not represent the current interface. For current tasks, roles, and execution contracts, see [bunshin_contract_orchestration.md](bunshin_contract_orchestration.md); for public tools, refer to [pal_tool_surface.md](pal_tool_surface.md) and the current registry.
 
-> 目标：定义 `tasking`、`bunshins`、checkpoint、ledger、workspace 治理，以及 `Pal` 如何观察和终止 bunshins。
+> Goal: define `tasking`, `bunshins`, checkpoint, ledger, and workspace governance, and how `Pal` observes and terminates bunshins.
 
-## 目标
+## Goals
 
-`tasking` 是 `Pal` 处理专业性任务和长链执行的正式子系统。
+`tasking` is the formal subsystem through which `Pal` handles specialized tasks and long-chain execution.
 
-这一版的重点不是重发明 task subsystem 语义，而是把旧版本里已经比较明确的 task / bunshins / work_order / approval / checkpoint / ledger 语义，正式从 `Pal runtime` 身上剥离出来，收成 first-party plugin family。
+The focus of this version is not to reinvent task subsystem semantics, but to formally strip the already fairly clear task / bunshins / work_order / approval / checkpoint / ledger semantics from the old version out of the `Pal runtime` and consolidate them into a first-party plugin family.
 
-它的意义不是“再开一个执行器”，而是把不适合 `Pal` 直接完成的工作放进：
+Its significance is not "spinning up yet another executor," but placing work unsuited to direct completion by `Pal` into:
 
-- 干净的 task context
-- 可替换的 bunshins execution world
-- 可检查、可恢复、可记账的执行链
+- a clean task context
+- a replaceable bunshins execution world
+- an inspectable, resumable, and auditable execution chain
 
-## 旧语义对齐原则
+## Old Semantics Alignment Principle
 
-`tasking` 在新架构中默认继承旧版本的核心语义。
+`tasking` inherits the core semantics of the old version by default in the new architecture.
 
-需要保留的旧语义包括：
+The old semantics to be preserved include:
 
-- `Pal` 是主体，bunshins 不是主体
-- `supervisor -> pal -> bunshins` 的进程关系
-- bunshins 不直接接触用户，只与 `Pal` 通信
-- `work_order` 是正式对象，不是临时执行片段
-- `approval` 是正式对象，不是瞬时按钮
-- continuity 绑定 `checkpoint / ledger`，不绑定单个 bunshins 进程
-- workspace / branch / artifact 是 task execution 的正式现场
+- `Pal` is the principal; bunshins are not principals
+- the `supervisor -> pal -> bunshins` process relationship
+- bunshins do not contact the user directly; they communicate only with `Pal`
+- `work_order` is a formal object, not an ad-hoc execution fragment
+- `approval` is a formal object, not an ephemeral button
+- continuity binds to `checkpoint / ledger`, not to a single bunshins process
+- workspace / branch / artifact are the formal site of task execution
 
-因此，新版本在这一块主要改变的是：
+Therefore, what the new version mainly changes in this area is:
 
 - ownership
 - registration
 - observability
 - governance integration
 
-而不是 task subsystem 的业务含义本身。
+rather than the business meaning of the task subsystem itself.
 
 ## Process Model Alignment
 
-旧版本中已经稳定成立的 process model 在新架构中直接保留：
+The process model already stably established in the old version is retained directly in the new architecture:
 
-- `supervisor` 是 lifecycle manager
-- `Pal` 是 front-control-runtime
-- `bunshins` 是 execution child
+- `supervisor` is the lifecycle manager
+- `Pal` is the front-control-runtime
+- `bunshins` is the execution child
 
-运行关系固定为：
+The running relationship is fixed as:
 
 - `supervisor -> pal -> bunshins`
 
-其中：
+where:
 
-- `supervisor` 负责拉起、监控、重启 `Pal`
-- `Pal` 负责和用户交互、治理任务、观察 bunshins
-- `bunshins` 负责执行 task / work order
+- `supervisor` is responsible for starting, monitoring, and restarting `Pal`
+- `Pal` is responsible for interacting with the user, governing tasks, and observing bunshins
+- `bunshins` is responsible for executing tasks / work orders
 
 ## IPC Plane Alignment
 
-旧版本中已经形成的 IPC 分层在新架构中继续保留：
+The IPC layering already established in the old version is retained in the new architecture:
 
 1. `supervisor <-> pal`
 2. `pal <-> bunshins`
 
-这两条链职责不同，不应混成一条“万能消息总线”。
+These two chains have different responsibilities and should not be merged into a single "universal message bus."
 
 ### `supervisor <-> pal`
 
-这是 control plane / lifecycle plane。
+This is the control plane / lifecycle plane.
 
-它只承载：
+It carries only:
 
 - transport ready
 - runtime log
 - lifecycle signal
 - shutdown / health-like event
 
-它不承载：
+It does not carry:
 
-- 正常用户消息
-- 正常用户回复
-- 普通 turn payload
+- normal user messages
+- normal user replies
+- ordinary turn payloads
 
 ### `pal <-> bunshins`
 
-这是 execution plane。
+This is the execution plane.
 
-它承载：
+It carries:
 
 - planning request
 - work order open
@@ -96,15 +96,15 @@
 - done / failed
 - process exit
 
-其传输实现未来可以替换，但 plane boundary 本身视为保留语义。
+Its transport implementation may be replaced in the future, but the plane boundary itself is treated as preserved semantics.
 
-## 核心原则
+## Core Principles
 
-- `Pal` 负责治理任务，不直接承担 bunshins 该做的专业执行
-- bunshins 是 replaceable execution actor，不是主体
-- continuity 绑定 checkpoint / ledger / workspace state，不绑定单个进程
-- `tasking` 的 effect surfaces 必须通过 capability 暴露
-- `Pal` 必须能观察 bunshins 状态，也必须能终止 bunshins
+- `Pal` governs tasks and does not directly undertake the specialized execution that bunshins should do
+- bunshins are replaceable execution actors, not principals
+- continuity binds to checkpoint / ledger / workspace state, not to a single process
+- the effect surfaces of `tasking` must be exposed through capabilities
+- `Pal` must be able to observe bunshins state and must be able to terminate bunshins
 
 ## Owns
 
@@ -126,7 +126,7 @@
 - channel transport
 - approval constitution
 
-## 运行模型
+## Running Model
 
 ```mermaid
 flowchart LR
@@ -142,13 +142,13 @@ flowchart LR
     PAL -->|terminate| STOP["bunshins Terminated"]
 ```
 
-## Tasking 的核心对象
+## Core Objects of Tasking
 
 ## Work Order
 
-`work order` 是一次正式执行委托。
+A `work order` is a formal delegation of execution.
 
-它必须能表达：
+It must be able to express:
 
 - goal
 - scope
@@ -158,13 +158,13 @@ flowchart LR
 - active bunshins
 - current status
 
-`work order` 的旧语义在新架构中直接继承。
+The old semantics of `work order` are inherited directly in the new architecture.
 
 ## Task Context Pack
 
-`TaskContextPack` 是 `Pal` 发给 bunshins 的执行上下文包。
+`TaskContextPack` is the execution context pack sent by `Pal` to bunshins.
 
-它至少包含：
+It contains at least:
 
 - plan pack
 - task-scoped memory
@@ -178,22 +178,22 @@ flowchart LR
 
 ## Work Order Draft
 
-Work order draft 是正式 work order 之前的 planning artifact。它用于收住用户脑暴、模块边界、候选 milestones、acceptance criteria 和 workspace hints。
+A work order draft is a planning artifact that precedes the formal work order. It is used to capture the user's brainstorming, module boundaries, candidate milestones, acceptance criteria, and workspace hints.
 
-Draft 不是进度事实，也不是 checkpoint。推荐路径是：
+A draft is not a progress fact, nor a checkpoint. The recommended path is:
 
-- `Pal` 根据对话起草 draft
-- planner 只 review 这个 bounded draft
-- 用户或 `Pal` 确认后 promote 成 formal work order
-- spawn 时从 formal work order 生成 `TaskContextPack`
+- `Pal` drafts the draft from the conversation
+- the planner only reviews this bounded draft
+- after the user or `Pal` confirms, it is promoted into a formal work order
+- at spawn time, a `TaskContextPack` is generated from the formal work order
 
 ## Checkpoint
 
-`checkpoint` 是 continuity 的一等对象。
+A `checkpoint` is a first-class object for continuity.
 
-它不是可有可无的日志，而是 milestone cursor 的事实记录。
+It is not an optional log, but the factual record of the milestone cursor.
 
-checkpoint 至少表达：
+A checkpoint expresses at least:
 
 - milestone index
 - status: completed / partial / blocked
@@ -202,13 +202,13 @@ checkpoint 至少表达：
 - key artifacts
 - verification snapshot
 
-`status=completed` 推进 derived current milestone。`partial/blocked` 只记录现场，不推进 cursor。不要维护第二套 `next_resume_point`。
+`status=completed` advances the derived current milestone. `partial/blocked` only records the on-site state and does not advance the cursor. Do not maintain a second `next_resume_point`.
 
 ## Ledger
 
-`ledger` 是 tasking 的正式记账层。
+The `ledger` is the formal bookkeeping layer of tasking.
 
-它用于记录：
+It is used to record:
 
 - bunshins accepted
 - bunshins progress updates
@@ -217,71 +217,71 @@ checkpoint 至少表达：
 - bunshins termination
 - final closeout
 
-ledger 的作用是：
+The purpose of the ledger is to:
 
-- 形成 continuity truth
-- 支撑恢复和复盘
-- 支撑 developer escalation
+- form the continuity truth
+- support recovery and retrospection
+- support developer escalation
 
 ## Approval
 
-`approval` 是 tasking 相关的正式对象。
+An `approval` is a formal object related to tasking.
 
-它不是瞬时 UI 动作，而是：
+It is not a transient UI action, but rather:
 
-- 有 proposal snapshot
-- 有 target
-- 有 decision lifecycle
-- 有 pending / approved / rejected / consumed 等状态
+- has a proposal snapshot
+- has a target
+- has a decision lifecycle
+- has states such as pending / approved / rejected / consumed
 
-approval 的治理入口属于 `Control`，但其任务语义仍然属于 tasking domain。
+The governance entry point of approval belongs to `Control`, but its task semantics still belong to the tasking domain.
 
 ## Workspace / Branch Model
 
-`tasking` 默认使用基于 git 的近似沙箱环境。
+`tasking` by default uses a git-based approximate sandbox environment.
 
-这里的“近似沙箱”含义是：
+The meaning of "approximate sandbox" here is:
 
-- 不是操作系统级隔离
-- 而是通过 workspace / branch / artifact 边界约束 bunshins 的改动范围
+- not operating-system-level isolation
+- but constraining the scope of bunshins' changes through workspace / branch / artifact boundaries
 
-tasking 必须治理：
+tasking must govern:
 
 - workspace location
 - active branch
 - artifact references
 - repo conflict checks
 
-## bunshins 是 Replaceable Actor
+## bunshins Are Replaceable Actors
 
-bunshins 不是主体，`Pal` 才是主体。
+bunshins are not the principal; `Pal` is the principal.
 
-bunshins 必须满足：
+bunshins must be:
 
-- 可启动
-- 可替换
-- 可终止
-- 可由 checkpoint 接棒恢复
+- startable
+- replaceable
+- terminable
+- resumable by taking over from a checkpoint
 
-continuity 不绑定单个 bunshins 进程。
+Continuity is not bound to a single bunshins process.
 
 ## Failure And Recovery Semantics
 
-### `Pal` 崩溃
+### `Pal` Crash
 
-- `supervisor` 负责拉起新的 `Pal`
-- 新 `Pal` 从 durable state 和当前现场重新观察恢复
-- 不允许盲续旧执行栈
+- the `supervisor` is responsible for starting a new `Pal`
+- the new `Pal` re-observes and recovers from durable state and the current on-site state
+- blindly resuming the old execution stack is not allowed
 
-### bunshins 崩溃
+### bunshins Crash
 
-- `Pal` 通过 IPC 或 process exit 感知 bunshins 退出
-- `Pal` 基于 checkpoint / ledger / work order state 决定报告、替换或终止
-- continuity 仍然不绑定单个 bunshins 进程
+- `Pal` detects the bunshins exit via IPC or process exit
+- `Pal` decides to report, replace, or terminate based on checkpoint / ledger / work order state
+- continuity is still not bound to a single bunshins process
 
 ## Tasking Capability Surface
 
-当前 bunshin subsystem 暴露给 `Pal` 的 capability shape 是：
+The capability shape currently exposed by the bunshin subsystem to `Pal` is:
 
 - `task_search`
 - `task_read`
@@ -299,20 +299,20 @@ continuity 不绑定单个 bunshins 进程。
 - `bunshin_kill`
 - `bunshin_finalize`
 
-其中：
+where:
 
-- `intro_*` 允许 `Pal` 读取任务、work order、draft、profile 和 active runner 状态
-- `bunshin_spawn` 是唯一启动入口
-- `bunshin_kill` 是正常治理动作
-- 没有单独的 replace capability；替换就是 `kill` 后用 checkpoint continuity 重新 `spawn`
+- `intro_*` allows `Pal` to read tasks, work orders, drafts, profiles, and active runner state
+- `bunshin_spawn` is the only launch entry point
+- `bunshin_kill` is the normal governance action
+- there is no separate replace capability; replacement is `kill` followed by a re-`spawn` using checkpoint continuity
 
-这些 capability 暴露给 `Pal`，不暴露给 runner。runner 不能看到 `intro_*` 或 `op_bunshin_*`，也不能递归 spawn 新 runner。
+These capabilities are exposed to `Pal`, not to runners. Runners cannot see `intro_*` or `op_bunshin_*`, and cannot recursively spawn new runners.
 
-runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，但 LLM-facing tool surface 应保持小：暴露 discovery/read/call 元工具，以及少量常驻干活工具（`file_read`、`file_edit`、`file_write`、`shell`、`web_search`、`web_read`、只读 `recall_memory`）。discovery/read 必须只返回该 runner 已允许且未被黑名单过滤的 capability。
+A runner's capability pool can be inherited from `Pal`'s current capability registry and then filtered, but the LLM-facing tool surface should stay small: expose the discovery/read/call meta-tools, plus a small set of standing work tools (`file_read`, `file_edit`, `file_write`, `shell`, `web_search`, `web_read`, read-only `recall_memory`). Discovery/read must only return capabilities that the runner is already allowed and not filtered out by the blacklist.
 
 ## bunshins Observation Contract
 
-`Pal` 必须能观察到 bunshins 的最小状态：
+`Pal` must be able to observe the minimal state of bunshins:
 
 - bunshins id
 - bound work order id
@@ -326,70 +326,70 @@ runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，
 
 ## bunshins Termination Contract
 
-`Pal` 必须拥有终止 bunshins 的能力。
+`Pal` must own the ability to terminate bunshins.
 
-允许终止的典型原因：
+Typical reasons that allow termination:
 
-- 用户明确取消
+- explicit user cancellation
 - runaway / hung bunshins
-- approval 被拒绝
+- approval was rejected
 - health check fail
 - maintenance kill / respawn
 
-终止后必须写 ledger，并保留：
+After termination, the ledger must be written, preserving:
 
 - termination reason
 - latest checkpoint
 - restart eligibility
 
-## 与 Execution 的关系
+## Relationship to Execution
 
-`tasking` 是 first-party plugin family。
+`tasking` is a first-party plugin family.
 
-这意味着：
+This means:
 
-- 它通过 capability surfaces 接入 `Execution`
-- 它的 effect 最终仍然经 `Tool`
-- 它不是 `Core` 的私有实现细节
-- 它在执行语义上继承旧 task subsystem，只是在新架构里改为插件化挂载
+- it plugs into `Execution` via capability surfaces
+- its effects still ultimately go through `Tool`
+- it is not a private implementation detail of `Core`
+- it inherits the semantics of the old task subsystem at the execution level, only changed to plugin-based mounting in the new architecture
 
-## 与 Memory 的关系
+## Relationship to Memory
 
-`Pal` 不应直接把自己的聊天上下文原样交给 bunshins。
+`Pal` should not hand its own chat context verbatim to bunshins.
 
-正确路径是：
+The correct path is:
 
-- 从 memory subsystem 取 task-scoped memory
-- 取 relevant system memory
-- 组装成 `TaskContextPack`
-- 交给 bunshins
+- fetch task-scoped memory from the memory subsystem
+- fetch relevant system memory
+- assemble it into a `TaskContextPack`
+- hand it to bunshins
 
-这样 bunshins 拿到的是干净、收敛的任务上下文。
+This way, bunshins receives a clean, converged task context.
 
-## 与 Control 的关系
+## Relationship to Control
 
-bunshins approval 请求必须进入 `Control`。
+bunshins approval requests must go into `Control`.
 
-bunshins 终止和重新 spawn 虽然属于 tasking capability，但仍可能受 control governance 约束，尤其在：
+Although bunshins termination and re-spawn belong to the tasking capability, they may still be subject to control governance constraints, especially in cases of:
 
-- 用户显式取消
-- 高风险 maintenance
+- explicit user cancellation
+- high-risk maintenance
 - destructive workspace handoff
 
 ## Invariants
 
-- `Pal` 负责治理任务，bunshins 负责执行任务。
-- bunshins 是 replaceable actor，不是主体。
-- task subsystem 的旧语义默认保留。
-- continuity 绑定 checkpoint / ledger，不绑定单个进程。
-- `tasking` 默认使用 git-based approximate sandbox。
-- `Pal` 必须能观察 bunshins 状态。
-- `Pal` 必须能终止 bunshins。
-- 专业性强、可异步、可由 SPEC/work order/milestone 收束，且与用户即时互动弱的任务，可以由 advisor 建议进入 `bunshin`。
+- `Pal` is responsible for governing tasks; bunshins are responsible for executing tasks.
+- bunshins are replaceable actors, not principals.
+- The old semantics of the task subsystem are retained by default.
+- continuity binds to checkpoint / ledger, not to a single process.
+- `tasking` uses the git-based approximate sandbox by default.
+- `Pal` must be able to observe bunshins state.
+- `Pal` must be able to terminate bunshins.
+- Tasks that are highly specialized, asynchronous, can be converged by SPEC/work order/milestone, and have weak immediate interaction with the user can be suggested by the advisor to enter `bunshin`.
 
 ## Non-Goals
 
-- 不在本文件定义具体 git 命令序列
-- 不在本文件定义 checkpoint 的数据库 schema
-- 不在本文件定义 bunshins UI
-- 不允许 `Pal` 直接替代 bunshins 执行长链专业任务
+- this document does not define concrete git command sequences
+- this document does not define the database schema for checkpoints
+- this document does not define the bunshins UI
+- `Pal` is not allowed to directly execute long-chain specialized tasks in place of bunshins

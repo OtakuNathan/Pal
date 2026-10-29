@@ -1,5 +1,10 @@
 # Pal Public Proof Demo
 
+> Historical demo script and evidence, prepared for the 2026-08-14 run.
+> Its cancelled workflow is not a statement about current Bunshin readiness.
+> For current working paths use [Task/workflow orchestration](bunshin_contract_orchestration.md),
+> [direct mode](bunshin_direct_mode.md) and the [Bunshin package map](../src/pal/bunshin/README.md).
+
 This is a 3–5 minute recorded demo of Pal as a persistent personal agent
 runtime. Bunshin appears only when the job outgrows a direct turn. The demo is
 designed around observable state and an exported evidence bundle rather than a
@@ -64,7 +69,7 @@ history or configuration files.
 ### 0:35–1:20 — Delegate a job, not the identity
 
 Give Pal a bounded task that produces an artifact and explicitly request
-Bunshin. The repository's real dogfood run used this shape:
+Bunshin. The August dogfood run used this shape:
 
 ```text
 Use Bunshin to review the bound project documents and produce a short public
@@ -176,5 +181,8 @@ That first run is deliberately not presented as a happy-path delivery. Its
 as bound inputs. The worker emitted a blocker instead of fabricating a review;
 Verifier entered triage, and the operator cancelled the workflow without retry
 or cleanup. The evidence directory keeps both the successful recovery
-checkpoint and the terminal failure record. Fix or avoid that input-binding
-gap before recording the final public happy path.
+checkpoint and the terminal failure record. The input-binding gap and
+cancellation describe that August revision. Current code has explicit immutable input
+binding and verified Git/artifact delivery; follow the current workflow contract
+when recording a new run. Preserve this capture as historical evidence, rather
+than treating it as an assessment of the present subsystem.

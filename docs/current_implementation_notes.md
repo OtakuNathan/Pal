@@ -1,6 +1,9 @@
 # Current Implementation Notes
 
-This file is a short sync point for the current codebase when older design notes lag behind implementation.
+This is a current-code sync point, reviewed on 2026-10-29. It describes source
+behavior, not the enabled or loaded state of a particular installation. See the
+[runtime map](pal_runtime_stack.md) for ownership and the
+[documentation index](README.md) for user guides, contracts and historical evidence.
 
 `/btw <question>` is a temporary, read-only-by-instruction side turn using a
 snapshot of L, the resident cache identity, and independent execution/projection
@@ -154,17 +157,17 @@ The inline button uses the generic `control.command.run` interaction action, whi
 
 Channel endpoints render platform-specific control UX. Telegram owns command menu publication, inline keyboard rendering, callback token mapping, and message editing. PalCore and Control receive typed interaction results, not Telegram callback payloads.
 
-Channel providers are managed through `ChannelEndpointProviderManager`. Builtin providers are registered during runtime composition; runtime providers are discovered from:
-
-```text
-<runtime_root>/channel/providers/<provider_id>/provider.toml
-```
-
-The provider entrypoint exports `build_channel_provider(context)`. The manager supplies a build context and exposes the unified capability surface for provider listing, endpoint inspection, auth/backlog/health introspection, attach/detach, endpoint restart. PluginHost supplies code reload and discovery.
+Channel providers are managed through `ChannelEndpointProviderManager`. The recovery socket is resident; detachable providers are discovered by PluginHost.
+New plugins use `<runtime_root>/plugins/community/<plugin_id>/plugin.toml`, declare
+`[channel] endpoint_types`, and return `ModuleHandle.channel_extension` from
+`start(scope)`. Legacy `<runtime_root>/channel/providers/<provider_id>/provider.toml`
+and `build_channel_provider(context)` remain supported in place.
+The manager exposes unified provider routing, endpoint inspection, auth/backlog/health
+and endpoint lifecycle; PluginHost owns metadata discovery and code generations.
 
 The important boundary is:
 
-- manager owns registration, discovery, endpoint-to-provider routing, and LLM/core-facing capability entrypoints
+- manager owns registration, hub topology, endpoint-to-provider routing, and LLM/core-facing capability entrypoints
 - provider owns endpoint lifecycle, attach/detach mechanics, platform SDK usage, provider-specific introspection, interaction rendering, and interaction result normalization
 - `channel_kind` remains the endpoint row discriminator for persistence and deserialization; core should not infer platform behavior from it
 
@@ -173,6 +176,11 @@ Channel provider code is owned by PluginHost generations; ChannelRuntime and end
 Automatic compaction failure is a terminal result for the current turn, not a Safe Mode trigger. Pal preserves memory/tool RPC state, reports the failure directly, and asks the user to run `/compact` manually and resend the request.
 
 Interaction is typed internally but realized per provider. Telegram may use inline keyboards, callback queries, command menu publication, message edit, reaction, and typing. Socket/CLI/Web providers may choose their own transport shape. Core and Control consume typed actions/results only.
+
+Silent tasks can select the built-in `null` endpoint, which discards output without
+transport I/O or replay. JSON null clears a proactive destination; the string
+`"null"` selects the sink. Socket buffers/ACK/replay make it a communication
+endpoint, not a discard destination.
 
 ## MCP
 
@@ -207,7 +215,7 @@ owns Task/workflow persistence, graph execution, role leases, and process-shell
 lifecycle. A Task has one current workflow, addressed publicly by Task name;
 workflow and aggregate identifiers remain manager-owned.
 
-The Architect receives the original requirements and family-specialized
+In planned mode, the Architect receives the original requirements and family-specialized
 `architect.yaml` template, designs the graph and module contracts, then writes
 the family-defined graph document. The manager validates and compiles that
 document to GraphIR. Executors and checkers consume their bound module view,
@@ -216,6 +224,11 @@ source. A role is a logical coroutine backed by a short-lived process shell;
 its serialized runtime state is the resume boundary. Independent ready graph
 nodes may run concurrently under the manager semaphore, while each node keeps
 its own worker/checker pair and worktree.
+
+For an already settled software repository task, [direct mode](bunshin_direct_mode.md)
+uses one repository node with Coder/Verifier, skipping Architect and architecture
+review while keeping durable task state, isolated workspaces and publication checks.
+Historical failed runs do not describe current Bunshin readiness.
 
 Manager task notifications are durable outbox rows. The Pal-side provider
 buffers them and drains them through the Core event loop. The event remains
@@ -228,10 +241,11 @@ If the current endpoint is unavailable, the manager may use the live socket
 recovery route. No channel receipt or remote business response is required for
 the ACK boundary.
 
-Compaction is shared infrastructure with separate Pal/Bunshin policies. It
-operates on a frozen L1 snapshot and commits atomically; closed tool protocol
-and external module views remain authoritative. A reset likewise waits for the
-active logical turn to exit. A bounded timeout reports that reset was not
+Compaction uses the shared agent kernel and one continuity schema, prompt,
+validator and full renderer. Host adapters retain task-source semantics, clocks
+and memory-candidate policy. It operates on frozen LEFT and commits atomically;
+pending RIGHT, closed tool protocol and external module views retain their
+authority. A reset likewise waits for the active logical turn to exit. A bounded timeout reports that reset was not
 applied and preserves the active turn rather than clearing live state.
 
 Bunshin capabilities use the current V2 Task/workflow surface and scoped role
@@ -247,6 +261,14 @@ Capability availability is runtime state.
 Persisted metadata may explain prior state, but live facts such as attached status, process status, socket status, and capability availability must be inspected live.
 
 ### LLM, history and execution ownership
+
+Requests retry only the selected endpoint, without automatic cross-endpoint fallback.
+Exact-model outgoing hooks under `llm/models` modify messages/tools. Provider
+default and exact-endpoint response hooks run after codec envelope splitting
+and before the common decoder; only that decoder creates executable ToolCallIR.
+These are protocol adaptation hooks, separate from Core system observations.
+Accepted L1 replay is the response authority; projection send receipts establish
+admission only and contain no independent response payload.
 
 LLM callers use the asynchronous generation/preflight contract directly. Optional
 projection support is exposed through `projection_port`; projected sessions expose

@@ -19,11 +19,9 @@ required components and optional fallbacks.
 
 ## Install a Release
 
-A Pal release bundle contains three files:
-
-- the `pal-v2` Python wheel;
-- the runtime-root overlay for detachable providers and harnesses;
-- `install-pal.sh`.
+A Pal release bundle contains the `pal-v2` wheel, a runtime-root overlay,
+independently installable channel-provider wheels under `providers/`, and
+`install-pal.sh`. Bundled providers currently include Telegram and the WebSocket bridge.
 
 Extract the bundle and run the installer:
 
@@ -51,6 +49,13 @@ The locations can be changed without editing the script:
 
 On Linux, `PAL_PYTHON` can select a particular Python 3.11+ executable. On
 macOS the installer uses Homebrew Python so SQLite extensions can be loaded.
+
+## Select the Runtime
+
+Use `--runtime-root` explicitly on runtime commands, especially when keeping
+production and development instances together. Without it the CLI selects
+`~/.pal` if that directory exists, otherwise `$PAL_HOME`, then `~/.pal`.
+Setting `$PAL_HOME` does not override an existing `~/.pal`.
 
 ## Complete Setup
 
@@ -105,7 +110,7 @@ journalctl --user -u pal -f
 The installer runs the doctor automatically. It can be rerun at any time:
 
 ```bash
-pal doctor
+pal doctor --runtime-root ~/.pal
 ```
 
 Important results include:
@@ -116,7 +121,10 @@ Important results include:
 - optional Codex CLI support;
 - optional local Ollama embedding fallback;
 - service-manager availability;
-- Node.js 18+ and npm for the `web_fetch` plugin, which provisions its pinned Playwright CLI and Chromium on first use.
+- Node.js 18+ and npm for `web_fetch`. The release installer prepares and verifies
+  built-in dependencies, including the pinned Playwright CLI and Chromium. A
+  source installation can explicitly prepare them with
+  `pal package prepare web_fetch --kind builtin --runtime-root ~/.pal-dev`.
 
 ## Upgrade
 
@@ -134,12 +142,8 @@ pal setup --upgrade --runtime-root ~/.pal
 ```
 
 This applies the current LLM and Bunshin schema migrations without reopening the
-wizard or replacing user configuration. Restart the service after installing a
-new wheel if it is already running:
-
-```bash
-systemctl --user restart pal
-```
+wizard or replacing user configuration. It does not replace code already loaded
+in a running host.
 
 The packaged release bundle contains the Pal wheel, the runtime plugin overlay,
 and independently installable channel-provider wheels under `providers/`.
@@ -148,8 +152,20 @@ and, on Linux, safely stops and restarts a Pal service that was already active.
 Use `--no-providers` or `--no-service-restart` only when managing those
 lifecycles separately.
 
-Individual detachable plugins can instead be refreshed through their lifecycle
-operation when only that subsystem changed.
+On macOS, or when replacing a wheel outside the installer's service handling,
+restart the actual service through its external supervisor. For the default
+Linux unit that is `systemctl --user restart pal.service`.
+
+For an individual plugin change, use `manage_plugin(name=..., operation="reload")`
+in a running Pal. Repeated attach preserves an existing instance; rescan discovers
+metadata, and endpoint restart only reconnects. Check lifecycle results and
+load/cleanup errors before claiming activation. Resident/shared Python changes
+require an external host restart.
+
+For a narrow existing configuration change, prefer `pal llm`, `pal identity`,
+`pal memory`, `pal web-search`, `pal core` or `pal bunshin` as appropriate; inspect
+that command's `--help`. Full setup can change identity, endpoints, embeddings and
+OS services, so inspect the existing runtime before rerunning it.
 
 ## Build a Release From Source
 
@@ -168,10 +184,22 @@ dist/pal_v2-install-bundle.tar.gz
 For editable development rather than a packaged installation:
 
 ```bash
-python -m pip install -e .
-pal doctor
+python -m pip install -e '.[test]'
+pal doctor --runtime-root ~/.pal-dev
 pal setup --runtime-root ~/.pal-dev
 ```
 
-Run the development instance in the foreground or accept service registration
-under a distinct runtime root.
+Run the development instance in the foreground:
+
+```bash
+pal run --runtime-root ~/.pal-dev
+```
+
+Inspect the service name and launch command before registering a development
+service so it does not replace a production unit.
+`scripts/pal_source.sh` prepends this checkout's `src/` to `PYTHONPATH`; use
+`PAL_PYTHON` to select its interpreter. This selects source code, not the runtime:
+continue to pass `--runtime-root ~/.pal-dev`.
+
+For test batches, type checks and model validation, see
+[Development and validation](development.md) and [Formal checks](../spec/README.md).

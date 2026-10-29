@@ -306,7 +306,10 @@ module's forest directly.
 
 LLM wire rendering belongs to the three codecs in `src/pal/llm/shapes/`, not in
 the generic capability forest. Exact-model tuning belongs to runtime model
-hooks; provider identity does not select behavior.
+hooks. Provider identity may select its explicit response-normalization hook;
+it does not choose wire semantics, codec, authentication or transport.
+Exact-endpoint response hooks compose after provider defaults and before the
+common semantic decoder. See the [LLM hook contract](pal_llm_contract.md#provider-and-endpoint-response-hooks).
 
 ## Invariants
 

@@ -2,9 +2,10 @@
 
 Owns:
 - `L1/L2/L3` memory semantics
-- runtime-owned `L1` and `L2`, with one encrypted resident exit checkpoint
-  consumed on the next Pal startup
-- future durable `L3` repository boundary
+- runtime-owned `L1` and `L2`, with encrypted resident baseline, incremental
+  admission/round journal and a full clean-shutdown checkpoint
+- durable `L3` provider contract; the SQLite-vec implementation is a plugin
+- `pal.memory.persistence`: resident recovery and the separate searchable dialogue archive
 - memory pack projection
 - shared recall, L2 heat, and prompt projection for every agent host
 - atomic replacement and rollback of an already validated compact summary
@@ -43,11 +44,15 @@ Interaction rule:
   replaces that history with a lossy continuity summary; RIGHT remains intact.
 - Memory exposes one runtime-state port for L1, L2, top-of-mind, and heat.
   Core orchestrates snapshot/restore/reset; Memory never reaches into Execution
-- Resident Pal quiesces on SIGINT/SIGTERM and writes the fixed L1 runtime
-  snapshot as one encrypted atomic checkpoint without calling an external
-  model. Startup restores and consumes that checkpoint before channel
-  endpoints start; normal context-budget policy may compact the restored L1
-  later. There is no periodic checkpoint or background compaction loop
+- Resident recovery saves accepted L submissions and completed rounds through
+  an encrypted baseline/journal. SIGINT/SIGTERM quiesces and writes a full atomic
+  checkpoint without a model call. Startup restores working state before
+  endpoints start; unfinished execution becomes interrupted context and is not
+  replayed. This is boundary-driven persistence, not timer-driven compaction
+- Compact/reset archive only dialogue removed from L1 into credential-redacted
+  daily JSONL under `data/conversation-history/`, by message date in Pal's timezone.
+  Startup, shutdown and midnight do not archive active working dialogue.
+  Searchable text excludes reasoning/native replay and does not replace recovery
 - Core runs compaction and host policies render its checkpoint before storage;
   `MemoryService` performs the L1 replacement, dependent L2 cleanup, and
   execution-context projection inside one rollback boundary

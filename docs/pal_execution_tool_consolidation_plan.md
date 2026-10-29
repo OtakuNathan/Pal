@@ -1,89 +1,89 @@
-# Execution 工具面收口计划
+# Execution Tool Surface Consolidation Plan
 
-日期：2026-10-15
-状态：已按确认范围实施到源码；定向验证见[实施记录](pal_tool_consolidation_implementation.md)。尚未安装或激活。
+Date: 2026-10-15
+Status: Implemented into source code per the confirmed scope; see [Implementation Notes](pal_tool_consolidation_implementation.md) for targeted verification. Not yet installed or activated.
 
-## 设计原则
+## Design Principles
 
-延续 [Browser 工具面收口计划](pal_browser_tool_consolidation_plan.md)：优先减少重复入口；简单枚举可以合并，不将多套操作专用参数重新塞进一个超级工具。
+Continuing from the [Browser tool surface consolidation plan](pal_browser_tool_consolidation_plan.md): prioritize reducing duplicate entry points; simple enums may be merged, but do not cram multiple sets of operation-specific parameters into a single mega-tool.
 
-Shell 保留独立、明确的日常操作。工具描述说明用途和前置条件；出现会话时提供简短、相关的指引，不在每次输出重复整套会话管理手册。
+Shell retains independent, explicit everyday operations. Tool descriptions explain purpose and preconditions; when a session appears, provide brief, relevant guidance rather than repeating the full session-management manual on every output.
 
-## 当前基线
+## Current Baseline
 
-按 execution 能力及当前 native shell / remote shortcut 声明，共 24 个入口、8 个常驻直调。这是源码与当前配置口径，不是在线实例快照；当前 remote 配置生成一个 `run_shell_desktop` 快捷入口。
+By execution capability and current native shell / remote shortcut declarations, there are 24 entry points and 8 resident direct-call tools. This is a source-code and current-configuration accounting, not an online-instance snapshot; the current remote configuration generates one `run_shell_desktop` shortcut entry.
 
-| 分组 | 工具 | 数量 |
+| Group | Tools | Count |
 | --- | --- | ---: |
-| 工具发现、调用及注册状态 | `search_tools`、`read_tool`、`call_tool`、`list_tools`、`inspect_execution_state` | 5 |
-| 文件 | `read_file`、`edit_file`、`write_file`、`delete_path` | 4 |
-| Shell 执行 | `run_shell`、`run_shell_desktop` | 2 |
-| Shell 会话 | `manage_shell_session`、`read_shell_session`、`write_shell_session`、`resize_shell_session`、`terminate_shell_session`、`release_shell_session`、`watch_shell_session`、`extend_shell_session`、`unwatch_shell_session` | 9 |
-| Shell 状态 | `inspect_shell_status` | 1 |
-| Remote | `list_remote`、`start_remote_target`、`shutdown_remote_target` | 3 |
-| 合计 | | **24** |
+| Tool discovery, invocation, and registration status | `search_tools`, `read_tool`, `call_tool`, `list_tools`, `inspect_execution_state` | 5 |
+| Files | `read_file`, `edit_file`, `write_file`, `delete_path` | 4 |
+| Shell execution | `run_shell`, `run_shell_desktop` | 2 |
+| Shell sessions | `manage_shell_session`, `read_shell_session`, `write_shell_session`, `resize_shell_session`, `terminate_shell_session`, `release_shell_session`, `watch_shell_session`, `extend_shell_session`, `unwatch_shell_session` | 9 |
+| Shell status | `inspect_shell_status` | 1 |
+| Remote | `list_remote`, `start_remote_target`, `shutdown_remote_target` | 3 |
+| Total | | **24** |
 
-## 已确认撤销的入口
+## Confirmed Entry Points to Withdraw
 
 ### delete_path
 
-撤销模型可调用的专用路径删除工具，文件删除由已有 shell 能力承担；不再为此保留一个等价的新工具或可搜索旧别名。
+Withdraw the model-callable dedicated path deletion tool; file deletion is handled by existing shell capability; no equivalent replacement tool or searchable legacy alias will be kept for this.
 
-实现时盘点工具声明、恢复提示、角色投影、文档及回归测试中的引用。内部路径处理代码是否有其他消费者，单独检查后决定清理范围。
+During implementation, inventory references in tool declarations, recovery prompts, role projections, documentation, and regression tests. Whether the internal path-handling code has other consumers is checked separately before deciding the cleanup scope.
 
-现有删除工具有 expected hash、路径类型及不可变输出快照检查，不能宣称 shell 删除具有相同的结构化契约；runtime 的快照引用和生命周期仍由原 owner 管理。
+The existing deletion tool has expected hash, path type, and immutable output snapshot checks; we cannot claim shell deletion provides the same structured contract; snapshot references and lifecycle in the runtime are still managed by the original owner.
 
 ### manage_shell_session
 
-撤销模型可调用的八操作超级入口。保留 read、write、resize、terminate、release、watch、extend、unwatch 的简单工具入口，暂不把其中几项重新组装成新的管理工具。
+Withdraw the model-callable eight-operation mega entry point. Keep the simple tool entry points for read, write, resize, terminate, release, watch, extend, and unwatch; for now, do not reassemble some of them into a new management tool.
 
-这只撤销模型工具面，不能直接删除独立工具共用的内部 `session_async` 分发、状态核对和输出恢复实现。
+This only withdraws the model tool surface; it cannot directly delete the internal `session_async` dispatch, state verification, and output recovery implementations shared by the independent tools.
 
-更新 `run_shell`、会话结果、状态检查、内置技能及其他工具的 next-tool 指引，避免继续推荐已撤销入口。
+Update the next-tool guidance in `run_shell`, session results, status checks, built-in skills, and other tools so they no longer recommend the withdrawn entry points.
 
-提示约定：
+Prompt conventions:
 
-- `run_shell` 与相关工具的静态描述解释返回 `session_id` 后如何按需要读取、输入或终止。
-- 首次返回会话，或发生需要操作的新状态时，必要时给出简短且相关的指引。
-- 不在每次结果重复所有工具名称、参数表及生命周期说明。
-- 输出导出失败继续给出准确的 `read_shell_session` 恢复入口；保留 `output_ref`，不能要求重跑生产命令。
+- Static descriptions of `run_shell` and related tools explain how to read, feed input to, or terminate as needed after a `session_id` is returned.
+- When a session is returned for the first time, or a new state requiring action occurs, give brief and relevant guidance as needed.
+- Do not repeat all tool names, parameter tables, and lifecycle explanations on every result.
+- When output export fails, continue to give the accurate `read_shell_session` recovery entry point; retain the `output_ref`; do not require rerunning the producing command.
 
-## list_tools：由现有 domain 目录承接
+## list_tools: Absorbed by the Existing Domain Directory
 
-当前 `list_tools` 一次返回所有注册工具的名字、用途、所属模块及调用模式，供全局清单浏览。
+Currently, `list_tools` returns the names, purposes, owning modules, and invocation modes of all registered tools at once, for a global inventory browse.
 
-`search_tools(domain="shell")` 不带 query 时，已经提供该域的目录分页，每页最多 16 条名字和简短用途，支持 `directory_offset` / `next_offset`。这类目录导航不同于相关性检索的完整候选契约；后者继续默认最多 3 条，上限 5 条。
+When `search_tools(domain="shell")` is called without a query, it already provides paginated directory listings for that domain, at most 16 names and brief purposes per page, supporting `directory_offset` / `next_offset`. This kind of directory navigation differs from the full candidate contract for relevance search; the latter continues to default to at most 3 candidates, capped at 5.
 
-建议撤销单独 `list_tools` 入口，统一先发现 domain，再浏览指定 domain 的目录；不把全量工具契约塞进 search 结果。实施时确认无 query、无 domain 的现有返回能提供可见 domain 清单；盘点原全局清单的调用者和测试，所需行政统计或完整导出可继续使用内部 registry / CLI。
+Recommendation: withdraw the separate `list_tools` entry point; unify on discovering the domain first, then browsing that domain's directory; do not stuff the full tool contract into search results. During implementation, confirm that the existing return with no query and no domain can provide a visible domain list; inventory the callers and tests of the original global listing; any required administrative statistics or full exports can continue to use the internal registry / CLI.
 
-目录只是导航：选中候选后按现有规则读取完整契约。保留工具可见性和角色授权边界，不因替换入口而展示无权调用的工具。
+The directory is only for navigation: after selecting a candidate, read the full contract per existing rules. Preserve tool visibility and role authorization boundaries; do not expose tools the caller is not authorized to invoke just because the entry point was replaced.
 
-## release 的含义与处理
+## Meaning and Handling of release
 
-`release_shell_session` 用于主动丢弃已完成会话的保留输出，或通过 `output_ref` 放弃尚未成功导出的结果。运行中的会话不能 release；取消进程由 `terminate_shell_session` 负责。
+`release_shell_session` is for actively discarding the retained output of a completed session, or abandoning results not yet successfully exported via `output_ref`. Running sessions cannot be released; canceling the process is the responsibility of `terminate_shell_session`.
 
-此前“再加入 release”指把它加入一个生命周期管理枚举。按本轮撤销超级入口、保留简单工具的方向，暂不采用该合并，release 独立保留。
+The earlier "then join release" meant adding it to a lifecycle-management enum. Per this round's direction of withdrawing the mega entry point and keeping simple tools, that merge is not adopted for now; release remains independent.
 
-## 明确保留的边界
+## Boundaries Explicitly Kept
 
-- `read_file`、`edit_file`、`write_file` 分别负责读取、精确局部替换、完整内容写入，保留各自读版本和前置条件。
-- `read_shell_session`、`write_shell_session`、`resize_shell_session` 不合并，避免输出、PTY 文本和终端尺寸切换参数契约。
-- `watch_shell_session` 安排后台决策通知；`extend_shell_session` 延长已有有限期限；`unwatch_shell_session` 关闭主动通知，均保留原语义。
-- `start_remote_target` 与 `shutdown_remote_target` 分开。当前使用场景分别为启动/WOL 与受管理的关机，启动实现仍以 target 宣告的配置动作为准；不将二者拼成新的操作枚举。
-- `list_remote` 保留目标汇总、指定目标详情及按需刷新，不新增细碎状态工具。
-- `inspect_execution_state` 负责注册工具及 generation 诊断；`inspect_shell_status` 负责会话及保留输出盘点，保留诊断对象区别。
-- `search_tools`、`read_tool`、`call_tool` 保留发现、契约读取、执行的职责划分。
+- `read_file`, `edit_file`, and `write_file` are respectively responsible for reading, precise partial replacement, and full content writing; each keeps its own read versions and preconditions.
+- `read_shell_session`, `write_shell_session`, and `resize_shell_session` are not merged, avoiding mixing parameter contracts for output, PTY text, and terminal size changes.
+- `watch_shell_session` schedules background decision notifications; `extend_shell_session` extends an existing finite deadline; `unwatch_shell_session` turns off active notifications; all keep their original semantics.
+- `start_remote_target` and `shutdown_remote_target` stay separate. Their current use cases are startup/WOL and managed shutdown respectively; startup implementation still follows the configuration actions declared by the target; the two are not stitched into a new operation enum.
+- `list_remote` keeps target summaries, specified target details, and on-demand refresh; no new fine-grained status tools are added.
+- `inspect_execution_state` handles registered-tool and generation diagnostics; `inspect_shell_status` handles sessions and retained-output inventory, preserving the distinction in diagnostic subjects.
+- `search_tools`, `read_tool`, and `call_tool` keep the division of responsibilities among discovery, contract reading, and execution.
 
-## 尚未单独确认的建议
+## Suggestions Not Yet Individually Confirmed
 
-`run_shell_desktop` 是固定 target 的常驻快捷投影，可考虑撤销并统一为 `run_shell(target=...)`。撤销前核对角色投影、固定目标约束和目标发现流程；当前尚不将其视为本轮已确认撤销项。
+`run_shell_desktop` is a resident shortcut projection with a fixed target; it could be considered for withdrawal and unified into `run_shell(target=...)`. Before withdrawal, verify role projections, fixed-target constraints, and target discovery flows; it is not currently regarded as a confirmed withdrawal item of this round.
 
-## 数量与验证
+## Counts and Verification
 
-- 已确认撤销 delete_path 和 manage_shell_session：24 → 22，常驻数量不变。
-- 若采用 list_tools 的目录承接方案：22 → 21，常驻数量不变。
-- 若后续再撤销当前一个 remote shortcut：21 → 20，常驻 8 → 7。
+- Confirmed withdrawal of delete_path and manage_shell_session: 24 → 22, resident count unchanged.
+- If the list_tools directory-absorption plan is adopted: 22 → 21, resident count unchanged.
+- If the remaining remote shortcut is later revoked: 21 → 20, resident 8 → 7.
 
-实施时分别核对 Pal 仓库及 `pal-shell-native` 仓库的所有权和贡献指南，保持现有未提交修改。需要定向验证工具可见性、旧别名撤销、独立会话操作、会话恢复、compact 后标识恢复、domain 目录分页及角色权限。
+During implementation, verify the ownership and contribution guidelines of both the Pal repository and the `pal-shell-native` repository separately, and preserve existing uncommitted changes. Targeted verification is needed for tool visibility, old alias revocation, independent session operations, session recovery, identity restoration after compact, domain directory pagination, and role permissions.
 
-模型评估同时检查发现、正确工具与参数、实际执行结果、重复提示量和调用轮次；不以减少名字数量直接判断改进。完整 CI 交给 GitHub；代码修改、安装文件复制与运行实例激活分别记录。
+Model evaluation checks discovery, correct tool and parameters, actual execution results, duplicate prompt volume, and number of call rounds; improvement is not judged solely by a reduced name count. Full CI is left to GitHub; code changes, installation file copies, and running-instance activation are each recorded separately.

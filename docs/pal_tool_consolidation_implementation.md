@@ -1,363 +1,363 @@
-# 工具面收口实施记录
+# Tool Surface Consolidation Implementation Record
 
-2026-10-15，用户授权逐个实施本轮六份计划。保留既有 LLM/endpoint/向导及其他无关工作树修改。以下按实施顺序记录当时状态；最终清理与验证见文末。未复制安装文件或激活运行实例。
+On 2026-10-15, the user authorized implementing this round's six plans one by one. Existing LLM/endpoint/wizard and other unrelated worktree modifications were preserved. The current state at each step is recorded below in implementation order; final cleanup and validation are at the end of this document. No installed files or running instances were activated.
 
-## 已实施范围
+## Implemented Scope
 
-| 模块 | 审查基线 → 当前源码 | 实现 |
+| Module | Review baseline → current source | Implementation |
 | --- | --- | --- |
-| LSP | 15 → 10 | 全部间接调用；统一 hub/workspace/单 server inspection，位置查询用 kind，调用关系用 direction；保留 rescan，预备调用链由内部处理。 |
-| Plugins | 14 → 8 | manage_plugin(name, operation)；inspect_plugin(name?)；扫描模式合并；保留摘要目录和四个包工具。 |
-| Execution | 24 → 21（含当前 remote shortcut） | 撤下 delete_path、list_tools 和 native shell 的超级会话入口；保留八个简单会话动作、run_shell_desktop、WOL 与关机的独立入口。 |
-| Browser | 28 → 23 | read_browser_page(url?) 统一打开/读取且保持唯一常驻入口；扩展 inspection 合并；会话维护用枚举，reset 仍要求 confirm=true；撤下 fetch。 |
-| Artifact | 8 → 4 | 文件归一化与描述；仅图片在输入渲染时附内容，list/search 合并，read/grep/select 撤下，待统一测试。 |
-| Bunshin | 13 → 11 | pause/resume/cancel/archive 统一控制；rebind 降为间接，start 保留直调，角色工具不改，待统一测试。 |
-| MCP | 7 → 5 | 连接控制枚举；artifact 转换下沉到 MCP 调用适配层，撤销独立图片工具，待统一测试。 |
-| Skill | 8 → 7 | 保留独立 hub/单体查询；停用并入 update_skill，统一版本及文件/数据库写入路径，待统一测试。 |
-| Proactive | 11 → 8 | 输出 channel/target 合为 set_proactive_destination；启用/停用/删除合为 manage_proactive_task；调度独立，控制合并待统一测试。 |
-| Channel | 11 → 7 | manage_channel_endpoint(name, operation) 五合一；查询、发送和凭据工具保留。 |
-| Memory | 减少 6 个后端维护入口 | pal memory CLI 通过 resident owner 管理后端；离线 embedding 迁移；模型只保留日常工具和健康摘要。 |
-| Emotion | 3 个情绪动作 → 1 个 | 独立协调插件 show_emotion(emotion)；渲染端词表并集、广播到所有启用端点、不支持则跳过、失败独立报告；不暴露 duration。 |
+| LSP | 15 → 10 | All indirect calls; unified hub/workspace/single-server inspection, kind for location queries and direction for call relations; rescan retained, preparation of the call chain handled internally. |
+| Plugins | 14 → 8 | manage_plugin(name, operation); inspect_plugin(name?); scan modes merged; the digest catalog and four package tools retained. |
+| Execution | 24 → 21 (including the current remote shortcut) | Removed delete_path, list_tools, and native shell super-session entries; retained the eight simple session actions plus standalone entries for run_shell_desktop, WOL, and shutdown. |
+| Browser | 28 → 23 | read_browser_page(url?) unifies open/read while remaining the single resident entry; extension inspection merged; session maintenance uses an enum, reset still requires confirm=true; fetch removed. |
+| Artifact | 8 → 4 | File normalization and description; only images attach content on input render, list/search merged, read/grep/select removed, pending unified testing. |
+| Bunshin | 13 → 11 | pause/resume/cancel/archive unified control; rebind demoted to indirect, start kept as a direct call, role tools unchanged, pending unified testing. |
+| MCP | 7 → 5 | Connection control enum; artifact conversion pushed down into the MCP invocation adapter layer, standalone image tools withdrawn, pending unified testing. |
+| Skill | 8 → 7 | Standalone hub/single queries retained; enable merged into update_skill, unifying version and file/database write paths, pending unified testing. |
+| Proactive | 11 → 8 | Output channel/target merged into set_proactive_destination; enable/disable/delete merged into manage_proactive_task; scheduling standalone, control merge pending unified testing. |
+| Channel | 11 → 7 | manage_channel_endpoint(name, operation) five-in-one; query, send, and credential tools retained. |
+| Memory | 6 backend maintenance entries removed | pal memory CLI manages backends via the resident owner; offline embedding migration; the model keeps only daily tools and the health digest. |
+| Emotion | 3 emotion actions → 1 | Standalone coordination plugin show_emotion(emotion); render-side vocabulary union, broadcast to all enabled endpoints, skipped when unsupported, failures reported independently; duration is not exposed. |
 
-表中沿用各计划审查时的模块基线，不宣称当前在线实例已采用新数量。Browser 的截图尺寸/纯 resize 及 snapshot/filter 合并仍属待定，不在本轮实施范围。
+The table reuses each plan's module baseline from its review time and does not claim the currently online instance has adopted the new counts. Browser's screenshot-size/pure-resize and snapshot/filter merges remain pending and were not part of this implementation round.
 
-前六块完成时，`audit_tool_surface.py` 导出 Pal 自有源码联合目录：130 个 resident_union 别名、36 个 role_only 别名；本次 Channel 五合一后审计确认主工具为 126 个；resident 中 20 个 native（17 direct + 3 native opt-in）。它排除运行时安装的 remote/eye/face/desktop 和外部 MCP 工具，不等于此前在线实例的 173/174 个工具口径。Emotion 基础契约纳入静态审计，实际词表由当前渲染端动态生成。
+When the first six blocks were complete, `audit_tool_surface.py` exported Pal's own source union directory: 130 resident_union aliases and 36 role_only aliases; after this round's Channel five-in-one, an audit confirmed 126 primary tools; of residents, 20 are native (17 direct + 3 native opt-in). It excludes runtime-installed remote/eye/face/desktop and external MCP tools, so it is not the same accounting as the previous online instance's 173/174 tools. The Emotion base contract is included in static audit; the actual vocabulary is dynamically generated by the current render side.
 
-## 关键行为
+## Key Behaviors
 
-- Hub inspection 默认摘要；指定对象后才返回那个对象的充分诊断。LSP 的无参数 inspection 不启动 sidecar，workspace-only 不主动探测 server；显式 name/file 才主动诊断。
-- Browser inspection 不启动 sidecar/浏览器；配置和 worker 观察不等于扩展行为已验证。页面完整快照、代理读取、登录状态及 ref 恢复边界保留。
-- Memory hub 的后端计数来自被动 owner 摘要，不发起 embedding 网络健康探测；详细探测仍在 CLI。Memory CLI 在线故障不降级成直接改数据库；后端控制在忙时拒绝，selection 明确只在当前运行实例生效。原 provider_id/mem_ref 核对保留。
-- Embedding 迁移在宿主停止、持有租约时进行。先构建未发布 generation，验证原内容/引用、完整向量和样本检索，再发布和写配置。同维度不同模型仍重建；中断可续跑。发布后配置尚未完成时阻止宿主启动；恢复核对完整配置摘要。原 generation、workflow pins 和私有配置备份保留。详见 [CLI 说明](pal_memory_cli.md)。
-- 情绪贡献随插件 generation 注册/注销。依赖闭包撤下时不会被贡献清理回调重新发布；reload 后旧渲染端不再收到调用。多个桌面端点各接受一次，时长和状态恢复继续归各 runtime。
-- Native shell 原有 compact 后 retained output_ref 恢复修改保留；本轮没有用重跑命令替代输出恢复。
+- Hub inspection defaults to a digest; only after specifying an object does it return that object's full diagnostics. LSP's argumentless inspection does not start a sidecar, and workspace-only does not actively probe servers; only explicit name/file triggers active diagnostics.
+- Browser inspection does not start a sidecar/browser; configuration and worker observation are not equivalent to extension behavior being verified. Full page snapshot, proxied reads, login state, and ref restore boundaries are preserved.
+- The Memory hub's backend counts come from passive owner digests and do not initiate embedding network health probes; detailed probing remains in the CLI. Memory CLI online failures do not degrade into directly modifying the database; backend control rejects while busy, and selection explicitly takes effect only on the current running instance. The original provider_id/mem_ref verification is retained.
+- Embedding migration runs while the host is stopped and holds the lease. It first builds an unpublished generation, verifies original content/references, full vectors, and sample retrieval, then publishes and writes configuration. Same-dimension but different models are still rebuilt; interruptions are resumable. If configuration is incomplete after publishing, host startup is blocked; recovery verifies the full configuration digest. Original generations, workflow pins, and private configuration backups are preserved. See [CLI documentation](pal_memory_cli.md).
+- Emotion contributions are registered/deregistered with plugin generations. When a dependency closure is withdrawn, they are not re-published by contribution cleanup callbacks; after reload, old render sides no longer receive calls. Multiple desktop endpoints each accept once; duration and state restoration remain owned by each runtime.
+- The native shell's existing retained output_ref restoration after compact is preserved; this round did not replace output restoration with re-running commands.
 
-## 源码与打包
+## Source and Packaging
 
-Pal、`../pal-shell-native` 和 `../desktop_avatar` 都有改动，需要一起审查和按所有权发布。Pal wheel 已成功构建，确认含 emotion runtime 和 builtin manifest。
+Pal, `../pal-shell-native`, and `../desktop_avatar` all have changes and need joint review and ownership-based publishing. The Pal wheel built successfully, confirmed to include the emotion runtime and builtin manifest.
 
-未找到 st7789_face 原始仓库，已将安装快照导入版本化 [plugins/st7789_face](../plugins/st7789_face/README.md)，记录来源与原文件哈希，再修改渲染接入。新 host-Python 包成功构建于 `/tmp/st7789_face-consolidated/plugin-st7789_face-0.1.1.palpkg`。这不代表硬件或 sidecar 已实际验证；安装前须对比目标配置和独立修改。若找到原仓库，应回迁这些变更。
+The st7789_face original repository was not found, so the installed snapshot was imported into the versioned [plugins/st7789_face](../plugins/st7789_face/README.md), recording provenance and original file hashes, before modifying the render integration. The new host-Python package built successfully at `/tmp/st7789_face-consolidated/plugin-st7789_face-0.1.1.palpkg`. This does not mean the hardware or sidecar was actually verified; before installing, compare against target configuration and independent modifications. If the original repository is found, these changes should be migrated back.
 
-## 定向验证
+## Targeted Verification
 
-本地未跑完整四批 CI，以下是模块定向验证，数字之间有重复覆盖，不能相加当作去重总数：
+The full four-batch CI was not run locally. Below are module-targeted verifications; the numbers have overlapping coverage and must not be added together as a deduplicated total:
 
-- LSP 及相关发现/结果投影：原一轮 437 项通过，三处旧测试接口引用修正后，相关 38 项复测通过。
-- Plugins 生命周期/包管理：55 项通过；工具面、发现与加载相关 81 项通过。该加载测试进程退出时有临时 Bunshin 数据库清理后的后台错误日志，pytest 本身通过。
-- Execution 文件、失败回执、配置可见性及展示：123 项通过。删除后端回归通过测试专用 adapter 保留，不重新公开生产工具。
-- Native shell production/session actions：34 项通过，两项因重复提示失败；修正后这两项复测通过。追加远端、分身权限、失败契约及观察/输出恢复：81 项、19 个 subtests 通过；同时更新 remote 手册和技能引用。
-- Browser 导航、扩展、恢复、正文快照、网络脚本、截图及错误保真：120 项通过。
-- 记忆 CLI、embedding、generation、对象检查及发现词表：326 项通过；追加迁移保护与词表检查复测 10 项通过。
-- 情绪广播、face、本轮新增 inspection/CLI、工具发现与 import boundary 等组合：134 项通过。
-- 评测机制、记忆任务、channel 插件与技能：62 项、25 个 subtests 通过；新增合并动作判分两项通过。评测不再将 reload 误选 attach 仅凭相同工具名计为正确。
-- Bootstrap 的 backend 重载、维护工具撤销及记忆读写往返：3 项通过。另有两组 architecture 定向检查分别 11 项和 7 项通过。
-- Desktop 多端点、别名、本地 runtime 时长及 factory：3 项通过；未进行浏览器/物理设备端到端验证。
-- 追加记忆 hub 被动摘要、CLI 与任务评测：50 项通过。
+- LSP and related discovery/result projection: originally one round of 437 items passed; after fixing three old test-interface references, the related 38 items re-passed.
+- Plugins lifecycle/package management: 55 items passed; tool surface, discovery, and loading related 81 items passed. That loading test process exited with background error logs after temporary Bunshin database cleanup; pytest itself passed.
+- Execution file operations, failure receipts, configuration visibility, and presentation: 123 items passed. The deletion-backend regression via the test-only adapter was retained and does not re-expose production tools.
+- Native shell production/session actions: 34 items passed, with two failing due to duplicate prompts; after the fix, those two re-passed. Additional remote, avatar permissions, failure contracts, and observation/output restoration: 81 items and 19 subtests passed; the remote manual and skill references were also updated.
+- Browser navigation, extensions, recovery, body snapshots, network scripts, screenshots, and error fidelity: 120 items passed.
+- Memory CLI, embedding, generation, object inspection, and discovery vocabulary: 326 items passed; an additional re-run of 10 items on migration protection and vocabulary checks passed.
+- Emotion broadcast, face, this round's new inspection/CLI, tool discovery, and import boundary combinations: 134 items passed.
+- Evaluation mechanics, memory tasks, channel plugin, and skills: 62 items and 25 subtests passed; two new scoring items for merged actions passed. Evaluation no longer counts a reload mis-chosen over attach as correct merely because of the same tool name.
+- Bootstrap backend reload, maintenance tool withdrawal, and memory read/write round-trip: 3 items passed. Two additional architecture-targeted checks passed with 11 and 7 items respectively.
+- Desktop multi-endpoint, aliases, local runtime duration, and factory: 3 items passed; no browser/physical-device end-to-end verification was performed.
+- Additional memory hub passive digest, CLI, and task evaluation: 50 items passed.
 
-本轮新增六模块回归文件合跑 41 项通过。最新源码目录/词表审计两项通过；三个仓库 diff 格式检查通过。完整 CI 交给 GitHub。
+This round's six new module regression files run together passed 41 items. The latest source directory/vocabulary audits passed both checks; the three-repository diff format check passed. Full CI is left to GitHub.
 
-## 模型冒烟
+## Model Smoke Test
 
-新增 `scripts/benchmark_consolidated_tools.py`，预先固定 16 个中文场景；只执行发现，对业务调用校验工具、direct/indirect 路由、schema 和关键参数，不实际执行。模型为此前指定的 OpenRouter `openai/gpt-6-luna`，单次采样，最多 6 轮，fixture 有自己的挂载目录，初始只开放发现入口。
+Added `scripts/benchmark_consolidated_tools.py`, pre-fixing 16 Chinese scenarios; only discovery is executed, and for business calls it validates tools, direct/indirect routing, schema, and key parameters without actually executing. The model was the previously specified OpenRouter `openai/gpt-6-luna`, single sampling, up to 6 rounds; the fixture has its own mount directory, initially exposing only the discovery entry.
 
-结果 15/16（93.75%）通过，平均 3.5625 个响应轮次；1 个 round_limit，无 endpoint 失败。插件 reload/attach/enable、Browser close/cache/reset、LSP definition/implementation 和 callers/callees 的枚举都正确；旧记忆后端切换工具不存在的场景也正确拒绝替代。
+Result: 15/16 (93.75%) passed, averaging 3.5625 response rounds; 1 round_limit, no endpoint failures. Plugin reload/attach/enable, Browser close/cache/reset, LSP definition/implementation, and callers/callees enums were all correct; the scenario where the old memory backend switch tool did not exist also correctly rejected substitutes.
 
-唯一失败为重读当前页：模型首搜自行加 namespace=action 和 module_name=browser，过滤掉真实候选；后续仍猜内部 module filter。它在目录第二页找到了 read_browser_page 并读了契约，但已耗完 6 轮。该失败保留在原结果中。冻结原 query、仅移除猜测的分类过滤器可重新找到 read_browser_page，诊断不另作模型成功计分。
+The only failure was re-reading the current page: the model's first search added namespace=action and module_name=browser on its own, filtering out the real candidates; subsequent attempts kept guessing internal module filters. It found read_browser_page on the catalog's second page and read the contract, but had exhausted the 6 rounds. That failure is kept in the original results. Freezing the original query and only removing the guessed classification filters would re-find read_browser_page; the diagnosis is not counted as an additional model success.
 
-原始记录在忽略目录 `test-logs/tool-consolidation-luna-20261015/`（manifest/runs/report/miss-diagnostic）。这是新契约小样本冒烟，不是全量工具召回率、生产流量测量或旧版本的可比前后实验；实际生产中常驻工具初始即有契约，本评测初始只给发现入口。
+The raw records are in the ignored directory `test-logs/tool-consolidation-luna-20261015/` (manifest/runs/report/miss-diagnostic). This is a small-sample smoke test of the new contracts, not a full tool recall rate, a production traffic measurement, or a comparable before/after experiment against the old version; in actual production, resident tools have contracts available from the start, whereas this evaluation initially only exposed the discovery entry.
 
-## 激活边界
+## Activation Boundaries
 
-未修改安装目录或现有 runtime 配置，也未向运行中的 Pal 发送激活消息。Resident core/execution/CLI 修改需要宿主代码更新和独立重启安排；插件代码用 manage_plugin(operation=reload) 替换已有 generation。Rescan 只更新发现，attach 保留既有实例，均不能替代代码激活。Pal 忙时延期。
+Did not modify the installation directory or existing runtime configuration, nor sent an activation message to a running Pal. Resident core/execution/CLI modifications require host code updates and a separate restart arrangement; plugin code replaces the existing generation via manage_plugin(operation=reload). Rescan only updates discovery, and attach retains existing instances; neither can substitute for code activation. Deferred while the Pal is busy.
 
-## 追加 Channel 五合一
+## Appendix: Channel five-in-one consolidation
 
-用户随后明确授权直接实施五合一。本次只修改端点控制公开入口，未开展凭据迁 CLI，也未合并发送/查询。五个旧别名撤销；原 Python handler 留作内部 owner 委派。同步更新恢复 affordance、生命周期锁识别、失败窗口的 canonical 选择、内置技能及评测；评测按 operation 区分 attach 与 restart，模拟反馈也按 operation 匹配，防止合并后错误计分。
+The user subsequently explicitly authorized directly implementing the five-in-one. This round only modified the endpoint control public entry points; credential migration to CLI was not carried out, nor send/query merged. The five old aliases were revoked; the original Python handlers remain as internal owner delegation. The recovery affordance, lifecycle lock recognition, canonical selection in the failure window, built-in skills, and evaluations were updated in sync; the evaluations distinguish attach from restart by operation, and simulated feedback is also matched by operation, preventing incorrect scoring after the consolidation.
 
-源码变化未安装或激活；验证结果见本节后续记录。
+Source changes were not installed or activated; see the records later in this section for verification results.
 
-本轮已验证：端点 attach/发送/错误回执及生命周期锁 58 项通过；发现词表、目录和调用评测 319 项通过；新增合并与 recovery socket 保护、相关 architecture 定向检查 15 项通过。审计确认 Channel 7 个间接工具，Pal 源码主工具联合目录 126 个，角色工具 36 个另计，native 20 个不变。本次未重新跑付费模型评测或全量 CI。
+Verified this round: endpoint attach/send/error receipts and lifecycle lock, 58 items passed; discovery vocabulary, catalog, and invocation evaluations, 319 items passed; newly added consolidation and recovery socket protection plus related architecture targeted checks, 15 items passed. Audit confirmed Channel has 7 indirect tools, the Pal source main-tool joint catalog is 126, role tools are 36 counted separately, and native is unchanged at 20. Paid-model evaluations and full CI were not rerun this round.
 
-补充验证完成：Channel 合并/插件集成/对象诊断组合 31 项通过；模拟恢复反馈按 operation 匹配、动作判分和根模块入口检查 5 项通过。工作树格式检查通过。本轮未提交、push、复制安装文件或激活运行实例。
+Supplementary verification completed: Channel consolidation/plugin integration/object diagnostic combinations, 31 items passed; simulated recovery feedback matched by operation, action scoring, and root module entry checks, 5 items passed. Working tree format check passed. This round did not commit, push, copy installation files, or activate running instances.
 
-## 追加 Proactive 目的地合并
+## Appendix: Proactive destination consolidation
 
-本轮仅获授权合并 `set_proactive_output_channel` 和
-`set_proactive_output_target`，统一为间接本地写入工具
-`set_proactive_destination(name, out_channel_name?, out_reply_target?)`。
-启用、停用、删除和调度修改保持独立，没有实施此前讨论的控制枚举。
+This round only received authorization to merge `set_proactive_output_channel` and
+`set_proactive_output_target`, unifying them into a single indirect local-write tool
+`set_proactive_destination(name, out_channel_name?, out_reply_target?)`.
+Enable, disable, delete, and schedule modifications remain independent; the previously discussed control enumeration was not implemented.
 
-省略 channel 保留当前端点；显式 null 清空 channel 和 target；只提供任务名
-拒绝执行。改端点而不提供 target 时重新解析当前/默认目的地，不能继承旧端点
-的 target。显式空 target 对象只清除 target；null target 无效。所有保留或指定
-端点的更新统一经 Channel resolver 验证，显式清空 target 也先核对端点存在，
-不会重新填入默认 target。channel/target 一次持久化后发布；验证或持久化
-失败不改变内存定义及已有存储。
+Omitting channel keeps the current endpoint; an explicit null clears both channel and target; providing only the task name
+is rejected. When changing the endpoint without providing a target, the current/default destination is re-resolved; the old endpoint's target
+cannot be inherited. An explicit empty target object only clears the target; a null target is invalid. All updates that keep or specify
+an endpoint are validated uniformly through the Channel resolver; explicitly clearing the target also first verifies the endpoint exists,
+and the default target is not re-populated. The channel/target are persisted once and then published; failure of validation or persistence
+leaves the in-memory definition and existing storage unchanged.
 
-两个旧公开别名及其 schema 已撤销；同步迁移现有调用测试和发现说明。
-当前源码审计：Proactive 10 个入口，Pal 主工具联合目录 125 个、角色工具
-36 个另计，native 20 个不变。它不是运行实例目录，也不是模型召回率。
-本轮不重新跑付费模型评测，不进行安装或运行态激活。
+The two old public aliases and their schemas were revoked; existing invocation tests and discovery descriptions were migrated in sync.
+Current source audit: Proactive has 10 entry points, the Pal main-tool joint catalog is 125, role tools
+are 36 counted separately, and native is unchanged at 20. This is not a running-instance catalog, nor model recall rate.
+This round does not rerun paid-model evaluations, and does not perform installation or runtime activation.
 
-验证：目的地行为、channel/proactive 错误回执、源码目录审计及发现词表组合
-361 项通过；原 architecture 的 proactive 挂载与管理两项通过。
-测试覆盖目标单改及持久化、显式清空、跨端点不继承、未知端点与错误 provider
-目标拒绝、空参数不误清空、存储失败不发布半更新、旧工具不可读不可调用。
-工作树格式检查通过。未跑完整四批 CI；未提交或激活运行实例。
+Verification: destination behavior, channel/proactive error receipts, source catalog audit, and discovery vocabulary combinations,
+361 items passed; the original architecture's proactive mounting and management, two items passed.
+Test coverage: target-only change and persistence, explicit clearing, no cross-endpoint inheritance, rejection of unknown endpoints and wrong provider
+targets, empty parameters not mistakenly clearing, storage failure not publishing a half update, and old tools unreadable and uncallable.
+Working tree format check passed. Full four-batch CI was not run; nothing was committed or activated on running instances.
 
-## 追加 Proactive 控制三合一（待统一验证）
+## Appendix: Proactive control three-in-one (pending unified verification)
 
-用户随后授权将 enable/disable/delete 三个同参数动作合为
-`manage_proactive_task(name, operation=enable|disable|delete)`，并明确本轮先改，
-暂不跑测试，后面与其他模块一起验证。原三个公开 alias 和输入 schema
-撤下，内部 handler 保留；新入口使用原有间接本地写入语义并委派现有 owner。
-暂停仅影响后续调度，不取消已经在运行的任务；删除移除任务定义。
+The user subsequently authorized merging the three same-parameter actions enable/disable/delete into
+`manage_proactive_task(name, operation=enable|disable|delete)`, explicitly stating this round makes the change first,
+without running tests for now; verification will come later together with other modules. The original three public aliases and input schemas
+were removed, with internal handlers retained; the new entry point uses the original indirect local-write semantics and delegates to the existing owner.
+Disable only affects future scheduling and does not cancel tasks already running; delete removes the task definition.
 
-现有调用及回归引用、发现词表和模型评测目标同步迁移；调用型评测校验
-operation，避免暂停误选删除却按相同 alias 判为正确。新增/迁移用例涵盖
-必填枚举、旧工具撤销、真实启停删除及持久化、参数错误不触达 owner、
-持久化错误保真和动作判分。上述用例本轮均未执行；前一节 363 项通过的
-结果属于目的地合并，不能作为本次控制合并的验证结果。
+Existing invocation and regression references, the discovery vocabulary, and model evaluation targets were migrated in sync; invocation-style evaluations
+validate the operation, preventing a mistaken disable-selected-as-delete from being scored correct under the same alias. New/migrated cases cover
+the required enum, revocation of old tools, real enable/disable/delete and persistence, parameter errors not reaching the owner,
+persistence-error fidelity, and action scoring. None of the above cases were executed this round; the previous section's
+363-item passing result belongs to the destination consolidation and cannot serve as verification for this control consolidation.
 
-按声明变化推算 Proactive 10 → 8，Pal 主工具联合目录 125 → 123；角色
-36 个、native 20 个不变。目录审计也留待下一批验证。未提交或激活。
+Based on the declared changes, Proactive is projected 10 → 8, and the Pal main-tool joint catalog 125 → 123; role
+36 and native 20 unchanged. The catalog audit is also deferred to the next verification batch. Nothing committed or activated.
 
-## 追加 Skill 停用合并（待统一验证）
+## Appendix: Skill disable consolidation (pending unified verification)
 
-用户明确拒绝合并 hub inspection 与单技能读取，仅同意将停用并入
-`update_skill`。查询和注入的参数、行为保持原样；prepare/commit 保持分离。
-模型用 `patch={"status":"disabled","enabled":false}` 停用，恢复仍需
-`patch={"status":"active","enabled":true}`，没有额外改变状态字段语义。
+The user explicitly refused to merge hub inspection with single-skill reading, agreeing only to fold disable into
+`update_skill`. The parameters and behavior of query and inject remain as-is; prepare/commit remain separate.
+The model disables via `patch={"status":"disabled","enabled":false}`; recovery still requires
+`patch={"status":"active","enabled":true}`, with no additional change to status field semantics.
 
-撤销 disable_skill 公开入口及其输入/输出 schema，给 update_skill 补充停用、
-恢复的用途、检索词及参数说明。内部 SkillService.disable_skill 兼容调用
-也委派到 update_skill，使文件镜像、数据库、版本和重复 patch 的 no-op
-处理走同一条路径；底层 repository 方法和旧 capability 的防御性 deny 项保留。
-继承 update 的不确定写入核对要求，不宣称文件和数据库具有跨存储事务。
+The disable_skill public entry point and its input/output schemas were revoked, and update_skill gained disable/recover
+purpose, retrieval terms, and parameter descriptions. The internal SkillService.disable_skill compatibility call
+also delegates to update_skill, so file mirroring, database, version, and repeated-patch no-op
+handling go through the same path; the underlying repository methods and the old capability's defensive deny items are retained.
+It inherits update's uncertain-write verification requirement, and does not claim file and database have cross-storage transactions.
 
-同步更新说明测试、发现词表、只读 worker 的写入不可见断言；新增公开工具
-撤销、真实停用/恢复的文件与版本、重复更新以及文件失败回执用例。按用户
-此前要求本轮未执行测试或导入式目录审计，只做语法与格式检查。
+Also synchronized: updated test descriptions, discovery word lists, and assertions that writes by the read-only Bunshin/worker are invisible; added public tool
+undo, real deactivation/restoration of files and versions, duplicate updates, and file failure receipt test cases. Per the user's
+prior instructions, no tests or import-style directory audits were run this round; only syntax and format checks were performed.
 
-按声明推算 Skill 8 → 7，主工具联合目录 123 → 122，角色 36、native 20
-不变。上一轮已通过的测试不作为本次变更的验证结果。未提交或激活。
+Per the declaration, Skill 8 → 7; the main tool joint catalog 123 → 122; roles 36 and native 20
+unchanged. Tests passed in the previous round are not treated as validation of this change. Not committed or activated.
 
-## 追加 MCP 控制与附件适配（待统一验证）
+## Added MCP control and attachment adaptation (pending unified verification)
 
-用户授权 attach/detach 合为 `manage_mcp_server(name, operation)`，原 handler、
-投影更新和故障隔离逻辑保留；旧两个别名撤下。独立 prepare_mcp_image 及
-其实现/schema 撤销，能力下沉到调用适配层。
+The user-authorized attach/detach are merged into `manage_mcp_server(name, operation)`; the original handler,
+projection updates, and fault isolation logic are retained; the two old aliases are removed. The standalone prepare_mcp_image and
+its implementation/schema are revoked; the capability is pushed down into the calling adaptation layer.
 
-本地 server 配置 `artifact_inputs.<external_tool>.<parameter> = representation`
-明确 path/url/data_url/base64，不从模糊的字符串参数名猜测。配置的顶层
-string 参数额外接受只含 artifact_id 的对象；宿主按当前 turn 的附件 scope
-调用 Artifact owner，转换后直接交给 server，按原始 schema 再验证。
-未配置参数和 prompt 模板不改变，未知参数/非 string 映射拒绝配置。
+Local server configuration `artifact_inputs.<external_tool>.<parameter> = representation`
+explicitly specifies path/url/data_url/base64, without guessing from ambiguous string parameter names. Configured top-level
+string parameters additionally accept an object containing only artifact_id; the host calls the Artifact owner according to the current turn's attachment scope,
+converts, then hands it directly to the server, re-validating against the original schema.
+Unconfigured parameters and prompt templates are unchanged; unknown parameter / non-string mappings are rejected at configuration time.
 
-URL 转换使用本地 data URL，不暴露下载来源里的凭据，也不暗示存在 HTTP
-文件托管。path 需要目标 server 能访问本机文件；仅接受 HTTP(S) 的 server
-仍需显式托管集成。编码限制每源 8 MiB，并限制总参数体积；失败在外部
-调用前报告 not_started。运行时配置尚未编辑，映射需按实际 server 参数配置。
+URL conversion uses a local data URL, does not expose credentials from the download source, and does not imply HTTP
+file hosting exists. path requires the target server to be able to access local files; servers that only accept HTTP(S)
+still need explicit hosting integration. Encoding is limited to 8 MiB per source, with a total parameter size limit; failures are reported before the external
+call as not_started. Runtime configuration has not yet been edited; mappings must be configured according to the actual server parameters.
 
-同步现有公开入口调用、错误回执与凭据保护用例；补充 facade 接收附件引用、
-原始 schema 校验、scope/文件失败不调 server、格式转换、编码限制、管理
-枚举和旧入口撤销用例。遵照此前安排，本轮不执行测试、付费模型评测或
-导入式目录审计；语法和格式检查见最终记录。
+Synchronized existing public entry call, error receipt, and credential protection test cases; added facade accepting attachment references,
+original schema validation, scope/file failure not calling the server, format conversion, encoding limits, management
+enums, and old-entry removal test cases. Per prior arrangements, this round ran no tests, paid model evaluations, or
+import-style directory audits; syntax and format checks are in the final record.
 
-按声明推算 MCP 7 → 5，主工具联合目录 122 → 120，角色 36、native 20
-不变。未提交、安装或激活运行实例。
+Per the declaration, MCP 7 → 5; the main tool joint catalog 122 → 120; roles 36 and native 20
+unchanged. Not committed, installed, or activated as a running instance.
 
-本轮语法解析与 git diff --check 通过；未执行测试或模型调用。调用型评测已
-补充 MCP attach/detach 的 operation 判分，相关用例同样待下一批执行。
+This round's syntax parsing and git diff --check passed; no tests or model calls were run. Call-based evaluation has
+added operation scoring for MCP attach/detach; those test cases likewise await the next batch of execution.
 
-## 追加 Bunshin 控制合并与 rebind 降级（待统一验证）
+## Added Bunshin control consolidation and rebind downgrade (pending unified verification)
 
-用户同意合并控制并明确要求 rebind 不常驻。公开入口
+The user agreed to the control consolidation and explicitly required that rebind not be always-on. The public entry
 `control_bunshin_workflow(task?, operation=pause|resume|cancel|archive, reason?)`
-替代原 control/resume/archive 三入口；command 参数改为 operation，不保留
-旧参数或两个旧别名。原 handler 与 service 状态机保持不变：archive 选择
-包含终态工作流，暂停/取消仍是异步请求；resume 仍能将孤儿工作项转入
-triage；重复归档保留 effect=none。restart、triage、人工决策、问答独立。
+replaces the original control/resume/archive three entries; the command parameter becomes operation, and the
+old parameter or the two old aliases are not retained. The original handler and service state machine are unchanged: archive selection
+includes terminal-state workflows, and pause/cancel remain asynchronous requests; resume can still move orphaned work items into
+triage; duplicate archiving retains effect=none. restart, triage, human decisions, and Q&A remain independent.
 
-rebind_bunshin_task_delivery 改为 INDIRECT_CONTROL，原 actor、目的地、
-Manager-owned binding 核对保持不变；start 仍 DIRECT_CONTROL。内部
-resume/archive 方法保留，但不再发布独立工具和输入模型。
+rebind_bunshin_task_delivery changes to INDIRECT_CONTROL; the original actor, destination, and
+Manager-owned binding verification are unchanged; start remains DIRECT_CONTROL. Internal
+resume/archive methods are retained, but no longer published as standalone tools and input models.
 
-迁移现有归档行为及错误保真测试、精确工具面和发现词表；补充枚举与旧
-入口撤销、操作分派与终态选择、triage 回执、重复归档、rebind 调用模式和
-目的地绑定用例。调用评测按 operation 判分。本轮未执行测试、付费模型
-评测或导入式审计；只做语法与格式检查。
+Migrated existing archive behavior and error fidelity tests, the exact tool surface, and the discovery word list; added enum and old
+entry removal, operation dispatch and terminal-state selection, triage receipts, duplicate archiving, rebind call patterns, and
+destination binding test cases. Call-based evaluation scores by operation. This round ran no tests, paid model
+evaluations, or import-style audits; only syntax and format checks were done.
 
-按声明推算 Bunshin 13 → 11，主工具联合目录 120 → 118；native 20 → 19
-（direct 17 → 16，三个 native opt-in 不变），角色 36 个不变。未提交、
-安装或激活运行实例；待与前面的 Proactive/Skill/MCP 一起验证。
+Per the declaration, Bunshin 13 → 11, main tool joint catalog 120 → 118; native 20 → 19
+(direct 17 → 16, the three native opt-ins unchanged), roles remain 36. Not committed,
+installed, or activated as a running instance; to be verified together with the earlier Proactive/Skill/MCP changes.
 
-本轮语法解析与 git diff --check 通过；测试及模型调用均未执行。
+This round's syntax parsing and git diff --check passed; tests and model calls were not executed.
 
-## 追加 Artifact normalizer（待统一验证）
+## Added Artifact normalizer (pending unified verification)
 
-用户确认 Artifact 定位为文件接入/归一化/描述，不再承担模型正文阅读。
-统一描述包含原文件名、扩展名、MIME、大小、状态、只读原始及处理后路径；
-PDF 额外返回页码索引导航。未知格式如 xlsx 保留原文件并说明未解析，
-不把没有 parser 当作接收失败。
+The user confirmed that Artifact is positioned as file ingestion/normalization/description and no longer handles model reading of body text.
+The unified description includes the original file name, extension, MIME, size, status, and read-only raw and processed paths;
+PDF additionally returns page-number index navigation. Unknown formats such as xlsx keep the original file and state that it was not parsed;
+the absence of a parser is not treated as an intake failure.
 
-文本无编码变化时复用 managed original；需要编码转换时只增加一份 UTF-8
-文本，不再生成 chunks。PDF 新接入只生成逐页文本/图片和 page_index，
-取消重复全文、chunks 及全文行号偏移。保留原页号、部分处理与失败状态。
-旧附件文件不主动迁移或删除，内部兼容读取仍可用。
+When text has no encoding change, the managed original is reused; when an encoding conversion is needed, only one additional UTF-8
+text copy is added, and chunks are no longer generated. New PDF ingestion only generates per-page text/images and page_index,
+eliminating duplicated full text, chunks, and full-text line number offsets. Original page numbers, partial processing, and failure states are preserved.
+Legacy attachment files are not proactively migrated or deleted; internal compatibility reads remain available.
 
-沿用 channel ingress 和本地 import 的 ArtifactRefPartIR：L1 保存引用，
-构造模型输入时才生成文件描述及图片内容。只有 kind=image 且视觉能力/
-预算允许时附像素；文本、音频转录及 PDF 内容不内联，PDF 按需导入指定
-页图。历史 summary 正文预览不进入新引用或自动描述。inspect 使用同一
-描述 builder，不返回数据库/representation/lifecycle 内部清单。
+The ArtifactRefPartIR from channel ingress and local import is retained: L1 stores the reference,
+and the file description and image content are only generated when constructing model input. Only when kind=image and vision capability/
+budget allow are pixels attached; text, audio transcripts, and PDF content are not inlined, and PDFs import specified page
+images on demand. Historical summary body previews do not enter new references or auto descriptions. inspect uses the same
+description builder and does not return database/representation/lifecycle internal inventories.
 
-模型面剩 import/search/inspect_info/inspect_state 四个间接入口；list 合并
-到 search（空 query 列举、limit/offset、total/has_more/next_offset），read/
-grep/select 公开 schema 和入口撤销。保留 runtime select 及现有 pending/L1/
-compact 租约，未改变作用域、过期或物理清理所有权。
+The model surface retains four indirect entries: import/search/inspect_info/inspect_state; list is merged
+into search (empty query for enumeration, limit/offset, total/has_more/next_offset), and read/
+grep/select public schemas and entries are withdrawn. The runtime select and the existing pending/L1/
+compact leases are preserved; scope, expiry, and physical cleanup ownership are unchanged.
 
-迁移发现、评测场景、既有附件行为测试；新增单份文本/编码转换、PDF
-无重复文件与部分页面、xlsx passthrough、只注入图片、引用不被渲染回写、
-文件描述不含正文/内部字段、完整分页及跨 scope 拒绝用例。所有新增与
-迁移测试本轮均未执行，留与前面模块统一跑。旧模型评测记录不改写，
-修改后的场景不与旧结果冒充严格前后对比。
+Migration discovery, evaluation scenarios, and existing attachment behavior tests; new tests for single-copy text/encoding conversion, PDF
+without duplicate files and with partial pages, xlsx passthrough, injecting images only, references not being rendered back, file
+descriptions without body/internal fields, full pagination, and cross-scope rejection cases. All new and
+migrated tests were not run this round, left to run together with the earlier modules. Old model evaluation records are not rewritten,
+and modified scenarios are not passed off as strict before/after comparisons against old results.
 
-按声明推算 Artifact 8 → 4，主工具联合目录 118 → 114，native 19、角色
-36 不变。本轮不运行模型评测、导入式审计或全量测试，不提交、不激活。
+Per the declaration, Artifact is computed as 8 → 4, the main tool joint catalog 118 → 114, with native 19 and role
+36 unchanged. This round runs no model evaluations, import-based audits, or full test suites; no commit, no activation.
 
-本轮 git diff --check、变更 Python 文件的语法解析及 Artifact 输入模型静态
-引用核对通过；没有导入运行时、执行测试或调用模型。
+This round, git diff --check, syntax parsing of changed Python files, and static verification of Artifact input model
+references passed; no runtime imports, test execution, or model calls were performed.
 
-## 追加 Web Search 无参数全量诊断（待统一验证）
+## Appendix: Web Search parameterless full diagnostics (pending unified verification)
 
-用户明确要求体量小的 Web Search 只保留一个无参数诊断能力，不按参数
-切换 hub/单 provider 语义。inspect_web_search() 一次返回 hub 选择/数量/
-生命周期和所有 provider 的公开配置、auth、最近请求 health，不分页或截取。
-旧 hub/list/provider 三个公开入口撤下；search_web 常驻及内部 fallback 不变。
-维护操作继续使用 pal web-search CLI；Checklist 本轮只讨论，未作修改。
+The user explicitly required that the small-footprint Web Search keep only one parameterless diagnostic capability, not switching
+hub/single-provider semantics by parameters. inspect_web_search() returns in one call the hub selection/counts/
+lifecycle and all providers' public configuration, auth, and recent request health, with no pagination or truncation.
+The old hub/list/provider three public entries are withdrawn; search_web's persistence and internal fallback are unchanged.
+Maintenance operations continue to use the pal web-search CLI; the Checklist was only discussed this round, not modified.
 
-独立 auth/health 读取失败保留其他信息，并汇总到顶层 partial；每条模型可见
-错误去除 traceback 并限 600 字符，不覆盖 resident 完整报告。健康明确为
-配置和最近请求观测，不主动联网探测。同步发现词表、旧入口恢复提示、
-配置评测适配和文档；新增无参数拒绝选择器、全量/空目录、被动查询、错误
-摘要与部分失败用例。按此前安排，新增和迁移测试均留到其他模块一起执行。
+When an independent auth/health read fails, the remaining information is preserved and aggregated into a top-level partial; each model-visible
+error has its traceback removed and is capped at 600 characters, without overriding the resident full report. Health is explicitly
+an observation of configuration and recent requests, with no proactive network probing. Synchronized updates cover the discovery vocabulary, old-entry recovery hints,
+configuration evaluation adaptations, and documentation; new cases cover parameterless rejection selectors, full/empty catalog, passive queries, error
+summaries, and partial failure cases. As previously arranged, new and migrated tests are all left to run together with other modules.
 
-按声明推算 Web Search 4 → 2，主工具联合目录 114 → 112，search-only
-95 → 93，native 19、角色 36 不变，合计 148。未导入运行态做目录审计，
-未运行测试或模型评测，未提交、安装或激活。
+Per the declaration, Web Search is computed as 4 → 2, the main tool joint catalog 114 → 112, search-only
+95 → 93, native 19 and role 36 unchanged, total 148. No runtime import was done for catalog audit,
+no tests or model evaluations were run, and nothing was committed, installed, or activated.
 
-本轮变更 Python 文件的 AST 语法解析、review JSON 解析、Web Search 两个
-公开声明的静态核对及 git diff --check 通过；没有导入运行态或执行测试。
+This round, AST syntax parsing of changed Python files, review JSON parsing, static verification of the two Web Search
+public declarations, and git diff --check passed; no runtime import or test execution was performed.
 
-## 追加 LLM 无参数查询与 active 标记（待统一验证）
+## Appendix: LLM parameterless query and active marking (pending unified verification)
 
-用户同意三个查询入口合为 inspect_llm()，并要求在 endpoint 列表像 inline
-keyboard 一样仅标 (active)。新工具无参数，一次返回全部已加载/启用
-endpoint 的公开能力和限制、当前 thinking、进程累计与各 endpoint 用量
-摘要。顶层只保留配置/有效 ID，不另展开 active 模型能力；原 ID 不加标记。
+The user agreed to merge the three query entries into inspect_llm(), and required the endpoint list to be marked only with (active), like an inline
+keyboard. The new tool takes no parameters and returns in one call all loaded/enabled
+endpoints' public capabilities and limits, current thinking, process cumulative totals, and per-endpoint usage
+summaries. The top level keeps only configuration/effective IDs, without separately expanding active model capabilities; original IDs carry no marking.
 
-用量一次读取并投影，保留费用/上报完整性，不展开 latest-request 字段、
-缓存内部策略或原始记账。无记录和不可用均显式区分，不能解释为零成本；
-进程总量可包含已从当前目录移除的 endpoint。修复 thinking_status 字典被
-取 __dict__ 的问题；thinking/usage 独立失败，错误摘要有界。
+Usage is read and projected in one pass, preserving expense/reporting completeness, without expanding latest-request fields,
+cache internal policies, or raw accounting. No records and unavailable are explicitly distinguished and cannot be interpreted as zero cost;
+the process total may include endpoints already removed from the current catalog. Fixed the issue of the thinking_status dictionary being
+taken via __dict__; thinking/usage fail independently, with bounded error summaries.
 
-旧 list/active/endpoint 三别名和专用模型参数 schema 撤下；内部 reader、
-人类 /status、LLM transport 改造和配置保持原有逻辑。同步技能引用、
-发现/评测用例、失败恢复 canonical 选择和文档，并顺手去除上一轮 Web
-Search 失败恢复中已撤下的目录/单 provider canonical 引用。
+The old list/active/endpoint three aliases and the dedicated model parameter schema are withdrawn; the internal reader,
+Human /status, LLM transport changes, and configuration keep their original logic. Sync skill references,
+discovery/evaluation cases, failure-recovery canonical selection, and documentation, and along the way remove the directory/single-provider canonical references already withdrawn from the previous round of Web
+Search failure recovery.
 
-新增单次 active 标记、无重复能力、全量与空目录、未知选择、thinking
-字典、一次记账读取/摘要、部分失败、只读与无参约束、旧入口撤销及失败
-恢复用例。按用户安排，本轮不执行测试、导入式审计或模型评测。
+Added cases for single active marker, no duplicates, full and empty directories, unknown selection, thinking
+dictionary, one-time accounting read/summary, partial failure, read-only and no-argument constraints, old entry withdrawal, and failure
+recovery. As arranged by the user, this round did not run tests, import audits, or model evaluation.
 
-按声明推算 LLM 3 → 1，主工具目录 112 → 110，search-only 93 → 91，
-native 19、角色 36 不变，合计 146。未提交、安装或激活运行实例。
+Per the declaration, LLM is inferred as 3 → 1, main tool directory 112 → 110, search-only 93 → 91,
+native 19 and roles 36 unchanged, total 146. Nothing committed, installed, or activated on running instances.
 
-本轮 137 个变更/新增 Python 文件 AST 语法解析、review JSON、LLM 唯一
-无参数间接声明、全仓 generated schema 导入静态核对和 git diff --check
-通过。未执行测试、导入运行态或调用评测模型。
+This round: AST syntax parsing of 137 changed/added Python files, review JSON, LLM unique
+no-argument indirect declaration, static cross-check of repo-wide generated schema imports, and git diff --check
+all passed. No tests were run, no import runtime, no evaluation models called.
 
-## 追加 Failure 单入口与证据文件（待统一验证）
+## Adding a Single Failure Entry Point and Evidence File (pending unified verification)
 
-用户同意 Failure 两入口合为无参数 inspect_failure()：统计与最近 16 条
-诊断摘要一次返回，不再重复最近四条。摘要保留诊断/动作/验证/重试语义，
-文本和动作数有界并标明截断；原报告窗口完整复制到一个只读 JSON 内容
-结果快照，返回路径供 rg/read_file 查看，使用现有诊断脱敏规则。
+With the user's consent, the two Failure entries are merged into a no-argument inspect_failure(): statistics and the most recent 16 diagnostic
+summary entries are returned in one call, no longer repeating the most recent four. Summaries retain diagnose/action/verify/retry semantics,
+with bounded text and action counts and truncation marked; the original report window is fully copied into a read-only JSON content
+result snapshot, with the returned path available for rg/read_file, using the existing diagnostic redaction rules.
 
-结果显式携带 snapshot_refs，复用当前对话 L1/compact 的结果文件所有权，
-不新建孤立的证据目录。没有报告不落文件；存储上下文缺失、序列化或
-落盘失败时保留摘要并标明 partial，不伪造路径或回退内联原始 evidence。
-报告生成、最多 32 条 resident 保留、故障升级流程和重试判定不变。
+Results explicitly carry snapshot_refs, reusing the current conversation's L1/compact result-file ownership,
+without creating an orphaned evidence directory. No file is written when there is no report; when storage context is missing, or serialization or
+writing to disk fails, the summary is kept and marked partial, without fabricating paths or falling back to inlined raw evidence.
+Report generation, the maximum 32 resident retention, failure escalation flow, and retry determination are unchanged.
 
-旧 inspect_failure_state/list_failure_reports 两别名撤下，canonical show
-保持用于默认故障恢复选择；内部 recent_reports reader 保留。同步发现
-词表、撤销入口断言和文档，补充固定窗口、只读文件/引用、空记录不落盘、
-文本截断、完整证据与脱敏、存储失败降级、调用归一化及无参约束用例。
+The old inspect_failure_state/list_failure_reports aliases are withdrawn; the canonical show
+remains for default failure-recovery selection; the internal recent_reports reader is kept. Sync discovery
+vocabularies, withdrawal-entry assertions, and documentation; add cases for fixed window, read-only files/refs, no file written on empty records,
+text truncation, full evidence and redaction, storage-failure degradation, call normalization, and no-argument constraints.
 
-按声明推算 Failure 2 → 1，主目录 110 → 109，search-only 91 → 90，
-native 19、角色 36 不变，合计 145。遵照此前安排，不运行测试、模型
-评测或导入式审计，未提交、安装或激活运行实例。
+Per the declaration, Failure is inferred as 2 → 1, main directory 110 → 109, search-only 91 → 90,
+native 19 and roles 36 unchanged, total 145. As previously arranged, no tests are run, no model
+evaluation or import audit; nothing committed, installed, or activated on running instances.
 
-本轮 138 个变更/新增 Python 文件 AST 语法解析、review JSON、Failure
-唯一无参数间接声明静态核对及 git diff --check 通过；未执行测试或导入
-运行态，行为验证仍待统一批次。
+This round: AST syntax parsing of 138 changed/added Python files, review JSON, Failure
+unique no-argument indirect declaration static cross-check, and git diff --check all passed; no tests were run and no import
+runtime executed; behavioral verification remains pending in the unified batch.
 
-## 全量发现元数据对齐（定义级审计，回归测试待统一执行）
+## Full Discovery Metadata Alignment (definition-level audit; regression testing pending unified execution)
 
-本轮用户要求检查搜索词、search_objects、说明和 use_when 是否跟上工具
-合并。定义级导出覆盖 145 个独立契约：主工具 109、角色 36；全部指导
-字段/词表规则通过实际模型定义校验，145 份输入 schema 可解析。AST 按
-声明确认 direct 16、native 19（含三个间接 opt-in）、search-only 90。
-没有构造 Pal runtime、调用业务工具或读取/修改运行实例配置。
+This round the user asked to check whether search terms, search_objects, descriptions, and use_when kept up with the tool
+consolidation. The definition-level export covers 145 independent contracts: 109 main tools, 36 roles; all guidance
+fields/vocabulary rules passed validation against actual model definitions, and all 145 input schemas are parseable. AST per
+declaration confirmed direct 16, native 19 (including three indirect opt-in), search-only 90.
+No Pal runtime was constructed, no business tools called, and no running-instance configuration read or modified.
 
-修改 18 个工具的发现元数据/说明：MCP/Proactive 控制枚举显式进入索引；
-Artifact 去除 representation 旧对象词并说明文件归一化/未知格式保留；
-Checklist 清理、取消和进行中状态；Memory 完整内容替换；Bunshin 状态/
-人工审查读取和工作流专用 artifact；Browser 扩展诊断；Skill pending
-candidate 恢复；MCP 观测诊断和隔离错误；目的地变更等辅助意图与能力
-对应。修正空目录不能证明配置不存在的指引，Web Search 失败转向统一
-诊断。两个公开参数描述分别撤掉旧 memory provider 目录工具和旧附件
-展示名称。动作允许值、执行逻辑、工具数量和搜索排序代码均未改。
+Modified discovery metadata/descriptions of 18 tools: MCP/Proactive control enums explicitly indexed;
+Artifact removes the legacy representation object terms and documents file normalization/unknown-format preservation;
+Checklist cleanup, cancel, and in-progress states; Memory full-content replacement; Bunshin status/
+manual review reads and workflow-specific artifacts; Browser extension diagnostics; Skill pending
+candidate recovery; MCP observability diagnostics and isolation errors; destination-change and other auxiliary intents mapped to capabilities.
+Corrected guidance that an empty directory cannot prove configuration absence; Web Search failure now routes to unified
+diagnostics. Two public parameter descriptions respectively removed the old memory provider directory tool and the old attachment
+display name. Action allowed values, execution logic, tool counts, and search ranking code are all unchanged.
 
-需区分模型说明和检索材料：当前 domain purpose 检索使用肯定的 purpose、
-工具辅助词/选择的动作枚举、search_intents；search_objects 支持关键词
-阶段。use_when/do_not_use_when、失败指引、后续工具提示及任意参数说明
-不当作能力索引。把真实支持、但仅存在于 use_when 的意图移入肯定的
-purpose/辅助意图，不索引整段否定和跳转文字。CSV 导出补齐这些指导字段
-以便同表复查；词表回归 fixture 也补入真实使用的意图与声明 domain 信息。
+Model-facing descriptions must be distinguished from retrieval material: current domain-purpose retrieval uses affirmative purpose,
+tool-assist terms/selection action enums, and search_intents; search_objects supports the keyword
+stage. use_when/do_not_use_when, failure guidance, follow-up tool hints, and arbitrary parameter descriptions
+are not treated as capability indexes. Intents genuinely supported but present only in use_when are moved into the affirmative
+purpose/auxiliary intent, without indexing full-sentence negation and jump text. CSV export fills in these guidance fields
+so the same table can be rechecked; the lexicon regression fixture also includes the intents actually used and declared domain information.
 
-清点结束后，当前指导/输入 schema 中已撤下工具的引用为零，空必填指导
-为零，失效 next-tool hint 为零；旧的未公开兼容方法/历史报告不算当前契约。
-另外只读查看了 native shell/remote 和受版本控制 face/desktop 渲染贡献的
-源码边界，没有修改兄弟仓库或安装目录；这些不计入 Pal 145 个源声明。
-外部 MCP 服务和其他运行实例插件的动态契约仍不在本次源码联合目录内。
+After the inventory, references to withdrawn tools in the current guidance/input schema are zero, empty required guidance
+entries are zero, and invalid next-tool hints are zero; old unpublished compatibility methods/historical reports do not count as the current contract.
+Additionally, the source boundaries of native shell/remote and the version-controlled face/desktop rendering contributions were viewed read-only;
+sibling repositories or installation directories were not modified; these are not counted among Pal's 145 source declarations.
+External MCP services and the dynamic contracts of other running instance plugins remain outside this source joint catalog.
 
-20 条人工挑选的、明确 domain 的英语查询用于定位和修正词表缺口，同一
-组 top-3 回放从 16/20 到 20/20，top-1 从 16/20 到 20/20。样本参与了
-元数据调整，不能当成独立评测或真实模型召回率，且未验证模型选 domain
-和参数的能力。记录及完整指导 CSV：
-`test-logs/tool-guidance-alignment-2026-10-15/{report.json,catalog.csv,before.json,after.json}`。
+20 manually selected, explicitly domain-ed English queries were used to locate and fix lexicon gaps; the same
+group's top-3 replay went from 16/20 to 20/20, and top-1 went from 16/20 to 20/20. The samples participated in
+the metadata adjustments and cannot be treated as independent evaluation or true model recall, and the model's ability to select domains
+and parameters was not verified. Records and the full guidance CSV:
+`test-logs/tool-guidance-alignment-2026-10-15/{report.json,catalog.csv,before.json,after.json}`.
 
-本轮只运行定义级检查、纯检索函数词表回放、语法与 diff 格式检查；新增
-和迁移 pytest 用例继续留到统一批次，未调用评测模型、未提交或激活。
+This round only ran definition-level checks, pure retrieval lexicon replays, and syntax and diff format checks; newly added
+and migrated pytest cases continue to be held for the unified batch; no evaluation model was invoked, and nothing was committed or activated.
 
-## 提交前过期测试清理与隔离验证（2026-10-15）
+## Pre-commit Stale Test Cleanup and Isolation Verification (2026-10-15)
 
-清理 Browser 常驻入口的矛盾断言、Plugin/MCP 恢复动作的旧别名、LSP 导航方法的旧接口、已撤销后端维护工具的说明断言，以及合并后重复的用例/允许集合。保留旧别名不可调用、作用域/TTL/回收、错误保真和生命周期取消顺序等有效回归。词法拒绝与 purpose 候选回退分别验证，已知 Artifact 域的列举使用明确 domain。
+Cleaned up contradictory assertions in Browser persistent entries, old aliases of Plugin/MCP recovery actions, old interfaces of LSP navigation methods, description assertions of the already-withdrawn backend maintenance tool, and duplicated cases/allow sets after merging. Kept valid regressions such as old aliases being non-callable, scope/TTL/reclamation, error fidelity, and lifecycle cancellation ordering. Lexical rejection and purpose candidate fallback were verified separately, and enumerations in the known Artifact domain use explicit domains.
 
-同时修复保留的 Artifact 内部内容搜索中未定义变量，补齐 Memory embedding 迁移所需的配置辅助函数；新增动态访问边界逐项记录原因。提交内容导出到独立源码目录，验证不依赖尚未提交的 LLM WebSocket 改造。
+Also fixed an undefined variable in the retained Artifact internal content search and added configuration helper functions needed for Memory embedding migration; new dynamic access boundaries record the reason for each item. The commit contents were exported to a separate source directory, verified to not depend on the yet-uncommitted LLM WebSocket changes.
 
-验证记录分组不可相加：初始定向组合 593 项通过、13 项失败，随后迁移旧断言并修复真实问题；独立提交目录 572 项通过、7 项失败，其后针对这些问题与生命周期修改的复测 21 项全部通过。另一个生命周期/错误回执组合 122 项通过、1 个旧 LSP 方法调用失败，修正后的该用例已包含在 21 项复测中。形式化清单检查通过。完整四批跨平台回归留给 GitHub CI。
+Verification record groups are not additive: the initial targeted combination had 593 items passed and 13 failed, then old assertions were migrated and real issues fixed; the independent commit directory had 572 items passed and 7 failed, after which a retest targeting those issues and lifecycle changes had all 21 items pass. Another lifecycle/error receipt combination had 122 items passed and 1 failure on an old LSP method call; the corrected case is included in the 21-item retest. The formal checklist check passed. The full four-batch cross-platform regression is left to GitHub CI.
 
-模型全量评估见 [GLM/DeepSeek 对比](pal_tool_discovery_evaluation_2026-10-15.md)。原始模型日志不进入提交。LLM WebSocket/传输实现、数据库 schema 和向导传输配置等既有工作保留在工作区。未更新安装目录、配置或运行中的 Pal。
+For the full model evaluation see [GLM/DeepSeek comparison](pal_tool_discovery_evaluation_2026-10-15.md). Raw model logs are not committed. Existing work such as the LLM WebSocket/transport implementation, database schema, and wizard transport configuration remains in the working tree. The installation directory, configuration, and running Pal were not updated.
 
-本地契约 mypy 首次分析持续约 7 分钟尚未完成，已停止并交由现有 GitHub contracts job 执行，不记为通过。
+The local contract mypy first analysis ran for about 7 minutes without completing; it was stopped and handed off to the existing GitHub contracts job, and is not recorded as passing.
 
-## 首轮 GitHub CI 失败项跟进
+## Follow-up on First-Round GitHub CI Failures
 
-首轮契约检查（含 mypy）与 Ubuntu/macOS 四个 Bunshin 批次全部通过；两平台 core-a/core-b 共暴露 10 个不同失败用例。迁移遗留的工具目录入口、LSP 调用模式、只读插件目录暴露、记忆后端内部生命周期断言、附件错误注入方法和 checklist 说明断言。工具说明审计改读完整源码目录，覆盖 emotion 动态契约；ID 来源检查接受附件描述、已有记忆结果及官方 CLI 等实际来源。Browser 评测 fixture 现在支持合并后的 read 动作。
+The first-round contract checks (including mypy) and all four Bunshin batches on Ubuntu/macOS passed; the two platforms' core-a/core-b exposed 10 distinct failing cases in total. Migrated legacy tool catalog entries, LSP call patterns, read-only plugin catalog exposure, memory backend internal lifecycle assertions, attachment error injection methods, and checklist description assertions. The tool description audit now reads the full source directory, covering the emotion dynamic contract; the ID source check accepts actual sources such as attachment descriptions, existing memory results, and official CLI. The Browser evaluation fixture now supports the merged read action.
 
-MCP 限额用例不再通过模块路径修改常量：插件重载后，该模块可能与收集阶段导入函数的 globals 不同。改用实际超过 8 MiB 的稀疏文件，验证编码拒绝及 path 模式保留；生产限制未放宽。独立提交源码中按插件重载在前的顺序执行，67 项全部通过。
+The MCP quota case no longer modifies constants via the module path: after plugin reload, that module may differ from the globals of functions imported during the collection phase. Instead, a sparse file actually exceeding 8 MiB is used to verify encoding rejection and path pattern preservation; the production limit was not relaxed. In the independent commit sources it runs with plugin reload first, and all 67 items passed.
 
-配套 shell 的 prototype host 保持自己的测试专用 multiplexer，并将共享说明中的下一工具提示映射到它实际注册的入口。SSH 测试改为等待监听就绪，替代固定 150 ms 延迟；相关 20 项通过。Desktop 测试直接验证渲染端公开情绪词表，避免以源码引号风格判断支持能力；相关 10 项通过。再次交由 GitHub 全量验证；未激活运行实例。
+The companion shell's prototype host keeps its own test-dedicated multiplexer and maps the next-tool hint in the shared description to the entry it actually registers. The SSH test now waits for listener readiness instead of a fixed 150 ms delay; the related 20 items pass. The Desktop test directly verifies the rendering side's public emotion lexicon, avoiding judging support capability by source quote style; the related 10 items pass. Handed back to GitHub for full verification; no running instance was activated.

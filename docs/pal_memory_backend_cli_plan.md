@@ -1,71 +1,71 @@
-# 记忆后端维护迁入 Pal CLI 计划
+# Plan for Moving Memory Backend Maintenance into the Pal CLI
 
-日期：2026-10-15
-状态：已按确认范围实施到源码；定向验证见[实施记录](pal_tool_consolidation_implementation.md)。尚未安装或激活。
+Date: 2026-10-15
+Status: Implemented into source code per the confirmed scope; see the [implementation record](pal_tool_consolidation_implementation.md) for targeted verification. Not yet installed or activated.
 
-## 已确定的方向
+## Confirmed Direction
 
-记忆后端维护不再作为模型工具提供，统一通过正式 Pal CLI 执行。更换 embedding provider 涉及升级脚本、向量空间兼容性和索引重建，应作为受管理的迁移处理，而非普通对话中的后端热切换。
+Memory backend maintenance is no longer provided as model tools; it is uniformly performed through the official Pal CLI. Changing the embedding provider involves upgrade scripts, vector space compatibility, and index rebuilds, and should be handled as a managed migration rather than a hot backend switch during ordinary conversation.
 
-模型继续使用日常记忆能力：recall、remember、update、forget，以及必要的记忆历史与健康诊断。后端维护退出工具面不改变 `mem_ref` 及原 provider 引用的含义。
+The model continues to use everyday memory capabilities: recall, remember, update, forget, plus memory history and health diagnostics as needed. Removing backend maintenance from the tool surface does not change the meaning of `mem_ref` or references to the original provider.
 
-## 工具面调整
+## Tool Surface Adjustments
 
-| 当前工具 | 计划 |
+| Current tool | Plan |
 | --- | --- |
-| `attach_memory_provider` | 撤出模型工具面，迁入 CLI 生命周期命令 |
-| `detach_memory_provider` | 撤出模型工具面，迁入 CLI 生命周期命令 |
-| `set_active_memory_provider` | 撤出模型工具面，由 CLI 管理存储后端选择与生效方式 |
-| `refresh_memory_provider_indexes` | 撤出模型工具面，由 CLI 调用索引维护或迁移作业 |
-| `list_memory_providers` | 后端清单迁入 CLI；日常诊断所需的 active provider 信息并入 `inspect_memory_state` |
-| `inspect_memory_provider_inventory` | 后端详细 inventory、索引及 embedding 诊断迁入 CLI；模型只保留必要健康摘要 |
+| `attach_memory_provider` | Withdraw from the model tool surface; move into CLI lifecycle commands |
+| `detach_memory_provider` | Withdraw from the model tool surface; move into CLI lifecycle commands |
+| `set_active_memory_provider` | Withdraw from the model tool surface; the CLI manages storage backend selection and how it takes effect |
+| `refresh_memory_provider_indexes` | Withdraw from the model tool surface; the CLI invokes index maintenance or migration jobs |
+| `list_memory_providers` | The backend inventory moves into the CLI; active provider information needed for everyday diagnostics is merged into `inspect_memory_state` |
+| `inspect_memory_provider_inventory` | Detailed backend inventory, index, and embedding diagnostics move into the CLI; the model keeps only a necessary health summary |
 
-以上六个公开入口计划撤销，不保留可被搜索到的维护别名或等价的通用模型管理工具。内部 provider 方法仍可由 runtime 和 CLI owner 使用，撤销工具不等于删除实现。
+The six public entry points above are planned for withdrawal; no searchable maintenance aliases or equivalent general-purpose model management tools will be kept. Internal provider methods remain usable by the runtime and the CLI owner; withdrawing tools does not mean deleting the implementation.
 
-保留 `inspect_memory_state`，提供记忆模块及当前后端的可用性、必要计数、简短故障原因和明确的维护建议。具体数据库路径、向量配置、迁移细节和索引内部状态交给 CLI。
+`inspect_memory_state` is retained, providing the memory module's and the current backend's availability, necessary counts, brief failure reasons, and explicit maintenance recommendations. Specific database paths, vector configuration, migration details, and index internal state are left to the CLI.
 
-`manage_memory_dreaming` 混合了自动任务配置和记忆内容整理，本轮不将其整体等同于后端切换；其配置部分是否迁入 CLI、内容整理入口如何收拢，后续单独审查。记忆候选审批与提交规则也不随本次后端维护迁移改变。
+`manage_memory_dreaming` mixes automatic task configuration with memory content curation; this round does not treat it wholesale as a backend switch. Whether its configuration part moves into the CLI, and how the content curation entry point is consolidated, will be reviewed separately later. Memory candidate approval and submission rules are also unchanged by this backend maintenance migration.
 
-## 两类 provider 变更需要区分
+## Two Kinds of Provider Changes Must Be Distinguished
 
-- **L3 存储后端变更**：改变日常记忆操作使用的存储实例，涉及资源生命周期、数据归属和生效方式。
-- **Embedding provider / 模型变更**：可能改变向量空间，涉及旧向量处理、重新计算和索引重建。切换 active L3 provider 不能代替这一流程。
+- **L3 storage backend change**: changes the storage instance used by everyday memory operations, involving resource lifecycle, data ownership, and how the change takes effect.
+- **Embedding provider / model change**: may change the vector space, involving handling of old vectors, recomputation, and index rebuilds. Switching the active L3 provider cannot substitute for this process.
 
-迁移脚本应识别 provider、模型版本、维度及影响向量兼容性的配置。向量维度相同不代表向量空间兼容。仅修改传输地址与更换向量空间也不能一概按同一种迁移处理，应由脚本检查兼容性后决定是否重建。
+Migration scripts should identify the provider, model version, dimensions, and any configuration affecting vector compatibility. Identical vector dimensions do not mean compatible vector spaces. Merely changing the transport address versus replacing the vector space also cannot be handled as the same kind of migration across the board; the script should check compatibility before deciding whether a rebuild is required.
 
-## CLI 与升级脚本的职责
+## Responsibilities of the CLI and Upgrade Scripts
 
-命令名称在实现时对齐现有 Pal CLI。以下是能力范围，不代表这些命令已经存在：
+Command names will be aligned with the existing Pal CLI at implementation time. The following is the capability scope and does not mean these commands already exist:
 
-1. 查询后端清单、当前配置、连接状态和索引健康度。
-2. 管理后端 attach / detach / select，并明确是在线生效还是下次启动生效。
-3. 查询目标 embedding 配置及其与当前数据的兼容性，生成迁移计划。
-4. 通过正式升级脚本执行数据或向量索引迁移，报告进度、失败和恢复方式。
-5. 支持索引检查、刷新和必要的重新计算，不依赖模型手工改数据库或拼接临时 SQL。
+1. Query the backend inventory, current configuration, connection status, and index health.
+2. Manage backend attach / detach / select, and state explicitly whether it takes effect online or on next startup.
+3. Query the target embedding configuration and its compatibility with current data, and generate a migration plan.
+4. Execute data or vector index migration via the official upgrade script, reporting progress, failures, and recovery steps.
+5. Support index inspection, refresh, and necessary recomputation, without relying on the model hand-editing the database or assembling ad hoc SQL.
 
-在线操作须通过运行实例的 owner 执行，不在另一个 CLI 进程中直接修改 live Python 对象，也不能只改配置文件后就宣称运行中实例已经完成切换。
+Online operations must be performed through the owner of the running instance; a separate CLI process must not directly modify live Python objects, nor may it merely edit a configuration file and then claim the running instance has completed the switch.
 
-升级流程需能重复运行或恢复中断作业；不混用不兼容的旧、新向量。切换完成前保留可恢复的数据与配置状态，结束后验证实际使用的配置、索引完整性及代表性检索结果。
+The upgrade process must be re-runnable or able to resume interrupted jobs; incompatible old and new vectors must not be mixed. Before the switch completes, recoverable data and configuration state is preserved; afterwards, verify the configuration actually in use, index integrity, and representative retrieval results.
 
-## 模型遇到后端故障时的行为
+## Model Behavior on Backend Failures
 
-- 使用 `inspect_memory_state` 及原始操作返回的原因判断可用性。
-- 需要维护时，通过 `pal.self.maintenance` 和正式 Pal CLI 处理。
-- 不因缺少维护工具而退回直接改数据库或使用非正式脚本。
-- 按原 `provider_id` / `mem_ref` 核对未知写入结果，不擅自改查另一后端，也不通过切换 active provider 规避错误。
-- 区分“CLI 已接受作业”“迁移完成”“运行实例已采用新配置”和“检索验证通过”。
+- Use `inspect_memory_state` and the reasons returned by the original operations to judge availability.
+- When maintenance is needed, use `pal.self.maintenance` and the official Pal CLI.
+- Do not fall back to directly editing the database or using informal scripts just because maintenance tools are missing.
+- Verify unknown write results against the original `provider_id` / `mem_ref`; do not unilaterally switch to querying another backend, and do not evade errors by switching the active provider.
+- Distinguish between "the CLI has accepted the job", "migration complete", "the running instance has adopted the new configuration", and "retrieval verification passed".
 
-## 实施顺序与验收
+## Implementation Order and Acceptance
 
-1. 盘点当前升级脚本、索引维护与 provider 生命周期接口，确定正式 CLI 的 owner 调用边界。
-2. 补齐 CLI 和迁移作业的功能，再撤下对应模型工具，避免出现维护能力空窗。
-3. 更新 `inspect_memory_state`、工具恢复提示、内置维护技能、CLI 帮助和相关文档，清除旧维护工具引用。
-4. 核对模型的 native schema、搜索目录、`read_tool` 及角色工具投影均不再公开上述维护入口。
-5. 定向验证后端不可用、迁移中断与恢复、embedding 不兼容、索引重建和配置生效路径；确认日常记忆读写与原引用核对仍可工作。
-6. 生成工具清单，单独统计减少的公开维护入口；完整 CI 交给 GitHub 执行。
+1. Inventory the current upgrade scripts, index maintenance, and provider lifecycle interfaces, and determine the owner invocation boundary of the official CLI.
+2. Complete the CLI and migration job functionality before withdrawing the corresponding model tools, avoiding a maintenance capability gap.
+3. Update `inspect_memory_state`, tool recovery prompts, built-in maintenance skills, CLI help, and related documentation, removing references to the old maintenance tools.
+4. Verify that the model's native schema, search catalog, `read_tool`, and role tool projections no longer expose the above maintenance entry points.
+5. Perform targeted verification of backend unavailability, migration interruption and recovery, embedding incompatibility, index rebuilds, and configuration activation paths; confirm that everyday memory reads/writes and original-reference verification still work.
+6. Generate the tool inventory, counting the removed public maintenance entry points separately; full CI is handed to GitHub.
 
-实现、复制安装文件、运行实例激活和检索验证分别记录。涉及 resident 实现变更时另行安排激活；不能以修改配置、rescan 或 attach 代替实际升级和代码激活。
+Implementation, copying installation files, activation on the running instance, and retrieval verification are recorded separately. When a resident implementation change is involved, activation is scheduled separately; editing configuration, rescanning, or attach must not substitute for an actual upgrade and code activation.
 
-## 相关模块计划
+## Related Module Plans
 
-- [情绪广播与工具面合并计划](pal_emotion_broadcast_plan.md)
+- [Emotion broadcast and tool surface consolidation plan](pal_emotion_broadcast_plan.md)

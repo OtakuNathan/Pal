@@ -1,136 +1,136 @@
 # Pal Change Admission
 
-> 目标：给 Pal 的人类与 AI 贡献者一条进入代码库前的最低审查线，防止大体量、跨边界、不可维护的改动直接落地。
+> Goal: give Pal's human and AI contributors a minimum review bar before code enters the codebase, preventing large-volume, cross-boundary, unmaintainable changes from landing directly.
 
 ## Principle
 
-Pal 可以使用 AI 快速落地实现，但不能把“能生成很多代码”当成设计质量。
+Pal may use AI to land implementations quickly, but must not treat "being able to generate a lot of code" as design quality.
 
-一个改动能进入主线，至少要回答：
+For a change to enter the mainline, it must at least answer:
 
-- 它改的是哪个 contract？
-- 它属于哪个 module owner？
-- 它有没有跨过明确的 Does Not Own 边界？
-- 它有没有验证当前 runtime 能活着工作？
-- 它失败时如何退回或停用？
+- Which contract does it modify?
+- Which module owner does it belong to?
+- Does it cross an explicit Does Not Own boundary?
+- Does it verify that the current runtime can work while alive?
+- How does it roll back or get disabled when it fails?
 
 ## Change Classes
 
 ### Small Local Fix
 
-适用场景：
+Applicable scenarios:
 
 - bug fix
-- 单模块行为修正
-- 文档同步
-- 小型测试补充
+- Single-module behavior fixes
+- Documentation sync
+- Small test additions
 
-要求：
+Requirements:
 
-- 说明受影响文件
-- 有 focused test 或明确说明为何不需要
-- 不顺手重构无关代码
+- List the affected files
+- Include a focused test or clearly state why one is not needed
+- Do not casually refactor unrelated code
 
 ### Contract Change
 
-适用场景：
+Applicable scenarios:
 
-- 新 capability
-- 新 provider contract
+- New capability
+- New provider contract
 - database schema or migration
 - prompt/tool surface change
 - core/runtime lifecycle change
 
-要求：
+Requirements:
 
-- 先更新或新增对应 `docs/pal_*_contract.md`
-- 说明 Owns / Does Not Own 是否变化
-- 加 architecture or integration test
-- dogfood 一次真实 runtime 或说明无法 dogfood 的原因
+- First update or add the corresponding `docs/pal_*_contract.md`
+- State whether Owns / Does Not Own changes
+- Add an architecture or integration test
+- Dogfood against a real runtime once, or explain why dogfooding is not possible
 
 ### Large Generated Change
 
-适用场景：
+Applicable scenarios:
 
-- AI 生成或批量迁移
-- 跨多个 subsystem
-- 新 runtime manager / provider family
-- 大量新增代码
+- AI-generated or bulk migrations
+- Spanning multiple subsystems
+- New runtime manager / provider family
+- Large amounts of new code
 
-要求：
+Requirements:
 
-- 拆成可审的阶段
-- 每阶段必须可运行、可测试、可回滚
-- 每阶段说明代码生成范围
-- 禁止混入无关格式化、重命名、搬目录
-- 如果 diff 过大到无法人工审查，应先改成 plan / draft / bunshin work order，而不是直接合入
+- Split into reviewable stages
+- Each stage must be runnable, testable, and rollback-able
+- Each stage states the code generation scope
+- Do not mix in unrelated formatting, renaming, or directory moves
+- If the diff is too large for human review, convert it first into a plan / draft / bunshin work order instead of merging directly
 
 ## Admission Checklist
 
-提交前至少检查：
+Check at least the following before submitting:
 
-- Contract: 改动是否对应现有 contract？如果不是，是否新增了 contract？
-- Ownership: 代码是否留在正确 module owner 内？
-- Boundary: 是否违反 `Does Not Own`？
-- Persistence: 是否改 DB？如果改，是否有迁移或明确允许不兼容？
-- Runtime: 是否影响 bootstrap、service loop、provider reload、sidecar lifecycle？
-- Tool Surface: 是否新增或改变 LLM-visible capability/tool？名称是否稳定、namespace-first？
-- Prompt Surface: 是否改变 prompt context？是否避免把 operational metadata 当作用户内容？
-- Channel: 是否把 interaction realization 留给 provider，而不是写进 core/manager？
-- Memory: 是否避免把 channel/conversation route 当作 memory identity？
-- Tests: 是否有 focused test？跨模块时是否有 architecture/integration test？
-- Dogfood: 是否通过真实运行中的 runtime、socket client 或 manager socket 验证？
-- Rollback: 是否可以 disable provider/plugin/endpoint 或 revert 单个 commit？
+- Contract: Does the change correspond to an existing contract? If not, was a new contract added?
+- Ownership: Does the code stay within the correct module owner?
+- Boundary: Does it violate `Does Not Own`?
+- Persistence: Does it change the DB? If so, is there a migration or is incompatibility explicitly allowed?
+- Runtime: Does it affect bootstrap, service loop, provider reload, or sidecar lifecycle?
+- Tool Surface: Does it add or change an LLM-visible capability/tool? Are names stable and namespace-first?
+- Prompt Surface: Does it change the prompt context? Does it avoid treating operational metadata as user content?
+- Channel: Is interaction realization left to the provider rather than written into core/manager?
+- Memory: Does it avoid treating the channel/conversation route as memory identity?
+- Tests: Is there a focused test? For cross-module changes, is there an architecture/integration test?
+- Dogfood: Was it verified through a real running runtime, socket client, or manager socket?
+- Rollback: Can the provider/plugin/endpoint be disabled or a single commit reverted?
 
 ## AI Contributor Rule
 
-AI 贡献代码时应被当作高级打字员加快速实现器，而不是架构授权来源。
+AI contributions should be treated as a senior typist plus rapid implementer, not as a source of architectural authority.
 
-AI 可以：
+AI may:
 
-- 根据既有 contract 实现代码
-- 补测试
-- 同步 docs
-- 提出风险
-- 帮助拆阶段
+- implement code against an existing contract
+- add tests
+- keep docs in sync
+- raise risks
+- help break work into stages
 
-AI 不可以在没有明确 contract 的情况下：
+AI may not, without an explicit contract:
 
-- 发明新的 ownership boundary
-- 把平台特化写进 core
-- 把工具执行绕过 execution
-- 把 memory 当成 routing state
-- 批量生成无法审查的大型 diff
+- invent new ownership boundaries
+- write platform-specific code into core
+- bypass execution for tool execution
+- treat memory as routing state
+- generate large, unreviewable diffs in bulk
 
 ## Dogfood Rule
 
-Pal 的 runtime 改动默认需要 dogfood。
+Pal runtime changes require dogfooding by default.
 
-优先验证：
+Verify in priority order:
 
 - `pal run --runtime-root <runtime>`
 - `pal client --runtime-root <runtime> --message "..."`
-- manager socket/client（Bunshin 调度与运行状态）
+- manager socket/client (Bunshin scheduling and runtime state)
 - provider reload / rescan / attach / detach
-- service log 中没有重复 crash 或 event-loop lifecycle error
+- no repeated crashes or event-loop lifecycle errors in the service log
 
-如果真实 runtime 不能运行，提交说明必须写清：
+If the real runtime cannot run, the commit message must state clearly:
 
-- 缺少什么 secret/config/service
-- 已经跑过哪些替代测试
-- 剩余风险在哪里
+- which secret/config/service is missing
+- which substitute tests have already been run
+- where the remaining risk lies
 
 ## Review Shape
 
-评审时先看风险，不先看代码量。
+When reviewing, look at risk first, not at lines of code.
 
-优先顺序：
+Priority order:
 
-1. 是否破坏架构边界
-2. 是否破坏 runtime lifecycle
-3. 是否破坏数据持久化或迁移
-4. 是否破坏 LLM-visible tool/capability contract
-5. 是否缺少 dogfood 或测试
-6. 是否存在无关 churn
+1. Does it break architectural boundaries
+2. Does it break the runtime lifecycle
+3. Does it break data persistence or migration
+4. Does it break the LLM-visible tool/capability contract
+5. Is dogfooding or testing missing
+6. Is there unrelated churn
 
-代码可以多，但必须能被解释、审查、测试和回滚。
+Code may be large, but it must be explainable, reviewable, testable, and rollbackable.

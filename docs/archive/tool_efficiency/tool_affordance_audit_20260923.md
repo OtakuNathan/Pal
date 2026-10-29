@@ -1,143 +1,143 @@
-# 工具 affordance 审计（2026-09-23）
+# Tool Affordance Audit (2026-09-23)
 
 > Historical record, archived on 2026-10-05 from `docs/tool_affordance_audit_20260923.md`.
 > Statements about implementation, deployment and test results describe the
 > original work, not the current checkout or running host. See the
 > [current documentation index](../../README.md).
 
-审计基线：`26bfb5e`。下文保留原始发现；本轮实现结果见文末。工作区还包含独立的 compact 文案和 OR hybrid 请求兼容性修复。
+Audit baseline: `26bfb5e`. The original findings are preserved below; implementation results for this round are at the end of the document. The workspace also contains independent compact copy and OR hybrid request compatibility fixes.
 
-## 范围与证据
+## Scope and Evidence
 
-- 静态遍历 `src/pal`、`plugins`、`providers`，提取 24 个文件中的 199 个 `capability_action` 声明，查看工具 guidance、InputModel 及主要返回路径。
-- 对其中 105 个集中生成的输入模型读取真实 Pydantic schema：304 个顶层字段，89 个没有字段 description。这是筛查信号，不是 89 个缺陷；普通 `name`、上层 guidance 已解释的字段不应机械补文案。
-- 其余包括独立输入模型、空参数工具、动态 endpoint 定位参数；不能把没有显式 InputModel 等同于模型拿不到参数。
-- 深查 discovery、LLM usage、channel/Telegram、checklist、artifact、browser、proactive；其余模块完成声明级扫描，不宣称全部错误分支已执行验证。
-- 结合 `/tmp/pal/pal.log` 的 TG 排障历史。该文件是末次请求快照，不是每轮完整性能 trace。
-- 离线调用真实 schema/函数，复现 discovery 错误筛选、browser 负索引，并测量 usage 快照字段数。浏览器底层执行用捕获 stub 替代，没有真实浏览器操作、付费调用或运行时变更。
-- 动态 MCP server、独立安装的 `pal-shell-native` 以及其他仓库不在本次源码覆盖内。日志里的 native shell 不能归因于本体 `run_shell` 的声明。
+- Statically traversed `src/pal`, `plugins`, and `providers`, extracting 199 `capability_action` declarations from 24 files, examining tool guidance, InputModel, and main return paths.
+- Read the real Pydantic schemas for 105 of the centrally generated input models: 304 top-level fields, of which 89 have no field description. This is a screening signal, not 89 defects; ordinary `name` fields and fields already explained by upper-level guidance should not mechanically get copy added.
+- The remainder includes independent input models, empty-parameter tools, and dynamic endpoint locator parameters; the absence of an explicit InputModel must not be equated with the model being unable to obtain parameters.
+- Deep dives were done on discovery, LLM usage, channel/Telegram, checklist, artifact, browser, and proactive; the remaining modules received declaration-level scans only, and no claim is made that all error branches have been execution-verified.
+- Combined with the TG troubleshooting history in `/tmp/pal/pal.log`. That file is a snapshot of the last request, not a complete per-round performance trace.
+- Offline calls against real schemas/functions reproduced the discovery filtering error, the browser negative index, and measured the usage snapshot field counts. The browser's underlying execution was replaced with a captured stub; there were no real browser operations, paid calls, or runtime changes.
+- Dynamic MCP servers, independently installed `pal-shell-native`, and other repositories are outside this source coverage. Native shell entries in the logs cannot be attributed to the core `run_shell` declaration.
 
-## 确认的问题与建议
+## Confirmed Issues and Recommendations
 
-### A1：search_tools 空结果不能解释筛选冲突（高）
+### A1: search_tools empty results cannot explain filter conflicts (High)
 
-位置：`src/pal/execution/generated_tool_models.py:482`、`src/pal/execution/runtime.py:1057`。
+Location: `src/pal/execution/generated_tool_models.py:482`, `src/pal/execution/runtime.py:1057`.
 
-`family` 是自由字符串，说明举 management/lifecycle/endpoint/search，但没有区分它和 module。TG 日志中模型传 `family=channel`，而相关工具 family 为 introspection。所有筛选先执行，facets 再从筛完的结果计算；因此即使 `facets=true`，零命中时也只能得到三个空数组。
+`family` is a free-form string whose examples mention management/lifecycle/endpoint/search, but it does not distinguish it from module. In the TG logs the model passed `family=channel`, while the relevant tools have family introspection. All filters are applied first, and facets are then computed from the filtered results; therefore even with `facets=true`, a zero-hit query only yields three empty arrays.
 
-离线复现：同一个 channel health 记录，family=channel 得到 0 个结果和空 facets；移除 family 后得到 1 个结果，family=introspection。
+Offline reproduction: the same channel health record yields 0 results and empty facets with family=channel; removing family yields 1 result with family=introspection.
 
-建议：说明 family 是注册表分类，未知时省略；零命中时返回有条件的筛选修正建议及可用分类，不自动放宽后假装精确命中。family/module 是动态集合，不能把当前值写死成永久 enum。`top_k`/`limit` 同时提供时目前前者优先，也应明确。
+Recommendation: explain that family is a registry classification and that it should be omitted when unknown; on zero hits, return a conditional filter-correction suggestion along with available classifications, rather than silently relaxing the filter and pretending it was a precise match. family/module are dynamic sets; current values must not be hardcoded as a permanent enum. When `top_k`/`limit` are both provided, the former currently takes precedence; this should also be made explicit.
 
-### A2：llm_usage 默认返回全部聚合细节，缺少视图选择（高）
+### A2: llm_usage returns all aggregate detail by default, lacking view selection (High)
 
-位置：`src/pal/llm/capabilities.py:266`、`:383`；`src/pal/llm/usage.py:175`。
+Location: `src/pal/llm/capabilities.py:266`, `:383`; `src/pal/llm/usage.py:175`.
 
-工具无输入参数，输出 active_model + usage 总计 + 所有 endpoint 桶。空 ledger 已有 42 个顶层字段，每个 endpoint 桶为 39 个字段；此外还有 active_model。包括最新请求细节、计数口径、覆盖率、reported_fields、异常、近义比例等。
+The tool takes no input parameters and outputs active_model + usage totals + all endpoint buckets. An empty ledger already has 42 top-level fields, and each endpoint bucket has 39 fields; plus there is active_model. This includes latest-request detail, counting conventions, coverage, reported_fields, anomalies, near-duplicate ratios, and more.
 
-这是聚合快照，不是无限请求明细表。已有结果分页不能解决默认信息层级不合适。
+This is an aggregate snapshot, not an unbounded request detail table. Pagination of results already obtained does not solve an inappropriate default information hierarchy.
 
-建议：默认展示进程级概览及数据完整性；按需选择 endpoint/detail。保留 cost_complete、未知费用/usage 的区别，不能为了简短把未知表示为零。当前 ledger 没有独立 turn 查询契约，不应承诺可直接查询本轮费用，除非另接正确数据源。
+Recommendation: by default show a process-level overview and data completeness; select endpoint/detail on demand. Preserve the distinction between cost_complete and unknown cost/usage; unknowns must not be represented as zero for brevity. The current ledger has no independent per-turn query contract, so do not promise direct querying of the current turn's cost unless a correct data source is wired in separately.
 
-### A3：Telegram health 混合当前轮询状态与历史旁路错误（高）
+### A3: Telegram health mixes current polling state with historical bypass errors (High)
 
-位置：`providers/telegram/endpoint.py:873`、`:1381`、`:1396`、`:1999`、`:2010`。
+Location: `providers/telegram/endpoint.py:873`, `:1381`, `:1396`, `:1999`, `:2010`.
 
-`healthy` 依据 polling_running 和 last_poll_error；同一结果同时返回 last_status_error，后者可能来自 reaction/typing/menu，缺少发生时间和恢复信息。因此 healthy=true 与 Timed out 同时出现并不逻辑矛盾，但模型必须读源码才能知道判断边界。该现象已经在 TG 日志中触发额外调查。
+`healthy` is based on polling_running and last_poll_error; the same result also returns last_status_error, which may come from reaction/typing/menu and lacks occurrence time and recovery information. Therefore healthy=true appearing together with Timed out is not a logical contradiction, but the model would have to read the source to know the judgment boundary. This phenomenon has already triggered extra investigation in the TG logs.
 
-建议：返回健康判断范围、错误操作类型、错误时间及后续成功情况。当前无积压只能说明当前队列为空，不能排除过去的消息延迟。底层观测元数据留在 harness；面向模型解释判断所需的信息即可。
+Recommendation: return the scope of the health judgment, the error's operation type, the error time, and any subsequent successes. "No backlog" currently only means the current queue is empty and cannot rule out past message delays. Leave low-level observation metadata to the harness; expose only what the model needs to understand the judgment.
 
-### A4：checklist 的 UI echo 全量进入 LLM 输出，收尾契约过度串行（高）
+### A4: checklist UI echo enters LLM output in full, and the wrap-up contract is overly serialized (High)
 
-位置：`src/pal/checklist/capabilities.py:135`、`:205`，`src/pal/checklist/prompt.py:40`。
+Location: `src/pal/checklist/capabilities.py:135`, `:205`, `src/pal/checklist/prompt.py:40`.
 
-同一结果重复包含 plan/markdown/echo.payload.plan/echo.markdown。TG 实例中一次打勾约 1.1K 字符，最后三次 check 加 clear 用了四个模型轮次。
+The same result redundantly contains plan/markdown/echo.payload.plan/echo.markdown. In the TG instance, a single checkbox tick is about 1.1K characters, and the last three checks plus clear took four model rounds.
 
-建议：UI echo 仍保留给 channel/harness，LLM 默认只看状态变化和必要下一步；文案明确整份计划可以批量更新，任务结束无需为了清空先逐项打勾。不必创建一个更大的 checklist 框架，也不要让 runtime 自行猜测任务已完成。
+Recommendation: keep the UI echo for channel/harness, while the LLM by default sees only state changes and necessary next steps; the copy should make clear that the whole plan can be updated in batch and that clearing does not require ticking items one by one at task end. There is no need to create a larger checklist framework, nor to let the runtime guess on its own that the task is complete.
 
-### A5：artifact 返回建议中的公开别名错误（高）
+### A5: artifact recommendations cite wrong public aliases (High)
 
-位置：`src/pal/artifact/service.py:1195`；`src/pal/execution/generated_tool_models.py:32` 等。
+Location: `src/pal/artifact/service.py:1195`; `src/pal/execution/generated_tool_models.py:32`, etc.
 
-PDF next_actions 建议调用 `artifact_read`，公开 alias 实为 `read_artifact`；多个 artifact_id 描述要求从 `artifact_search` 获取 ID，公开 alias 实为 `search_artifacts`。内部方法同名并不等于可调用工具别名。
+The PDF next_actions recommend calling `artifact_read`, but the public alias is actually `read_artifact`; multiple artifact_id descriptions say to obtain IDs from `artifact_search`, but the public alias is actually `search_artifacts`. An internal method with the same name is not equivalent to a callable tool alias.
 
-建议：统一使用真实公开 alias，增加针对注册表引用的契约检查。无需增加发现流程来掩盖错误建议。
+Recommendation: uniformly use the real public aliases and add a contract check for registry references. There is no need to add a discovery flow to mask bad suggestions.
 
-### A6：search_artifacts.time_hint 被接受但完全忽略（高）
+### A6: search_artifacts.time_hint is accepted but entirely ignored (High)
 
-位置：`src/pal/execution/generated_tool_models.py:59`、`src/pal/artifact/service.py:534`。
+Location: `src/pal/execution/generated_tool_models.py:59`, `src/pal/artifact/service.py:534`.
 
-schema 暴露字符串 time_hint，默认 recent；实现直接 `_ = time_hint`，实际只使用固定的 hot-state 有效性与 recency 加权。模型传入 last_week 等值也不会产生相应过滤。
+The schema exposes a string time_hint defaulting to recent; the implementation simply does `_ = time_hint` and actually only uses fixed hot-state validity and recency weighting. Passing values like last_week produces no corresponding filtering.
 
-建议：删除/明确拒绝无效参数，或定义真实支持的时间语义再实现；不能用 enum 包装一个仍不起作用的参数。
+Recommendation: remove/reject the ineffective parameter explicitly, or define the actually supported time semantics and then implement it; do not wrap a still-nonfunctional parameter in an enum.
 
-### A7：browser_tabs 的负索引会悄悄指向标签页 0（高）
+### A7: browser_tabs negative index silently points to tab 0 (High)
 
-位置：`src/pal/web_fetch/tool_models.py:111`、`src/pal/web_fetch/browser_service.py:648`。
+Location: `src/pal/web_fetch/tool_models.py:111`, `src/pal/web_fetch/browser_service.py:648`.
 
-index 没有范围/编号说明；schema 接受 -1，dispatch 使用 max(0,index)。离线通过真实 schema 和 dispatch 复现：`{operation:close,index:-1}` 生成 `tab-close -- 0`。这不只是额外轮次风险，还会选择错误操作目标。
+index has no range/numbering explanation; the schema accepts -1, and dispatch uses max(0,index). Reproduced offline via the real schema and dispatch: `{operation:close,index:-1}` generates `tab-close -- 0`. This is not just a wasted-round risk; it also selects the wrong operation target.
 
-建议：明确索引来自 tabs list，添加 ge=0 并让非法索引报错；说明 select/close 缺省 index 的含义，按底层 CLI 的真实契约决定是否要求显式值。不要替用户猜目标。
+Recommendation: explain that the index comes from the tabs list, add ge=0 and make invalid indices error; explain the meaning of an omitted index for select/close, deciding whether an explicit value is required based on the underlying CLI's real contract. Do not guess the target on the user's behalf.
 
-### A8：read_artifact 的 page/chunk 编号与相互关系没有说明（中）
+### A8: read_artifact page/chunk numbering and their relationship are unexplained (Medium)
 
-位置：`src/pal/execution/generated_tool_models.py:42`、`src/pal/artifact/service.py:881`、`src/pal/artifact/processors.py:436`。
+Location: `src/pal/execution/generated_tool_models.py:42`, `src/pal/artifact/service.py:881`, `src/pal/artifact/processors.py:436`.
 
-page/chunk 是无说明、无下界的可选整数；分块实际从 1 开始。二者同时传时 `_select_representation` 优先 page，schema 没有说明。max_chars 也没有解释与工具结果分页的区别。
+page/chunk are optional integers with no description and no lower bound; chunking actually starts at 1. When both are passed, `_select_representation` prioritizes page, which the schema does not state. max_chars is also unexplained relative to tool-result pagination.
 
-建议：解释编号来源、起点及适用 representation，拒绝或明确处理互斥组合；不要把工具结果分页的 page 与 artifact 页码混为一谈。已有 `read_tool_result` 的 1-based/head/tail 说明是可参照的正例。
+Recommendation: explain the numbering source, starting point, and applicable representation, and reject or explicitly handle mutually exclusive combinations; do not conflate tool-result pagination's page with artifact page numbers. The existing 1-based/head/tail documentation of `read_tool_result` is a good example to follow.
 
-### A9：proactive 输出路由参数的发现入口不可靠（中）
+### A9: proactive output routing parameters have an unreliable discovery path (Medium)
 
-位置：`src/pal/execution/generated_tool_models.py:1184`、`:1227`；`providers/telegram/endpoint.py:913`。
+Location: `src/pal/execution/generated_tool_models.py:1184`, `:1227`; `providers/telegram/endpoint.py:913`.
 
-out_reply_target 的说明要求查询 endpoint auth_state 获取 session_id/request_id。但 Telegram auth_state 只有 paired/authorized/token_present；其 reply_target 使用 chat_id/message_id/thread_id 等字段。通用工具说明把一种通道的字段写成了普遍契约。
+The out_reply_target description says to query the endpoint's auth_state to obtain session_id/request_id. But Telegram's auth_state only has paired/authorized/token_present; its reply_target uses fields like chat_id/message_id/thread_id. The generic tool description writes one channel's fields as a universal contract.
 
-建议：通过 channel owner 返回可用目的地或提供明确的 provider 路由 schema；模型不应猜内部路由字段。schedule 目前有例子，但仍是任意 dict，未来可用基于 cadence 的输入结构表达条件必填字段。
+Suggestion: return available destinations via channel owner or provide an explicit provider routing schema; the model should not guess internal routing fields. schedule currently has an example, but it is still an arbitrary dict; in the future, conditionally required fields could be expressed via a cadence-based input structure.
 
-### A10：browser 目标/键值参数缺少足够具体的语法说明（中）
+### A10: browser target/key-value parameters lack sufficiently specific syntax documentation (Medium)
 
-位置：`src/pal/web_fetch/tool_models.py:45`–`:81`、`:111`，`src/pal/web_fetch/capabilities.py:258` 起。
+Location: `src/pal/web_fetch/tool_models.py:45`–`:81`, `:111`, and `src/pal/web_fetch/capabilities.py:258` onward.
 
-target 只有 str，guidance 说 current snapshot ref or unique locator，却未提供允许的 locator 语法/示例。key、modifiers、select.value 的合法形式也未在字段中说明。模型通常需要另读手册或靠经验猜 CLI 语法。
+target is only a str; guidance says current snapshot ref or unique locator, but provides no allowed locator syntax/examples. The valid forms of key, modifiers, and select.value are not documented in the fields either. The model usually has to read a separate manual or guess CLI syntax from experience.
 
-建议：静态集合用已验证的 enum；开放表达式给示例、来源与失效边界；不能随意把 CSS、Playwright locator 或其他 CLI 的语法混用。浏览器新页面后的 ref 变化应由返回 affordance 告知，而非反复发通用操作手册。
+Suggestion: use verified enums for static sets; for open expressions, give examples, sources, and invalidation boundaries; do not casually mix CSS, Playwright locator, or other CLI syntaxes. Ref changes after a browser new page should be conveyed by the returned affordance, not by repeatedly sending generic operation manuals.
 
-## 不应误改的地方
+## Things That Must Not Be Mistakenly Changed
 
-- `call_tool` 已写清：已知准确 alias 和足够契约即可调用，不要求每次 read_tool。TG 那次多读说明也有模型策略因素。
-- discovery 的 input_shape 是摘要，不是完整 schema。不能因此声称所有命中都可无条件调用；只在已有信息确实足够时省略 read_tool。
-- 文件工具已有授权快照、批量 edits、分页；大范围读取首先检查调用参数，不能再硬截断证据。
-- memory 的 kind/view 等已经有 enum 和较完整说明；分页能力不应倒退为按字符静默丢内容。
-- Bunshin 的 task/subject、workflow command 等已有语义定位及部分明确 enum；本次声明扫描没有证明需要整体重构。
-- `read_tool` 默认不展示完整 output_schema 是既有降噪选择。需要补的是关键结果语义，不能一律把完整 schema 再塞回每次工具结果。
-- 参数可配置值来自 provider/MCP/插件时，不应强行定义一套不完整的全局 enum。
+- `call_tool` already states clearly: a known accurate alias plus a sufficient contract is enough to call, without requiring read_tool every time. TG's extra documentation reads that time also had model-policy factors.
+- discovery's input_shape is a summary, not a complete schema. You cannot therefore claim all hits are unconditionally callable; omit read_tool only when existing information is genuinely sufficient.
+- File tools already have authorization snapshots, batch edits, and pagination; large-scope reads first check call parameters, and evidence must not be hard-truncated again.
+- memory's kind/view etc. already have enums and fairly complete descriptions; the pagination capability must not regress to silently dropping content by character count.
+- Bunshin's task/subject, workflow command, etc. already have semantic positioning and some explicit enums; this round's claim scan did not prove a full refactor is needed.
+- `read_tool` not showing the full output_schema by default is an existing noise-reduction choice. What needs supplementing is key result semantics; the full schema must not simply be stuffed back into every tool result.
+- When a parameter's configurable values come from a provider/MCP/plugin, do not force an incomplete global enum.
 
-## 建议实施顺序
+## Suggested Implementation Order
 
-1. 修错误或会误选目标的契约：artifact 别名、无效 time_hint、browser 负索引、proactive 路由说明。
-2. 修高频结果表达：llm_usage 默认摘要/按需详情、channel 错误时间与语义、checklist LLM/UI 分离。
-3. 修发现与输入 affordance：空结果筛选建议、参数编号/冲突/语法、缺失动态能力入口。
-4. 回归以“模型可见 schema → 实际校验/调用 → 模型可见结果”为单位，不写只验证说明文字非空的测试。增加错误 next-tool alias、静默忽略参数、非法目标被自动改写的反例。
+1. Fix contracts that are wrong or can cause wrong target selection: artifact aliases, invalid time_hint, browser negative indices, proactive routing documentation.
+2. Fix high-frequency result expressions: llm_usage default summary/on-demand detail, channel error timing and semantics, checklist LLM/UI separation.
+3. Fix discovery and input affordances: empty-result filter suggestions, parameter numbering/conflicts/syntax, missing dynamic capability entry points.
+4. Regressions should use "model-visible schema → actual validation/invocation → model-visible result" as the unit; do not write tests that only verify the description text is non-empty. Add negative cases: wrong next-tool alias, silently ignored parameters, invalid targets automatically rewritten.
 
-本报告是审计清单，不代表全部建议已实施，也不将 TG 的全部轮次归因于工具。没有改变现有分页、执行权限或工具生命周期。
+This report is an audit checklist; it does not mean all suggestions have been implemented, nor does it attribute all of TG's rounds to tools. It did not change existing pagination, execution permissions, or tool lifecycles.
 
 
-## 本轮实现结果
+## Implementation Results This Round
 
-- A1：保留精确筛选语义；零命中时按查询匹配项返回 `filter_suggestions`，与实际 hits/facets 分开。补充 family/module 区别及 top_k 优先级。
-- A2：`llm_usage(view="summary"|"detail", endpoint_id=...)`。默认只返回进程概览和 usage/cost 完整性；详情与 endpoint 桶按需读取。缺少 endpoint 记录明确返回 no_recorded_usage，不构造零费用结果。原 ledger 和用户 status 控制命令保留完整数据。
-- A3：Telegram health 明确当前入站 polling 的判断范围；最近辅助错误附操作、UTC 失败时间和同类操作后续成功时间。历史错误保留，不把其他操作成功当成恢复；错误记录到本地 logger。
-- A4：checklist 的模型更新结果只保留变化与进度；完整快照和 echo 留在 structured 供 UI 使用。upsert 可一次更新多个状态；最后一次 check 完成全部项目时，在 service 锁内复用 clear，返回完整完成快照并只发一次完成回显；batch upsert 保持原语义，取消、替换或批量完成后的关闭仍使用 clear。最后打勾前回顾需求与实际结果，不重复已完成的检查。
-- A5：修正 read_artifact/search_artifacts 公开别名；新增 next_actions 与已注册 alias 的契约校验。
-- A6：从公开 schema、工具转发及 service 签名移除无效 time_hint，旧参数由严格输入校验拒绝；文案明确只是 relevance/recency 排序，不是日期过滤。
-- A7：schema 和执行层拒绝负 tab index；select 必须给编号，close 省略编号仍表示当前 tab，与实际 CLI 保持一致。
-- A8：page/chunk 标明 1-based，拒绝同时传入，区分 artifact 页码与工具结果分页；说明 max_chars 是文本预览预算。
-- A9：移除 auth_state 能提供目的地及通用 session_id/request_id 的错误承诺。说明使用已知 inbound reply_target 或既有 proactive 配置，Telegram 字段独立说明。本轮没有新增跨 provider 的目的地发现 API，也没有改造 schedule 输入结构。
-- A10：依据本地安装的 @playwright/cli README 和 Playwright schema，补全 ref、CSS/locator、key、select value 的语法及失效边界，modifiers 使用已支持的 enum。没有新增浏览器操作或模型请求。
+- A1: Preserved exact filter semantics; on zero hits, returns `filter_suggestions` based on query-matched items, separate from actual hits/facets. Added family/module distinction and top_k priority.
+- A2: `llm_usage(view="summary"|"detail", endpoint_id=...)`. By default, returns only the process overview and usage/cost completeness; details and endpoint buckets are read on demand. A missing endpoint record clearly returns no_recorded_usage, without constructing zero-cost results. The original ledger and user status control commands retain full data.
+- A3: Telegram health now clearly states the judgment scope of current inbound polling; recent auxiliary errors include the operation, UTC failure time, and the time of a later success for the same operation. Historical errors are retained; another operation's success is not treated as recovery; errors are logged to the local logger.
+- A4: checklist's model-facing update results keep only changes and progress; full snapshots and echo remain in structured for UI use. upsert can update multiple statuses at once; when the final check completes all items, clear is reused inside the service lock, returning a full completion snapshot and sending the completion echo only once; batch upsert keeps its original semantics, and closing after cancel, replace, or batch completion still uses clear. Before the final check, review requirements and actual results, without repeating already-completed checks.
+- A5: Fixed the public aliases of read_artifact/search_artifacts; added contract validation for next_actions against registered aliases.
+- A6: Removed invalid time_hint from the public schema, tool forwarding, and the service signature; the old parameter is rejected by strict input validation; documentation clarifies it is only relevance/recency ordering, not date filtering.
+- A7: Schema and execution layer reject negative tab indices; select must give a number, close without a number still means the current tab, consistent with the actual CLI.
+- A8: page/chunk are marked 1-based, passing both is rejected, and artifact page numbers are distinguished from tool-result pagination; documents that max_chars is a text preview budget.
+- A9: Removed the erroneous promises that auth_state can provide destinations and generic session_id/request_id. Documents using a known inbound reply_target or existing proactive configuration, with Telegram fields explained separately. This round added no cross-provider destination discovery API and did not restructure the schedule input.
+- A10: Based on the locally installed @playwright/cli README and Playwright schema, completed the syntax and invalidation boundaries for ref, CSS/locator, key, and select value; modifiers use a supported enum. No new browser operations or model requests were added.
 
-### 验证与生效
+### Verification and Effectiveness
 
-相关回归 169 passed（含 Telegram endpoint、browser、artifact、discovery、usage、checklist 和恢复场景）；未运行全部 CI 批次或真实网络/浏览器操作。SDK 缓存修复的测试另行记录。
+Relevant regressions: 169 passed (covering Telegram endpoint, browser, artifact, discovery, usage, checklist, and recovery scenarios); the full CI batches and real network/browser operations were not run. Tests for the SDK cache fix are documented separately.
 
-修改在源码工作区，未提交或激活。execution/core 代码需主进程重新加载；Telegram 是独立 provider 源码，运行目录若为复制安装，需先更新该副本再走 channel_reload_provider，单纯重连 endpoint 不会加载新实现。没有修改运行时配置或重启正在工作的 Pal。
+Changes are in the source workspace, not committed or activated. execution/core code requires a reload by the main process; Telegram is a separate provider source, and if the running directory is a copied installation, that copy must be updated first and then channel_reload_provider invoked — merely reconnecting the endpoint will not load the new implementation. No runtime configuration was changed and no working Pal was restarted.

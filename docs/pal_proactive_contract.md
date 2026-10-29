@@ -96,17 +96,41 @@ Only proactive table and identifier names are active. Hot/top-of-mind state belo
 
 ## Capabilities
 
-Management actions are exposed under proactive capability names:
+Current public aliases are:
 
-- `op_proactive_mgmt_create`
-- `op_proactive_mgmt_destroy`
-- `op_proactive_mgmt_enable`
-- `op_proactive_mgmt_disable`
-- `op_proactive_mgmt_set_output_channel`
-- `op_proactive_mgmt_set_output_target`
-- `op_proactive_mgmt_update_schedule`
+- `inspect_proactive_status`
+- `list_proactive_tasks`
+- `read_proactive_task(name)`
+- `list_proactive_runs(name)`
+- `upsert_proactive_task`
+- `manage_proactive_task(name, operation="enable"|"disable"|"delete")`
+- `set_proactive_destination(name, out_channel_name?, out_reply_target?)`
+- `update_proactive_schedule`
 
-Introspection actions expose module status, task detail, latest run, and run history.
+Destination changes persist channel and target together. Omit the channel to
+retain it; JSON null clears channel and target; an empty target object clears
+only the target. At least one destination field must be supplied. Invalid
+resolution or persistence failure leaves the definition unchanged.
+
+For silent work select the built-in sink with
+`set_proactive_destination(name=TASK, out_channel_name="null")`. This is the
+string `"null"`, not JSON null. The sink discards output without transport/replay;
+run history and normal effect/approval rules remain. Do not ask a model to emit
+an invisible character to simulate silence, or use the recovery socket as a sink.
+
+## Admission And Context
+
+Due triggers wait in the existing mailbox until resident admission; no run row
+or L1 turn opens before admission. Pending user input has priority. Proactive
+runs use their own model-cache scope and isolated context, not the resident
+history projection or queued interjections. New user input waits for the next
+chat turn while proactive owns the resident slot.
+
+Tool calls, results and output references use the shared L1 store and are visible
+to later ordinary chat after turn closure. An isolated proactive context-budget
+failure does not compact the resident conversation. See the
+[subsystem README](../src/pal/proactive/README.md) for destination validation and
+context/handoff details.
 
 ## Invariants
 

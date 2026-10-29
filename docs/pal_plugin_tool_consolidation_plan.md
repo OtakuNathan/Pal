@@ -1,129 +1,129 @@
-# Plugins 工具面收口计划
+# Plugins Tool Surface Consolidation Plan
 
-日期：2026-10-15
-状态：已按确认范围实施到源码；定向验证见[实施记录](pal_tool_consolidation_implementation.md)。尚未安装或激活。
+Date: 2026-10-15
+Status: Implemented into source code per the confirmed scope; for targeted verification see [Implementation Record](pal_tool_consolidation_implementation.md). Not yet installed or activated.
 
-## 已确定的方向
+## Agreed Direction
 
-插件管理继续提供在线能力。按 [Browser 工具面收口计划](pal_browser_tool_consolidation_plan.md) 的原则，合并参数共用的生命周期操作与扫描操作，统一 hub 和单插件诊断；包管理保留独立入口。
+Plugin management continues to provide online capabilities. Following the principles of the [Browser tool surface consolidation plan](pal_browser_tool_consolidation_plan.md), merge lifecycle operations and scan operations that share parameters, and unify hub and single-plugin diagnostics; package management keeps its separate entry points.
 
-公开工具目标 **14 → 8**。`list_plugins` 从常驻直调降为间接目录工具后，plugins 不再占用常驻直调位置。以上为实施目标，尚未生效。
+Public tool target **14 → 8**. After `list_plugins` is downgraded from resident direct call to an indirect catalog tool, plugins no longer occupies a resident direct-call slot. The above is the implementation target and is not yet in effect.
 
-## 当前基线
+## Current Baseline
 
-依据 `src/pal/plugins/capabilities.py` 的能力声明，当前有 14 个工具，只有 `list_plugins` 为常驻直调。这是源码口径，不是在线实例的工具快照。
+Per the capability declarations in `src/pal/plugins/capabilities.py`, there are currently 14 tools, with only `list_plugins` as a resident direct call. This is the source-code view, not a snapshot of a live instance's tools.
 
-| 能力组 | 现有工具 | 数量 |
+| Capability group | Existing tools | Count |
 | --- | --- | ---: |
-| 查询与诊断 | `inspect_plugin_host`、`list_plugins`、`inspect_plugin` | 3 |
-| 生命周期 | `attach_plugin`、`detach_plugin`、`reload_plugin`、`enable_plugin`、`disable_plugin` | 5 |
-| 扫描发现 | `rescan_plugins`、`rescan_and_attach_first_party_plugins` | 2 |
-| 包管理 | `install_package`、`prepare_package`、`uninstall_plugin`、`inspect_package_status` | 4 |
-| 合计 | | **14** |
+| Query and diagnostics | `inspect_plugin_host`, `list_plugins`, `inspect_plugin` | 3 |
+| Lifecycle | `attach_plugin`, `detach_plugin`, `reload_plugin`, `enable_plugin`, `disable_plugin` | 5 |
+| Scan discovery | `rescan_plugins`, `rescan_and_attach_first_party_plugins` | 2 |
+| Package management | `install_package`, `prepare_package`, `uninstall_plugin`, `inspect_package_status` | 4 |
+| Total | | **14** |
 
-## 生命周期：5 → 1
+## Lifecycle: 5 → 1
 
-统一为 `manage_plugin`，共用必填插件名字和一个必选操作枚举：
+Unified as `manage_plugin`, with a shared required plugin name and one required operation enum:
 
 ```text
 manage_plugin(name=..., operation=attach | detach | reload | enable | disable)
 ```
 
-不增加按操作切换的专用参数。模型仍需明确选择动作；合并减少发现入口，不意味着五种生命周期语义可以互相替代。
+No operation-specific parameters are added. The model must still explicitly choose an action; the merge reduces discovery entry points and does not mean the five lifecycle semantics are interchangeable.
 
-| operation | 保留的行为 |
+| operation | Behavior retained |
 | --- | --- |
-| `attach` | 加载已启用插件；保留已经加载的实例，不隐含代码刷新 |
-| `detach` | 暂时卸载实例，保留 enabled 状态 |
-| `reload` | 替换已启用插件的实现及所拥有的资源，按现有规则处理受影响的依赖插件；已卸载的启用插件可被加载 |
-| `enable` | 启用并加载，按原有成功条件持久化启用状态 |
-| `disable` | 卸载并持久化禁用状态，保留卸载失败时的原有处理 |
+| `attach` | Load an enabled plugin; keep instances that are already loaded, with no implicit code refresh |
+| `detach` | Temporarily unload the instance while preserving the enabled state |
+| `reload` | Replace an enabled plugin's implementation and its owned resources, handling affected dependent plugins per existing rules; an enabled plugin that has been unloaded may be loaded |
+| `enable` | Enable and load, persisting the enabled state per the original success conditions |
+| `disable` | Unload and persist the disabled state, preserving the original handling when unloading fails |
 
-Runtime 显式分派到现有 host 生命周期方法，不因合并自动把 attach 升级为 enable 或 reload。保留依赖恢复、逻辑卸载已提交、资源清理未完成、失败回执和不确定结果的原有语义。
+The runtime explicitly dispatches to the existing host lifecycle methods and does not automatically upgrade attach to enable or reload because of the merge. The original semantics of dependency recovery, logical unload committed, resource cleanup incomplete, failure receipts, and uncertain results are preserved.
 
-撤销五个旧模型入口，不保留可被搜索到的重复管理别名。Host 内部方法以及其他 owner 使用的生命周期接口继续保留。
+Revoke the five old model entry points and keep no searchable duplicate management aliases. Host internal methods and lifecycle interfaces used by other owners remain in place.
 
-模型调用采用 `reload` 这个公开动作；host 内部现有 `reattach` 实现名称可保持不变，不为统一工具面额外重命名内部协议。
+Model calls use the public action `reload`; the host's existing internal `reattach` implementation name may remain unchanged, and the internal protocol is not additionally renamed for the unified tool surface.
 
-## Hub 与单插件诊断：2 → 1
+## Hub and Single-Plugin Diagnostics: 2 → 1
 
-将 `inspect_plugin_host` 与 `inspect_plugin` 收口到 `inspect_plugin(name?)`：
+Consolidate `inspect_plugin_host` and `inspect_plugin` into `inspect_plugin(name?)`:
 
-- 不指定 name：返回 hub 本身的健康摘要、插件与 generation 计数、扫描错误和待清理计数，不默认展开所有插件的完整状态。
-- 指定 name：返回该插件的完整相关诊断，包括 enabled/attached、生命周期状态、generation、依赖与阻塞原因、清理进度及错误、安装状态和最近错误。
-- 依赖以引用形式展示，不递归展开其他插件的全部状态。
-- 未找到对象时报告 unknown plugin，并引导通过插件目录发现名字。
+- Without a name: return a health summary of the hub itself, plugin and generation counts, scan errors, and pending-cleanup counts, without expanding the full status of all plugins by default.
+- With a name: return the full relevant diagnostics for that plugin, including enabled/attached, lifecycle state, generation, dependencies and blocking reasons, cleanup progress and errors, install status, and recent errors.
+- Dependencies are shown as references, without recursively expanding the full status of other plugins.
+- When the object is not found, report unknown plugin and guide discovery of the name via the plugin catalog.
 
-沿用现有单插件检查对配置值的处理，不因收口把完整敏感配置默认输出给模型。安装状态暂时不可取得时保留其他可用诊断，并明确缺失部分。
+Keep the existing single-plugin inspection's handling of configuration values, and do not output full sensitive configurations to the model by default as a result of the consolidation. When install status is temporarily unavailable, keep the other available diagnostics and clearly mark the missing part.
 
-## 插件目录继续保留，降为间接工具
+## Plugin Catalog Retained, Downgraded to an Indirect Tool
 
-`list_plugins` 继续返回可用插件名字、所属模块、一方/第三方来源及简短启用、挂载和生命周期状态，不返回每个插件的完整详情。
+`list_plugins` continues to return available plugin names, owning modules, first-party/third-party origin, and brief enabled, attached, and lifecycle states, without returning full details for each plugin.
 
-它负责发现具体插件对象；`search_tools(domain="plugin")` 负责发现插件管理工具，二者不能直接替代。
+It is responsible for discovering specific plugin objects; `search_tools(domain="plugin")` is responsible for discovering plugin management tools, and the two cannot directly replace each other.
 
-撤销 `list_plugins` 的常驻直调地位，保留间接调用和搜索发现。维护技能与恢复指引按需要引用目录，不在每次成功操作后重复要求列举插件。
+Revoke the resident direct-call status of `list_plugins`, keeping indirect invocation and search discovery. Maintenance skills and recovery guidance reference the catalog as needed, rather than repeatedly requiring a plugin listing after every successful operation.
 
-## 扫描发现：2 → 1
+## Scan Discovery: 2 → 1
 
-保留一个 `rescan_plugins`，使用单个模式枚举：
+Keep a single `rescan_plugins` with a single mode enum:
 
 ```text
 mode = scan | scan_and_attach_new_first_party
 ```
 
-两个模式不切换额外参数。默认保持只扫描；自动挂载模式须由调用者明确选择。
+The two modes do not switch additional parameters. The default remains scan-only; the auto-attach mode must be explicitly selected by the caller.
 
-- `scan`：发现目录及 manifest 元数据变化，保留现有 legacy channel provider 发现路径；不隐含重载已运行代码。
-- `scan_and_attach_new_first_party`：执行同样扫描后，仅自动挂载本次新发现且已启用的一方插件。
+- `scan`: Detect directory and manifest metadata changes, preserving the existing legacy channel provider discovery path; do not implicitly reload running code.
+- `scan_and_attach_new_first_party`: After performing the same scan, automatically attach only first-party plugins newly discovered in this scan that are enabled.
 
-不扩大到已有插件重载、禁用插件启用或第三方插件自动挂载。分别保留扫描错误与挂载错误，部分完成不能宣称全部激活成功；保留现有错误状态和效果回执。
+Do not extend to reloading existing plugins, enabling disabled plugins, or auto-attaching third-party plugins. Keep scan errors and attach errors separate; partial completion must not be claimed as full activation success; preserve the existing error states and effect receipts.
 
-撤销 `rescan_and_attach_first_party_plugins` 独立模型入口。底层复合实现可继续使用。
+Revoke the separate model entry point `rescan_and_attach_first_party_plugins`. The underlying composite implementation may continue to be used.
 
-## 包管理四个入口保留
+## Four Package Management Entry Points Retained
 
-| 工具 | 保留原因 |
+| Tool | Reason retained |
 | --- | --- |
-| `install_package` | 按本地包路径安装或升级，准备私有依赖，并通过所属 owner 激活 |
-| `prepare_package` | 按已安装对象的名字和类型准备或修复依赖 |
-| `uninstall_plugin` | 移除第三方插件，具有独立的数据清理选项及生命周期约束 |
-| `inspect_package_status` | 查询异步作业的阶段、失败与激活结果，包括插件尚未注册或已经卸载的情况 |
+| `install_package` | Install or upgrade from a local package path, prepare private dependencies, and activate via the owning owner |
+| `prepare_package` | Prepare or repair dependencies by the name and type of an already-installed object |
+| `uninstall_plugin` | Removes third-party plugins, with independent data cleanup options and lifecycle constraints |
+| `inspect_package_status` | Queries the phase, failure, and activation results of asynchronous jobs, including cases where the plugin is not yet registered or has already been uninstalled |
 
-不将不同的 path/name/kind/purge_data 参数混入一个通用包操作工具。单插件 inspection 的安装状态与特定异步 job 诊断保留各自对象边界。
+Do not mix different path/name/kind/purge_data parameters into one generic package operations tool. Installation state for single-plugin inspection and diagnostics for a specific asynchronous job keep their own object boundaries.
 
-保留现有完成通知、无通知时的有界等待和结果核对路径；成功结果不追加反复轮询或完整工具菜单。
+Keep the existing completion notification, the bounded wait when there is no notification, and the result verification path; successful results do not append repeated polling or a full tool menu.
 
-## 目标工具面
+## Target Tool Surface
 
-| 目标入口 | 数量 |
+| Target entry point | Count |
 | --- | ---: |
 | `manage_plugin` | 1 |
 | `inspect_plugin` | 1 |
 | `list_plugins` | 1 |
 | `rescan_plugins` | 1 |
-| 四个现有包管理入口 | 4 |
-| 合计 | **8** |
+| Four existing package management entry points | 4 |
+| Total | **8** |
 
-核算：生命周期减少 4 个，inspection 减少 1 个，扫描减少 1 个，合计减少 6 个。所有目标入口为间接工具。
+Accounting: lifecycle reduced by 4, inspection reduced by 1, scanning reduced by 1, for a total reduction of 6. All target entry points are indirect tools.
 
-## 实施前检查与验收
+## Pre-Implementation Checks and Acceptance
 
-1. 确定输入契约及执行分类，盘点 host、公开 provider、技能、提示、affordance、包管理激活流程、文档及测试中的旧入口引用。
-2. 仅撤销模型入口，保留内部生命周期 owner 和包管理依赖的 host 接口。更新维护指引，包括 `pal.self.maintenance` 中的插件 reload 调用方式；不把频道端点重连混入插件 generation 替换。
-3. 定向验证五个动作的路由及原有 enabled/attached 持久化、依赖处理、reload 代码替换、逻辑卸载回执、清理失败与恢复行为。
-4. 验证 hub 和单插件诊断范围、目录名字发现、安装诊断部分失败和未知插件处理。
-5. 验证只扫描与自动挂载新一方插件的范围，覆盖禁用插件、已有插件、第三方插件、扫描错误和挂载错误。
-6. 确认 native schema、工具搜索及完整契约读取只展示目标工具面；角色权限继续约束可访问的插件和生命周期动作，不能因合并而放宽授权。
-7. 模型评估同时检查工具发现、枚举选择、参数合法性、真实生命周期结果和调用轮次；不以减少名字数量直接宣称效果改善。
-8. 本地只跑相关定向测试，完整 CI 交给 GitHub。修改源文件、复制安装文件、运行实例激活与实际行为验证分别记录；Pal 忙碌时不追加激活请求。
+1. Determine the input contract and execution classification, and inventory old entry point references in the host, public providers, skills, prompts, affordances, package management activation flows, documentation, and tests.
+2. Revoke only model-facing entry points, keeping the internal lifecycle owner and the host interfaces that package management depends on. Update maintenance guidance, including how plugin reload is invoked in `pal.self.maintenance`; do not mix channel endpoint reconnection into plugin generation replacement.
+3. Perform targeted verification of routing for the five actions and the original enabled/attached persistence, dependency handling, reload code replacement, logical uninstall receipts, cleanup failure, and recovery behavior.
+4. Verify hub and single-plugin diagnostic scopes, directory name discovery, partial failures in installation diagnostics, and unknown plugin handling.
+5. Verify the scope of scan-only and auto-attach for new third-party plugins, covering disabled plugins, existing plugins, third-party plugins, scan errors, and attach errors.
+6. Confirm that native schema, tool search, and full contract reads expose only the target tool surface; role permissions continue to constrain accessible plugins and lifecycle actions, and authorization must not be loosened because of the consolidation.
+7. Model evaluation checks tool discovery, enumeration choice, parameter validity, real lifecycle results, and call turns together; do not claim improved effectiveness based solely on the reduced name count.
+8. Run only the relevant targeted tests locally, leaving full CI to GitHub. Record source file modifications, installed file copies, running instance activation, and actual behavior verification separately; do not append activation requests while Pal is busy.
 
-本计划的已确认范围已实施到源码；安装与运行实例激活尚未进行。
+The confirmed scope of this plan has been implemented in the source code; installation and running instance activation have not yet been performed.
 
-## 相关模块计划
+## Related Module Plans
 
-- [Browser 工具面收口计划](pal_browser_tool_consolidation_plan.md)
-- [Execution 工具面收口计划](pal_execution_tool_consolidation_plan.md)
-- [LSP 工具面收口计划](pal_lsp_tool_consolidation_plan.md)
-- [记忆后端维护迁入 CLI 计划](pal_memory_backend_cli_plan.md)
-- [情绪广播与工具面合并计划](pal_emotion_broadcast_plan.md)
+- [Browser Tool Surface Consolidation Plan](pal_browser_tool_consolidation_plan.md)
+- [Execution Tool Surface Consolidation Plan](pal_execution_tool_consolidation_plan.md)
+- [LSP Tool Surface Consolidation Plan](pal_lsp_tool_consolidation_plan.md)
+- [Memory Backend Maintenance Migration to CLI Plan](pal_memory_backend_cli_plan.md)
+- [Emotion Broadcast and Tool Surface Consolidation Plan](pal_emotion_broadcast_plan.md)
