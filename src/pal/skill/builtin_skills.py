@@ -428,7 +428,7 @@ compile the provider to verify that all intended aliases are actually published.
 matching `[a-z][a-z0-9]*`: for example `("drag", "fetch")`. Do not put
 `"drag target"`, `"drag_browser_target"`, uppercase words, or Chinese in these
 fields. Put multiword or Chinese intent phrases in `search_intents`, for example
-`("drag a browser target", "拖动浏览器元素")`. It allows at most eight unique
+`("drag a browser target", "move a browser element")`. It allows at most eight unique
 nonempty phrases, each up to 160 characters. Domain aliases have their own
 separator rules; do not apply those rules to `search_terms`.
 

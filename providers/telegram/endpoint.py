@@ -2082,10 +2082,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             if target.get("thread_id"):
                 kwargs["message_thread_id"] = target["thread_id"]
             try:
-                for part in _segment_text(f'{item["label"]} 当前值：\n{item["value"]}', limit=4096):
+                for part in _segment_text(f'Current value for {item["label"]}:\n{item["value"]}', limit=4096):
                     await self.application.bot.send_message(**kwargs, text=part)
                 message = await self.application.bot.send_message(**kwargs,
-                    text=f'回复这条消息，完整替换「{item["label"]}」。返回审核可用 /memory_review {spec.interaction_id}',
+                    text=f'Reply to this message to replace the entire value of "{item["label"]}". Resume the review with /memory_review {spec.interaction_id}',
                     reply_markup=ForceReply(selective=True))
                 self._interaction_store.put_input(target["chat_id"], message.message_id, {
                     "interaction_id": spec.interaction_id, "token": item["submit"]["token"],
@@ -2117,7 +2117,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             input_values={binding["input_id"]: value}) if isinstance(value, str) else None
         if result is None:
             await self.application.bot.send_message(chat_id=chat_id,
-                text=f'输入已过期或不是文本，请用 /memory_review {binding["interaction_id"]} 重新打开。',
+                text=f'This input has expired or is not text. Reopen it with /memory_review {binding["interaction_id"]}.',
                 **({"message_thread_id": thread_id} if thread_id else {}))
             return True
         self.emit_interaction_result(result, correlation_id=str(message.message_id),

@@ -162,8 +162,8 @@ def test_estimated_card_does_not_promise_cache_hit():
         _route(), epoch="estimate", prefix_tokens=50_000, lead_seconds=300,
         expires_at="2026-10-16T00:00:00+00:00", estimated=True,
     )
-    assert "预计" in delivery.interaction.text
-    assert "不保证缓存仍可复用" in delivery.interaction.text
+    assert "estimated" in delivery.interaction.text
+    assert "cache reuse is not guaranteed" in delivery.interaction.text
     assert delivery.interaction.buttons[0][0].action_args == {"cache_epoch": "estimate"}
 
 

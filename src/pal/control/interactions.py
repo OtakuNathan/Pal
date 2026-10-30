@@ -419,14 +419,16 @@ def cache_warm_deadline_delivery(
 ) -> ControlDelivery:
     minutes = max(1, int((max(0, lead_seconds) + 59) // 60))
     text = (
-        f"当前约 {max(0, prefix_tokens):,} tokens 的对话缓存将在约 "
-        f"{minutes} 分钟后过期。现在 compact 可以利用热缓存，降低下次恢复成本。"
+        f"Your conversation cache contains approximately {max(0, prefix_tokens):,} tokens "
+        f"and will expire in about {minutes} minutes. "
+        "Compact now to reuse the warm cache and reduce the cost of rebuilding context."
     )
     if estimated:
         text = (
-            f"当前约 {max(0, prefix_tokens):,} tokens 的对话已接近预计缓存期限，"
-            f"预计剩余约 {minutes} 分钟，可按需 compact。"
-            "此时间按响应返回时刻和缓存策略预估，不保证缓存仍可复用。"
+            f"The conversation of approximately {max(0, prefix_tokens):,} tokens is approaching "
+            f"its estimated cache deadline, with about {minutes} minutes remaining. Compact if needed. "
+            "This estimate is based on response completion time and the cache policy; "
+            "cache reuse is not guaranteed."
         )
     interaction = InteractionMessageSpec(
         interaction_id=cache_warm_deadline_interaction_id(epoch),
@@ -436,14 +438,14 @@ def cache_warm_deadline_delivery(
         buttons=(
             (
                 InteractionButtonSpec(
-                    label="立即 Compact",
+                    label="Compact now",
                     action_key="control.compact.run",
                     action_args={"cache_epoch": epoch},
                 ),
             ),
             (
                 InteractionButtonSpec(
-                    label="本轮忽略",
+                    label="Dismiss this reminder",
                     action_key="control.action.dispatch",
                     action_args={
                         "action_kind": "cache_warm_deadline_ignore",
@@ -452,7 +454,7 @@ def cache_warm_deadline_delivery(
                     },
                 ),
                 InteractionButtonSpec(
-                    label="关闭此提醒",
+                    label="Disable reminders",
                     action_key="control.action.dispatch",
                     action_args={
                         "action_kind": "cache_warm_deadline_disable",

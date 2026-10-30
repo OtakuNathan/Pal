@@ -302,9 +302,9 @@ def test_interaction_has_control_actions_and_delete_expiration() -> None:
     assert delivery.interaction.expires_at == "2026-08-24T15:00:00+00:00"
     buttons = [button for row in delivery.interaction.buttons for button in row]
     assert [button.label for button in buttons] == [
-        "立即 Compact",
-        "本轮忽略",
-        "关闭此提醒",
+        "Compact now",
+        "Dismiss this reminder",
+        "Disable reminders",
     ]
     assert buttons[0].action_key == "control.compact.run"
 

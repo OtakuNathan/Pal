@@ -2327,7 +2327,7 @@ class TurnExecutor:
                 clock_value=clock_value,
             )
 
-        # Warm split (主项1): the run has fenced the cut, so the LEFT
+        # Warm split (primary item 1): the run has fenced the cut, so the LEFT
         # ids are final.  When a locally eligible cached anchor lies
         # entirely inside L, the compact request rides the anchor bytes
         # verbatim + the LEFT suffix after it + the instruction tail;

@@ -5,7 +5,7 @@ from pal.control import ControlDelivery
 from pal.core.core_events import MEMORY_SLEEP
 
 
-SLEEP_REPLY = "Pal 正在 dreaming，暂不接收消息。请等睡醒通知后重新发送。"
+SLEEP_REPLY = "Pal is dreaming and is not accepting messages right now. Please wait for the wake notification, then resend."
 
 
 class MemoryMaintenanceMixin:

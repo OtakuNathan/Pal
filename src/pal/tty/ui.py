@@ -341,7 +341,7 @@ class TtyRepl:
             event.app.exit(result=None)
 
         return await PromptSession().prompt_async(
-            f'{item["label"]} (Ctrl-S 保存 / Esc 返回)> ',
+            f'{item["label"]} (Ctrl-S save / Esc cancel)> ',
             default=item.get("value", ""), multiline=True, key_bindings=bindings,
         )
 

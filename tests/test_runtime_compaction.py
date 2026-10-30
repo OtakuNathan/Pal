@@ -994,7 +994,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(statuses[0][0], "interactive_update")
         pending_spec = statuses[0][1]["spec"]
         self.assertEqual(pending_spec.buttons, ())
-        self.assertIn("正在利用热缓存", pending_spec.text)
+        self.assertIn("Compacting with the warm cache", pending_spec.text)
         candidate_notices = [
             payload["spec"]
             for kind, payload in statuses

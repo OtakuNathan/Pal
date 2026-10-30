@@ -2450,13 +2450,13 @@ class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
         self.endpoint._interactive_messages['sudo-card'] = {
-            'chat_id':100, 'owner_user_id':'42', 'interaction_kind':'approval_request',
+            'chat_id':100, 'message_id':200, 'owner_user_id':'42', 'interaction_kind':'approval_request',
             'actions':{'b0':{'action_key':'control.action.dispatch', 'action_args':{
                 'action_kind':'shell_privilege_decision','target_scope':'execution',
                 'target_id':'approval','args':{'decision':'accept','trusted_actor':'forged'}}}},
         }
         callback = SimpleNamespace(data='ix:sudo-card:b0',
-            message=SimpleNamespace(chat=SimpleNamespace(id=100)),
+            message=SimpleNamespace(chat=SimpleNamespace(id=100), message_id=200),
             from_user=SimpleNamespace(id=43), answer=AsyncMock())
         update = SimpleNamespace(callback_query=callback)
         self.assertIsNone(await self.endpoint._interaction_result_from_update(update))

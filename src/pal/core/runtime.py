@@ -1979,7 +1979,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     "or dreaming."
                 )
             elif cache_epoch and not self.cache_warm_deadline.claim_compaction(cache_epoch):
-                busy_reply = "这条缓存 compact 提醒已经处理或失效。"
+                busy_reply = "This cache compaction reminder has already been handled or has expired."
             else:
                 hot_cache_epoch = cache_epoch if not estimated_notice else ""
                 ticket = gate.claim(
@@ -2006,7 +2006,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     await self._deliver_control_delivery_async(
                         control_interactions.terminal_delivery_for_action(
                             action,
-                            "正在利用热缓存 Compact…" if hot_cache_epoch else "正在 Compact…",
+                            "Compacting with the warm cache..." if hot_cache_epoch else "Compacting...",
                             delivery_kind="interactive_update",
                         )
                     )
@@ -2052,9 +2052,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 )
             elif hot_cache_epoch:
                 message = (
-                    "热缓存已失效或无法复用，已停止自动尝试。原上下文保留，请按需手动 compact。"
+                    "The warm cache has expired or cannot be reused. Automatic attempts have stopped. "
+                    "The original context is preserved; run /compact manually if needed."
                     if run_result.status == "hot_cache_unavailable"
-                    else f"Compact 未完成（已尝试 {run_result.attempts} 次）。请先查看错误详情再决定是否重试。"
+                    else f"Compaction did not complete after {run_result.attempts} attempts. Review the error details before deciding whether to retry."
                 )
             if run_result.user_notice:
                 message += "\n" + run_result.user_notice
@@ -2131,9 +2132,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         epoch = str(action.args.get("cache_epoch") or "").strip()
         ignored = self.cache_warm_deadline.ignore(epoch)
         message = (
-            "已忽略本轮热缓存 compact 提醒。"
+            "Dismissed this warm cache compaction reminder."
             if ignored
-            else "这条热缓存提醒已经失效。"
+            else "This warm cache reminder has expired."
         )
         return {
             "delivery": control_interactions.terminal_delivery_for_action(
@@ -2148,9 +2149,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     ) -> dict[str, Any]:
         try:
             self.cache_warm_deadline.configure(enabled=False)
-            message = "已关闭热缓存到期前的 compact 提醒。"
+            message = "Compaction reminders before cache expiry are disabled."
         except Exception as exc:
-            message = f"关闭热缓存提醒失败：{exception_report(exc)}"
+            message = f"Could not disable cache reminders: {exception_report(exc)}"
         return {
             "delivery": control_interactions.terminal_delivery_for_action(
                 action,

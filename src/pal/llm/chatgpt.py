@@ -76,17 +76,22 @@ class ChatGPTError(RuntimeError):
     def user_message(self) -> str:
         if self.code == QUOTA_CODE:
             return (
-                "ChatGPT 订阅或 Pal 应用用量已达限制，订阅请求已暂停。"
-                "请用 /model <endpoint_id> 手动选择其他 endpoint；"
-                "额度恢复后重新选择订阅 endpoint 才会解除暂停。管理用量：" + USAGE_URL
+                "The ChatGPT subscription or Pal app usage limit has been reached. "
+                "Subscription requests are paused. Use /model <endpoint_id> to select another endpoint. "
+                "Once quota is available, select the subscription endpoint again to resume. "
+                "Manage usage: " + USAGE_URL
             )
         if self.code in {"reauthorization_required", "subscription_sharing_invalid_user"} or self.status == 401:
-            return "ChatGPT 授权已失效或尚未配置，请运行 pal wizard --llm --runtime-root <dir> 重新授权。"
+            return "ChatGPT authorization is missing or expired. Run pal setup --llm --runtime-root <dir> to authorize again."
         if self.code == "plan_permission_missing":
-            return "已登录 ChatGPT，但尚未授予订阅使用权限。请在 pal wizard --llm 中重新授权。"
+            return "ChatGPT is signed in, but subscription access has not been granted. Run pal setup --llm --runtime-root <dir> to authorize again."
         if self.code == "request_outcome_unknown":
-            return "ChatGPT 连接中断，请求可能已被接收；为避免重复推理，未自动重发。请检查已收到的结果后再决定是否重试。"
-        return f"ChatGPT 请求未完成（{self.code}）。未切换 endpoint；可使用 /model 手动选择。"
+            return (
+                "The ChatGPT connection was interrupted and the request may have been accepted. "
+                "It was not resent automatically to avoid duplicate inference. "
+                "Check any received result before deciding whether to retry."
+            )
+        return f"The ChatGPT request did not complete ({self.code}). The endpoint was not changed; use /model to select one manually."
 
     def to_dict(self) -> dict[str, Any]:
         return {"code": self.code, "status": self.status, "param": self.param, "request_id": self.request_id,

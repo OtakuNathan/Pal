@@ -87,7 +87,7 @@ def register_dreaming(core, provider, llm, runtime_root):
         argv = list(action.args.get("argv") or ["status"])
         operation = argv[0]
         if core.state.memory_maintenance and operation not in {"status", "report", "config", "configure", "enable", "disable"}:
-            return {"message": "Dreaming 正在运行；可查询状态或修改下一轮配置。"}
+            return {"message": "Dreaming is already running. You can inspect its status or change the configuration for the next run."}
         if operation in {"configure", "enable", "disable"}:
             try:
                 raw = action.args.get("raw_text", "").split(None, 2)

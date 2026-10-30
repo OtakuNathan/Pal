@@ -59,8 +59,9 @@ VIEW_BOX = (591.333, 887.0)
 
 # The panel mirrors the desktop avatar's raster skin (pal-raster-avatar.js),
 # which is the source of truth for the expression set. Keep the state list,
-# aliases, labels, eye/mouth kinds and durations in step with that file:
+# aliases, eye/mouth kinds and durations in step with that file:
 # anything the avatar can show should render here too, and vice versa.
+# Labels are English presentation text; wire state keys remain unchanged.
 ALIASES = {
     "sleepy": "sleeping", "err": "error", "laugh": "happy", "clap": "happy",
     "excited": "happy", "proud": "smirk",
@@ -79,32 +80,32 @@ STATES = (
 
 # state -> (label, eye kind, mouth kind)
 PRESETS: dict[str, tuple[str, str, str]] = {
-    "greeting": ("打招呼 · 挥手", "happy", "smile"),
-    "standby": ("待机", "round", "smile"),
-    "thinking": ("思考", "round", "flat"),
-    "working": ("工作", "round", "smile"),
-    "sleeping": ("睡觉", "closed", "flat"),
-    "curious": ("好奇 · 星星眼", "star", "small"),
-    "love": ("喜欢 · 爱心眼", "heart", "smile"),
+    "greeting": ("Greeting · wave", "happy", "smile"),
+    "standby": ("Standby", "round", "smile"),
+    "thinking": ("Thinking", "round", "flat"),
+    "working": ("Working", "round", "smile"),
+    "sleeping": ("Sleeping", "closed", "flat"),
+    "curious": ("Curious · star eyes", "star", "small"),
+    "love": ("Love · heart eyes", "heart", "smile"),
     "wink": ("Wink · 0_<", "wink", "smirk"),
-    "shock": ("惊醒", "wide", "o"),
-    "happy": ("开心", "happy", "grin"),
-    "cheeky": ("耍贱 · 吐舌", "playful", "tongue"),
-    "smirk": ("坏笑", "sly", "smirk"),
-    "snacking": ("赛博零食", "happy", "chew"),
-    "drinking": ("赛博可乐", "round", "small"),
-    "sad": ("难过", "pleading", "pout"),
-    "error": ("工具失败 · 崩溃脸", "cross", "open"),
-    "shy": ("害羞 · 脸红", "happy", "small"),
-    "awkward": ("尴尬 · 偷吃被发现", "cookie", "small"),
-    "crying": ("哭 · 眼泪", "round", "sad"),
-    "bored": ("无聊 · 挠头", "heavy", "flat"),
-    "gloomy": ("阴郁 · 小乌云", "heavy", "sad"),
-    "celebrate": ("庆祝 · 烟花", "happy", "grin"),
-    "agree": ("同意 · OK 手势", "happy", "smile"),
-    "confused": ("疑惑 · 问号眼", "question", "small"),
-    "panic": ("懵圈 · 大头螺旋眼", "spiral", "o"),
-    "angry": ("生气", "round", "sad"),
+    "shock": ("Startled", "wide", "o"),
+    "happy": ("Happy", "happy", "grin"),
+    "cheeky": ("Cheeky · tongue out", "playful", "tongue"),
+    "smirk": ("Smirk", "sly", "smirk"),
+    "snacking": ("Snacking", "happy", "chew"),
+    "drinking": ("Drinking", "round", "small"),
+    "sad": ("Sad", "pleading", "pout"),
+    "error": ("Error · tool failure", "cross", "open"),
+    "shy": ("Shy · blush", "happy", "small"),
+    "awkward": ("Awkward · caught snacking", "cookie", "small"),
+    "crying": ("Crying · tears", "round", "sad"),
+    "bored": ("Bored · head scratch", "heavy", "flat"),
+    "gloomy": ("Gloomy · dark cloud", "heavy", "sad"),
+    "celebrate": ("Celebrate · fireworks", "happy", "grin"),
+    "agree": ("Agree · OK gesture", "happy", "smile"),
+    "confused": ("Confused · question eyes", "question", "small"),
+    "panic": ("Panic · spiral eyes", "spiral", "o"),
+    "angry": ("Angry", "round", "sad"),
 }
 
 # Base (persistent) states never auto-expire. Every other state plays for its
@@ -454,7 +455,7 @@ def _head_effect(state: str, age: float, reduced: bool) -> str:
             '<path d="M -17 -5 Q -5 -5 -5 -17 M 5 -17 Q 5 -5 17 -5 M 17 5 Q 5 5 5 17 '
             'M -5 17 Q -5 5 -17 5"/></g>'
         )
-    # The little dark cloud belongs to gloomy (阴郁); bored is the head-scratch
+    # The little dark cloud belongs to gloomy; bored is the head-scratch
     # pose, which the arm rig draws instead of a head effect.
     if state == "gloomy":
         strands = "".join(

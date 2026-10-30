@@ -256,7 +256,7 @@ class DreamingService:
             with self.storage.connection(write=True) as connection:
                 connection.execute("UPDATE dreaming_runs SET source_generation=? WHERE run_id=?", (source.generation_id, run_id))
             if self.core is not None:
-                if not await self.core.deliver_memory_notice_async(route, "Pal 开始 dreaming，正在整理重复记忆。期间暂不接收消息，醒来后会通知你。"):
+                if not await self.core.deliver_memory_notice_async(route, "Pal is consolidating duplicate memories in dreaming mode. Messages are not accepted during this process; you will be notified when Pal wakes up."):
                     raise RuntimeError("dreaming notification delivery failed")
             sleeping = True
             if self.core is not None:
@@ -348,11 +348,11 @@ class DreamingService:
             if sleeping and self.core is not None:
                 status = self.status(run_id)
                 outcome = status.get("report", {}).get("outcome")
-                text = ("记忆新版本已发布，但连接尚未恢复；Pal 仍处于维护状态，需要外部完整重启。" if self.activation_error
-                        else "记忆新版本已发布，但后续步骤出错，详情见 dreaming 运行报告。" if status.get("report", {}).get("post_publish_error")
-                        else "Pal 睡醒了。本次未确认可安全合并的重复记忆。" if outcome == "no_changes"
-                        else "Pal 睡醒了，重复记忆整理已完成。" if status["status"] == "completed"
-                        else "Pal 睡醒了。本次整理未完成，继续使用原记忆库。")
+                text = ("A new memory version has been published, but connections have not recovered. Pal is still in maintenance mode and requires a full external restart." if self.activation_error
+                        else "A new memory version has been published, but a subsequent step failed. See the dreaming run report for details." if status.get("report", {}).get("post_publish_error")
+                        else "Pal is awake. No duplicate memories were confirmed safe to merge." if outcome == "no_changes"
+                        else "Pal is awake. Duplicate memory consolidation is complete." if status["status"] == "completed"
+                        else "Pal is awake. Consolidation did not complete; the original memory store is still in use.")
                 await self.core.deliver_memory_notice_async(route, text, require_provider=False)
 
     def _verify(self, provider, clusters, replacements):
