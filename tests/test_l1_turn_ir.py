@@ -103,8 +103,9 @@ class L1TurnIRTests(unittest.TestCase):
         interrupted = turn.interrupt(reason="user interrupt")
         store.replace(interrupted)
         self.assertEqual(interrupted.state, L1TurnState.INTERRUPTED)
-        self.assertEqual(interrupted.messages[-1].text, "partial")
+        self.assertEqual(interrupted.messages[-1].text, "hello")
         self.assertEqual(interrupted.messages[-1].tool_calls, ())
+        self.assertEqual(interrupted.metadata["discarded_assistant_drafts"][0]["parts"][0]["text"], "partial")
         with self.assertRaises(L1TurnProtocolError):
             store.require_active("turn-1")
 

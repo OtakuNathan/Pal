@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Mapping
+from uuid import uuid4
 
 from pal.foundation import HeatLevel, HeatState
 from pal.llm.ir import LLMMessageIR, MessageRole, MessageState, ReasoningPartIR
 from pal.llm.serde import message_from_payload, message_to_payload
+from pal.llm.replay_acceptance import is_legacy_uncommitted_reasoning
 from pal.memory.contracts import CompactionReceipt, L2Entry
 from pal.memory.service import MemoryService
-from pal.memory.turn_ir import L1TurnIR, L1TurnState, L1TurnStore, _repair_replay
+from pal.memory.turn_ir import L1TurnIR, L1TurnState, L1TurnStore, _repair_replay, retain_assistant_drafts
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
 
@@ -243,7 +245,7 @@ class MemoryRuntimeStatePort:
             context_epoch=context_epoch,
             compaction_receipts=receipts,
             history_root=_prepared_history_root(
-                value.get("history_root"), turns,
+                value.get("history_root"), turns, original_turns=list(value.get("l1_turns") or ()),
             ),
         )
 
@@ -285,7 +287,7 @@ class MemoryRuntimeStatePort:
 
 
 def _prepared_history_root(
-    raw: Any, turns: L1TurnStore,
+    raw: Any, turns: L1TurnStore, *, original_turns: list[Mapping[str, Any]] | None = None,
 ) -> tuple[str, dict[str, int | str], int] | None:
     """Validate the persisted owner state against the prepared turns (H02).
 
@@ -359,11 +361,34 @@ def _prepared_history_root(
                 "memory runtime snapshot history_root intra cut has no boundary turn"
             )
         boundary = turns.turns[counters["turn_count"]]
-        if counters["intra_messages"] > len(boundary.messages):
+        original_messages = (original_turns[counters["turn_count"]]["messages"]
+                             if original_turns is not None else boundary.messages)
+        if counters["intra_messages"] > len(original_messages):
             raise ValueError(
                 "memory runtime snapshot history_root intra cut splits "
                 "messages that never existed"
             )
+    if original_turns is not None:
+        # Validate the saved cut against original message positions first,
+        # then translate it by identity after recovery removed draft records.
+        # Repaired LEFT gets a new generation; clean prefixes remain identical.
+        changed_left = False
+        for index, turn in enumerate(turns.turns):
+            frozen = (len(original_turns[index]["messages"]) if index < counters["turn_count"]
+                      else counters["intra_messages"] if index == counters["turn_count"] else 0)
+            if not frozen:
+                continue
+            original_prefix = original_turns[index]["messages"][:frozen]
+            frozen_ids = {message["message_id"] for message in original_prefix}
+            restored_prefix = [message_to_payload(message) for message in turn.messages
+                               if message.message_id in frozen_ids]
+            changed_left = changed_left or restored_prefix != original_prefix
+            if index == counters["turn_count"]:
+                counters["intra_messages"] = len(restored_prefix)
+        if changed_left:
+            raw_generation += 1
+            counters["revision"] += 1
+            cut_id = "recovery-" + uuid4().hex
     return (
         incarnation,
         {
@@ -386,8 +411,20 @@ def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:
     if any(not isinstance(item, Mapping) for item in raw_messages):
         raise ValueError("runtime L1 turn contains an invalid message")
     messages = tuple(message_from_payload(item) for item in raw_messages)
-    normalized, repaired = _normalize_tool_protocol(messages)
     requested_state = L1TurnState(str(value.get("state") or "active"))
+    drafts = tuple(message for message in messages if message.role == MessageRole.ASSISTANT and (
+        message.state == MessageState.IN_PROGRESS
+        or (requested_state in {L1TurnState.INTERRUPTED, L1TurnState.ABORTED}
+            and is_legacy_uncommitted_reasoning(message))))
+    draft_ids = {message.message_id for message in drafts}
+    # Tool execution starts only after response acceptance. A snapshot that
+    # claims a consumed call from an unaccepted response is contradictory.
+    draft_calls = {call.call_id for message in drafts for call in message.tool_calls}
+    if any(isinstance(part, ToolResultIR) and part.call_id in draft_calls
+           for message in messages for part in message.parts):
+        raise ValueError("unaccepted runtime response has consumed tool calls")
+    normalized, repaired = _normalize_tool_protocol(tuple(m for m in messages if m.message_id not in draft_ids))
+    repaired = repaired or bool(drafts)
     state = (
         requested_state
         if not repaired
@@ -398,7 +435,7 @@ def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:
     raw_metadata = value.get("metadata") or {}
     if not isinstance(raw_metadata, Mapping):
         raise ValueError("runtime L1 turn metadata must be an object")
-    metadata = dict(raw_metadata)
+    metadata = retain_assistant_drafts(raw_metadata, drafts)
     if repaired:
         metadata["interrupt_reason"] = "runtime snapshot protocol normalization"
     return L1TurnIR(

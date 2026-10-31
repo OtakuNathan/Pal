@@ -42,6 +42,14 @@ Interaction rule:
   turn closure and restart. Recovery repairs unmatched/duplicate tool protocol
   and incomplete streams without inventing outcomes. Explicit LEFT compaction
   replaces that history with a lossy continuity summary; RIGHT remains intact.
+- Streaming assistant messages remain response drafts until a terminal response
+  is accepted. Interrupt/abort and restart recovery move an unfinished response
+  intact into private `discarded_assistant_drafts` diagnostics; they never mark
+  its native replay complete. Previously accepted rounds and tool results stay
+  verbatim. Recovery also recognizes the old interrupted, unsigned reasoning-only
+  draft with an explicit empty item-commit ledger. Removing a recovered draft
+  from LEFT translates the cut by message identity and advances its generation;
+  unchanged prefixes retain their original cut identity.
 - Memory exposes one runtime-state port for L1, L2, top-of-mind, and heat.
   Core orchestrates snapshot/restore/reset; Memory never reaches into Execution
 - Resident recovery saves accepted L submissions and completed rounds through

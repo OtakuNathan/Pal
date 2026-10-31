@@ -54,6 +54,15 @@ The intended mapping is:
 4. The normal execution/result path supplies turn-level calls and results; stream
    decoding does not independently execute tools
 
+Cancellation before terminal response acceptance abandons that assembled L1
+response, including provider-committed items that have not entered the normal
+execution path. Earlier accepted rounds/results remain unchanged; draft bytes
+stay in private diagnostics. `tests/test_interrupted_response_atomicity.py`
+checks unsigned thinking, signed thinking followed by a partial body, and restore
+of the historical draft incorrectly marked complete. The two isolated models
+do not prove this provider-item-to-L1 cancellation boundary; these are production
+boundary regressions, not a new composition proof.
+
 `LLMRuntime._recover_length` returns responses with committed tool calls without
 regenerating them. This behavior and `ItemCommitLifecycle` arrived together in
 `1d81086` (2026-08-05). The real wire regression

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import freeze_json_mapping, thaw_json
 from pal.memory.continuity import ANCHOR_KEY, Continuity
+from pal.llm.serde import message_to_payload
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -262,8 +263,18 @@ class L1TurnIR:
         self._require_active()
         pending = self.pending_call_ids
         closed: list[LLMMessageIR] = []
+        drafts: list[LLMMessageIR] = []
         for message in self.messages:
             if message.role == MessageRole.ASSISTANT:
+                if message.state == MessageState.IN_PROGRESS:
+                    # Provider item commits are not acceptance of the whole
+                    # response. Never turn a live draft (including its opaque
+                    # native envelope) into a completed replay at cancellation.
+                    draft_calls = {part.call_id for part in message.tool_calls}
+                    if draft_calls - pending:
+                        raise L1TurnProtocolError("unaccepted response has consumed tool calls")
+                    drafts.append(message)
+                    continue
                 parts = tuple(
                     part
                     for part in message.parts
@@ -287,7 +298,7 @@ class L1TurnIR:
                     ),
                 )
             closed.append(_close_message(message))
-        metadata = thaw_json(self.metadata)
+        metadata = retain_assistant_drafts(self.metadata, drafts)
         if reason:
             metadata["settlement_reason"] = str(reason)
         return replace(
@@ -602,6 +613,16 @@ def _repair_replay(replay, parts):
     from pal.llm.replay_acceptance import repair_replay_calls
 
     return repair_replay_calls(replay, {part.call_id for part in parts if isinstance(part, ToolCallIR)})
+
+
+def retain_assistant_drafts(
+    metadata: Mapping[str, Any], drafts: Iterable[LLMMessageIR],
+) -> dict[str, Any]:
+    """Keep interrupted source evidence outside executable/replayable messages."""
+    value = thaw_json(metadata)
+    for draft in drafts:
+        value.setdefault("discarded_assistant_drafts", []).append(message_to_payload(draft))
+    return value
 
 
 def _close_message(message: LLMMessageIR) -> LLMMessageIR:

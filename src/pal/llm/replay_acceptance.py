@@ -5,7 +5,7 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from pal.llm.ir import LLMMessageIR, ReplayEnvelope, WireShape
+from pal.llm.ir import LLMMessageIR, ReasoningPartIR, ReplayEnvelope, WireShape
 from pal.llm.continuation_policy import NativeCandidate, validate_candidate
 from pal.llm.decode_contracts import ShapeDecodeError
 from pal.llm.response_blocks import json_object
@@ -26,6 +26,25 @@ def has_opaque_continuation(message: LLMMessageIR) -> bool:
             return any(contains(item) for item in value)
         return False
     return message.replay is not None and contains(thaw_json(message.replay.payload))
+
+
+def is_legacy_uncommitted_reasoning(message: LLMMessageIR) -> bool:
+    """Recognize the old interrupt bug without laundering accepted bad replay.
+
+    Old closure marked a reasoning-only stream draft complete despite an
+    explicit empty provider-commit ledger. Keep signed/committed messages and
+    every other invalid envelope on the normal fail-closed path.
+    """
+    native = message.replay
+    if (native is None or "committed_items" not in message.metadata
+            or message.metadata["committed_items"]
+            or not message.parts or not all(isinstance(p, ReasoningPartIR) for p in message.parts)):
+        return False
+    decision = validate_candidate(NativeCandidate(
+        native.wire_shape, native.endpoint_id, native.model_id,
+        json.dumps(thaw_json(native.payload), ensure_ascii=False), (),
+    ))
+    return bool(decision.issues) and all(issue.code == "thinking_missing_signature" for issue in decision.issues)
 
 
 def repair_replay_calls(native: ReplayEnvelope | None, call_ids: set[str]) -> ReplayEnvelope | None:
