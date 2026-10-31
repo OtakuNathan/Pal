@@ -81,3 +81,11 @@ Core/Channel/Failure and plugin-host changes require an external full Pal restar
 Provider source/resource updates additionally require their normal installation and
 provider reload (or a fresh host); browser resources require refresh. Written source
 is not evidence of runtime activation.
+
+`turn.input_admitted` reports an interjection after its L1 append and pending-queue
+acknowledgement. It includes the source `endpoint_id`/`request_id`, the owning
+`turn_id`, `reply_endpoint_id`/`reply_request_id`, and `scope_key`. This lets a
+channel associate a voice interjection with an existing reply without changing
+reply authority. It is an observation, not a delivery receipt; consumers must
+not infer missing mappings or use it to trigger resubmission. Initial requests
+already obtain their mapping from `turn.start`.

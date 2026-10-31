@@ -11,7 +11,7 @@ from pal.shared.tool_protocol import EffectOutcome, RetryDirective
 
 from .client import AndroidError, DroidlineClient
 from .models import (ActInput, ActOutput, DevicesOutput, EmptyInput, ObserveInput,
-                     QueryInput, QueryOutput, ScreenOutput)
+                     QueryInput, QueryOutput, ScreenOutput, DeviceInput, AppsOutput)
 
 
 def compact_node(node):
@@ -45,6 +45,7 @@ def screen(result: dict) -> dict:
     return ScreenOutput.model_validate({
         **{key: result[key] for key in ("package", "activity", "width", "height")},
         "tree": compact_node(result["tree"]),
+        **{key: result[key] for key in ("workspace", "generation", "truncated") if key in result},
     }).model_dump()
 
 
@@ -95,6 +96,15 @@ class AndroidProvider:
                    for d in result["value"]]
         return success({"devices": devices})
 
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="android", action_name="apps",
+                       guidance=guidance("List launchable apps and their package names.",
+                                         "Find an app package before launching it.", ("apps", "packages")),
+                       InputModel=DeviceInput, OutputModel=AppsOutput, aliases=("android_apps",),
+                       examples=({},), execution=INDIRECT_EXTERNAL_READ)
+    def apps(self, call: CapabilityCall) -> CapabilityResult:
+        args = DeviceInput.model_validate(call.args)
+        return success({"apps": self.read("apps", device=args.device)["value"]})
+
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="android", action_name="observe",
                        guidance=guidance("Read a self-contained current app accessibility snapshot.",
                                          "Inspect app, page, text, controls and bounds. Offscreen/recycled content may be absent; scroll then observe.", ("observe", "screen", "tree")),
@@ -136,15 +146,25 @@ class AndroidProvider:
         valid = isinstance(results, list) and len(results) == len(args.steps) and all(
             isinstance(r, dict) and r.get("ok") is True for r in results)
         data = {"results": results if isinstance(results, list) else [], "screen": None, "snapshot_error": None}
-        try:
-            # Best-effort settling is read-only; animations must not hide applied actions.
+        if "screen" in result and "snapshot_error" in result:
+            # Pal Android captures the receipt and screen under one phone-side lock.
             try:
-                self.client.request("wait_idle", {"ms": 250, "timeout": 2}, device=args.device)
-            except AndroidError:
-                pass
-            data["screen"] = screen(self.client.request("dump", {}, device=args.device))
-        except (AndroidError, ValueError, KeyError) as exc:
-            data["snapshot_error"] = str(exc)
+                data["screen"] = screen(result["screen"]) if result["screen"] is not None else None
+                data["snapshot_error"] = result["snapshot_error"]
+                if data["screen"] is None and not data["snapshot_error"]:
+                    data["snapshot_error"] = "Host returned no snapshot"
+            except (ValueError, KeyError, TypeError) as exc:
+                data["snapshot_error"] = str(exc)
+        else:
+            try:
+                # Best-effort settling is read-only; animations must not hide applied actions.
+                try:
+                    self.client.request("wait_idle", {"ms": 250, "timeout": 2}, device=args.device)
+                except AndroidError:
+                    pass
+                data["screen"] = screen(self.client.request("dump", {}, device=args.device))
+            except (AndroidError, ValueError, KeyError) as exc:
+                data["snapshot_error"] = str(exc)
         if not valid:
             raise ToolExecutionError("Android batch stopped or returned incomplete results", error_code="android_batch_partial",
                                      details=data, effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN),

@@ -604,6 +604,29 @@ class InterjectionInjectionTests(unittest.TestCase):
             1,
         )
 
+    def test_input_admission_observation_follows_durable_append_and_ack(self) -> None:
+        opening = _make_envelope(turn_id="turn-main", text="run")
+        opening.response_handle.reply_target["request_id"] = "chat_main"
+        continuation = self.turn_manager.start(opening)
+        memory = self.context.port_registry["memory:memory"]
+        memory.begin_l1_turn("turn-main", user_text="run")
+        queued = _make_envelope(turn_id="voice-input", text="additional condition")
+        queued.response_handle.reply_target["request_id"] = "chat_voice"
+        queued = replace(queued, opening_delivery_binding=TurnDeliveryBinding.from_envelope(
+            queued, control_scope_key=continuation.control_scope_key))
+        self.state.pending_channel_turns.append(queued)
+        observed = []
+        def observe(topic, payload):
+            self.assertFalse(self.state.pending_channel_turns)
+            self.assertIn("additional condition", [m.text for m in memory.active_l1_turn("turn-main").messages])
+            observed.append(payload)
+        self.context.core_event_bus.subscribe("turn.input_admitted", observe)
+        asyncio.run(inject_pending_interjection_async(context=self.context, state=self.state, continuation=continuation))
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["request_id"], "chat_voice")
+        self.assertEqual(observed[0]["reply_request_id"], "chat_main")
+        self.assertEqual(observed[0]["turn_id"], "turn-main")
+
 
 if __name__ == "__main__":
     unittest.main()

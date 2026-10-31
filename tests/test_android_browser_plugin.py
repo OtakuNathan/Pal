@@ -168,3 +168,30 @@ def test_bundle_build_has_no_network_or_side_effects(android, tmp_path):
     assert handle.module_id == "android_browser"
     assert registered == [handle]
     assert not list(tmp_path.iterdir())
+
+
+def test_phone_embedded_snapshot_uses_one_request(android):
+    state = snapshot()
+    state.update(workspace="pal", generation=7, truncated=True)
+    client = FakeClient([{"ok": True, "results": [{"ok": True}], "screen": state, "snapshot_error": None}])
+    result = android.caps.AndroidProvider(client).act(CapabilityCall("android_act", args={"steps": [{"cmd": "back"}]}))
+    assert [item[0] for item in client.calls] == ["batch"]
+    assert result.structured["screen"]["generation"] == 7
+    assert result.structured["screen"]["truncated"] is True
+    assert result.effect_receipt.outcome == EffectOutcome.APPLIED
+
+
+def test_embedded_snapshot_failure_keeps_applied_receipt(android):
+    client = FakeClient([{"ok": True, "results": [{"ok": True}], "screen": None, "snapshot_error": "workspace lost"}])
+    result = android.caps.AndroidProvider(client).act(CapabilityCall("android_act", args={"steps": [{"cmd": "back"}]}))
+    assert len(client.calls) == 1
+    assert result.effect_receipt.outcome == EffectOutcome.APPLIED
+    assert result.structured["snapshot_error"] == "workspace lost"
+
+
+def test_apps_discovery_returns_labels_and_packages(android):
+    apps = [{"package": "com.example", "label": "Example"}]
+    client = FakeClient([{"ok": True, "value": apps}])
+    result = android.caps.AndroidProvider(client).apps(CapabilityCall("android_apps"))
+    assert result.structured == {"apps": apps}
+    assert client.calls[0][0] == "apps"

@@ -83,9 +83,16 @@ class DevicesOutput(StrictToolModel):
     devices: list[dict[str, Any]]
 
 
+class AppsOutput(StrictToolModel):
+    apps: list[dict[str, Any]]
+
+
 class ScreenOutput(StrictToolModel):
     package: str
     activity: str
+    workspace: str | None = None
+    generation: int | None = None
+    truncated: bool = False
     width: int
     height: int
     tree: dict[str, Any] | list[Any] | None

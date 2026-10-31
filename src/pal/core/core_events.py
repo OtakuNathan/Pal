@@ -11,6 +11,7 @@ from threading import RLock
 CoreEvent = dict[str, Any]
 TurnEvent = CoreEvent
 
+TURN_INPUT_ADMITTED = "turn.input_admitted"
 TURN_START = "turn.start"
 TURN_END = "turn.end"
 TURN_TOOL_CALL_BEFORE = "turn.tool_call_before"
@@ -25,7 +26,7 @@ SAFE_MODE_STARTED = "failure.safe_mode_started"
 SAFE_MODE_FINISHED = "failure.safe_mode_finished"
 RUNTIME_SNAPSHOT = "runtime.snapshot"
 
-ALL_CORE_TOPICS = frozenset({TURN_START, TURN_END, TURN_TOOL_CALL_BEFORE,
+ALL_CORE_TOPICS = frozenset({TURN_INPUT_ADMITTED, TURN_START, TURN_END, TURN_TOOL_CALL_BEFORE,
     TURN_TOOL_CALL_AFTER, TURN_TOOL_RESULT_COMMITTED, TURN_TOOL_CALL_FAILED, MEMORY_SLEEP, FAILURE_STARTED,
     FAILURE_FINISHED, SAFE_MODE_STARTED, SAFE_MODE_FINISHED})
 

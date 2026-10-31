@@ -73,3 +73,13 @@ but external scheduling/network delays can still produce uncertain outcomes.
 
 The upstream binaries and app are separate MIT-licensed components; they are
 not bundled in the Pal package.
+
+## Pal Android host
+
+The independent `pal-android` APK also implements this HTTP contract directly.
+Set `url` to its Tailscale address on port 8780 and `token` to the APK-generated
+secret. `android_apps` lists launchable app labels/packages. The APK returns
+batch receipts and a settled snapshot under the same execution lock; the plugin
+uses that embedded snapshot without extra HTTP reads. Original Droidline hosts
+retain their existing settle/dump path. Snapshots may include `workspace`,
+`generation`, and `truncated`; truncation is never presented as a complete tree.

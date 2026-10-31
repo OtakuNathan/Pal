@@ -125,6 +125,24 @@ async def inject_pending_interjection_async(
                 # between the durable L1 write and this acknowledgement.
                 for _ in batch:
                     state.pending_channel_turns.popleft()
+                # Publish only after the durable append and queue acknowledgement.
+                # Presentation observers cannot alter admission or cause a retry.
+                for admitted in batch:
+                    source = admitted.opening_delivery_binding
+                    active = continuation.delivery_binding
+                    if source is None or active is None:
+                        continue
+                    try:
+                        context.core_event_bus.emit("turn.input_admitted", {
+                            "turn_id": str(continuation.turn_id),
+                            "endpoint_id": str(source.endpoint.endpoint_id),
+                            "request_id": str(source.response_handle.reply_target.get("request_id") or ""),
+                            "reply_endpoint_id": str(active.endpoint.endpoint_id),
+                            "reply_request_id": str(active.response_handle.reply_target.get("request_id") or ""),
+                            "scope_key": str(active.control_scope_key),
+                        })
+                    except Exception:
+                        pass
                 return True
 
         commit = asyncio.create_task(append_and_acknowledge())
