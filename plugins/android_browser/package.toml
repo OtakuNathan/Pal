@@ -1,0 +1,5 @@
+kind = "plugin"
+id = "android_browser"
+version = "0.1.0"
+python = "host"
+host_files = ["plugin.toml", "pal_android_browser", "README.md", "config.example.toml"]
