@@ -195,3 +195,81 @@ def test_apps_discovery_returns_labels_and_packages(android):
     result = android.caps.AndroidProvider(client).apps(CapabilityCall("android_apps"))
     assert result.structured == {"apps": apps}
     assert client.calls[0][0] == "apps"
+
+
+def test_native_protocol_uses_correlated_rpc_and_keeps_ordinal_explicit(android):
+    from uuid import uuid4
+    calls = []
+    descriptor = {"v": 1, "id": str(uuid4()), "session": str(uuid4())}
+    client = android.client.AndroidHostClient(protocol="pal.android.v1")
+
+    def http(path, body):
+        calls.append((path, body))
+        if path == "/v1/device":
+            return descriptor
+        packet = json.loads(body)
+        assert packet["session"] == descriptor["session"]
+        actions = packet["operation"]["actions"]
+        assert "ordinal" not in actions[0]["target"]
+        assert actions[1]["target"]["ordinal"] == 0
+        return {"v": 1, "id": packet["id"], "kind": "completed", "value": {
+            "steps": [{"kind": "applied"}, {"kind": "applied"}],
+            "observation": {"kind": "unavailable", "fault": {"code": "NO_A11Y", "message": "offline"}}}}
+    client._http = http
+    result = android.caps.AndroidProvider(client).act(CapabilityCall("android_act", {"steps": [
+        {"cmd": "touch", "by": "text", "value": "确认"},
+        {"cmd": "input", "by": "id", "value": "field", "text": "你好", "nth": 0}]}))
+    assert result.effect_receipt.outcome == EffectOutcome.APPLIED
+    assert result.structured["snapshot_error"]["code"] == "NO_A11Y"
+    assert [c[0] for c in calls] == ["/v1/device", "/v1/control"]
+
+
+@pytest.mark.parametrize("steps", [[{"cmd": "home"}, {"cmd": "recents"}]])
+def test_native_unsupported_batch_is_rejected_before_any_write(android, steps):
+    from uuid import uuid4
+    client = android.client.AndroidHostClient(protocol="pal.android.v1")
+    calls = []
+    def http(path, body):
+        calls.append(path)
+        return {"v": 1, "id": str(uuid4()), "session": str(uuid4())}
+    client._http = http
+    with pytest.raises(ToolExecutionError) as caught:
+        android.caps.AndroidProvider(client).act(CapabilityCall("android_act", {"steps": steps}))
+    assert calls == ["/v1/device"]
+    assert caught.value.effect_receipt.outcome == EffectOutcome.NOT_APPLIED
+
+
+@pytest.mark.parametrize("receipt,outcome", [
+    ([{"kind": "rejected", "fault": {"code": "AMBIGUOUS_TARGET"}}], EffectOutcome.NOT_APPLIED),
+    ([{"kind": "applied"}, {"kind": "rejected", "fault": {"code": "NOT_FOUND"}}], EffectOutcome.APPLIED),
+    ([{"kind": "indeterminate", "fault": {"code": "TIMEOUT"}}], EffectOutcome.UNKNOWN),
+])
+def test_native_partial_effect_receipts_are_preserved(android, receipt, outcome):
+    from uuid import uuid4
+    client = android.client.AndroidHostClient(protocol="pal.android.v1")
+    client._descriptor = {"id": str(uuid4()), "session": str(uuid4())}
+    seen = []
+    def http(path, body):
+        seen.append(path)
+        return {"v": 1, "id": json.loads(body)["id"], "kind": "completed", "value": {
+            "steps": receipt, "observation": {"kind": "unavailable", "fault": {"code": "LOST"}}}}
+    client._http = http
+    with pytest.raises(ToolExecutionError) as caught:
+        android.caps.AndroidProvider(client).act(CapabilityCall("android_act", {"steps": [{"cmd": "home"}, {"cmd": "back"}]}))
+    assert caught.value.effect_receipt.outcome == outcome
+    assert seen == ["/v1/control"]
+
+
+def test_native_wrong_correlation_is_unknown_and_never_replayed(android):
+    from uuid import uuid4
+    client = android.client.AndroidHostClient(protocol="pal.android.v1")
+    client._descriptor = {"id": str(uuid4()), "session": str(uuid4())}
+    seen = []
+    def http(path, body):
+        seen.append(path)
+        return {"v": 1, "id": str(uuid4()), "kind": "rejected", "effect": "none"}
+    client._http = http
+    with pytest.raises(ToolExecutionError) as caught:
+        android.caps.AndroidProvider(client).act(CapabilityCall("android_act", {"steps": [{"cmd": "home"}]}))
+    assert caught.value.effect_receipt.outcome == EffectOutcome.UNKNOWN
+    assert seen == ["/v1/control"]

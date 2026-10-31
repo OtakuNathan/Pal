@@ -9,7 +9,7 @@ from pal.execution.tool_semantics import INDIRECT_EXTERNAL_READ, INDIRECT_EXTERN
 from pal.shared import OPERATION_NAMESPACE, RuntimeStatus, capability_action, capability_node
 from pal.shared.tool_protocol import EffectOutcome, RetryDirective
 
-from .client import AndroidError, DroidlineClient
+from .client import AndroidError, AndroidHostClient
 from .models import (ActInput, ActOutput, DevicesOutput, EmptyInput, ObserveInput,
                      QueryInput, QueryOutput, ScreenOutput, DeviceInput, AppsOutput)
 
@@ -74,7 +74,7 @@ def success(data: dict, *, applied: bool = False, hint: str = "") -> CapabilityR
                  source="plugin:android_browser", target_kind="module")
 @dataclass
 class AndroidProvider:
-    client: DroidlineClient
+    client: AndroidHostClient
     module_id: str = "android_browser"
 
     def read(self, command: str, args: dict | None = None, *, device: str = "_") -> dict:
@@ -134,12 +134,14 @@ class AndroidProvider:
         args = ActInput.model_validate(call.args)
         try:
             result = self.client.request("batch", {
-                "steps": [step.model_dump() for step in args.steps], "stop_on_error": True,
+                "steps": [step.model_dump(exclude_unset=True) for step in args.steps], "stop_on_error": True,
             }, device=args.device)
         except AndroidError as exc:
-            # Even an error response cannot prove earlier steps had no effect.
+            # Only this versioned protocol can attest rejection before effects.
+            outcome = (EffectOutcome.NOT_APPLIED if exc.details.get("receipt_protocol") == "pal.android.v1"
+                       and exc.details.get("effect") == "none" else EffectOutcome.UNKNOWN)
             raise ToolExecutionError(str(exc), error_code="android_action_uncertain", details=exc.details,
-                                     effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN),
+                                     effect_receipt=EffectReceipt(outcome=outcome),
                                      retry=RetryDirective.RECONCILE_FIRST,
                                      recovery_hint="Observe the current phone state; do not replay the batch blindly.") from exc
         results = result.get("results")
@@ -166,8 +168,13 @@ class AndroidProvider:
             except (AndroidError, ValueError, KeyError) as exc:
                 data["snapshot_error"] = str(exc)
         if not valid:
+            outcome = EffectOutcome.UNKNOWN
+            if result.get("receipt_protocol") == "pal.android.v1" and isinstance(results, list) and results:
+                effects = [step.get("effect") for step in results]
+                if all(effect in {"applied", "none"} for effect in effects):
+                    outcome = EffectOutcome.APPLIED if "applied" in effects else EffectOutcome.NOT_APPLIED
             raise ToolExecutionError("Android batch stopped or returned incomplete results", error_code="android_batch_partial",
-                                     details=data, effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN),
+                                     details=data, effect_receipt=EffectReceipt(outcome=outcome),
                                      retry=RetryDirective.RECONCILE_FIRST,
                                      recovery_hint="Inspect per-step receipts and current screen before continuing; do not replay completed steps.")
         return success(data, applied=True, hint="Actions completed. Observe again before continuing." if data["snapshot_error"] else "")

@@ -29,7 +29,7 @@ class QueryInput(DeviceInput):
 class Target(StrictToolModel):
     by: Selector
     value: str
-    nth: int = Field(default=0, ge=0, description="Zero-based match index; query first if the selector is ambiguous.")
+    nth: int = Field(default=0, ge=0, description="Explicit zero-based match index. On Pal Android, omission requires a unique match; query duplicates first.")
     timeout: float = Field(default=5.0, ge=0, le=10)
 
 

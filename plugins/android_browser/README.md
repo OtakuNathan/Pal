@@ -1,9 +1,9 @@
 # Android browser
 
-Native Pal plugin using [Droidline](https://github.com/KnifeLemon/Droidline)
-as an Android accessibility execution host. No MCP server or extra Python
+Native Pal plugin for the independent Pal Android APK, with an explicit legacy
+Droidline transport for existing installations. No MCP server or extra Python
 dependencies. Pal retains page understanding and decisions; the host executes
-explicit primitives. Tested protocol target: Droidline 0.1.12.
+explicit primitives.
 
 ## Capabilities
 
@@ -76,10 +76,25 @@ not bundled in the Pal package.
 
 ## Pal Android host
 
-The independent `pal-android` APK also implements this HTTP contract directly.
-Set `url` to its Tailscale address on port 8780 and `token` to the APK-generated
-secret. `android_apps` lists launchable app labels/packages. The APK returns
-batch receipts and a settled snapshot under the same execution lock; the plugin
-uses that embedded snapshot without extra HTTP reads. Original Droidline hosts
-retain their existing settle/dump path. Snapshots may include `workspace`,
-`generation`, and `truncated`; truncation is never presented as a complete tree.
+The APK uses its own versioned RPC, selected explicitly in configuration:
+
+```toml
+protocol = "pal.android.v1"
+url = "http://<phone-address>:8780"
+token = "<APK-generated secret>"
+```
+
+Native RPC has one device descriptor (`GET /v1/device`) and a closed operation
+union (`POST /v1/control`). Every command carries a request UUID and server
+session UUID. The adapter validates correlation and never guesses a protocol,
+retries a write, or falls back to another host after failure. Native `recents`
+is unsupported and is rejected before submitting any part of the batch.
+Omitted `nth` requires a unique target; explicit `nth=0` selects the first match.
+
+`android_apps` lists launchable labels/packages. The APK returns per-step
+applied/rejected/indeterminate receipts and a settled snapshot under one lock.
+A failed observation does not erase applied actions. Proven rejection before
+actions is reported as not applied; lost transport and indeterminate effects
+require observation before retry. Snapshots carry the workspace generation and
+an explicit truncation flag. The legacy host remains the default only when
+`protocol` is omitted; set `protocol = "legacy.droidline"` to document that choice.
