@@ -478,7 +478,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         core.leave_memory_maintenance_async.assert_not_awaited()
         self.assertFalse(self.provider.repository.frozen)
 
-    async def test_sleep_notification_and_failure_recovery_boundaries(self):
+    async def test_sleep_is_silent_even_when_last_route_cannot_receive_notifications(self):
         for notice_delivered in (False, True):
             with self.subTest(notice_delivered=notice_delivered):
                 def admit(provider):
@@ -497,8 +497,29 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(service, "_resolve_main_provider"):
                     result = await service.run()
                 self.assertEqual(result["status"], "failed")
-                self.assertEqual(states, ["sleeping", "awake"] if notice_delivered else ["awake"])
+                self.assertEqual(states, ["sleeping", "awake"])
                 self.assertEqual(self.storage.current(), self.head)
+                core.deliver_memory_notice_async.assert_not_awaited()
+
+    async def test_successful_sleep_does_not_require_a_user_route(self):
+        def admit(provider):
+            provider.repository.freeze()
+            return True
+        core = SimpleNamespace(
+            try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
+            memory_notification_route=Mock(side_effect=AssertionError("silent sleep must not resolve a route")),
+            deliver_memory_notice_async=AsyncMock(side_effect=AssertionError("silent sleep must not send a notice")),
+            begin_memory_sleep=Mock(), leave_memory_maintenance_async=AsyncMock(),
+        )
+        service = DreamingService(storage=self.storage, provider=self.provider,
+            llm=ReviewingLLM(merge=False), core=core)
+        with patch.object(service, "_resolve_main_provider"):
+            result = await service.run()
+        self.assertEqual(result["status"], "completed", result)
+        core.begin_memory_sleep.assert_called_once()
+        core.leave_memory_maintenance_async.assert_awaited_once()
+        core.memory_notification_route.assert_not_called()
+        core.deliver_memory_notice_async.assert_not_awaited()
 
     async def test_lost_commit_acknowledgement_recovers_the_published_generation(self):
         publish = self.storage.publish

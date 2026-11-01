@@ -8,6 +8,12 @@ from pal.memory.history_root import HistoryRoot
 from pal.memory.turn_ir import L1TurnStore
 from pal.llm.projection_contracts import ProjectionSessionPort
 from pal.llm.projection_session import EndpointProjectionSession
+from pal.shared.proactive_protocol import SilentOnceSchedulerPort
+from pal.proactive.runtime import ProactiveManager
+
+
+def proactive_conformance(manager: ProactiveManager) -> None:
+    scheduler: SilentOnceSchedulerPort = manager
 
 def conformance(llm: LLMRuntime, memory: MemoryService, root: HistoryRoot, history: L1TurnStore, projection: EndpointProjectionSession) -> None:
     a: LLMRuntimePort = llm

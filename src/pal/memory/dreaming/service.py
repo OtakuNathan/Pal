@@ -14,7 +14,8 @@ from pal.memory.service import MemoryService
 from pal.memory.storage import MemoryStorage, MemoryDatabase
 from pal.memory.repository import MemoryDurableRepository
 from pal.memory.dreaming.clustering import MergeTree, discover_clusters, semantic_document
-from pal.memory.dreaming.contracts import DreamingConfig
+from pal.memory.dreaming.contracts import DreamingConfig, DreamingFailureNotice
+from pal.memory.persistence.checkpoint import atomic_json
 from pal.memory.dreaming.pipeline import DreamingPipeline, apply_merges
 
 
@@ -87,6 +88,62 @@ class DreamingService:
             else:
                 connection.execute("UPDATE dreaming_runs SET status=?,report_json=?,updated_at=? WHERE run_id=? AND status!='completed'", (phase, json.dumps(report), utc_now(), run_id))
 
+    def _record_failure(self, run_id, report):
+        """The existing run report is durable before scheduling any handoff."""
+        status = self.status(run_id)
+        report = dict(report)
+        report.setdefault("failed_at", utc_now())
+        report.setdefault("failure_reminder", {"scheduled": False})
+        path = self.storage.root / "runs" / run_id / "failure.json"
+        report["failure_log"] = str(path)
+        phase = "completed" if status["status"] == "completed" else "failed"
+        with self.storage.connection(write=True) as db:
+            db.execute("UPDATE dreaming_runs SET status=?,report_json=?,updated_at=? WHERE run_id=?",
+                       (phase, json.dumps(report), utc_now(), run_id))
+        try:
+            atomic_json(path, {"run_id": run_id, "status": phase, "report": report})
+        except Exception as exc:
+            # The catalog already contains the full error. Keep that usable
+            # diagnostic reference if a separate JSON projection cannot be written.
+            report["failure_log"] = str(self.storage.catalog_path)
+            report["failure_log_error"] = exception_report(exc)
+            with self.storage.connection(write=True) as db:
+                db.execute("UPDATE dreaming_runs SET report_json=? WHERE run_id=?", (json.dumps(report), run_id))
+
+    def reconcile_failure_reminders(self):
+        if self.core is None:
+            return
+        with self.storage.connection() as db:
+            rows = db.execute("SELECT run_id,status,report_json FROM dreaming_runs "
+                              "WHERE json_extract(report_json,'$.failure_reminder.scheduled')=0").fetchall()
+        for row in rows:
+            report = json.loads(row["report_json"])
+            error = str(report.get("background_error") or report.get("post_publish_error") or report.get("error") or "Dreaming failed")
+            summary = next((line.strip() for line in reversed(error.splitlines()) if line.strip()), "Dreaming failed")
+            notice = DreamingFailureNotice(
+                run_id=row["run_id"], failed_at=report["failed_at"],
+                error=summary[:1024], log_path=report["failure_log"],
+                published=row["status"] == "completed", service_ready=not bool(self.activation_error),
+            )
+            try:
+                task_id = self.core.schedule_memory_failure_reminder(notice)
+                if task_id is None:
+                    continue  # Optional proactive plugin may be attached later.
+                report["failure_reminder"] = {"scheduled": True, "proactive_id": task_id}
+                report.pop("failure_reminder_error", None)
+            except Exception as exc:
+                report["failure_reminder_error"] = exception_report(exc)
+            with self.storage.connection(write=True) as db:
+                db.execute("UPDATE dreaming_runs SET report_json=? WHERE run_id=?", (json.dumps(report), row["run_id"]))
+
+    def recover_interrupted_runs(self):
+        with self.storage.connection() as db:
+            rows = db.execute("SELECT run_id,report_json FROM dreaming_runs WHERE status NOT IN ('completed','failed')").fetchall()
+        for row in rows:
+            report = json.loads(row["report_json"])
+            report.update(outcome="failed", error="Dreaming interrupted by host restart before completion.")
+            self._record_failure(row["run_id"], report)
+
     async def _work(self, function, *args, **kwargs):
         # Cancelling an asyncio waiter does not stop its worker thread. Join it
         # before closing connections or deciding whether publication committed.
@@ -154,10 +211,8 @@ class DreamingService:
                     try:
                         status = self.status(self.run_id)
                         report = {**status.get("report", {}), "background_error": self.last_task_error}
-                        with self.storage.connection(write=True) as connection:
-                            connection.execute("UPDATE dreaming_runs SET status=?,report_json=?,updated_at=? WHERE run_id=?",
-                                ("completed" if status["status"] == "completed" else "failed",
-                                 json.dumps(report), utc_now(), self.run_id))
+                        self._record_failure(self.run_id, report)
+                        self.reconcile_failure_reminders()
                     except Exception as exc:
                         self.last_task_error += "\nRecording the background failure also failed:\n" + exception_report(exc)
         if self.on_ready:
@@ -215,8 +270,6 @@ class DreamingService:
             raise ValueError("unknown dreaming run")
         self.run_id = run_id
         acquired = False
-        sleeping = False
-        route = None
         source = self.provider.repository
         candidate = None
         pipeline = None
@@ -241,9 +294,6 @@ class DreamingService:
                         break
                     await self.core.wait_for_memory_maintenance_async()
                 acquired = True
-                route = self.core.memory_notification_route()
-                if route is None:
-                    raise RuntimeError("no user notification route is available")
             else:
                 source.freeze()
                 acquired = True
@@ -255,10 +305,6 @@ class DreamingService:
                 clusters = await self._work(self._prepare, run_id, pipeline.config_fingerprint, config)
             with self.storage.connection(write=True) as connection:
                 connection.execute("UPDATE dreaming_runs SET source_generation=? WHERE run_id=?", (source.generation_id, run_id))
-            if self.core is not None:
-                if not await self.core.deliver_memory_notice_async(route, "Pal is consolidating duplicate memories in dreaming mode. Messages are not accepted during this process; you will be notified when Pal wakes up."):
-                    raise RuntimeError("dreaming notification delivery failed")
-            sleeping = True
             if self.core is not None:
                 self.core.begin_memory_sleep()
             self._phase(run_id, "sleeping")
@@ -319,13 +365,11 @@ class DreamingService:
             status = self.status(run_id)
             if status["status"] != "completed":
                 report["error"] = exception_report(exc)
-                self._phase(run_id, "failed", report)
+                self._record_failure(run_id, report)
             else:
                 published_report = dict(status["report"])
                 published_report["post_publish_error"] = exception_report(exc)
-                with self.storage.connection(write=True) as connection:
-                    connection.execute("UPDATE dreaming_runs SET report_json=?,updated_at=? WHERE run_id=?",
-                        (json.dumps(published_report), utc_now(), run_id))
+                self._record_failure(run_id, published_report)
                 if self.provider.repository.generation_id != self.storage.current():
                     self.provider.repository.close()
                     self.provider.repository = self.storage.open()
@@ -345,15 +389,7 @@ class DreamingService:
                     self.provider.service.clear_generation_projection()
                     if self.core is not None:
                         await self.core.leave_memory_maintenance_async()
-            if sleeping and self.core is not None:
-                status = self.status(run_id)
-                outcome = status.get("report", {}).get("outcome")
-                text = ("A new memory version has been published, but connections have not recovered. Pal is still in maintenance mode and requires a full external restart." if self.activation_error
-                        else "A new memory version has been published, but a subsequent step failed. See the dreaming run report for details." if status.get("report", {}).get("post_publish_error")
-                        else "Pal is awake. No duplicate memories were confirmed safe to merge." if outcome == "no_changes"
-                        else "Pal is awake. Duplicate memory consolidation is complete." if status["status"] == "completed"
-                        else "Pal is awake. Consolidation did not complete; the original memory store is still in use.")
-                await self.core.deliver_memory_notice_async(route, text, require_provider=False)
+            self.reconcile_failure_reminders()
 
     def _verify(self, provider, clusters, replacements):
         repo = provider.repository

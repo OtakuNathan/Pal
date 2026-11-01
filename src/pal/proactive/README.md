@@ -85,3 +85,13 @@ The facade delegates to the existing task-owner operations and preserves their
 persistence/error behavior. The three old tool aliases are no longer published.
 Creation/replacement, destination updates and schedule updates remain separate
 tools; this control tool takes no operation-specific extra parameters.
+
+## Internal silent once handoffs
+
+The stable shared `SilentOnceSchedulerPort` publishes
+`ensure_silent_once(proactive_id, goal, method)`. It persists an immediately due
+`once` definition targeting `null`; existing ids are preserved, including completed
+or intentionally disabled tasks. Core uses this for failed dreaming handoffs. The
+ordinary task execution writes shared L1, whose existing resident persistence owns
+recovery and subsequent conversational visibility. Task definitions/cursors remain
+in the existing proactive repository. This port's identity survives plugin reload.

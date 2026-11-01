@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.proactive.runtime import ProactiveManager, ProactiveRunner
+from pal.shared.proactive_protocol import SILENT_ONCE_SCHEDULER
 from pal.proactive.source import ProactiveEventSource
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -831,7 +832,9 @@ def register_with_core(
         introspection_provider=provider,
         event_sources=[source],
         event_handlers={EventKind.PROACTIVE_TRIGGER: [event_handler]},
-        ports={"proactive_manager": manager, "proactive_runner": runner},
+        ports={"proactive_manager": manager, "proactive_runner": runner,
+               "silent_once_scheduler": manager},
+        port_contracts=(SILENT_ONCE_SCHEDULER,),
     )
     context.register_module(handle)
     context.event_source_registry.attach(PROACTIVE_MODULE_ID, source)

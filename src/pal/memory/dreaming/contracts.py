@@ -9,6 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 @dataclass(frozen=True)
+class DreamingFailureNotice:
+    run_id: str
+    failed_at: str
+    error: str
+    log_path: str
+    published: bool
+    service_ready: bool
+
+
+@dataclass(frozen=True)
 class DreamingConfig:
     enabled: bool = False
     cron: str = "0 3 1 * *"

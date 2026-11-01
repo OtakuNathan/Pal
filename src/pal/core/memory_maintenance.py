@@ -1,11 +1,16 @@
 """Core-owned admission boundary for resident memory maintenance."""
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+
 from pal.control import ControlDelivery
 from pal.core.core_events import MEMORY_SLEEP
+from pal.memory.dreaming.contracts import DreamingFailureNotice
+from pal.shared.proactive_protocol import SILENT_ONCE_SCHEDULER
 
 
-SLEEP_REPLY = "Pal is dreaming and is not accepting messages right now. Please wait for the wake notification, then resend."
+SLEEP_REPLY = "Pal is sleeping. This message was not accepted or queued; please try again after it wakes."
 
 
 class MemoryMaintenanceMixin:
@@ -53,6 +58,25 @@ class MemoryMaintenanceMixin:
     def memory_notification_route(self):
         channel = self.context.port_registry.get("channel:channel")
         return channel.last_user_route() if channel is not None else None
+
+    def schedule_memory_failure_reminder(self, notice: DreamingFailureNotice) -> str | None:
+        scheduler = self.context.port_registry.optional(SILENT_ONCE_SCHEDULER)
+        if scheduler is None:
+            return None
+        return scheduler.ensure_silent_once(
+            proactive_id=f"memory-dreaming-failure-{notice.run_id}",
+            goal="Record this dreaming failure as a pending user notice in shared L1.",
+            method=(
+                "The user has NOT been notified. Produce a short handoff note, in the user's "
+                "language, for the next ordinary user conversation to mention before answering "
+                "their message. Include the run id, failure summary and diagnostic log path. "
+                "These are facts at the time of failure, not a claim about the current runtime. "
+                "Output is intentionally discarded by the null channel; your turn remains in L1. "
+                "Do not call tools, send a message, retry dreaming or change configuration. "
+                "Do not claim the user has already been told. Failure facts: "
+                + json.dumps(asdict(notice), ensure_ascii=False)
+            ),
+        )
 
     async def deliver_memory_notice_async(self, route, text, *, require_provider=True) -> bool:
         if not require_provider:

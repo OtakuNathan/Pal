@@ -19,6 +19,7 @@ class DreamingEventSource:
         self.due = None
 
     def prepare(self, context):
+        self.service.reconcile_failure_reminders()
         config = self.service.config
         if not config.enabled or (self.service.task is not None and not self.service.task.done()):
             return False
@@ -73,8 +74,7 @@ def register_dreaming(core, provider, llm, runtime_root):
                               config=DreamingConfig.load(runtime_root, storage=storage), core=core)
     # Publication is already reconciled by opening catalog.current at startup.
     # Interrupted unpublished work keeps its cache but relinquishes admission.
-    with storage.connection(write=True) as db:
-        db.execute("UPDATE dreaming_runs SET status='failed' WHERE status NOT IN ('completed','failed')")
+    service.recover_interrupted_runs()
     service.on_ready = core.notify_ready
     source = DreamingEventSource(service)
     handler = DreamingEventHandler(service)

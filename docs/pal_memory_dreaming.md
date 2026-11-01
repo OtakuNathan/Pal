@@ -153,17 +153,40 @@ oversized nodes retain their current records rather than truncating text.
 A capacity-limited parent does not undo already reviewed child merges.
 
 Core waits for main turns, queued input and admitted preparation/control work to
-drain. Admission and the writer fence precede the sleep notice. Repository writes
+drain. Admission and the writer fence precede the retained sleep-state broadcast. Repository writes
 also check the fence; generation writer locks cover independent connections.
 Bunshin workers continue reading and do not block admission.
 
 During sleep, user messages receive a fixed refusal and do not enter L1 or a
 queue. Status/report remain available. New proactive execution is paused, and
 its due state remains for the existing scheduler to coalesce on wake. Channel
-delivery and recovery events continue. The sleep and wake notices use the same
-persisted last accepted user route, including reply/thread targets. Missing route
-or failed sleep delivery aborts before LLM processing. Wake delivery uses the
-normal recovery queue after service admission has reopened.
+delivery and recovery events continue. Sleep starts and ends silently: neither
+transition resolves the last user route or waits for a chat notification. Missing
+or disconnected reply sessions cannot prevent consolidation.
+
+Failures first persist the existing run report and a private
+`memory/runs/<run_id>/failure.json` diagnostic. If the JSON projection cannot be
+written, the catalog report remains the diagnostic reference. After maintenance
+cleanup, Core schedules one immediate `once` proactive task with output `null`,
+keyed by the failed run id. Its instruction is to produce a short pending-user
+handoff containing the failure summary, run id and log path, without tools,
+repair, retry or channel delivery. The task's ordinary trigger/result enter shared
+L1 and use existing resident persistence; later ordinary chat can remind the user
+before addressing their message. Existing user-input priority still applies to
+proactive admission. No new notification queue or separate reminder database is
+introduced.
+
+The existing failure report records whether its proactive definition was
+registered. The dreaming source reconciles an unfinished registration even when
+automatic dreaming is disabled. Persistent proactive definitions retain their due
+cursor across restart; existing completed definitions are never rearmed. Startup
+also records interrupted unfinished rounds as failures. Historical terminal
+reports predating this handoff remain unchanged. This is a one-time schedule,
+not a promise of exactly-once effects across an interrupted model run.
+
+Published memory is authoritative even if cleanup fails. A failure handoff records
+whether publication happened and whether the service recovered; it must not claim
+that original memory remains active after a committed publication.
 
 There is no business cancel operation. Shutdown interrupts execution and records
 recoverable failed work; it does not introduce a `cancelled` dreaming state.
@@ -203,9 +226,9 @@ originals, not by rolling back a whole publicly used database.
 
 ## Operation and activation
 
-After the required sleep notice is delivered, Core broadcasts a retained
+After maintenance admission, Core immediately broadcasts a retained
 `runtime_state` snapshot (`sleeping: true`) to channel endpoints through
-`on_runtime_state`. This UI signal is independent of the notification route and
+`on_runtime_state`. This UI signal needs no notification route and
 does not enter chat history. Newly attached/replacement endpoints receive the
 latest snapshot; providers replay it to reconnected clients. Maintenance exit
 broadcasts `sleeping: false` only when service can reopen, including failed runs

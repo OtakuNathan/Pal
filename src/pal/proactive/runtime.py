@@ -117,12 +117,28 @@ class ProactiveManager(ProactiveManagerPort):
 
     def register(self, definition: ProactiveDefinition) -> None:
         next_due = self.schedule_engine._compute_next_due(definition)
+        self._register_at(definition, next_due)
+
+    def _register_at(self, definition: ProactiveDefinition, next_due: str | None) -> None:
         if self.repository is not None:
             self.repository.upsert_definition(definition, next_due_at_utc=next_due)
         self.registered[definition.proactive_id] = definition
         self.schedule_engine.next_due_by_proactive_id[definition.proactive_id] = next_due
         self._notify_change()
         self._notify_ready()
+
+    def ensure_silent_once(self, *, proactive_id: str, goal: str, method: str) -> str:
+        if proactive_id in self.registered:
+            return proactive_id
+        # Persist the due cursor explicitly: normal schedule parsing discards
+        # past timestamps, while an internal handoff must be due immediately.
+        due = utc_now_dt().isoformat()
+        definition = ProactiveDefinition(
+            proactive_id=proactive_id, goal=goal, method=method,
+            out_channel_id="null", schedule={"cadence": "once", "run_at_utc": due},
+        )
+        self._register_at(definition, due)
+        return proactive_id
 
     def hydrate(self, definition: ProactiveDefinition, *, next_due_at_utc: str | None = None, persist: bool = False) -> None:
         self.registered[definition.proactive_id] = definition

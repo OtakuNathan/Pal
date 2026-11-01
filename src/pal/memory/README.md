@@ -66,3 +66,9 @@ Interaction rule:
   execution-context projection inside one rollback boundary
 - a storage or dependent-projection failure restores the original L1, L2,
   top-of-mind, and heat state
+
+Dreaming enters maintenance silently after idle admission. Failures retain the
+existing run report and private diagnostic log, then request an idempotent silent
+once proactive handoff through Core. Notification transport is not a precondition
+for sleep. The handoff uses existing proactive persistence and shared L1; see
+[Dreaming](../../../docs/pal_memory_dreaming.md).
