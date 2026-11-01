@@ -68,7 +68,8 @@ return ModuleHandle(
 ```
 
 Here `command(invocation)` returns a `ControlAction` with action kind
-`phone_pair` and the invocation's route. Declare `control:control` in
+`phone_pair`, `target_scope="phone"` matching the module id, and the invocation's
+route. Declare `control:control` in
 `requires_ports`. PluginHost validates and publishes the commands, cleans them
 up on withdrawal or rollback, and refreshes the common channel catalog. Do not
 manually call `register_command` or add unregister callbacks from plugin start.
