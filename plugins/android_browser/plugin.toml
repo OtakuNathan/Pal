@@ -1,6 +1,6 @@
 plugin_id = "android_browser"
 entrypoint = "pal_android_browser.plugin"
-version = "0.2.1"
+version = "0.3.0"
 enabled_by_default = true
 lifecycle_protocol = "raii.v1"
 module_id = "android_browser"

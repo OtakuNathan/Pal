@@ -10,6 +10,7 @@ from pal.shared import OPERATION_NAMESPACE, RuntimeStatus, capability_action, ca
 from pal.shared.tool_protocol import EffectOutcome, RetryDirective
 
 from .client import AndroidError, AndroidHostClient
+from .devices import AndroidDeviceRouter
 from .models import (ActInput, ActOutput, DevicesOutput, EmptyInput, ObserveInput,
                      QueryInput, QueryOutput, ScreenOutput, DeviceInput, AppsOutput)
 
@@ -74,7 +75,7 @@ def success(data: dict, *, applied: bool = False, hint: str = "") -> CapabilityR
                  source="plugin:android_browser", target_kind="module")
 @dataclass
 class AndroidProvider:
-    client: AndroidHostClient
+    client: AndroidHostClient | AndroidDeviceRouter
     module_id: str = "android_browser"
 
     def read(self, command: str, args: dict | None = None, *, device: str = "_") -> dict:

@@ -76,6 +76,18 @@ not bundled in the Pal package.
 
 ## Pal Android host
 
+APK 0.3.0 起可通过 Tailscale 配对：手机填写 Pal 主机 MagicDNS 名称与
+`/android_pair` 生成的一次性配对码。配对由 `android_companion` 插件负责，
+主机用 `tailscale whois` 确认来源节点，自动登记独立 channel 与 RPC backend。
+此适配器每次调用读取 `data/android_companion/devices.json` 的版本 1 契约，
+新配对的手机立即可由现有 capability 使用，不新增工具定义、不需要重载。
+地址保存为手机 MagicDNS 全名，不保存其当前 IP。
+
+`android_devices` 返回设备 UUID 与名称，不返回地址或凭据。多手机时必须显式
+指定设备 UUID；`_` 不会因为一台手机离线而改为操作另一台。已有 config.toml
+作为独立的旧 backend 保留；新配对不会覆盖它。仅用配对设备的新部署无需
+创建该配置文件。配对未改变无障碍或无线 ADB 的手机本机权限流程。
+
 The APK uses its own versioned RPC, selected explicitly in configuration:
 
 ```toml
