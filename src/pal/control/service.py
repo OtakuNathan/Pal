@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import shlex
+import re
+from threading import RLock
+from typing import Callable
 from dataclasses import dataclass, field
 
 from pal.control.contracts import (
@@ -18,6 +21,7 @@ from pal.shared import EventKind
 class ControlCommandRegistry:
     commands: dict[str, ControlCommandSpec] = field(default_factory=dict)
     aliases: dict[str, str] = field(default_factory=dict)
+    lock: RLock = field(default_factory=RLock, repr=False)
 
     def register(self, spec: ControlCommandSpec) -> None:
         normalized = _normalize_command_name(spec.name)
@@ -62,6 +66,10 @@ class ControlCommandRegistry:
             self.aliases.pop(alias, None)
 
     def resolve(self, name: str) -> ControlCommandSpec | None:
+        with self.lock:
+            return self._resolve(name)
+
+    def _resolve(self, name: str) -> ControlCommandSpec | None:
         normalized = _normalize_command_name(name)
         if normalized in self.commands:
             return self.commands[normalized]
@@ -71,21 +79,75 @@ class ControlCommandRegistry:
         return self.commands.get(canonical)
 
     def list_panel_commands(self) -> list[ControlCommandSpec]:
-        return [spec for spec in self.commands.values() if spec.show_in_panel]
+        with self.lock:
+            return [spec for spec in self.commands.values() if spec.show_in_panel]
+
+
+@dataclass
+class InstalledControlCommands:
+    registry: ControlCommandRegistry
+    owned: dict[str, ControlCommandSpec]
+    changed: Callable[[], None]
+
+    def close(self) -> None:
+        removed = False
+        with self.registry.lock:
+            for name, spec in self.owned.items():
+                if self.registry.commands.get(name) is spec:
+                    self.registry.unregister(name)
+                    removed = True
+        if removed:
+            self.changed()
 
 
 @dataclass
 class ControlPlane(ControlPlanePort):
     registry: ControlCommandRegistry = field(default_factory=ControlCommandRegistry)
+    catalog_revision: int = 0
+    on_ready: Callable[[], None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._register_builtins()
 
     def register_command(self, spec: ControlCommandSpec) -> None:
-        self.registry.register(spec)
+        with self.registry.lock:
+            self.registry.register(spec)
+        self._catalog_changed()
 
     def unregister_command(self, name: str) -> None:
-        self.registry.unregister(name)
+        with self.registry.lock:
+            self.registry.unregister(name)
+        self._catalog_changed()
+
+    def _catalog_changed(self) -> None:
+        with self.registry.lock:
+            self.catalog_revision += 1
+            ready = self.on_ready
+        if ready is not None:
+            ready()
+
+    def install_commands(self, owner: str, specs: tuple[ControlCommandSpec, ...]) -> InstalledControlCommands:
+        """Validate the entire contribution before publishing any command."""
+        if not owner or not isinstance(specs, tuple):
+            raise ValueError("slash commands require an owner and an immutable declaration")
+        with self.registry.lock:
+            candidate = ControlCommandRegistry(dict(self.registry.commands), dict(self.registry.aliases))
+            owned = {}
+            for spec in specs:
+                if not isinstance(spec, ControlCommandSpec) or not callable(spec.handler):
+                    raise TypeError("plugin slash commands require ControlCommandSpec with a callable handler")
+                names = (spec.name, *spec.aliases)
+                if len(set(names)) != len(names) or any(re.fullmatch(r"[a-z0-9_]{1,32}", name) is None for name in names):
+                    raise ValueError(f"invalid plugin slash command declaration for {owner}")
+                if spec.show_in_panel and not 1 <= len(spec.description.strip()) <= 256:
+                    raise ValueError("menu commands require a description of 1–256 characters")
+                candidate.register(spec)
+                owned[spec.name] = candidate.commands[spec.name]
+            self.registry.commands = candidate.commands
+            self.registry.aliases = candidate.aliases
+        if owned:
+            self._catalog_changed()
+        return InstalledControlCommands(self.registry, owned, self._catalog_changed)
 
     def list_panel_commands(self) -> list[ControlCommandSpec]:
         return self.registry.list_panel_commands()

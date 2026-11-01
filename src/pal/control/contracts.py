@@ -140,6 +140,11 @@ class ControlEvent:
     event_id: str = field(default_factory=lambda: str(uuid4()))
 
 
+class ControlCommandLease(Protocol):
+    def close(self) -> None:
+        ...
+
+
 class ControlPlanePort(Protocol):
     def parse_event(self, event: ControlEvent) -> ControlAction | None:
         ...
@@ -151,6 +156,9 @@ class ControlPlanePort(Protocol):
         ...
 
     def unregister_command(self, name: str) -> None:
+        ...
+
+    def install_commands(self, owner: str, specs: tuple[ControlCommandSpec, ...]) -> ControlCommandLease:
         ...
 
     def list_panel_commands(self) -> list[ControlCommandSpec]:

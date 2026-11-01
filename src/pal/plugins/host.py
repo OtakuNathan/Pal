@@ -948,6 +948,10 @@ class PluginHost:
             self._restore_event_handlers(handle)
             self._restore_control_action_handlers(handle)
             self._publish_module_capabilities(handle.module_id)
+            if handle.control_commands:
+                control = self.context.require_port("control:control")
+                handle.control_command_lease = control.install_commands(plugin_id, handle.control_commands)
+                scope.defer(handle.control_command_lease.close)
             self._generation_counter += 1
             generation = PluginGeneration(self._generation_counter, instance, scope, handle)
             self.generations[plugin_id] = generation
@@ -1017,6 +1021,8 @@ class PluginHost:
         return errors
 
     def _withdraw_generation_surface(self, handle: ModuleHandle) -> None:
+        if handle.control_command_lease is not None:
+            handle.control_command_lease.close()
         self._withdraw_module_capabilities(handle.module_id)
         self.context.prompt_fragment_registry.unregister_module(handle.module_id)
         self.context.event_source_registry.detach_module(handle.module_id)

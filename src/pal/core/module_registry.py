@@ -7,6 +7,7 @@ from pal.shared import IntrospectionPort, PromptFragmentProvider
 from pal.shared.ports import PortKey
 
 if TYPE_CHECKING:
+    from pal.control.contracts import ControlCommandSpec, ControlCommandLease
     from pal.core.runtime_state import RuntimeStatePort
     from pal.shared import MountedSubtreeHandle
 
@@ -28,6 +29,8 @@ class ModuleHandle:
     event_sources: list[Any] = field(default_factory=list)
     event_handlers: dict[str, list[Any]] = field(default_factory=dict)
     control_action_handlers: dict[str, Any] = field(default_factory=dict)
+    control_commands: tuple[ControlCommandSpec, ...] = ()
+    control_command_lease: ControlCommandLease | None = field(default=None, init=False, repr=False)
     provider_refs: list[str] = field(default_factory=list)
     ports: dict[str, Any] = field(default_factory=dict)
     port_contracts: tuple[PortKey[object], ...] = ()

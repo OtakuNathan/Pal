@@ -565,6 +565,11 @@ tests. Fix example/guidance failures before live activation.
 - `event_sources`: event sources owned by this module.
 - `event_handlers`: event handlers keyed by event kind.
 - `control_action_handlers`: deterministic control action handlers.
+- `control_commands`: immutable tuple of `ControlCommandSpec` declarations.
+  PluginHost validates the complete name/alias set, owns registration through
+  rollback and detach, and refreshes channel command menus. Use
+  `show_in_panel=True` with a description for public commands. Do not register
+  plugin commands imperatively or hand-write unregister callbacks.
 - `provider_refs`: named providers that execution runtime may route to.
 - `ports`: internal service ports exposed as `<module_id>:<port_name>`.
 - `cleanup_callbacks`: cleanup functions called on detach.

@@ -688,6 +688,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         self.main_loop.notify_ready()
 
     def bind_async_wakeup_sources(self) -> None:
+        control_plane = self.context.port_registry.get("control:control")
+        if control_plane is not None:
+            control_plane.on_ready = self.notify_ready
         self.main_loop.bind_async_loop()
         channel_runtime = self.context.port_registry.get("channel:channel")
         if channel_runtime is not None and hasattr(channel_runtime, "on_ready"):
@@ -1382,6 +1385,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     fallback_route=action.route,
                     require_provider=require_provider,
                 )
+            if action.action_kind == "publish_control_catalog":
+                await self.publish_control_catalog_async()
+                return True
             if action.action_kind == "show_panel":
                 await self._handle_show_panel_async(action)
                 return

@@ -54,6 +54,25 @@ Plugin lifecycle:
 - Resident modules and shared implementation changes need an external host
   restart; plugin reload cannot replace their imported dependencies.
 
+Slash commands are a native generation-owned contribution:
+
+```python
+return ModuleHandle(
+    module_id="phone", tier=MODULE_TIER_DETACHABLE, detachable=True,
+    control_commands=(ControlCommandSpec(
+        name="pair_phone", description="Pair a new phone", handler=command,
+        show_in_panel=True, panel_button=True, panel_label="Pair phone",
+    ),),
+    control_action_handlers={"phone_pair": pair},
+)
+```
+
+Here `command(invocation)` returns a `ControlAction` with action kind
+`phone_pair` and the invocation's route. Declare `control:control` in
+`requires_ports`. PluginHost validates and publishes the commands, cleans them
+up on withdrawal or rollback, and refreshes the common channel catalog. Do not
+manually call `register_command` or add unregister callbacks from plugin start.
+
 Package preparation and online installation can already perform activation;
 inspect their result before adding another lifecycle request. See
 [package installation](../../../docs/pal_package_installation.md) and the

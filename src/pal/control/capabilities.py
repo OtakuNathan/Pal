@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from pal.control.handler import ControlEventHandler
 from pal.control.service import ControlPlane
+from pal.control.catalog import ControlCatalogSource
 from pal.core.module_registry import MODULE_TIER_MANAGED_ESSENTIAL, ModuleHandle
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -76,12 +77,14 @@ def register_with_core(context: MainContext, control_plane: ControlPlane) -> Mod
     provider = ControlIntrospectionProvider(control_plane=control_plane)
     prompt_provider = ControlPromptFragmentProvider(provider=provider)
     event_handler = ControlEventHandler(control_plane=control_plane)
+    source = ControlCatalogSource(control_plane)
     handle = ModuleHandle(
         module_id="control",
         tier=MODULE_TIER_MANAGED_ESSENTIAL,
         detachable=False,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
+        event_sources=[source],
         event_handlers={
             EventKind.SLASH_COMMAND: [event_handler],
             EventKind.INTERACTION_RESULT: [event_handler],
@@ -89,6 +92,7 @@ def register_with_core(context: MainContext, control_plane: ControlPlane) -> Mod
         ports={"control": control_plane},
     )
     context.register_module(handle)
+    context.event_source_registry.attach("control", source)
     context.prompt_fragment_registry.register(prompt_provider)
     context.event_handler_registry.register(EventKind.SLASH_COMMAND, event_handler, module_id="control")
     context.event_handler_registry.register(EventKind.INTERACTION_RESULT, event_handler, module_id="control")
