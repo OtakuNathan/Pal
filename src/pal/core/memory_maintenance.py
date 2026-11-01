@@ -39,7 +39,7 @@ class MemoryMaintenanceMixin:
         await self.state.memory_maintenance_changed.wait()
 
     def begin_memory_sleep(self) -> None:
-        """Publish sleep only after admission and the required notice succeed."""
+        """Publish sleep after maintenance admission without a channel notice."""
         if not self.state.memory_maintenance:
             raise RuntimeError("memory sleep requires maintenance admission")
         self.context.core_event_bus.emit(MEMORY_SLEEP, {
