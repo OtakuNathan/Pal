@@ -273,3 +273,103 @@ def test_native_wrong_correlation_is_unknown_and_never_replayed(android):
         android.caps.AndroidProvider(client).act(CapabilityCall("android_act", {"steps": [{"cmd": "home"}]}))
     assert caught.value.effect_receipt.outcome == EffectOutcome.UNKNOWN
     assert seen == ["/v1/control"]
+
+
+def screenshot_packet():
+    import base64
+    import hashlib
+    png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+P//PwAF/wL+Xg47rQAAAABJRU5ErkJggg==')
+    return {'surface': {'epoch': 7, 'width': 1080, 'height': 1920},
+            'app': {'package': 'com.example', 'activity': '.Canvas'}, 'frame_age_ms': 12,
+            'image': {'mime': 'image/png', 'width': 1, 'height': 1,
+                      'sha256': hashlib.sha256(png).hexdigest(), 'base64': base64.b64encode(png).decode()}}
+
+
+def test_screenshot_native_wire_correlates_and_rejects_corruption_without_replay(android):
+    from copy import deepcopy
+    from uuid import uuid4
+    packet = screenshot_packet()
+    for mutation in ('none', 'hash', 'size', 'extra', 'base64', 'correlation'):
+        client = android.client.AndroidHostClient(protocol='pal.android.v1')
+        client._descriptor = {'id': str(uuid4()), 'session': str(uuid4())}
+        value = deepcopy(packet)
+        if mutation == 'hash': value['image']['sha256'] = '0' * 64
+        if mutation == 'size': value['image']['width'] = 2
+        if mutation == 'extra': value['surface']['display'] = 0
+        if mutation == 'base64': value['image']['base64'] = 'invalid!'
+        calls = []
+        def http(path, body):
+            calls.append(path)
+            request = json.loads(body)
+            assert request['operation'] == {'kind': 'screenshot', 'max_edge': 720}
+            return {'v': 1, 'id': str(uuid4()) if mutation == 'correlation' else request['id'], 'kind': 'completed', 'value': value}
+        client._http = http
+        if mutation == 'none':
+            result = client.request('screenshot', {'max_edge': 720})
+            assert result['width'] == 1 and result['viewport_width'] == 1080
+            assert result['png'].startswith(b'\x89PNG')
+        else:
+            with pytest.raises(android.client.AndroidError): client.request('screenshot', {'max_edge': 720})
+        assert calls == ['/v1/control']
+
+
+def test_screenshot_legacy_and_invalid_edge_never_submit_a_capture(android):
+    from uuid import uuid4
+    for protocol, edge in [('legacy.droidline', 720), ('pal.android.v1', True), ('pal.android.v1', 255), ('pal.android.v1', 1921)]:
+        client = android.client.AndroidHostClient(protocol=protocol)
+        client._descriptor = {'id': str(uuid4()), 'session': str(uuid4())}
+        client._http = lambda *a: pytest.fail('must reject before HTTP')
+        with pytest.raises(android.client.AndroidError): client.request('screenshot', {'max_edge': edge})
+
+
+def test_screenshot_indirect_path_registers_real_conversation_artifact(android, tmp_path):
+    import asyncio
+    from pal.artifact import ArtifactManager, ArtifactRepository, ArtifactRecordModel, ArtifactRepresentationModel, ArtifactHotStateModel
+    from pal.foundation import PalV2Database
+    from pal.execution import register_with_core
+    packet = screenshot_packet()
+    wire = importlib.import_module('pal_android_browser.native_wire')
+    client = FakeClient([wire.screenshot(packet)])
+    database = PalV2Database(tmp_path / 'artifacts.sqlite3')
+    database.initialize([ArtifactRecordModel, ArtifactRepresentationModel, ArtifactHotStateModel])
+    core = _PalCoreBootstrap()
+    register_with_core(core.context)
+    core.publish_module_capabilities('execution')
+    runtime = core.context.execution_runtime
+    owner = ArtifactManager(runtime_root=tmp_path, repository=ArtifactRepository())
+    runtime.provider_registry['artifact:artifact'] = owner
+    from tests.turn_fakes import TurnIOFixture
+    runtime.register_provider_ref('core:turn_io', TurnIOFixture(scope='phone-scope', capabilities={'supports_vision': True}))
+    provider = android.caps.AndroidProvider(client, runtime_root=tmp_path)
+    subtree = compile_provider_subtree(provider, module_id='android_browser', lifecycle_scope='runtime', detachable=True)
+    runtime.mount_subtree(SimpleNamespace(mounted_subtree=subtree))
+    try:
+        result = asyncio.run(runtime.execute_tool_async(new_tool_call(name='call_tool', args={
+            'name': 'android_screenshot', 'args': {'device': 'test-phone', 'max_edge': 720}}), turn_id='phone-shot'))
+        assert result.ok, result.llm_text
+        assert result.structured['registration'] == 'registered', result.llm_text
+        assert Path(result.structured['path']).read_bytes() == wire.screenshot(packet)['png']
+        assert packet['image']['base64'] not in result.llm_text
+        assert 'base64' not in json.dumps(result.structured)
+        assert result.context_messages and result.context_messages[0].artifact_ids == (result.structured['artifact_id'],)
+        exposure = owner.select_prompt_exposure('phone-scope', 'phone-shot', 'inspect phone', {'supports_vision': True})
+        assert exposure.inline_parts
+        assert client.calls == [('screenshot', {'max_edge': 720}, 'test-phone')]
+    finally:
+        runtime.shutdown()
+        database.close()
+
+
+def test_accessibility_fault_dict_survives_indirect_output_validation(android):
+    fault = {'code': 'NO_ACCESSIBILITY', 'message': 'service disabled'}
+    client = FakeClient([{'ok': True, 'results': [{'ok': True}], 'screen': None, 'snapshot_error': fault}])
+    subtree = compile_provider_subtree(android.caps.AndroidProvider(client), module_id='android_browser', lifecycle_scope='runtime', detachable=True)
+    runtime = ExecutionRuntime()
+    try:
+        runtime.mount_subtree(SimpleNamespace(mounted_subtree=subtree))
+        result = runtime.invoke_indirect_tool(new_tool_call(name='android_act', args={'steps': [{'cmd': 'tap', 'x': 10, 'y': 20}]}))
+        assert isinstance(result, CompleteResult), result
+        assert result.output['snapshot_error'] == fault
+        assert len(client.calls) == 1
+    finally:
+        runtime.shutdown()

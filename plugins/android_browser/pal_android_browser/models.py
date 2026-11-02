@@ -21,6 +21,29 @@ class ObserveInput(DeviceInput):
     all_windows: bool = False
 
 
+class ScreenshotInput(DeviceInput):
+    max_edge: int = Field(default=1920, ge=256, le=1920,
+                          description="Maximum image edge. Default preserves the native viewport so image coordinates match taps.")
+
+
+class ScreenshotOutput(StrictToolModel):
+    device: str
+    package: str
+    activity: str
+    workspace: Literal["pal"]
+    generation: int
+    width: int
+    height: int
+    viewport_width: int
+    viewport_height: int
+    frame_age_ms: int
+    sha256: str
+    path: str
+    artifact_id: str | None = None
+    registration: Literal["registered", "unavailable", "failed", "unknown"]
+    registration_error: str | None = None
+
+
 class QueryInput(DeviceInput):
     by: Selector
     value: str
@@ -105,4 +128,4 @@ class QueryOutput(StrictToolModel):
 class ActOutput(StrictToolModel):
     results: list[dict[str, Any]]
     screen: dict[str, Any] | None = None
-    snapshot_error: str | None = None
+    snapshot_error: str | dict[str, Any] | None = None

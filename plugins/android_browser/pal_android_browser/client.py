@@ -42,6 +42,8 @@ class AndroidHostClient:
     def request(self, command: str, args: dict | None = None, *, device: str = "_") -> dict:
         if self.protocol == "pal.android.v1":
             return self._native(command, args or {}, device)
+        if command == "screenshot":
+            raise AndroidError("Screenshots require the native Pal Android host")
         if command == "devices":
             path, body = "/devices", None
         else:
@@ -67,10 +69,10 @@ class AndroidHostClient:
             except HTTPError as exc:
                 response = exc
             with response:
-                raw = response.read(8 * 1024 * 1024 + 1)
+                raw = response.read(16 * 1024 * 1024 + 1)
                 status = response.code
-            if len(raw) > 8 * 1024 * 1024:
-                raise AndroidError("Android response exceeds 8 MiB")
+            if len(raw) > 16 * 1024 * 1024:
+                raise AndroidError("Android response exceeds 16 MiB")
             result = json.loads(raw)
             if not isinstance(result, dict):
                 raise AndroidError("Invalid Android response envelope")
@@ -112,6 +114,11 @@ class AndroidHostClient:
                     operation = {"kind": "execute", "actions": [native_wire.action({"cmd": "wait_idle", **args})]}
                 case "apps":
                     operation = {"kind": "apps"}
+                case "screenshot":
+                    edge = args.get("max_edge", 1920)
+                    if type(edge) is not int or not 256 <= edge <= 1920:
+                        raise ValueError("Invalid screenshot edge")
+                    operation = {"kind": "screenshot", "max_edge": edge}
                 case _:
                     raise ValueError("Undeclared native operation")
         except (KeyError, ValueError, TypeError) as exc:
@@ -143,6 +150,11 @@ class AndroidHostClient:
                     return {"ok": True, "value": [native_wire.node(item) for item in value["matches"]]}
                 case "apps":
                     return {"ok": True, "value": value["apps"]}
+                case "screenshot":
+                    image = native_wire.screenshot(value)
+                    if max(image["width"], image["height"]) > args.get("max_edge", 1920):
+                        raise ValueError("Screenshot exceeds the requested edge")
+                    return image
                 case _:
                     return native_wire.receipt(value)
         except (KeyError, ValueError, TypeError) as exc:

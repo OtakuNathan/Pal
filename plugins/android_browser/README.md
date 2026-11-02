@@ -12,6 +12,7 @@ Discover in the `android` domain, then call through Pal's indirect tool path:
 | Alias | Behavior |
 | --- | --- |
 | `android_devices` | Paired devices, connection and accessibility readiness |
+| `android_screenshot` | Owned native desktop PNG as a conversation artifact, independently of accessibility |
 | `android_observe` | Current package/activity, screen dimensions, semantic tree |
 | `android_query` | All current matches by id, text, description or class |
 | `android_act` | Up to eight explicit steps, stop on first error, then fresh snapshot |
@@ -110,3 +111,24 @@ actions is reported as not applied; lost transport and indeterminate effects
 require observation before retry. Snapshots carry the workspace generation and
 an explicit truncation flag. The legacy host remains the default only when
 `protocol` is omitted; set `protocol = "legacy.droidline"` to document that choice.
+
+## Pixel observation (0.4.0)
+
+`android_screenshot` requires Pal Android 0.4.8+. Its `device` routing matches
+other Android capabilities. Optional `max_edge` defaults to 1920 (256–1920).
+The default preserves the native viewport; resized images return both image
+and viewport dimensions so Pal can scale coordinates. RPC validates request
+correlation, PNG dimensions and SHA-256 before storing a managed local artifact.
+The result contains metadata/path and registration status, never base64 text.
+Successful artifact registration contributes a conversation reference; Core
+attaches pixels only for vision-capable models. If registration is unavailable,
+use `import_artifact` on the saved path; reconcile uncertain registration with
+`search_artifacts` first.
+
+For canvas-only pages, screenshot → coordinate tap/swipe → screenshot provides
+an observation loop without accessibility. Semantic selectors and text input
+still require exposed nodes; this version supplies no blind keyboard. Launch
+confirmation uses system task information. Successful actions with unavailable
+accessibility retain applied receipts and a structured `snapshot_error`.
+Screenshots are limited to the owned background display, reject human takeover,
+and cannot bypass secure windows. They do not enable legacy Droidline capture.

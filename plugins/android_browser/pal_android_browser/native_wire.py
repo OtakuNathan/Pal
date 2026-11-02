@@ -1,6 +1,11 @@
 """Pal Android v1 boundary. The APK never consumes the legacy host protocol."""
 from __future__ import annotations
 
+import base64
+import hashlib
+import struct
+import zlib
+
 
 _SELECTORS = {
     "text": ("text", "exact"), "textContains": ("text", "contains"),
@@ -88,3 +93,33 @@ def receipt(value: dict) -> dict:
             raise ValueError("Unknown observation receipt")
     return {"ok": True, "results": steps, "screen": screen, "snapshot_error": error,
             "receipt_protocol": "pal.android.v1"}
+
+
+def screenshot(value: dict) -> dict:
+    surface, picture, app = value["surface"], value["image"], value["app"]
+    for record, keys in ((surface, {"epoch", "width", "height"}),
+                         (picture, {"mime", "width", "height", "sha256", "base64"}),
+                         (app, {"package", "activity"})):
+        if not isinstance(record, dict) or record.keys() != keys:
+            raise ValueError("Invalid screenshot fields")
+    if (set(value) != {"surface", "image", "app", "frame_age_ms"}
+            or picture["mime"] != "image/png"
+            or any(type(app[k]) is not str for k in app)
+            or type(value["frame_age_ms"]) is not int or value["frame_age_ms"] < 0
+            or any(type(n) is not int or n <= 0 for n in (*surface.values(), picture["width"], picture["height"]))
+            or max(surface["width"], surface["height"]) > 4000
+            or max(picture["width"], picture["height"]) > 1920
+            or picture["width"] > surface["width"] or picture["height"] > surface["height"]):
+        raise ValueError("Invalid screenshot metadata")
+    png = base64.b64decode(picture["base64"], validate=True)
+    if (not 33 <= len(png) <= 10 * 1024 * 1024 or png[:8] != b"\x89PNG\r\n\x1a\n"
+            or png[8:16] != b"\x00\x00\x00\rIHDR"
+            or struct.unpack(">II", png[16:24]) != (picture["width"], picture["height"])
+            or zlib.crc32(png[12:29]) != struct.unpack(">I", png[29:33])[0]
+            or hashlib.sha256(png).hexdigest() != picture["sha256"]):
+        raise ValueError("Invalid screenshot PNG")
+    return {"ok": True, "png": png, "package": app["package"], "activity": app["activity"],
+            "width": picture["width"], "height": picture["height"],
+            "viewport_width": surface["width"], "viewport_height": surface["height"],
+            "generation": surface["epoch"], "frame_age_ms": value["frame_age_ms"],
+            "sha256": picture["sha256"], "workspace": "pal"}

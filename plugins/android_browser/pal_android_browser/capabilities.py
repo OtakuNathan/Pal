@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
+from uuid import uuid4
+
+from pal.foundation import ArtifactIngestor
 
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.tool_facade import EffectReceipt, ToolExecutionError, ToolGuidance
-from pal.execution.tool_semantics import INDIRECT_EXTERNAL_READ, INDIRECT_EXTERNAL_WRITE
+from pal.execution.tool_semantics import INDIRECT_EXTERNAL_READ, INDIRECT_EXTERNAL_WRITE, INDIRECT_UNSAFE_LOCAL_WRITE
 from pal.shared import OPERATION_NAMESPACE, RuntimeStatus, capability_action, capability_node
 from pal.shared.tool_protocol import EffectOutcome, RetryDirective
 
 from .client import AndroidError, AndroidHostClient
 from .devices import AndroidDeviceRouter
 from .models import (ActInput, ActOutput, DevicesOutput, EmptyInput, ObserveInput,
-                     QueryInput, QueryOutput, ScreenOutput, DeviceInput, AppsOutput)
+                     QueryInput, QueryOutput, ScreenOutput, DeviceInput, AppsOutput,
+                     ScreenshotInput, ScreenshotOutput)
 
 
 def compact_node(node):
@@ -53,12 +58,12 @@ def screen(result: dict) -> dict:
 def guidance(purpose: str, use_when: str, terms: tuple[str, ...]) -> ToolGuidance:
     return ToolGuidance(
         purpose=purpose, use_when=use_when,
-        do_not_use_when="Desktop/browser control, arbitrary shell commands, or autonomous app business workflows.",
+        do_not_use_when="PC/browser control, arbitrary shell commands, or autonomous app business workflows.",
         search_domain="android", search_domain_aliases=("phone", "mobile"),
         search_domain_description="Observe and operate Android apps through a paired accessibility host.",
         search_objects=("phone",), search_terms=terms,
         search_intents=("操作安卓手机", "查看手机页面"),
-        failure_next_steps="Observe the phone before deciding whether to retry an action. Never blindly replay a batch.",
+        failure_next_steps="Inspect current state with accessibility observe, or android_screenshot when the tree is unavailable. Never blindly replay an action batch.",
     )
 
 
@@ -77,6 +82,7 @@ def success(data: dict, *, applied: bool = False, hint: str = "") -> CapabilityR
 class AndroidProvider:
     client: AndroidHostClient | AndroidDeviceRouter
     module_id: str = "android_browser"
+    runtime_root: Path | None = None
 
     def read(self, command: str, args: dict | None = None, *, device: str = "_") -> dict:
         try:
@@ -114,6 +120,44 @@ class AndroidProvider:
     def observe(self, call: CapabilityCall) -> CapabilityResult:
         args = ObserveInput.model_validate(call.args)
         return success(screen(self.read("dump", {"all_windows": args.all_windows}, device=args.device)))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="android", action_name="screenshot",
+                       guidance=guidance("Capture the owned Android desktop as a PNG and attach its conversation artifact.",
+                           "Inspect pixels when accessibility is incomplete or unavailable. Requires native Pal Android. Default image pixels match viewport tap coordinates; when resized, scale coordinates to viewport_width/viewport_height. Core delivers pixels only to vision-capable models; other models need a suitable image-processing capability.",
+                           ("screenshot", "image", "vision", "pixels")),
+                       InputModel=ScreenshotInput, OutputModel=ScreenshotOutput, aliases=("android_screenshot",),
+                       examples=({},), metadata={"async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+    async def screenshot(self, call: CapabilityCall) -> CapabilityResult:
+        args = ScreenshotInput.model_validate(call.args)
+        runtime = call.meta.get("execution_runtime")
+        root = getattr(runtime, "runtime_root", None) or self.runtime_root
+        if root is None:
+            raise ToolExecutionError("Screenshot cache has no runtime root", error_code="android_cache_unavailable")
+        result = self.read("screenshot", {"max_edge": args.max_edge}, device=args.device)
+        png = result["png"]
+        turn_id = str(call.meta.get("turn_id") or "manual")
+        stored = ArtifactIngestor(Path(root)).store_bytes(channel_kind="android_browser", bucket_id=turn_id,
+            file_name=f"android-{uuid4().hex[:12]}.png", content=png, mime_type="image/png")
+        data = {key: value for key, value in result.items() if key not in {"ok", "png"}}
+        data.update(device=args.device, path=stored.local_cached_path, artifact_id=None, registration="unavailable", registration_error=None)
+        owner = getattr(runtime, "provider_registry", {}).get("artifact:artifact")
+        messages = ()
+        if owner is not None:
+            try:
+                imported = await owner.import_local_for_turn(stored, runtime=runtime, turn_id=turn_id, source_channel="android_browser")
+                if imported.status == RuntimeStatus.OK:
+                    data.update(artifact_id=imported.structured["artifact_id"], registration="registered")
+                    messages = imported.context_messages
+                else:
+                    data.update(registration="failed", registration_error=imported.llm_text)
+            except Exception as exc:
+                data.update(registration="unknown", registration_error=f"{type(exc).__name__}: {exc}")
+        hint = ("Image registered; do not import it again. Core attaches pixels only when the model supports vision."
+                if data["registration"] == "registered" else
+                "Image saved. Reconcile uncertain registration with search_artifacts; when registration is unavailable, import_artifact with path.")
+        return CapabilityResult(status=RuntimeStatus.OK, structured=data,
+            llm_text=json.dumps(data, ensure_ascii=False, separators=(",", ":")), context_messages=messages,
+            effect_receipt=EffectReceipt(outcome=EffectOutcome.APPLIED), recovery_hint=hint)
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="android", action_name="query",
                        guidance=guidance("Find all current controls by resource id, text, description or class.",
