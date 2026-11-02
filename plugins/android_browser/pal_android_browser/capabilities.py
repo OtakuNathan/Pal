@@ -17,7 +17,7 @@ from .client import AndroidError, AndroidHostClient
 from .devices import AndroidDeviceRouter
 from .models import (ActInput, ActOutput, DevicesOutput, EmptyInput, ObserveInput,
                      QueryInput, QueryOutput, ScreenOutput, DeviceInput, AppsOutput,
-                     ScreenshotInput, ScreenshotOutput)
+                     ScreenshotInput, ScreenshotOutput, FocusOutput)
 
 
 def compact_node(node):
@@ -112,6 +112,16 @@ class AndroidProvider:
         args = DeviceInput.model_validate(call.args)
         return success({"apps": self.read("apps", device=args.device)["value"]})
 
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="android", action_name="focus",
+                       guidance=guidance("Inspect the owned desktop's active editor session without requiring editable accessibility nodes.",
+                           "After clicking an input field, obtain a ready editor lease before input(by=focus). Android 13+ native host required. Ready requires exclusive app tasks and a focused owned window. A tap or visible keyboard alone does not prove focus. Unavailable is a refusal, never permission to paste blindly.",
+                           ("focus", "editor", "keyboard", "typing")),
+                       InputModel=DeviceInput, OutputModel=FocusOutput, aliases=("android_focus",),
+                       examples=({},), execution=INDIRECT_EXTERNAL_READ)
+    def focus(self, call: CapabilityCall) -> CapabilityResult:
+        args = DeviceInput.model_validate(call.args)
+        return success({"focus": self.read("focus", device=args.device)["focus"]})
+
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="android", action_name="observe",
                        guidance=guidance("Read a self-contained current app accessibility snapshot.",
                                          "Inspect app, page, text, controls and bounds. Offscreen/recycled content may be absent; scroll then observe.", ("observe", "screen", "tree")),
@@ -171,7 +181,7 @@ class AndroidProvider:
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="android", action_name="act",
                        guidance=guidance("Execute up to eight explicit UI primitives, stop on error, then return a fresh screen.",
-                                         "Tap/type/swipe/navigate in an observed Android app. Batch only known steps; leave page and business decisions to Pal. Coordinate tap is a fallback. A timeout may mean actions already ran; observe before retrying.", ("tap", "input", "swipe", "launch", "batch")),
+                                         "Tap/type/swipe/navigate in an observed Android app. Batch only known steps; leave page and business decisions to Pal. For node-free typing: click, inspect android_focus, then input(by=focus,package,editor,text) inserts at the current cursor/selection. Editor leases expire on focus restart; an unverified submission may have typed already, so inspect a screenshot before continuing. Coordinate tap is a fallback. A timeout may mean actions already ran; observe before retrying.", ("tap", "input", "swipe", "launch", "batch")),
                        InputModel=ActInput, OutputModel=ActOutput, aliases=("android_act",),
                        examples=({"steps": [{"cmd": "launch", "package": "com.android.settings"}]},),
                        execution=INDIRECT_EXTERNAL_WRITE)

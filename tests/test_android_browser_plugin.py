@@ -373,3 +373,59 @@ def test_accessibility_fault_dict_survives_indirect_output_validation(android):
         assert len(client.calls) == 1
     finally:
         runtime.shutdown()
+
+
+def test_focused_input_and_focus_observation_use_the_indirect_contract(android):
+    from uuid import uuid4
+    client = android.client.AndroidHostClient(protocol='pal.android.v1')
+    client._descriptor = {'id': str(uuid4()), 'session': str(uuid4())}
+    editor = str(uuid4())
+    calls = []
+    def http(path, body):
+        request = json.loads(body); operation = request['operation']; calls.append(operation)
+        if operation['kind'] == 'focus':
+            value = {'kind': 'ready', 'editor': editor, 'package': 'com.example', 'field_id': 0}
+        else:
+            assert operation['actions'] == [{'kind': 'write_focused', 'editor': editor, 'package': 'com.example', 'text': '你好😀'}]
+            value = {'steps': [{'kind': 'applied'}], 'observation': {'kind': 'unavailable', 'fault': {'code': 'TIMEOUT', 'message': 'no nodes'}}}
+        return {'v': 1, 'id': request['id'], 'kind': 'completed', 'value': value}
+    client._http = http
+    subtree = compile_provider_subtree(android.caps.AndroidProvider(client), module_id='android_browser', lifecycle_scope='runtime', detachable=True)
+    runtime = ExecutionRuntime()
+    try:
+        runtime.mount_subtree(SimpleNamespace(mounted_subtree=subtree))
+        focus = runtime.invoke_indirect_tool(new_tool_call(name='android_focus', args={}))
+        assert isinstance(focus, CompleteResult), focus
+        assert focus.output['focus']['editor'] == editor
+        result = runtime.invoke_indirect_tool(new_tool_call(name='android_act', args={'steps': [
+            {'cmd': 'input', 'by': 'focus', 'package': 'com.example', 'editor': editor, 'text': '你好😀'}]}))
+        assert isinstance(result, CompleteResult), result
+        assert result.output['snapshot_error']['code'] == 'TIMEOUT'
+        assert len(calls) == 2
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize('change', [
+    {'editor': None}, {'package': None}, {'append': True}, {'mode': 'replace'}, {'text': ''},
+])
+def test_focused_input_requires_an_explicit_lease_and_has_no_silent_modes(android, change):
+    step = {'cmd': 'input', 'by': 'focus', 'package': 'com.example', 'editor': 'lease', 'text': 'hello'} | change
+    step = {k: v for k, v in step.items() if v is not None}
+    with pytest.raises(ValidationError):
+        android.models.ActInput.model_validate({'steps': [step]})
+
+
+def test_legacy_host_refuses_editor_operations_before_http(android):
+    client = android.client.AndroidHostClient(protocol='legacy.droidline')
+    client._http = lambda *a: pytest.fail('must not submit an editor command to legacy host')
+    for command, args in [('focus', {}), ('batch', {'steps': [{'cmd': 'input', 'by': 'focus', 'package': 'com.example', 'editor': 'lease', 'text': 'hello'}]})]:
+        with pytest.raises(android.client.AndroidError): client.request(command, args)
+
+
+def test_unavailable_focus_preserves_the_reason_without_inventing_a_lease(android):
+    fault = {'code': 'FOCUS_SCOPE', 'message': 'same app on another display'}
+    client = FakeClient([{'ok': True, 'focus': {'kind': 'unavailable', 'fault': fault}}])
+    result = android.caps.AndroidProvider(client).focus(CapabilityCall('android_focus'))
+    assert result.structured == {'focus': {'kind': 'unavailable', 'fault': fault}}
+    assert 'editor' not in result.structured['focus']

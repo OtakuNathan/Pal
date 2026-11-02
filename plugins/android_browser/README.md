@@ -132,3 +132,40 @@ confirmation uses system task information. Successful actions with unavailable
 accessibility retain applied receipts and a structured `snapshot_error`.
 Screenshots are limited to the owned background display, reject human takeover,
 and cannot bypass secure windows. They do not enable legacy Droidline capture.
+
+## Editor-session input (0.5.0, Pal Android 0.4.9+)
+
+`android_focus(device?)` inspects a real editor connection without requiring an
+editable accessibility node. A ready result carries `editor`, `package` and
+`field_id`; the field id is descriptive, not a stable identity. Otherwise the
+result contains an explicit unavailable fault. A tap or visible keyboard is
+not a focus receipt.
+
+After a ready observation, use the existing `android_act` primitive:
+
+```json
+{"device":"<device UUID>","steps":[{"cmd":"input","by":"focus","package":"com.example","editor":"<editor from android_focus>","text":"你好"}]}
+```
+
+This inserts into the current cursor/selection via Android's accessibility IME
+connection. It does not replace the entire field, append at an assumed end, or
+press Enter. Existing node-targeted `input` replacement/append behavior remains
+available. Missing leases and unsupported extra modes are rejected by schema.
+
+The backend binds the lease to the editor session and workspace, invalidates it
+on input restart/finish or service disconnect, and checks app/window/task scope
+again before dispatch. Shared same-package tasks on other displays/users,
+truncated task inventories, unidentified application windows on another screen,
+missing ownership evidence and password/key-only editors refuse this path.
+This is deliberately conservative; an IME connection alone has no public display
+identifier. Scope checks may therefore refuse some custom/OEM windows.
+
+A submitted commit is never automatically repeated. Matching bounded editor
+readback produces an applied receipt. Missing/unreliable readback or a focus
+change after dispatch produces an indeterminate receipt and stops the batch;
+use `android_screenshot` to reconcile before continuing. No clipboard fallback,
+keyboard replacement or implicit sending is performed. Android 11/12 and legacy
+Droidline hosts retain node input but do not expose this editor-session path.
+
+The source/package is prepared for later device testing; installing the APK and
+coordinating the plugin package update are separate activation steps.

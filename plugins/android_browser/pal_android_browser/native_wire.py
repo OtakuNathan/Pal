@@ -24,6 +24,8 @@ def action(step: dict) -> dict:
     match step["cmd"]:
         case "launch":
             return {"kind": "launch", "package": step["package"]}
+        case "input" if step.get("by") == "focus":
+            return {"kind": "write_focused", "editor": step["editor"], "package": step["package"], "text": step["text"]}
         case "touch" | "input":
             target = {"selector": selector(step), "wait_ms": round(step.get("timeout", 5) * 1000)}
             if "nth" in step:
@@ -123,3 +125,21 @@ def screenshot(value: dict) -> dict:
             "viewport_width": surface["width"], "viewport_height": surface["height"],
             "generation": surface["epoch"], "frame_age_ms": value["frame_age_ms"],
             "sha256": picture["sha256"], "workspace": "pal"}
+
+
+def focus(value: dict) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("Invalid focus observation")
+    if value.get("kind") == "ready":
+        if (set(value) != {"kind", "editor", "package", "field_id"}
+                or any(not isinstance(value[k], str) or not value[k] for k in ("editor", "package"))
+                or type(value["field_id"]) is not int):
+            raise ValueError("Invalid editor lease")
+    elif value.get("kind") == "unavailable":
+        fault = value.get("fault")
+        if (set(value) != {"kind", "fault"} or not isinstance(fault, dict)
+                or set(fault) != {"code", "message"} or any(not isinstance(v, str) for v in fault.values())):
+            raise ValueError("Invalid focus fault")
+    else:
+        raise ValueError("Unknown focus observation")
+    return {"ok": True, "focus": value}

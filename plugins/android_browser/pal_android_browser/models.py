@@ -66,6 +66,17 @@ class InputStep(Target):
     append: bool = False
 
 
+class FocusInputStep(StrictToolModel):
+    cmd: Literal["input"]
+    by: Literal["focus"]
+    package: str = Field(min_length=1, pattern=r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$", description="Expected app package from android_focus.")
+    editor: str = Field(min_length=1, max_length=64, description="Opaque editor lease from android_focus; expires on focus changes or input restart.")
+    text: str = Field(min_length=1, max_length=16384, description="Insert at the editor cursor/selection. Does not replace the entire field or press Enter.")
+
+
+InputAction = Annotated[InputStep | FocusInputStep, Field(discriminator="by")]
+
+
 class TapStep(StrictToolModel):
     cmd: Literal["tap"]
     x: int = Field(ge=0)
@@ -93,7 +104,7 @@ class WaitStep(StrictToolModel):
     timeout: float = Field(default=5.0, ge=0.1, le=10)
 
 
-Step = Annotated[TouchStep | InputStep | TapStep | SwipeStep | NavigationStep | LaunchStep | WaitStep,
+Step = Annotated[TouchStep | InputAction | TapStep | SwipeStep | NavigationStep | LaunchStep | WaitStep,
                  Field(discriminator="cmd")]
 
 
@@ -129,3 +140,19 @@ class ActOutput(StrictToolModel):
     results: list[dict[str, Any]]
     screen: dict[str, Any] | None = None
     snapshot_error: str | dict[str, Any] | None = None
+
+
+class ReadyFocus(StrictToolModel):
+    kind: Literal["ready"]
+    editor: str
+    package: str
+    field_id: int
+
+
+class UnavailableFocus(StrictToolModel):
+    kind: Literal["unavailable"]
+    fault: dict[str, str]
+
+
+class FocusOutput(StrictToolModel):
+    focus: Annotated[ReadyFocus | UnavailableFocus, Field(discriminator="kind")]

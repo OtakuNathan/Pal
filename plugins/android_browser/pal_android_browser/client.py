@@ -42,8 +42,8 @@ class AndroidHostClient:
     def request(self, command: str, args: dict | None = None, *, device: str = "_") -> dict:
         if self.protocol == "pal.android.v1":
             return self._native(command, args or {}, device)
-        if command == "screenshot":
-            raise AndroidError("Screenshots require the native Pal Android host")
+        if command in {"screenshot", "focus"} or (command == "batch" and any(s.get("by") == "focus" for s in (args or {}).get("steps", []))):
+            raise AndroidError("Pixel and editor input capabilities require the native Pal Android host")
         if command == "devices":
             path, body = "/devices", None
         else:
@@ -112,6 +112,8 @@ class AndroidHostClient:
                     operation = {"kind": "execute", "actions": [native_wire.action(step) for step in args["steps"]]}
                 case "wait_idle":
                     operation = {"kind": "execute", "actions": [native_wire.action({"cmd": "wait_idle", **args})]}
+                case "focus":
+                    operation = {"kind": "focus"}
                 case "apps":
                     operation = {"kind": "apps"}
                 case "screenshot":
@@ -150,6 +152,8 @@ class AndroidHostClient:
                     return {"ok": True, "value": [native_wire.node(item) for item in value["matches"]]}
                 case "apps":
                     return {"ok": True, "value": value["apps"]}
+                case "focus":
+                    return native_wire.focus(value)
                 case "screenshot":
                     image = native_wire.screenshot(value)
                     if max(image["width"], image["height"]) > args.get("max_edge", 1920):
