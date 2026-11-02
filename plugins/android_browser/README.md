@@ -160,6 +160,15 @@ missing ownership evidence and password/key-only editors refuse this path.
 This is deliberately conservative; an IME connection alone has no public display
 identifier. Scope checks may therefore refuse some custom/OEM windows.
 
+An independent window focus also does not guarantee global IME focus. AOSP
+Android 16 only accepts editor clients on the top-focused display; the APK's
+Android 14+ background display intentionally cannot steal that focus. The API 36
+emulator therefore returns unavailable for this path, while API 33 has verified
+real Chinese/emoji insertion without editable nodes. This is not yet a verified
+Android 16 background WeChat input solution. No focus-policy change is performed
+to obtain a connection. See the
+[AOSP WMS focus check](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/wm/WindowManagerService.java).
+
 A submitted commit is never automatically repeated. Matching bounded editor
 readback produces an applied receipt. Missing/unreliable readback or a focus
 change after dispatch produces an indeterminate receipt and stops the batch;
