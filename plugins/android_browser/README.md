@@ -210,4 +210,6 @@ before transport. The global Pal tool definitions remain frozen.
 
 A temporary real-device probe on V2520A Android 16 verified Chinese/emoji in the
 hidden-node fixture and Chinese text in WeChat search, with the main focus and
-clipboard preserved. These probe results precede packaged APK/plugin activation.
+clipboard preserved. Packaged APK 0.4.10 subsequently passed the real native RPC
+WeChat-search test on that phone; android_browser 0.6.0 is loaded and attached.
+See the [device acceptance record](https://github.com/OtakuNathan/pal-android/blob/main/docs/device-acceptance.md#2026-11-03-explicit-ctrlv-fallback-and-final-activation).
