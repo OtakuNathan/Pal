@@ -1,7 +1,0 @@
-# Use pal.android.v1 for the Pal APK; legacy.droidline for an existing Droidline host.
-protocol = "legacy.droidline"
-# Copy to <runtime_root>/data/android_browser/config.toml.
-url = "http://127.0.0.1:8780"
-timeout = 90.0
-# Optional HTTP bearer token, when required by the Droidline server.
-# token = "..."

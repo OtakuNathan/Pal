@@ -54,6 +54,11 @@ Plugins contribute capabilities, providers, presentation and sidecars through
 explicit lifecycles. Pal can inspect its own runtime, diagnose failures and carry
 out authorized maintenance. Plugin refresh and host restart have separate owners.
 
+The [Pal Android repository](https://github.com/OtakuNathan/pal-android) owns the
+phone APK, control SDK and both native plugins (`android_browser` and
+`android_companion`). Its Android and Pal plugin components build and distribute
+independently from one source repository.
+
 ## Design Philosophy
 
 - **Make decisions explicit.** Configuration, permissions, task contracts and
