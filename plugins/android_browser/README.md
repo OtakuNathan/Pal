@@ -164,8 +164,10 @@ An independent window focus also does not guarantee global IME focus. AOSP
 Android 16 only accepts editor clients on the top-focused display; the APK's
 Android 14+ background display intentionally cannot steal that focus. The API 36
 emulator therefore returns unavailable for this path, while API 33 has verified
-real Chinese/emoji insertion without editable nodes. This is not yet a verified
-Android 16 background WeChat input solution. No focus-policy change is performed
+real Chinese/emoji insertion without editable nodes. A real Vivo V2520A on
+Android 16 also returned `FOCUS_MISSING` for both the hidden-node fixture and
+WeChat's composer, with the system IME still bound to display 0. This path does
+not provide background WeChat input on that phone. No focus-policy change is performed
 to obtain a connection. See the
 [AOSP WMS focus check](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/wm/WindowManagerService.java).
 
