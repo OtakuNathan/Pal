@@ -482,7 +482,7 @@ def _build_bwrap_invocation(
             args.extend(["--dir", str(host_path)])
             args.extend(["--ro-bind", str(host_path), str(host_path)])
     # The harness runs the resolved current interpreter, which may live outside
-    # /usr. Project its code before narrower runtime/dependency/workspace binds.
+    # /usr. Project its code and loaded libpython before narrower binds.
     for python_path in _python_runtime_paths():
         _append_bind_path(args, python_path, read_only=True)
     _append_dir_scaffold(args, Path(runtime_root))
@@ -791,7 +791,7 @@ def _safe_component(value: str) -> str:
 
 
 def _python_runtime_paths() -> tuple[Path, ...]:
-    """Expose the selected Python executable and standard library, not its prefix.
+    """Expose Python's executable, standard library and loaded shared library.
 
     The harness resolves sys.executable, so virtualenv executable aliases do not
     need additional mounts. Use the base interpreter's installed paths rather
@@ -822,7 +822,32 @@ def _python_runtime_paths() -> tuple[Path, ...]:
         libraries.append(path)
     if not (libraries[0] / "encodings" / "__init__.py").is_file():
         raise RuntimeError(f"sandbox Python standard library is incomplete: {libraries[0]}")
-    return tuple(dict.fromkeys([*libraries, executable]))
+    return tuple(dict.fromkeys([*libraries, executable, *_python_shared_library_paths()]))
+
+
+def _python_shared_library_paths() -> tuple[Path, ...]:
+    """Find the actual loaded libpython after relocation, without binding LIBDIR."""
+    if sys.platform != "linux":
+        return ()
+    library_name = f"libpython{sys.version_info.major}.{sys.version_info.minor}{sys.abiflags}.so"
+    paths: list[Path] = []
+    # Build-time LIBDIR can point at a different installation. Linux's mappings
+    # identify the runtime file, including its SONAME version. Keep file mounts
+    # narrow: neighboring prefix files are not part of the worker's authority.
+    for line in Path("/proc/self/maps").read_text(encoding="utf-8", errors="surrogateescape").splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) != 6:
+            continue
+        path = Path(fields[5])
+        if path.name != library_name and not path.name.startswith(library_name + "."):
+            continue
+        if not path.is_absolute():
+            raise RuntimeError(f"sandbox Python shared library path is invalid: {path}")
+        path = path.resolve(strict=True)
+        if not path.is_file():
+            raise RuntimeError(f"sandbox Python shared library is unavailable: {path}")
+        paths.append(path)
+    return tuple(dict.fromkeys(paths))
 
 
 def _python_dependency_paths() -> list[str]:

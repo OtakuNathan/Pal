@@ -379,7 +379,7 @@ def test_sandboxed_worker_loads_both_hook_layers_from_read_only_configuration(tm
     import json
     import shutil
     import subprocess
-    import sys
+    from pal.bunshin.harnesses import pal_harness_spec
     from pal.bunshin.sandbox import build_sandboxed_runner_invocation
     from pal.shared import BunshinInvocationPack
 
@@ -414,7 +414,7 @@ def test_sandboxed_worker_loads_both_hook_layers_from_read_only_configuration(tm
                                  metadata={"sandbox": {"enabled": True, "backend": "bwrap", "run_id": "hook-config"}})
     monkeypatch.setenv("PAL_BUNSHIN_SANDBOX_SCRATCH_ROOT", str(tmp_path / "scratch"))
     argv, env = build_sandboxed_runner_invocation(
-        runtime_root=tmp_path, pack=pack, argv=[sys.executable, "-c", script], env={"PATH": "/usr/bin:/bin"},
+        runtime_root=tmp_path, pack=pack, argv=[pal_harness_spec().worker_argv[0], "-c", script], env={"PATH": "/usr/bin:/bin"},
     )
     result = subprocess.run(argv, env=env, cwd=repo, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
