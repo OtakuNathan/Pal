@@ -24,6 +24,8 @@ def action(step: dict) -> dict:
     match step["cmd"]:
         case "launch":
             return {"kind": "launch", "package": step["package"]}
+        case "input" if step.get("by") == "clipboard":
+            return {"kind": "paste", "package": step["package"], "text": step["text"]}
         case "input" if step.get("by") == "focus":
             return {"kind": "write_focused", "editor": step["editor"], "package": step["package"], "text": step["text"]}
         case "touch" | "input":

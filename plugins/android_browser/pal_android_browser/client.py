@@ -42,7 +42,7 @@ class AndroidHostClient:
     def request(self, command: str, args: dict | None = None, *, device: str = "_") -> dict:
         if self.protocol == "pal.android.v1":
             return self._native(command, args or {}, device)
-        if command in {"screenshot", "focus"} or (command == "batch" and any(s.get("by") == "focus" for s in (args or {}).get("steps", []))):
+        if command in {"screenshot", "focus"} or (command == "batch" and any(s.get("by") in {"focus", "clipboard"} for s in (args or {}).get("steps", []))):
             raise AndroidError("Pixel and editor input capabilities require the native Pal Android host")
         if command == "devices":
             path, body = "/devices", None

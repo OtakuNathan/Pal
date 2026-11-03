@@ -74,7 +74,14 @@ class FocusInputStep(StrictToolModel):
     text: str = Field(min_length=1, max_length=16384, description="Insert at the editor cursor/selection. Does not replace the entire field or press Enter.")
 
 
-InputAction = Annotated[InputStep | FocusInputStep, Field(discriminator="by")]
+class ClipboardInputStep(StrictToolModel):
+    cmd: Literal["input"]
+    by: Literal["clipboard"]
+    package: str = Field(min_length=1, pattern=r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$", description="Expected foreground app on the owned desktop; inspect the field before choosing this fallback.")
+    text: str = Field(min_length=1, max_length=16384, description="Explicit one-shot Ctrl+V at the current cursor/selection. Requires an unlocked phone; no select-all or Enter. Inspect a screenshot after the unverified receipt.")
+
+
+InputAction = Annotated[InputStep | FocusInputStep | ClipboardInputStep, Field(discriminator="by")]
 
 
 class TapStep(StrictToolModel):

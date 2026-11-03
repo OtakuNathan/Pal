@@ -429,3 +429,46 @@ def test_unavailable_focus_preserves_the_reason_without_inventing_a_lease(androi
     result = android.caps.AndroidProvider(client).focus(CapabilityCall('android_focus'))
     assert result.structured == {'focus': {'kind': 'unavailable', 'fault': fault}}
     assert 'editor' not in result.structured['focus']
+
+
+def test_clipboard_input_uses_one_native_dispatch_and_preserves_uncertainty(android):
+    from uuid import uuid4
+    from pal.shared.tool_protocol import FailedResult
+    client = android.client.AndroidHostClient(protocol='pal.android.v1')
+    client._descriptor = {'id': str(uuid4()), 'session': str(uuid4())}
+    calls = []
+    def http(path, body):
+        request = json.loads(body); calls.append(request['operation'])
+        assert request['operation'] == {'kind': 'execute', 'actions': [
+            {'kind': 'paste', 'package': 'com.example', 'text': '你好😀'}]}
+        return {'v': 1, 'id': request['id'], 'kind': 'completed', 'value': {
+            'steps': [{'kind': 'indeterminate', 'fault': {'code': 'INPUT_UNVERIFIED', 'message': 'Inspect screenshot'}}],
+            'observation': {'kind': 'unavailable', 'fault': {'code': 'TIMEOUT', 'message': 'no nodes'}}}}
+    client._http = http
+    subtree = compile_provider_subtree(android.caps.AndroidProvider(client), module_id='android_browser', lifecycle_scope='runtime', detachable=True)
+    runtime = ExecutionRuntime()
+    try:
+        runtime.mount_subtree(SimpleNamespace(mounted_subtree=subtree))
+        result = runtime.invoke_indirect_tool(new_tool_call(name='android_act', args={'steps': [
+            {'cmd': 'input', 'by': 'clipboard', 'package': 'com.example', 'text': '你好😀'}]}))
+        assert isinstance(result, FailedResult), result
+        assert result.effect == EffectOutcome.UNKNOWN
+        assert result.retry == RetryDirective.RECONCILE_FIRST
+        assert len(calls) == 1
+    finally:
+        runtime.shutdown()
+
+
+@pytest.mark.parametrize('change', [{'package': None}, {'text': ''}, {'append': True}, {'send': True}, {'editor': 'lease'}])
+def test_clipboard_input_is_explicit_and_rejects_implicit_modes(android, change):
+    step = {'cmd': 'input', 'by': 'clipboard', 'package': 'com.example', 'text': 'hello'} | change
+    step = {k: v for k, v in step.items() if v is not None}
+    with pytest.raises(ValidationError):
+        android.models.ActInput.model_validate({'steps': [step]})
+
+
+def test_legacy_host_rejects_clipboard_before_http(android):
+    client = android.client.AndroidHostClient(protocol='legacy.droidline')
+    client._http = lambda *a: pytest.fail('must not try clipboard paste on a legacy host')
+    with pytest.raises(android.client.AndroidError):
+        client.request('batch', {'steps': [{'cmd': 'input', 'by': 'clipboard', 'package': 'com.example', 'text': 'hello'}]})

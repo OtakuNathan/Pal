@@ -180,3 +180,34 @@ Droidline hosts retain node input but do not expose this editor-session path.
 
 The source/package is prepared for later device testing; installing the APK and
 coordinating the plugin package update are separate activation steps.
+
+## Explicit clipboard fallback (0.6.0, Pal Android 0.4.10+)
+
+When no editor connection is available, inspect the screenshot, click the input
+field, then explicitly choose this variant of the existing `android_act`:
+
+```json
+{"device":"<device UUID>","steps":[{"cmd":"input","by":"clipboard","package":"com.tencent.mm","text":"你好"}]}
+```
+
+The phone must be unlocked. The host checks the owned foreground app and its
+focused application window, temporarily replaces the system clipboard, and
+sends exactly one Ctrl+V chord to that display. It does not select all, replace
+the entire field, switch keyboards or press Enter. No editor lease is required;
+window focus still cannot prove which field received the preceding click.
+
+The helper preserves the old clipboard in memory and restores it when the last
+read still identifies its temporary value. An unreadable existing clipboard is
+not overwritten, and a new copy made during the operation is left alone. This
+uses the shared system clipboard; it is not an isolated per-display clipboard
+or an atomic compare-and-swap with other apps.
+
+A dispatched chord returns `INPUT_UNVERIFIED`/indeterminate and stops the batch,
+even when the text appeared. Read `android_screenshot`, confirm the contents and
+then continue in a new call. Never use clipboard fallback to repeat an earlier
+input with an uncertain outcome. Legacy Droidline hosts reject this variant
+before transport. The global Pal tool definitions remain frozen.
+
+A temporary real-device probe on V2520A Android 16 verified Chinese/emoji in the
+hidden-node fixture and Chinese text in WeChat search, with the main focus and
+clipboard preserved. These probe results precede packaged APK/plugin activation.

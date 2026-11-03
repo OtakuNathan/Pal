@@ -15,7 +15,7 @@ from .devices import AndroidDeviceRouter
 class AndroidBundle:
     runtime_root: Path
     plugin_id: str = "android_browser"
-    version: str = "0.5.0"
+    version: str = "0.6.0"
 
     def start(self, scope):
         path = self.runtime_root / "data" / self.plugin_id / "config.toml"
