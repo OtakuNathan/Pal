@@ -57,12 +57,12 @@ def test_empty_configuration_has_the_same_snapshot_shape(service):
     assert not payload["diagnostics"]["partial"]
 
 
-def test_error_summaries_are_bounded_and_do_not_replace_resident_report(service):
+def test_error_summaries_keep_the_root_and_do_not_replace_resident_report(service):
     report = 'Traceback (most recent call last):\n  File "/owner/private.py", line 1\n    request()\nRuntimeError: quota exceeded token=hidden-secret\n' + 'response body ' * 500
     service.last_errors["brave"] = report
     result = snapshot(service)
     brave = next(item for item in result.structured["providers"] if item["name"] == "brave")
-    assert len(brave["health"]["last_error"]) <= 600
+    assert brave["health"]["last_error"] == "RuntimeError: quota exceeded token=[redacted]"
     assert "quota exceeded" in brave["health"]["last_error"]
     assert "Traceback" not in result.llm_text
     assert "/owner/private.py" not in result.llm_text
@@ -82,7 +82,7 @@ def test_one_unavailable_health_section_preserves_other_providers(service, monke
     assert result.status == "ok"
     assert providers["brave"]["auth"]["authorized"] is False
     assert providers["brave"]["health"]["status"] == "unavailable"
-    assert len(providers["brave"]["health"]["error"]) <= 600
+    assert providers["brave"]["health"]["error"] == "RuntimeError: health source unavailable token=[redacted] " + "x" * 2000
     assert providers["ddg"]["health"]["healthy"] is True
     assert result.structured["diagnostics"]["partial"] is True
     assert "providers.brave.health" in result.structured["diagnostics"]["unavailable_sections"]

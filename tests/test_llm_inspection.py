@@ -101,14 +101,14 @@ def test_usage_is_one_process_snapshot_with_only_summary_fields(runtime, monkeyp
 
 
 @pytest.mark.parametrize('section,method', [('thinking', 'thinking_status'), ('usage', 'usage_snapshot')])
-def test_unavailable_section_keeps_other_diagnostics_and_a_bounded_error(runtime, monkeypatch, section, method):
+def test_unavailable_section_keeps_other_diagnostics_and_the_complete_cause(runtime, monkeypatch, section, method):
     monkeypatch.setattr(runtime, method, Mock(side_effect=RuntimeError('backend unavailable token=hidden-secret ' + 'x' * 3000)))
     result = snapshot(runtime)
     payload = result.structured
     assert result.status == 'ok'
     assert payload['endpoint_count'] == 2
     assert payload[section]['status'] == 'unavailable'
-    assert len(payload[section]['error']) <= 600
+    assert payload[section]['error'] == 'RuntimeError: backend unavailable token=[redacted] ' + 'x' * 3000
     assert section in payload['diagnostics']['unavailable_sections']
     assert payload['diagnostics']['partial'] is True
     assert 'Traceback' not in result.llm_text and 'hidden-secret' not in result.llm_text

@@ -380,9 +380,8 @@ class WebSearchIntrospectionProvider:
 
 
 def _compact_inspection_errors(value: Any) -> Any:
-    """Keep owner diagnostics intact while bounding model-facing error reports."""
+    """Remove private frames while retaining the complete diagnostic cause."""
     if isinstance(value, dict):
-        # Reserve room for the truncation marker within a 600-character budget.
         return {
             key: diagnostic_reason(item)
             if key in {"error", "last_error"} and isinstance(item, str)
