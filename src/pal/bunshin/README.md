@@ -134,6 +134,9 @@ Interaction rule:
   They add only recording/reuse facts. Recording failures retain the lower
   result and distinguish an already-saved record from an uncertain write;
   they never reconstruct a public error from internal structured diagnostics
+- sandbox evidence reads go through the role gateway, limited to references in
+  the authenticated draft's recorded cases or the exact replayed operation.
+  Public-result artifacts use the same byte-storage interface as stdout/stderr
 - invocation directories and prepared role-workspace clones are disposable
   session-owned runtime state. A completed or cancelled session deletes them
   after its durable database transition; Manager startup reconciles terminal

@@ -27,6 +27,9 @@ context can describe an earlier operation whose recovery failed, so it remains
 log evidence rather than replacing the current failure. Owner-authored public
 reasons preserve operation facts such as an already-applied write, including
 when reached through an explicit cause chain or an exception group.
+Cause projection removes frames and redundant wrappers without a default
+character cap; long causes and recovery facts remain intact. Display surfaces
+that need a preview must request an explicit limit.
 
 `fd_lease` treats an SDK client, socket, and their hidden responses or streams
 as one private resource graph. I/O requires a generation-fenced

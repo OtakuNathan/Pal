@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -21,6 +21,14 @@ def role_gateway_client_from_env(runtime_root: Path) -> BunshinRoleGatewayClient
 @dataclass
 class RoleGatewayArtifactStore:
     client: BunshinRoleGatewayClient
+    evidence_scope: Mapping[str, Any] = field(default_factory=dict)
+
+    def read_bytes(self, ref: ArtifactRef | Mapping[str, Any] | str) -> bytes:
+        digest = ref.sha256 if isinstance(ref, ArtifactRef) else ref if isinstance(ref, str) else ref.get("sha256")
+        response = self.client.request_sync("draft_evidence_read", {
+            **self.evidence_scope, "sha256": digest,
+        })
+        return base64.b64decode(str(response["data_base64"]), validate=True)
 
     def put_bytes(
         self,

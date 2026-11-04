@@ -59,10 +59,10 @@ async def run_shell_evidence(
         if call.call_id:
             replay = store.read_operation(context, operation_key=call.call_id, request=args)
             if replay is not None:
-                return _replay_result(call, replay, _artifact_store(workspace))
+                return _replay_result(call, replay, _artifact_store(workspace, context, call))
         snapshot = store.read(context, seed=_empty_payload())
         existing = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).get(name)
-        artifacts = _artifact_store(workspace)
+        artifacts = _artifact_store(workspace, context)
         request_fingerprint = _fingerprint_payload(
             context,
             {
@@ -208,10 +208,10 @@ async def run_lsp_evidence(
         if call.call_id:
             replay = store.read_operation(context, operation_key=call.call_id, request=args)
             if replay is not None:
-                return _replay_result(call, replay, _artifact_store(workspace))
+                return _replay_result(call, replay, _artifact_store(workspace, context, call))
         snapshot = store.read(context, seed=_empty_payload())
         existing = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).get(name)
-        artifacts = _artifact_store(workspace)
+        artifacts = _artifact_store(workspace, context)
         request_fingerprint = _fingerprint_payload(
             context,
             {
@@ -545,7 +545,8 @@ def execution_workspace_fingerprint(workspace: Mapping[str, Any]) -> str:
     return digest.hexdigest()
 
 
-def _artifact_store(workspace: Mapping[str, Any]) -> Any:
+def _artifact_store(workspace: Mapping[str, Any], context: SubmissionDraftContext,
+                   replay_call: ToolCallIR | None = None) -> Any:
     root = _runtime_root(workspace)
     from pal.bunshin.role_gateway_client import (
         RoleGatewayArtifactStore,
@@ -554,7 +555,11 @@ def _artifact_store(workspace: Mapping[str, Any]) -> Any:
 
     gateway = role_gateway_client_from_env(root)
     if gateway is not None:
-        return RoleGatewayArtifactStore(gateway)
+        return RoleGatewayArtifactStore(gateway, evidence_scope={
+            "context": context.to_dict(),
+            **({"operation_key": replay_call.call_id, "request": dict(replay_call.args or {})}
+               if replay_call is not None else {}),
+        })
     repository = BunshinRepository(root)
     repository.database.ensure_schema()
     return ContentAddressedArtifactStore(root, repository.artifacts)
@@ -680,10 +685,14 @@ def _shell_execution_text(
 
 
 def _save_public_result(artifacts: ContentAddressedArtifactStore, result: ToolExecutionResult) -> dict[str, Any]:
-    return artifacts.put_json({
+    payload = {
         "ok": result.ok, "llm_text": result.llm_text,
         "snapshot_refs": [ref.to_dict() for ref in result.snapshot_refs],
-    }, artifact_type="VerificationPublicResultArtifact").to_dict()
+    }
+    return artifacts.put_bytes(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        artifact_type="VerificationPublicResultArtifact", media_type="application/json",
+    ).to_dict()
 
 
 def _recorded_public_result(artifacts: ContentAddressedArtifactStore, case: Mapping[str, Any]) -> dict[str, Any]:

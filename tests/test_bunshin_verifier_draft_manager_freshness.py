@@ -76,6 +76,16 @@ def test_manager_rejects_stale_required_case_then_accepts_fresh_replays(verifier
             payload(call("update_checklist", plan=[{"step": "audit", "status": "completed"}]))
             for name in ("finding_first", "finding_second"):
                 payload(call("run_verification_historical_regression", name=name, command=command))
+            replay_call = new_tool_call(name="run_verification_historical_regression",
+                args={"name": "finding_second", "command": command}, call_id=f"manager-call-{index}")
+            with patch.object(fixture.adapter, "execute_tool_async", side_effect=AssertionError("must not rerun")):
+                replay = asyncio.run(runtime.execute_tool_async(replay_call))
+                assert replay.ok, replay.llm_text
+                assert "shell completed" in replay.llm_text
+                assert payload(replay)["replayed"] is True
+                payload(call("run_verification_historical_regression", name="finding_second", command=command))
+            with pytest.raises(ValueError, match="not recorded evidence"):
+                remote.request_sync("draft_evidence_read", {"context": context.to_dict(), "sha256": view_ref.sha256})
             payload(call("run_verification_diff_risk", name="current delta", command=command))
             probe.write_text("assert False\n")
             payload(call("run_verification_diff_risk", name="unrelated", command="true"))

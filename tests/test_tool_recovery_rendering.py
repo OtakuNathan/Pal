@@ -17,12 +17,13 @@ def test_mcp_body_is_displayed_once_and_raw_protocol_is_preserved(is_error):
     result = normalize_tool_result(raw, server_id="demo", tool_name="inspect")
     assert result.llm_text.count("unique tool body") == 1
     assert result.structured["raw_result"] == raw
-    visible = json.loads(result.llm_text.split("\n", 1)[1])
-    assert visible["result"] == {key: value for key, value in raw.items() if key != "_meta"}
-    assert "_meta" not in visible["result"]
     if is_error:
-        assert "read_tool" in result.llm_text
-        assert "read_mcp_server" in result.llm_text
+        assert "read_tool" in result.recovery_hint
+        assert "read_mcp_server" in result.recovery_hint
+    else:
+        visible = json.loads(result.llm_text.split("\n", 1)[1])
+        assert visible["result"] == {key: value for key, value in raw.items() if key != "_meta"}
+        assert "_meta" not in visible["result"]
 
 
 def test_mcp_prompt_and_protocol_error_do_not_duplicate_content():
@@ -35,7 +36,7 @@ def test_mcp_prompt_and_protocol_error_do_not_duplicate_content():
     assert result.structured["raw_result"] == raw
     error = normalize_protocol_error(ValueError("unique error body"), server_id="demo", name="inspect", kind="tool")
     assert error.llm_text.count("unique error body") == 1
-    assert "read_mcp_server" in error.llm_text
+    assert "read_mcp_server" in error.recovery_hint
 
 
 def test_memory_conflict_exposes_existing_recovery_information():

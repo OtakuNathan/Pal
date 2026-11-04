@@ -723,12 +723,14 @@ Run the workflow.
             llm_runtime=_FakeLLMRuntime("{not-json"),
         )
 
-        result = asyncio.run(SkillAssimilateTool(service=service).ainvoke({"source_text": "Learn this workflow."}))
+        with self.assertLogs("pal.failure.diagnostics", level="WARNING") as diagnostics:
+            result = asyncio.run(SkillAssimilateTool(service=service).ainvoke({"source_text": "Learn this workflow."}))
 
         self.assertEqual(result.status, "error")
-        self.assertIn("sanitizer_invalid_json", result.structured["error"])
         self.assertIn("JSONDecodeError", result.structured["error"])
-        self.assertIn("{not-json", result.structured["error"])
+        self.assertNotIn("{not-json", result.llm_text)
+        self.assertIn("sanitizer_invalid_json", "\n".join(diagnostics.output))
+        self.assertIn("{not-json", "\n".join(diagnostics.output))
 
 
 if __name__ == "__main__":

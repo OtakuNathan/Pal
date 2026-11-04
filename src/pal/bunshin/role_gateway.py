@@ -170,6 +170,8 @@ class RoleAssignmentGateway:
             return self._bound_input_json(authenticated, payload)
         if method == "artifact_put":
             return self._artifact_put(authenticated, payload)
+        if method == "draft_evidence_read":
+            return self._draft_evidence_read(authenticated, payload)
         if method == "git_read":
             def record_event(event: Mapping[str, Any]) -> None:
                 self.repository.role_events.record_worker_event(event)
@@ -814,6 +816,26 @@ class RoleAssignmentGateway:
         if not isinstance(prompt_pack, Mapping):
             raise ValueError("role prompt pack is malformed")
         return dict(prompt_pack)
+
+    def _draft_evidence_read(self, authenticated: Mapping[str, Any],
+                            params: Mapping[str, Any]) -> dict[str, Any]:
+        context = self._context(authenticated, params)
+        store = SubmissionDraftStore(self.service.runtime_root)
+        if params.get("operation_key"):
+            result = store.read_operation(context, operation_key=str(params["operation_key"]),
+                                          request=dict(params.get("request") or {}))
+            cases = [dict((result or {}).get("case") or {})]
+        else:
+            snapshot = store.read(context)
+            cases = list(dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).values())
+        digest = str(params.get("sha256") or "")
+        for case in cases:
+            for key in ("stdout_ref", "stderr_ref", "public_result_ref"):
+                ref = case.get(key)
+                if isinstance(ref, Mapping) and digest and ref.get("sha256") == digest:
+                    data = self.service.artifacts.read_bytes(ref)
+                    return {"data_base64": base64.b64encode(data).decode("ascii")}
+        raise ValueError("artifact is not recorded evidence for this Draft operation")
 
     def _artifact_put(
         self,

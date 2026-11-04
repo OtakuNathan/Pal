@@ -290,10 +290,9 @@ class F2SendReceiptTests(unittest.TestCase):
         async def failed(*args, **kwargs):
             return SimpleNamespace(user_feedback=None)
         ex._handle_failure_async = failed
-        ex._render_failure_feedback_text = lambda _: "Selected endpoint failed."
+        ex._render_failure_feedback_text = lambda _: "Blocker: primary endpoint exploded"
         outcome = _drive(ex, request)
-        self.assertIn("Selected endpoint failed.", outcome.payload.text)
-        self.assertIn("primary endpoint exploded", outcome.payload.text)
+        self.assertEqual("Blocker: primary endpoint exploded", outcome.payload.text)
         self.assertIsNone(getattr(outcome.payload, "projection_receipt", None))
         self.assertEqual([name for name, _ in transport.captured], ["trace-endpoint"])
         session = runtime.endpoint_projection_session("pal:resident")

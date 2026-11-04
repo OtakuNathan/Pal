@@ -42,7 +42,7 @@ def test_every_tool_using_prompt_explains_all_effects_and_retries(worker, turn_k
 
 
 @pytest.mark.parametrize("kind", ["tool", "prompt"])
-def test_mcp_protocol_failure_keeps_chain_and_transport_details(runtime, kind):
+def test_mcp_protocol_failure_keeps_root_public_and_transport_details_private(runtime, kind):
     def fail(*args):
         try:
             raise PermissionError("original remote cause; token=hidden-token")
@@ -56,7 +56,9 @@ def test_mcp_protocol_failure_keeps_chain_and_transport_details(runtime, kind):
     runtime.mount_subtree(SimpleNamespace(mounted_subtree=projection.mounted_subtree))
     result = invoke(runtime, "call_mcp_fidelity_probe" if kind == "tool" else "render_mcp_fidelity_probe", {})
     assert not result.ok
-    assert "original remote cause" in result.llm_text and "response decode" in result.llm_text
+    assert "original remote cause" in result.llm_text
+    assert "response decode" not in result.llm_text
+    assert "response decode" in str(result.structured)
     assert "hidden-token" not in result.llm_text
     assert metadata(result)["error_code"] == "mcp_protocol_error"
     assert metadata(result)["effect"] == "unknown"
@@ -87,7 +89,8 @@ def test_remote_exception_chain_survives_actual_sidecar_transport(runtime, tmp_p
     mount(runtime, "remote_failure", lambda _: raw)
     result = invoke(runtime, "remote_failure", {})
     assert "remote root cause" in result.llm_text
-    assert "remote wrapper" in result.llm_text
+    assert "remote wrapper" not in result.llm_text
+    assert "remote wrapper" in str(result.structured)
     assert "hidden-remote" not in result.llm_text
     assert metadata(result)["error_code"] == "mcp_protocol_error"
 
@@ -109,29 +112,37 @@ def test_guidance_fault_preserves_original_recovery_and_reports_its_own_cause(ru
     assert not result.ok and metadata(result)["error_code"] == "original_error"
     assert "original failure" in result.llm_text
     assert hint in result.llm_text
-    assert "guidance resolver crashed" in result.llm_text
+    if resolver == "failure":
+        # The owner hint survives unchanged, so the internal fallback failure
+        # belongs in diagnostics rather than becoming another model blocker.
+        assert "guidance resolver crashed" not in result.llm_text
+    else:
+        assert "guidance resolver crashed" in result.llm_text
     assert metadata(result)["effect"] == "applied"
 
 
-def test_storage_fault_cannot_discard_original_failure_cause(runtime, monkeypatch):
+def test_failure_metadata_does_not_require_snapshot_storage(runtime, monkeypatch):
     original = "FIRST_CAUSE\n" + "x" * 4000 + "\nMIDDLE_CAUSE\n" + "y" * 4000 + "\nLAST_CAUSE"
     mount(runtime, "unsaved_failure", lambda _: CapabilityResult(
         status=RuntimeStatus.ERROR, text=original, llm_text=original,
         structured={"error_code": "original_error"},
         effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN)))
+    captures = []
     def fail(*args, **kwargs):
+        captures.append(args)
         raise OSError("diagnostic storage failed")
     monkeypatch.setattr(runtime.result_snapshots, "capture", fail)
     result = runtime.execute_tool(new_tool_call(name="unsaved_failure", args={}), turn_id="review",
         budget=ToolCallBudget(max_output_chars=1200, preview_chars=300))
     assert not result.ok and metadata(result)["error_code"] == "original_error"
     assert original in result.llm_text
-    assert "diagnostic storage failed" in result.llm_text
+    assert not captures
+    assert "diagnostic storage failed" not in result.llm_text
     assert not result.snapshot_refs
 
 
 @pytest.mark.parametrize("relay", [False, True])
-def test_rejection_keeps_the_reason_its_precondition_failed(runtime, relay):
+def test_rejection_keeps_owner_public_reason_without_dumping_private_chain(runtime, relay):
     def fail(_):
         try:
             raise OSError("precondition lookup failed")
@@ -142,7 +153,7 @@ def test_rejection_keeps_the_reason_its_precondition_failed(runtime, relay):
         from pal.execution.contracts import CapabilityCall
         mount(runtime, "rejection_relay", lambda _: runtime.execute(CapabilityCall(name="rejection_chain")))
     result = invoke(runtime, "rejection_relay" if relay else "rejection_chain", {})
-    assert "precondition lookup failed" in result.llm_text
+    assert "precondition lookup failed" not in result.llm_text
     assert "precondition unavailable" in result.llm_text
     assert metadata(result)["kind"] == "rejected"
     assert metadata(result)["effect"] == "not_started"

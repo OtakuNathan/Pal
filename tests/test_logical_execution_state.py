@@ -884,8 +884,8 @@ class LogicalExecutionStateTests(unittest.TestCase):
 
         self.assertEqual(result.status.value, "error")
         self.assertEqual(result.payload.call_id, call.call_id)
-        self.assertIn("timed out", result.text)
-        self.assertIn("Inspect the current state", result.text)
+        self.assertIn("TimeoutError: test deadline", result.text)
+        self.assertIn("Inspect the operation state", result.text)
         from tests.test_tool_failure_affordances import metadata
         info = metadata(result.payload)
         self.assertEqual(info["kind"], "failed")

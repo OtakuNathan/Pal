@@ -99,8 +99,7 @@ class McpCompilerTests(unittest.TestCase):
         self.assertEqual(result.structured["error_kind"], "tool_execution")
         self.assertEqual(result.structured["tool_text"], "failed")
         self.assertEqual(result.text, "failed")
-        self.assertIn("MCP tool execution failed:", result.llm_text)
-        self.assertIn('"text":"failed"', result.llm_text)
+        self.assertEqual("MCP run: failed", result.llm_text)
 
         projection = McpCompiler().compile(
             module_id="mcp",

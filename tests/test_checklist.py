@@ -591,9 +591,8 @@ def test_inspection_search_and_invocation_preserve_unfinished_steps(query):
         core.close()
 
 
-def test_unknown_step_large_plan_is_recoverable_from_snapshot():
+def test_unknown_step_large_plan_remains_visible_outside_output_budget():
     import json
-    from pathlib import Path
     from pal.execution.contracts import ToolCallBudget
     from pal.shared.tool_protocol import new_tool_call
     core = PalCore()
@@ -609,10 +608,8 @@ def test_unknown_step_large_plan_is_recoverable_from_snapshot():
         result = runtime.execute_tool(new_tool_call(name="complete_checklist_step", args={"step": "missing"}),
                                       budget=ToolCallBudget(max_output_chars=2000))
         assert not result.ok
-        assert result.snapshot_refs
-        saved = Path(result.snapshot_refs[0].path).read_text()
-        # The complete diagnostic also carries status/recovery metadata.
-        payload, _ = json.JSONDecoder().raw_decode(saved.split("\n", 1)[1])
+        assert not result.snapshot_refs
+        payload, _ = json.JSONDecoder().raw_decode(result.llm_text.split("\n", 1)[1])
         assert [item["step"] for item in payload["plan"]] == [item["step"] for item in plan]
         assert service.show().done == 0
     finally:

@@ -57,7 +57,7 @@ def test_mutation_keeps_receipt_and_complete_redacted_diagnostics(diagnostic_key
     assert "mem_ref: fact:opaque" in text and "provider_id: original-store" in text
     assert "no_changes: True" in text and "replayed: True" in text
     assert "noise" not in text and "secret" not in text
-    # Delivery budgets and snapshots belong to the shared tool presenter.
+    # Root diagnostics retain their complete meaning outside the output budget.
     assert diagnostic.replace("api_key=secret", "api_key=[redacted]") in text
 
 

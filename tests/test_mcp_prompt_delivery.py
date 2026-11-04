@@ -69,6 +69,6 @@ def test_prompt_protocol_failure_preserves_cause_and_unknown_effect(runtime, asy
 
     assert not result.ok
     assert "underlying prompt connection failure" in result.llm_text
-    assert "prompt retrieval failed" in result.llm_text
+    assert "prompt retrieval failed" not in result.llm_text
     assert metadata(result)["effect"] == "unknown"
     assert metadata(result)["error_code"] == "mcp_protocol_error"

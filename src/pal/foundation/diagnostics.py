@@ -52,7 +52,7 @@ def exception_reason(exc: BaseException) -> str:
     return diagnostic_text(text, limit=None) if has_public_reason else diagnostic_reason(text)
 
 
-def diagnostic_reason(value: object, *, limit: int | None = 600) -> str:
+def diagnostic_reason(value: object, *, limit: int | None = None) -> str:
     """Render an external failure at its owner boundary, keeping evidence in logs."""
     text = (json.dumps(diagnostic_value(value), ensure_ascii=False)
             if isinstance(value, (Mapping, list, tuple)) else str(value)).strip()

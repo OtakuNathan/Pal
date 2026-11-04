@@ -51,7 +51,11 @@ def test_memory_failure_keeps_deep_root_cause_without_stack_frames(implicit):
         require_port=lambda _: memory, port_registry={},
     ))
     text = compiler.build_canonical_prompt(PromptAssemblyContext()).metadata["runtime_reminder_text"]
-    assert "history.db: permission denied" in text
+    if implicit:
+        assert "RuntimeError: memory layer 4" in text
+        assert "history.db: permission denied" not in text
+    else:
+        assert "history.db: permission denied" in text
     assert "PRIVATE_CANARY" not in text
     assert "Traceback" not in text
 

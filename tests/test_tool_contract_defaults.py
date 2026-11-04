@@ -94,6 +94,7 @@ def test_error_paths_preserve_original_cause_and_diagnostic_action(tmp_path):
     result = memory.dreaming(IntrospectionCall(name='manage_memory_dreaming', args={'operation': 'configure', 'config': {}}))
     assert 'bad schedule' in result.llm_text
     error = normalize_protocol_error(ConnectionError('connection refused'), server_id='demo', name='inspect', kind='tool')
-    assert 'connection refused' in error.llm_text and "read_mcp_server(name='demo')" in error.llm_text
+    assert 'connection refused' in error.llm_text
+    assert "read_mcp_server(name='demo')" in error.recovery_hint
     error = normalize_tool_result({'isError': True, 'content': [{'type': 'text', 'text': 'invalid field'}]}, server_id='demo', tool_name='inspect')
-    assert 'invalid field' in error.llm_text and 'read_tool' in error.llm_text
+    assert 'invalid field' in error.llm_text and 'read_tool' in error.recovery_hint
