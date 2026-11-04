@@ -276,6 +276,9 @@ class ToolExecutionError(RuntimeError):
         retry: RetryDirective | None = None,
     ) -> None:
         super().__init__(message)
+        # This message is authored at the operation boundary. Its chained
+        # exception is private evidence, not a replacement for owner semantics.
+        self.public_reason = str(message)
         self.error_code = str(error_code or "handler_failed")
         self.effect_receipt = effect_receipt
         self.affordances = list(affordances or ())
@@ -298,6 +301,7 @@ class ToolRejectedError(ValueError):
         recovery_hint: str = "",
     ) -> None:
         super().__init__(message)
+        self.public_reason = str(message)
         self.error_code = str(error_code or "rejected")
         self.retry = retry
         self.affordances = list(affordances or ())

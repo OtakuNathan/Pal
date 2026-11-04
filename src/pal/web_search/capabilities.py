@@ -26,7 +26,7 @@ from pal.shared.inspection import inspection_snapshot
 from pal.web_search.contracts import WebSearchQuery
 from pal.web_search.models import WebSearchProviderModel
 from pal.web_search.service import WebSearchService
-from pal.foundation.diagnostics import diagnostic_summary, diagnostic_text, exception_report
+from pal.foundation.diagnostics import diagnostic_reason, diagnostic_text, exception_reason
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -254,7 +254,7 @@ class WebSearchIntrospectionProvider:
                 )
             )
         except Exception as exc:
-            diagnostic = exception_report(exc)
+            diagnostic = exception_reason(exc)
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
                 text="web search failed",
@@ -277,7 +277,7 @@ class WebSearchIntrospectionProvider:
         if result.provider_errors:
             visible["provider_errors"] = [
                 {"provider_id": error.get("provider_id"),
-                 "error": diagnostic_summary(str(error.get("error") or ""))}
+                 "error": diagnostic_reason(str(error.get("error") or ""))}
                 for error in result.provider_errors
             ]
         return IntrospectionResult(
@@ -384,7 +384,7 @@ def _compact_inspection_errors(value: Any) -> Any:
     if isinstance(value, dict):
         # Reserve room for the truncation marker within a 600-character budget.
         return {
-            key: diagnostic_text(diagnostic_summary(item), limit=560)
+            key: diagnostic_reason(item)
             if key in {"error", "last_error"} and isinstance(item, str)
             else _compact_inspection_errors(item)
             for key, item in value.items()

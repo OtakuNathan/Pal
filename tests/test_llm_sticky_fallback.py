@@ -213,8 +213,8 @@ class PalLLMNoFallbackTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("kind=unknown", outcome.text)
-        self.assertIn("type=RuntimeError", outcome.text)
+        self.assertEqual(outcome.response.message.metadata["failure_kind"], "unknown")
+        self.assertEqual(outcome.response.message.metadata["error_type"], "RuntimeError")
         self.assertIn("broken endpoint", outcome.text)
         self.assertNotIn("Traceback", outcome.text)
         self.assertIn("Traceback", outcome.response.message.metadata["error_diagnostic"])
@@ -369,8 +369,8 @@ class PalLLMNoFallbackTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("kind=unknown", outcome.text)
-        self.assertIn("type=RuntimeError", outcome.text)
+        self.assertEqual(outcome.response.message.metadata["failure_kind"], "unknown")
+        self.assertEqual(outcome.response.message.metadata["error_type"], "RuntimeError")
         self.assertIn("broken endpoint", outcome.text)
         self.assertNotIn("Traceback", outcome.text)
         self.assertIn("Traceback", outcome.response.message.metadata["error_diagnostic"])

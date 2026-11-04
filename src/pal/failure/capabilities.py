@@ -9,7 +9,7 @@ from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import ToolGuidance
 from pal.execution.tool_semantics import INDIRECT_LOCAL_READ
-from pal.foundation.diagnostics import diagnostic_summary, diagnostic_value, exception_summary
+from pal.foundation.diagnostics import diagnostic_reason, diagnostic_value, exception_reason
 from pal.failure.runtime import FailureRuntime
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -80,7 +80,7 @@ class FailureIntrospectionProvider:
                 payload["reports_file"] = {"file_path": ref.path, "size_bytes": ref.size_bytes,
                                            "sha256": ref.digest, "read_only": True, "format": "json"}
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                payload["reports_file"] = {"status": "unavailable", "error": _brief(exception_summary(exc), 400)}
+                payload["reports_file"] = {"status": "unavailable", "error": _brief(exception_reason(exc), 400)}
                 payload["diagnostics"]["partial"] = True
                 payload["diagnostics"]["unavailable_sections"]["reports_file"] = "output_storage_unavailable"
         else:
@@ -105,7 +105,7 @@ class FailureIntrospectionProvider:
 
 
 def _brief(value: Any, limit: int) -> str:
-    text = " ".join(diagnostic_summary(str(value)).split())
+    text = " ".join(diagnostic_reason(value).split())
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
@@ -118,7 +118,7 @@ def _report_summary(report: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     truncated = []
     for key, limit in limits.items():
-        text = " ".join(diagnostic_summary(str(report.get(key, ""))).split())
+        text = " ".join(diagnostic_reason(report.get(key, "")).split())
         payload[key] = text if len(text) <= limit else text[:limit - 1] + "…"
         if len(text) > limit:
             truncated.append(key)
@@ -127,7 +127,7 @@ def _report_summary(report: dict[str, Any]) -> dict[str, Any]:
     if len(actions) > 4:
         truncated.append("attempted_actions")
     for action in actions[:4]:
-        text = " ".join(diagnostic_summary(str(action)).split())
+        text = " ".join(diagnostic_reason(action).split())
         payload["attempted_actions"].append(text if len(text) <= 120 else text[:119] + "…")
         if len(text) > 120 and "attempted_actions" not in truncated:
             truncated.append("attempted_actions")

@@ -129,6 +129,11 @@ Interaction rule:
   compaction calls do not advance it
 - output snapshots remain available while referenced by role L1 or active
   delivery/read pins; source-file edit authority belongs to delivered results
+- evidence wrappers retain a tool's public response separately from private
+  evidence and reuse that response verbatim, including on operation replay.
+  They add only recording/reuse facts. Recording failures retain the lower
+  result and distinguish an already-saved record from an uncertain write;
+  they never reconstruct a public error from internal structured diagnostics
 - invocation directories and prepared role-workspace clones are disposable
   session-owned runtime state. A completed or cancelled session deletes them
   after its durable database transition; Manager startup reconciles terminal

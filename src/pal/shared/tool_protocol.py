@@ -210,6 +210,10 @@ class FailedResult(_StrictProtocolModel):
     llm_text: str
     affordances: list[ToolAffordance] = Field(default_factory=list)
     recovery_hint: str = ""
+    # Owner-reported outcome retained when delivery/output validation fails.
+    # These guide reconciliation and are outside the normal-output budget.
+    operation_result: str = ""
+    effect_receipt: dict[str, Any] = Field(default_factory=dict)
     details: dict[str, Any] = Field(default_factory=dict)
 
 

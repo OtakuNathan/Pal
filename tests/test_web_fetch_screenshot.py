@@ -98,6 +98,30 @@ class BrowserScreenshotToolTests(unittest.TestCase):
         self.assertTrue(Path(result.structured["artifact"]["local_cached_path"]).is_file())
         self.assertEqual(len(str(service.calls[0]["session_key"])), 64)
 
+    def test_saved_screenshot_shows_brief_profile_and_registration_failures(self) -> None:
+        from unittest.mock import AsyncMock
+        from pal.execution.contracts import CapabilityResult
+
+        report = 'Traceback (most recent call last):\n  File "private.py", line 7\nPermissionError: denied'
+        class Service(_FakeBrowserService):
+            def execute(self, **kwargs):
+                return {**super().execute(**kwargs), "profile_state_error": report,
+                        "screenshot_cleanup_error": report, "action_completed": True}
+        owner = SimpleNamespace(import_local_for_turn=AsyncMock(return_value=CapabilityResult(
+            status='error', llm_text='PermissionError: denied', structured={'error': report})))
+        result = asyncio.run(BrowserScreenshotTool(service=Service(self.root)).ainvoke(
+            {}, session_key='a' * 64, persistent=True,
+            runtime=SimpleNamespace(runtime_root=self.root, provider_registry={'artifact:artifact': owner}),
+            turn_id='turn-browser-shot',
+        ))
+        self.assertEqual(result.status, 'ok')
+        self.assertTrue(Path(result.structured['artifact']['local_cached_path']).is_file())
+        self.assertEqual(result.structured['profile_state_error'], report)
+        self.assertIn('PermissionError: denied', result.llm_text)
+        self.assertIn('do not repeat', result.llm_text)
+        self.assertNotIn('Traceback', result.llm_text)
+        self.assertNotIn('private.py', result.llm_text)
+
     def test_uncertain_registration_uses_current_artifact_inventory_for_recovery(self) -> None:
         from unittest.mock import AsyncMock
 

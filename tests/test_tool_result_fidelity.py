@@ -25,14 +25,15 @@ def mount(runtime, alias, handler, *, direct=True):
         execution=DIRECT_LOCAL_READ if direct else INDIRECT_LOCAL_READ)
 
 
-def test_failure_summary_cannot_hide_text_or_unfamiliar_details(runtime):
+def test_failure_owner_selects_public_cause_and_retains_private_details(runtime):
     mount(runtime, "failure_details", lambda _: CapabilityResult(
-        status=RuntimeStatus.ERROR, text="actual backend failure", llm_text="short summary",
+        status=RuntimeStatus.ERROR, text="actual backend failure", llm_text="actual backend failure at upload chunk 42",
         structured={"error_code": "backend_error", "diagnostic": "full backend diagnostic",
                     "failed_stage": "upload chunk 42", "retry": "do_not_retry"}))
     result = invoke(runtime, "failure_details", {})
     assert "actual backend failure" in result.llm_text
-    assert "full backend diagnostic" in result.llm_text
+    assert "full backend diagnostic" not in result.llm_text
+    assert result.structured["details"]["diagnostic"] == "full backend diagnostic"
     assert "upload chunk 42" in result.llm_text
     assert metadata(result)["retry"] == "do_not_retry"
 
@@ -41,14 +42,15 @@ def test_failure_summary_cannot_hide_text_or_unfamiliar_details(runtime):
 @pytest.mark.parametrize("direct", [False, True])
 def test_typed_failure_delivers_error_and_details_once(runtime, rejected, direct):
     cls = RejectedResult if rejected else FailedResult
-    raw = cls(error_code="specific_error", error="actual typed cause", llm_text="short typed summary",
+    raw = cls(error_code="specific_error", error="actual typed cause", llm_text="actual typed cause",
         retry=RetryDirective.CORRECT_INPUT,
         details={"diagnostic": "corrective detail", "token": "hidden"},
         **({} if rejected else {"effect": EffectOutcome.UNKNOWN}))
     mount(runtime, "typed_failure", lambda _: raw, direct=direct)
     result = invoke(runtime, "typed_failure", {})
     assert "actual typed cause" in result.llm_text
-    assert "corrective detail" in result.llm_text
+    assert "corrective detail" not in result.llm_text
+    assert result.structured["details"]["diagnostic"] == "corrective detail"
     assert "hidden" not in result.llm_text
     assert result.llm_text.count("Tool result metadata:") == 1
 
@@ -212,7 +214,7 @@ def test_output_storage_exception_preserves_operation_result(runtime, monkeypatc
     assert calls == ["executed"]
 
 
-def test_failed_snapshot_read_saves_diagnostic_separately_from_source(runtime, monkeypatch):
+def test_failed_snapshot_read_logs_diagnostic_without_overwriting_source(runtime, monkeypatch, caplog):
     ref = runtime.result_snapshots.capture("original snapshot body", call_id="source", lifetime="review")
     def unreadable(_):
         raise PermissionError("snapshot read error " + "x" * 4000 + " complete-error-tail")
@@ -220,7 +222,7 @@ def test_failed_snapshot_read_saves_diagnostic_separately_from_source(runtime, m
     result = runtime.execute_tool(new_tool_call(name="read_file", args={"file_path": ref.path}), turn_id="review",
         budget=ToolCallBudget(max_output_chars=1500, preview_chars=300))
     assert not result.ok
-    assert result.snapshot_refs[-1].path != ref.path
-    saved = Path(result.snapshot_refs[-1].path).read_text()
-    assert "complete-error-tail" in saved
-    assert "snapshot read error" in saved
+    assert Path(ref.path).read_text() == "original snapshot body"
+    assert "complete-error-tail" in caplog.text
+    assert "snapshot read error" in result.llm_text
+    assert "Traceback" not in result.llm_text

@@ -106,8 +106,8 @@ class CapabilityResult:
     context_delivery: dict[str, Any] | None = None
     snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
     context_messages: tuple[ToolContextMessageIR, ...] = ()
-    # Owner-selected failure diagnostics for model delivery. None preserves the
-    # default complete failure rendering; structured remains the raw receipt.
+    # Retained owner diagnostic metadata. Public delivery uses llm_text;
+    # neither this field nor structured is automatically appended to it.
     llm_failure_details: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
@@ -116,6 +116,18 @@ class CapabilityResult:
         object.__setattr__(self, "affordances", tuple(self.affordances or ()))
         object.__setattr__(self, "recovery_hint", str(self.recovery_hint or ""))
         object.__setattr__(self, "context_messages", tuple(self.context_messages or ()))
+
+    @property
+    def user_text(self) -> str:
+        """Control replies carry the same owner message and actionable receipt."""
+        text = self.llm_text
+        if self.status == "ok":
+            return text
+        if self.effect_receipt is not None:
+            text += f"\nEffect: {self.effect_receipt.outcome.value}."
+        if self.recovery_hint and self.recovery_hint not in text:
+            text += "\n" + self.recovery_hint
+        return text
 
 
 @dataclass(frozen=True)
@@ -142,6 +154,9 @@ class ExecutionProjectionPort(Protocol):
 
 
 class ExecutionRuntimePort(ExecutionProjectionPort, Protocol):
+    def tool_call_failed_result(self, call: Any, exc: Exception) -> Any:
+        ...
+
     def register_provider_ref(self, provider_id: str, provider: Any) -> None:
         ...
 

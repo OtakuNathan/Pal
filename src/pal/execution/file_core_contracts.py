@@ -50,6 +50,7 @@ class ToolExecutionError(RuntimeError):
     def __init__(self, message, *, error_code, retry=None, effect_receipt=None,
                  details=None, recovery_hint=''):
         super().__init__(message)
+        self.public_reason = str(message)
         self.error_code = error_code
         self.retry = retry
         self.effect_receipt = effect_receipt

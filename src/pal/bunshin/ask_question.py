@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR, EffectOutcome, FailedResult, RetryDirective
 from pal.execution.tool_facade import rejection
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_reason
 
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -123,7 +123,7 @@ async def ask_question_tool_result(
             status=RuntimeStatus.OK,
         )
     except Exception as exc:
-        cause = exception_report(exc)
+        cause = exception_reason(exc)
         details = {"error": cause, "error_type": type(exc).__name__}
         if answer.strip():
             details.update(answer=answer, task_revision=revision, status="answered_revision_unconfirmed")

@@ -103,7 +103,7 @@ def test_skill_precondition_failure_reports_no_effect(runtime, skill_provider, o
 
 
 @pytest.mark.parametrize("operation", ["catalog", "archive", "archive_error"])
-def test_bunshin_handler_preserves_original_exception_chain(core, runtime, tmp_path, monkeypatch, operation):
+def test_bunshin_handler_preserves_original_exception_chain(core, runtime, tmp_path, monkeypatch, operation, caplog):
     def fail(*args, **kwargs):
         try:
             raise PermissionError("root cause: cannot read pinned family file")
@@ -127,7 +127,8 @@ def test_bunshin_handler_preserves_original_exception_chain(core, runtime, tmp_p
     assert "PermissionError" in result.llm_text
     if operation == "catalog":
         assert "catalog decode" in result.llm_text
-        assert "manager request failed" in result.llm_text
+        assert "manager request failed" in caplog.text
+        assert "manager request failed" not in result.llm_text
         assert "private-audit-token" not in result.llm_text
         assert "[redacted]" in result.llm_text
 

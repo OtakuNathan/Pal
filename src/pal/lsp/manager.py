@@ -1155,10 +1155,10 @@ class LspManager:
         unsupported = exc.code == _METHOD_NOT_FOUND
         subject = exc.method or "the request"
         next_step = (
-            f"{state.server_id} does not implement {subject} (JSON-RPC {exc.code}: {exc}). "
+            f"{state.server_id} does not implement {subject} (JSON-RPC {exc.code}). "
             "Do not retry it; use textDocument/references or a repository text search instead."
             if unsupported
-            else f"{state.server_id} rejected {subject} with JSON-RPC {exc.code}: {exc}."
+            else f"Inspect {state.server_id} and correct the reported server error before retrying {subject}."
         )
         return {
             "status": "error",

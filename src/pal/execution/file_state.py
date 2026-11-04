@@ -26,6 +26,7 @@ from pal.execution.session_state import (
     count_text_lines,
 )
 from pal.shared import RuntimeStatus
+from pal.shared.diagnostics import exception_reason
 
 UTF8_BOM = "\ufeff"
 
@@ -183,7 +184,7 @@ def _atomic_compare_and_swap_locked(
                 os.close(directory_fd)
         except OSError as exc:
             raise ToolExecutionError(
-                (f"File replacement and directory synchronization completed for {resolved}, "
+                exception_reason(exc) + "\n" + (f"File replacement and directory synchronization completed for {resolved}, "
                  "but closing the directory failed." if directory_synced else
                  f"File replacement applied to {resolved}, but directory synchronization failed; "
                  "crash durability is unconfirmed."),

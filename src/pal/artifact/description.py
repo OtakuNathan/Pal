@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from pal.artifact.contracts import ArtifactRecord, ArtifactRepresentation
+from pal.foundation.diagnostics import diagnostic_reason
 
 
 def file_description(path_text: str, mime_type: str = '') -> dict[str, Any]:
@@ -46,7 +47,7 @@ def describe_record(record: ArtifactRecord, representations: Iterable[ArtifactRe
         'file_name': record.file_name, 'extension': Path(record.file_name).suffix.lower(),
         'mime_type': record.original_mime_type, 'size_bytes': record.original_size_bytes,
         'status': record.status, 'summary': artifact_summary(record),
-        'notes': str(record.notes or '')[:2000],
+        'notes': diagnostic_reason(record.notes or ''),
         'files': {'original': original, 'processed': processed},
     }
     if text_file:

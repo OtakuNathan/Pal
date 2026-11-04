@@ -18,6 +18,15 @@ Exposes:
 - `RawSQLHookRegistry`
 - `RepositoryBase`
 - `FdLease`, `FdCapability`, and `FdCancellationControl`
+- owner-side error presentation: `exception_reason` logs complete redacted
+  evidence and returns a concise cause; `diagnostic_reason` handles external
+  reports. These helpers never infer execution effects or recovery policy
+
+Cause selection follows explicit `raise ... from ...` chains. Implicit exception
+context can describe an earlier operation whose recovery failed, so it remains
+log evidence rather than replacing the current failure. Owner-authored public
+reasons preserve operation facts such as an already-applied write, including
+when reached through an explicit cause chain or an exception group.
 
 `fd_lease` treats an SDK client, socket, and their hidden responses or streams
 as one private resource graph. I/O requires a generation-fenced

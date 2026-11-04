@@ -216,7 +216,8 @@ def test_gateway_rpc_shim_roundtrip_preserves_refusal_and_native_results(
         assert stdout.getvalue() == ""
         assert not responses[0]["ok"] and "result" not in responses[0]
         assert responses[0]["error"]["kind"] == "role_gateway"
-        assert "ToolRejectedError" in stderr.getvalue()
+        assert "Git wrapper rejected" in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
         assert "rejected the scoped command before execution" in stderr.getvalue()
         assert PRIVATE not in stderr.getvalue()
         assert_failed_without_process(events)

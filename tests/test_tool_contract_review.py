@@ -125,6 +125,8 @@ def test_unknown_target_lists_valid_values_without_a_discovery_tool(runtime):
 def test_channel_persistence_failure_keeps_cause_and_restored_state(runtime):
     from types import SimpleNamespace
     from pal.channel.capabilities import ChannelIntrospectionProvider
+    from pal.execution.capability_compiler import _attach_effect_receipt
+    from pal.execution.tool_semantics import INDIRECT_LOCAL_WRITE
     from pal.shared import IntrospectionCall
     endpoint = SimpleNamespace(enabled=True)
     channel = SimpleNamespace(get_endpoint=lambda _: endpoint,
@@ -137,9 +139,12 @@ def test_channel_persistence_failure_keeps_cause_and_restored_state(runtime):
         provider_manager=SimpleNamespace())
     mount_test_capability(runtime, alias='disable_review_channel', canonical_path='op_test_disable_channel',
         InputModel=_TargetName, OutputModel=_Output, examples=({'name': 'test'},),
-        handler=lambda value: provider.disable(IntrospectionCall(name='disable_review_channel', args=value.model_dump())))
+        execution=INDIRECT_LOCAL_WRITE,
+        handler=lambda value: _attach_effect_receipt(provider.disable(IntrospectionCall(
+            name='disable_review_channel', args=value.model_dump())), INDIRECT_LOCAL_WRITE))
     result = invoke(runtime, 'disable_review_channel', {'name': 'test'})
     assert not result.ok
+    assert result.status != 'output_validation_failed'
     assert 'channel state disk full' in result.llm_text
     assert 'restored to True' in result.llm_text
     assert endpoint.enabled

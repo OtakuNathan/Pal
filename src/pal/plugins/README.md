@@ -25,6 +25,18 @@ Plugin naming rules:
 - Keep `action_name` descriptive; the compiler owns canonical path abbreviation.
 - Do not handcraft abbreviated canonical paths in plugins. New high-frequency abbreviations must be added centrally in the compiler.
 
+Tool failures are authored by the plugin's execution boundary. Return concise
+`llm_text` with the root cause and supply the existing effect receipt, retry
+directive, recovery hint or affordances. `ToolExecutionError` and
+`ToolRejectedError` carry owner-authored public reasons; chained exceptions are
+retained in service logs. Do not embed traceback reports in public messages.
+Use `exception_reason` for local exceptions, `diagnostic_reason` for external
+failure text, and `render_diagnostic_record_for_llm` for diagnostic records.
+Keep command output, file content and other successful business data intact.
+MCP adapters follow the same rule, marking effects unknown when the server
+does not supply a trustworthy receipt. Human control replies use the same
+cause and include recovery only when the user needs to act.
+
 Plugins can observe resident state through `scope.subscribe_core_events(...)`.
 Subscriptions become active on publication and close with the plugin generation.
 See [Core system observations](../../../docs/pal_core_events.md) for the bounded

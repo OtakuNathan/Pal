@@ -25,7 +25,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT
-from pal.foundation.diagnostics import diagnostic_text, exception_report
+from pal.foundation.diagnostics import diagnostic_text, exception_report, exception_reason, diagnostic_reason
 from pal.web_fetch.extensions import inspect_extension, read_extensions, validate_extension_url
 from pal.web_fetch.runtime_paths import (
     BrowserRuntimePaths,
@@ -131,6 +131,7 @@ class BrowserServiceError(RuntimeError):
         return {
             "code": self.code,
             "message": diagnostic_text(self, limit=None),
+            "reason": diagnostic_reason(self.diagnostic) if self.diagnostic else exception_reason(self),
             "diagnostic": exception_report(self),
             "details": self.details,
             "retryable": self.retryable,

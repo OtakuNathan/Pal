@@ -664,6 +664,10 @@ class BunshinScopedExecutionRuntime:
     _authoring_lock: asyncio.Lock = field(init=False, repr=False)
     _legacy_finding_generation: Any = field(default=None, init=False, repr=False)
 
+    @staticmethod
+    def tool_call_failed_result(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
+        return ExecutionRuntime.tool_call_failed_result(call, exc)
+
     def __post_init__(self) -> None:
         self._original_runtime = self.base_runtime if callable(getattr(self.base_runtime, "execute_tool_async", None)) else ExecutionRuntime()
         lifetime_id = str(

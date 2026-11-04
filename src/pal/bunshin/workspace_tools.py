@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.shared import RuntimeStatus, ToolExecutionResult
-from pal.shared.diagnostics import exception_report, exception_summary
+from pal.shared.diagnostics import exception_reason
 
 
 class ArtifactWriteError(RuntimeError):
@@ -53,7 +53,7 @@ def _workspace_tool_result(call: ToolCallIR, workspace: dict[str, Any]) -> ToolE
             status=RuntimeStatus.OK,
         )
     except Exception as exc:
-        message = exception_summary(exc)
+        message = exception_reason(exc)
         effect = exc.effect if isinstance(exc, ArtifactWriteError) else "not_started"
         recovery = (f"Inspect the exact file {exc.path!r} and reconcile its content before retrying; do not blindly append again."
                     if isinstance(exc, ArtifactWriteError) else "Correct the reported input or workspace error before retrying; file content was not written.")
@@ -61,7 +61,7 @@ def _workspace_tool_result(call: ToolCallIR, workspace: dict[str, Any]) -> ToolE
             name=call.name,
             ok=False,
             text=message,
-            structured={"error": exception_report(exc), "error_type": exc.__class__.__name__,
+            structured={"error": exception_reason(exc), "error_type": exc.__class__.__name__,
                         "effect": effect, "recovery_hint": recovery,
                         **({"path": exc.path, "phase": exc.phase} if isinstance(exc, ArtifactWriteError) else {})},
             call_id=call.call_id,

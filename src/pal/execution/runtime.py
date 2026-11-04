@@ -60,7 +60,7 @@ from pal.execution.tool_facade import (
     validate_output,
     validation_error_details,
 )
-from pal.shared.diagnostics import diagnostic_text, diagnostic_value, diagnostic_summary, exception_report, exception_summary
+from pal.shared.diagnostics import diagnostic_text, diagnostic_value, diagnostic_summary, exception_report, exception_summary, exception_reason, diagnostic_reason
 from pal.execution.tool_presentation import native_input_contract, render_tool_definition, render_tool_search
 from pal.shared.result_rendering import render_structured_for_llm
 from pal.execution.tool_registry import (
@@ -179,23 +179,6 @@ def _failure_effect_outcome(record: CompiledToolRecord, receipt: EffectReceipt |
     # Read-labelled tools can still change session state, e.g. navigation or
     # memory promotion. Only the handler can confirm that no effect occurred.
     return EffectOutcome.UNKNOWN
-
-
-def _with_failure_diagnostics(text: str, structured: dict[str, Any], *, error: str = "") -> str:
-    """Keep handler diagnostics visible even when its summary omits them."""
-    error = diagnostic_text(error, limit=None)
-    if error and error not in text:
-        text += "\nReported error: " + error
-    missing = {}
-    for key, value in diagnostic_value(structured).items():
-        if isinstance(value, str) and (not value or value in text):
-            continue
-        serialized_field = render_structured_for_llm({key: value})[1:-1]
-        if serialized_field not in text:
-            missing[key] = value
-    if missing:
-        text += "\nFailure details: " + render_structured_for_llm(missing)
-    return text
 
 
 @dataclass
@@ -983,7 +966,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             if record.native_function:
                 contract = native_input_contract(record.input_schema)
                 details["input_schema"] = contract
-                error += "\nInput contract (JSON objects must not be stringified): " + json.dumps(contract, ensure_ascii=False)
+                error += "\nJSON objects must not be stringified. Supply the required nested fields."
             return rejection(
                 "invalid_arguments",
                 error,
@@ -1420,10 +1403,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
             validated = dump_output(validate_output(record.output_model, output))
         except (ValidationError, TypeError) as exc:
             outcome = EffectOutcome.NONE if record.execution.effect_kind is EffectKind.NONE else EffectOutcome.NOT_APPLIED
-            diagnostic = exception_report(exc)
+            diagnostic = exception_reason(exc)
             return FailedResult(
                 error_code="output_validation_failed",
-                error=exception_summary(exc),
+                error=diagnostic,
                 effect=outcome,
                 retry=derive_retry_directive(record.execution, outcome),
                 llm_text=(f"Built-in output failed validation for {record.alias}.\n"
@@ -1592,27 +1575,27 @@ class ExecutionRuntime(ExecutionRuntimePort):
             # Guidance handling must never turn a delivered operation into a
             # new failure. Keep its recovery constraints and report this
             # additional fault without offering unvalidated actions.
-            _LOGGER.warning("Unable to resolve tool result guidance", exc_info=True)
+            _LOGGER.warning("Unable to resolve tool result guidance:\n%s", exception_report(exc))
             updates = {
                 "affordances": [],
                 "llm_text": result.llm_text + "\nRecovery suggestions could not be validated; "
-                    "operation status is unchanged:\n" + exception_report(exc),
+                    "operation status is unchanged:\n" + exception_reason(exc),
             }
             if isinstance(result, (FailedResult, RejectedResult)):
-                updates["error"] = result.error + "\nRecovery guidance also failed: " + exception_summary(exc)
+                updates["error"] = result.error + "\nRecovery guidance also failed: " + exception_reason(exc)
             else:
                 updates.pop("llm_text")
                 updates["output_error"] = (
                     (result.output_error + "\n" if result.output_error else "")
                     + "Recovery suggestions could not be validated; operation status is unchanged:\n"
-                    + exception_report(exc)
+                    + exception_reason(exc)
                 )
             result = result.model_copy(update=updates)
         if isinstance(result, (FailedResult, RejectedResult)):
             # Redact the final failure projection, including provider output
-            # rejected by validation, before any full diagnostic is retained
-            # in a snapshot. Keep host evidence, executable arguments, and
-            # successful business output unchanged.
+            # rejected by validation. Preserve owner-authored errors and
+            # receipts regardless of their length. Keep host evidence,
+            # executable arguments, and successful business output unchanged.
             result = result.model_copy(update={
                 "error": diagnostic_text(result.error, limit=None),
                 "llm_text": diagnostic_text(result.llm_text, limit=None),
@@ -1621,41 +1604,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     "reason": diagnostic_text(action.reason, limit=None),
                 }) for action in result.affordances],
             })
-        if isinstance(result, (FailedResult, RejectedResult)):
-            return self._present_failure_diagnostic(result, call, turn_id=turn_id)
-        result = self._present_delivery_diagnostic(result, call, turn_id=turn_id)
+            if isinstance(result, FailedResult):
+                result = result.model_copy(update={
+                    "operation_result": diagnostic_text(result.operation_result, limit=None),
+                    "effect_receipt": diagnostic_value(result.effect_receipt),
+                })
+            return result
+        if result.output_error:
+            result = result.model_copy(update={
+                "output_error": diagnostic_text(result.output_error, limit=None),
+            })
         return self._budget_invocation_result(result, call, budget=budget, turn_id=turn_id)
 
-    def _present_delivery_diagnostic(self, result: CompleteResult, call, *, turn_id):
-        """Expose secondary delivery errors without rewriting successful output."""
-        if not result.output_error:
-            return result
-        full = diagnostic_text(result.output_error, limit=None)
-        if any(ref.coverage == "complete delivery diagnostic" and full.endswith(render_snapshot_hint(ref))
-               for ref in result.snapshot_refs):
-            return result
-        summary = diagnostic_summary(full)
-        if summary == full and len(full) <= _DIAGNOSTIC_PREVIEW_CHARS:
-            return result.model_copy(update={"output_error": full})
-        if len(summary) > _DIAGNOSTIC_PREVIEW_CHARS:
-            summary, _ = head_tail(summary, _DIAGNOSTIC_PREVIEW_CHARS)
-        try:
-            lifetime = self.logical_context_for_turn(turn_id or call.call_id).execution_lifetime_id
-            ref = self.result_snapshots.capture(full, call_id=call.call_id,
-                lifetime=lifetime, coverage="complete delivery diagnostic")
-        except Exception as exc:
-            return result.model_copy(update={"output_error": full +
-                "\nFull diagnostic could not be saved: " + exception_summary(exc)})
-        return result.model_copy(update={
-            "output_error": summary + "\n\nFull diagnostic:\n" + render_snapshot_hint(ref),
-            "snapshot_refs": tuple(dict.fromkeys((*result.snapshot_refs, ref))),
-        })
+    def _present_output_contract_failure(self, result, call, *, turn_id):
+        """Present Execution's own validation fault and retain rejected output.
 
-    def _present_failure_diagnostic(self, result, call, *, turn_id):
-        """Keep actionable errors outside the business-output budget.
-
-        Stack traces and large provider responses are evidence, not a useful
-        default error message. Retain them before presenting a concise view.
+        Only the output validator calls this. Provider-authored public errors
+        and receipts must never pass through this diagnostic summarizer.
         """
         text = result.llm_text
         if any(ref.coverage == "complete failure diagnostic" and text.endswith(render_snapshot_hint(ref))
@@ -1663,28 +1628,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return result
         if len(text) <= _DIAGNOSTIC_PREVIEW_CHARS and "Traceback (most recent call last):" not in text:
             return result
-        summary = diagnostic_summary(result.error or text)
+        summary = diagnostic_reason(text)
         heading = text.split("\n", 1)[0]
-        if heading and "Traceback (most recent call last):" not in heading and heading not in summary:
+        if (heading and len(heading) < len(summary)
+                and "Traceback (most recent call last):" not in heading and heading not in summary):
             summary = heading + "\n" + summary
-        if result.details:
-            safe_details = diagnostic_value(result.details, summarize=True)
-            details = "\nFailure details: " + render_structured_for_llm(safe_details)
-            if len(summary) + len(details) <= _DIAGNOSTIC_PREVIEW_CHARS:
-                summary += details
         if len(summary) > _DIAGNOSTIC_PREVIEW_CHARS:
             summary, _ = head_tail(summary, _DIAGNOSTIC_PREVIEW_CHARS)
         # Include recovery in the saved diagnostic as well as live metadata.
-        full = text + self._rendered_guidance_tail(result)
+        full = diagnostic_text(text + self._rendered_guidance_tail(result), limit=None)
         try:
             lifetime = self.logical_context_for_turn(turn_id or call.call_id).execution_lifetime_id
             ref = self.result_snapshots.capture(full, call_id=call.call_id,
                 lifetime=lifetime, coverage="complete failure diagnostic")
         except Exception as exc:
-            # Never shorten evidence without a retained full copy.
-            return result.model_copy(update={"llm_text": text +
-                "\nFull diagnostic could not be saved: " + exception_summary(exc) +
-                "\nThe complete diagnostic is shown above; operation status is unchanged."})
+            # Service logging remains available when snapshot storage fails.
+            return result.model_copy(update={"llm_text": summary +
+                "\nDiagnostic snapshot unavailable: " + exception_reason(exc)})
         return result.model_copy(update={
             "llm_text": summary + "\n\nFull diagnostic:\n" + render_snapshot_hint(ref),
             "snapshot_refs": tuple(dict.fromkeys((*result.snapshot_refs, ref))),
@@ -1724,8 +1684,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     action = ToolAffordance(tool="call_tool", arguments=arguments, reason=candidate.reason)
                 resolved.append(action)
             except Exception as exc:
-                _LOGGER.warning("Dropping invalid tool result affordance", exc_info=True)
-                diagnostics.append(exception_report(exc))
+                _LOGGER.warning("Dropping invalid tool result affordance:\n%s", exception_report(exc))
+                diagnostics.append(exception_reason(exc))
         resolved = normalize_affordances(resolved)
         if resolved == list(result.affordances or ()) and not diagnostics:
             return result
@@ -1808,7 +1768,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             # mutation's evidence. Appending leaves file-delivery offsets and
             # existing snapshot references intact.
             updates = {
-                "llm_text": text + "\n\nComplete output could not be saved:\n" + exception_report(exc)
+                "llm_text": text + "\n\nComplete output could not be saved:\n" + exception_reason(exc)
                     + "\nThe full result is shown above beyond the output budget because no complete snapshot "
                       "could be saved. Operation status is unchanged; do not repeat side effects to recover output.",
             }
@@ -1857,8 +1817,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         turn_id: str | None,
     ) -> ToolInvocationResult:
         if isinstance(raw, (RejectedResult, FailedResult)):
-            return raw.model_copy(update={"llm_text": _with_failure_diagnostics(
-                raw.llm_text, raw.details, error=raw.error)})
+            return raw
         if isinstance(raw, CompleteResult):
             return raw
         receipt: EffectReceipt | None = None
@@ -1918,9 +1877,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     error=error,
                     effect=outcome,
                     retry=retry,
-                    llm_text=_with_failure_diagnostics(llm_text or raw_text,
-                        dict(raw_structured or {}) if raw.llm_failure_details is None
-                        else raw.llm_failure_details, error=raw_text),
+                    llm_text=llm_text or raw_text or error,
                     affordances=owner_affordances,
                     recovery_hint=recovery_hint,
                     details=dict(raw_structured or {}),
@@ -1977,7 +1934,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 output = dump_output(output_model)
         except (ValidationError, JsonSchemaValidationError, TypeError) as exc:
             diagnostic = exception_report(exc)
-            return FailedResult(
+            return self._present_output_contract_failure(FailedResult(
                 error_code="output_validation_failed",
                 error=exception_summary(exc),
                 effect=outcome,
@@ -1993,9 +1950,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 details={"output_schema": record.output_schema,
                          "raw_output_text": render_structured_for_llm(candidate),
                          "raw_llm_text": llm_text},
-                recovery_hint="Repair the tool/provider output contract, not the task arguments. Do not repeat side effects to recover output.",
+                recovery_hint=(recovery_hint + "\n" if recovery_hint else "") +
+                    "Repair the tool/provider output contract, not the task arguments. Do not repeat side effects to recover output.",
+                affordances=affordances,
+                operation_result=diagnostic_text(llm_text, limit=None),
+                effect_receipt=diagnostic_value(receipt.receipt) if receipt is not None else {},
                 context_messages=context_messages,
-            )
+            ), call, turn_id=turn_id)
         # Handler text is data, including leading/trailing whitespace. Only
         # Pal-owned structured serialization may change presentation.
         rendered = llm_text or render_structured_for_llm(output)
@@ -2046,9 +2007,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     @staticmethod
     def _rejected_error_result(exc: ToolRejectedError) -> RejectedResult:
-        text = exception_report(exc)
-        if exc.details:
-            text += "\nFailure details: " + render_structured_for_llm(diagnostic_value(exc.details))
+        text = exception_reason(exc)
         return rejection(
             exc.error_code,
             text,
@@ -2056,7 +2015,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             affordances=normalize_affordances(exc.affordances, limit=None),
             details=dict(exc.details),
             recovery_hint=str(getattr(exc, "recovery_hint", "") or ""),
-        ).model_copy(update={"error": exception_summary(exc)})
+        )
 
     @staticmethod
     def _safe_failure_guidance(
@@ -2072,10 +2031,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 declared_failure_next_steps=declared_failure_next_steps,
             )
         except Exception as exc:
-            _LOGGER.warning("Unable to resolve failure guidance; retaining operation failure", exc_info=True)
+            _LOGGER.warning("Unable to resolve failure guidance; retaining operation failure:\n%s", exception_report(exc))
             hint = handler_recovery_hint or declared_failure_next_steps
-            diagnostic = "Recovery guidance resolution also failed:\n" + exception_report(exc)
-            return ((hint + "\n" if hint else "") + diagnostic), []
+            return hint, []
 
     @staticmethod
     def _handler_exception_result(record: CompiledToolRecord, exc: Exception) -> FailedResult:
@@ -2084,11 +2042,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         retry = exc.retry if isinstance(exc, ToolExecutionError) else None
         if not isinstance(retry, RetryDirective):
             retry = derive_retry_directive(record.execution, outcome)
-        diagnostic = exception_report(exc)
+        diagnostic = exception_reason(exc)
         details = dict(getattr(exc, "details", {}) or {})
-        llm_text = f"Tool {record.alias} failed ({type(exc).__name__}); effect={outcome.value}.\n{diagnostic}"
-        if details:
-            llm_text += "\nFailure details: " + render_structured_for_llm(diagnostic_value(details))
+        llm_text = f"{record.alias}: {diagnostic}"
         recovery_hint, affordances = ExecutionRuntime._safe_failure_guidance(
             handler_recovery_hint=str(getattr(exc, "recovery_hint", "") or ""),
             handler_affordances=list(getattr(exc, "affordances", ()) or ()),
@@ -2096,7 +2052,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         )
         return FailedResult(
             error_code=str(getattr(exc, "error_code", "handler_exception") or "handler_exception"),
-            error=exception_summary(exc),
+            error=diagnostic,
             effect=outcome,
             retry=retry,
             llm_text=llm_text,
@@ -2156,6 +2112,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     "retry": result.retry.value,
                 }
             )
+            if isinstance(result, FailedResult):
+                if result.operation_result:
+                    metadata["operation_result"] = result.operation_result
+                if result.effect_receipt:
+                    metadata["effect_receipt"] = result.effect_receipt
         elif result.output_error:
             metadata["delivery_error"] = result.output_error
         hint = (
@@ -2435,14 +2396,24 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return self._capability_exception_result(call, exc)
 
     @staticmethod
+    def tool_call_failed_result(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
+        """Execution owns the fallback when no provider result was delivered."""
+        reason = exception_reason(exc)
+        result = FailedResult(
+            error_code="tool_timeout" if isinstance(exc, TimeoutError) else "tool_rpc_failed",
+            error=reason, llm_text=f"{call.name}: {reason}",
+            effect=EffectOutcome.UNKNOWN, retry=RetryDirective.RECONCILE_FIRST,
+            recovery_hint="Inspect the operation state before retrying; no result was received.",
+        )
+        return ExecutionRuntime._canonical_result_from_invocation(call.name, call.call_id, result)
+
+    @staticmethod
     def _capability_exception_result(call: CapabilityCall, exc: Exception) -> CapabilityResult:
         rejected = isinstance(exc, ToolRejectedError)
         declared = isinstance(exc, (ToolRejectedError, ToolExecutionError))
-        diagnostic = exception_report(exc)
+        diagnostic = exception_reason(exc)
         text = diagnostic if rejected else f"Capability execution failed: {diagnostic}"
         details = dict(exc.details) if declared else {}
-        if details:
-            text += "\nFailure details: " + render_structured_for_llm(diagnostic_value(details))
         structured = {
             **details,
             "kind": "rejected" if rejected else "failed",

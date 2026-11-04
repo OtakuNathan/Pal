@@ -21,7 +21,7 @@ from pal.shared.result_snapshot import ResultSnapshotRef
 
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolGuidance
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_reason
 from pal.execution.tool_semantics import DIRECT_CONTROL
 from pal.shared import (
     OPERATION_NAMESPACE,
@@ -176,7 +176,7 @@ class _ShellProcessSupervisor:
                 captured = self.capture_output(stdout_path, stderr_path) if self.capture_output else None
             except Exception as exc:
                 captured = None
-                output_error = "Command finished, but its output snapshot could not be saved:\n" + exception_report(exc)
+                output_error = "Command finished, but its output snapshot could not be saved:\n" + exception_reason(exc)
                 output_error_code = "output_snapshot_failed"
             # A failed snapshot must not discard streams that still exist.
             # The outer delivery layer can budget this retained evidence.
@@ -186,7 +186,7 @@ class _ShellProcessSupervisor:
                     try:
                         streams[label] = path.read_bytes().decode("utf-8", errors="replace")
                     except OSError as exc:
-                        output_error += f"\n{label} could not be read; its contents are unavailable:\n" + exception_report(exc)
+                        output_error += f"\n{label} could not be read; its contents are unavailable:\n" + exception_reason(exc)
                         output_error_code = "output_read_failed"
             self.execution = _ShellExecution(
                 returncode=proc.returncode,
@@ -458,7 +458,7 @@ class ShellExecTool:
     ) -> CapabilityResult:
         if supervisor.execution is not None:
             completed = ShellExecTool._execution_result(cmd, cwd, timeout_ms, supervisor.execution)
-            diagnostic = exception_report(exc)
+            diagnostic = exception_reason(exc)
             text = completed.llm_text + "\nShell output cleanup failed:\n" + diagnostic
             return CapabilityResult(
                 status=RuntimeStatus.ERROR, text=text, llm_text=text,
@@ -470,7 +470,7 @@ class ShellExecTool:
             "Shell command started, but execution or output delivery failed. "
             f"Observed exit code: {supervisor.returncode if supervisor.returncode is not None else 'unavailable'}.\n"
             if supervisor.started else "could not start shell command:\n"
-        ) + exception_report(exc)
+        ) + exception_reason(exc)
         return CapabilityResult(
             status=RuntimeStatus.ERROR,
             text=display_text,

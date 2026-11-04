@@ -41,6 +41,133 @@ def runtime_for(invoker, **config):
         config=SimpleNamespace(llm_endpoint_retry_attempts=2, **config))
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_llm_exception_body_is_not_prepended_to_public_root(streaming):
+    report = ('Traceback (most recent call last):\n'
+              '  File "private_transport.py", line 9\n'
+              'ConnectionError: upstream disconnected; api_key=hidden-secret')
+
+    class Invoker:
+        def invoke(self, *args, **kwargs):
+            raise RuntimeError(report)
+
+        def invoke_updates(self, *args, **kwargs):
+            raise RuntimeError(report)
+            yield
+
+    runtime = runtime_for(Invoker())
+    runtime.endpoint_retry_attempts = 1
+    response = (list(runtime._iter_stream_updates(_request()))[-1].response
+                if streaming else runtime.generate(_request()).response)
+    assert "upstream disconnected" in response.text
+    assert "Traceback" not in response.text
+    assert "private_transport.py" not in response.text
+    assert "hidden-secret" not in response.text
+    assert "private_transport.py" in response.message.metadata["error_diagnostic"]
+    assert _capture_turn_failure_signal(response).primary_blocker == response.text
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("envelope", ["direct", "response", "event"])
+def test_llm_provider_error_keeps_private_metadata_out_of_reply(streaming, envelope):
+    error = {"code": "backend_unavailable", "message": "upstream disconnected",
+             "stackTrace": 'Traceback (most recent call last):\n  File "private_backend.py", line 4'}
+    payload = {"error": error, "output": [], "private_context": "PRIVATE_RESPONSE_CONTEXT"}
+    if envelope == "response":
+        payload = {"type": "response.failed", "response": payload}
+    elif envelope == "event":
+        payload = {"type": "error", **error}
+    response = generation_result_from_values(finish_reason="error").response
+    response = replace(response, message=replace(response.message, metadata={
+        "provider_error": json.dumps(payload), "debug_dump": "PRIVATE_METADATA"}))
+
+    class Invoker:
+        def invoke(self, *args, **kwargs):
+            return response, ()
+
+        def invoke_updates(self, *args, **kwargs):
+            yield LLMResponseUpdate(response, LLMResponseDeltaKind.STATE)
+
+    runtime = runtime_for(Invoker())
+    runtime.endpoint_retry_attempts = 1
+    final = (list(runtime._iter_stream_updates(_request()))[-1].response
+             if streaming else runtime.generate(_request()).response)
+    assert "upstream disconnected" in final.text
+    assert "backend_unavailable" in final.text
+    for private in ("Traceback", "private_backend.py", "PRIVATE_RESPONSE_CONTEXT", "PRIVATE_METADATA"):
+        assert private not in final.text
+    assert "PRIVATE_METADATA" in final.message.metadata["error_diagnostic"]
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_responses_error_payload_never_streams_as_answer(failed):
+    from pal.llm.endpoint import ShapeEndpointInvoker
+    from pal.llm.ir import WireShape
+    from pal.llm.shapes.base import _JSONFrame
+
+    body = 'Traceback (most recent call last):\n  File "provider_trace.py", line 4\nOSError: offline'
+
+    class Transport:
+        def frames(self, endpoint, request):
+            yield _JSONFrame(0, {
+                "id": "response", "status": "failed" if failed else "completed",
+                "output": [{"type": "message", "id": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": body}]}],
+                **({"error": {"code": "unavailable", "message": "backend offline"}} if failed else {}),
+            })
+
+    endpoint = _endpoint()
+    endpoint.wire_shape = WireShape.OPENAI_RESPONSE.value
+    runtime = LLMRuntime(endpoint_resolver=EndpointResolver(endpoints=(endpoint,)), settings_repository=_Settings(),
+        endpoint_invoker=ShapeEndpointInvoker(transport=Transport()),
+        config=SimpleNamespace(llm_endpoint_retry_attempts=1))
+    updates = list(runtime._iter_stream_updates(_request()))
+    if failed:
+        assert updates[-1].response.finish_reason == "error"
+        assert "backend offline" in updates[-1].response.text
+        assert all("Traceback" not in item.response.text + item.text_delta for item in updates)
+        assert "provider_trace.py" in updates[-1].response.message.metadata["error_diagnostic"]
+    else:
+        assert updates[-1].response.text == body
+        assert body in "".join(item.text_delta for item in updates)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("source", ["openai", "anthropic", "subscription"])
+def test_sdk_error_body_stack_is_private(source, streaming):
+    import httpx
+    from anthropic import APIStatusError as AnthropicStatusError
+    from openai import APIStatusError as OpenAIStatusError
+    from pal.llm.chatgpt import ChatGPTError
+    from pal.llm.transport_contracts import LLMTransportError
+
+    body = {"error": {"code": "backend_error", "message": "upstream unavailable",
+                      "stack": "PRIVATE_STACK_FRAME", "api_key": "hidden-secret"}}
+    if source == "subscription":
+        error = ChatGPTError("request_failed", diagnostic=json.dumps(body))
+    else:
+        response = httpx.Response(503, request=httpx.Request("POST", "https://example.test"))
+        error_type = OpenAIStatusError if source == "openai" else AnthropicStatusError
+        error = error_type(f"Error code: 503 - {body}", response=response, body=body)
+
+    class Invoker:
+        def invoke(self, *args, **kwargs):
+            raise LLMTransportError("transport failed") from error
+
+        def invoke_updates(self, *args, **kwargs):
+            self.invoke()
+            yield
+
+    runtime = runtime_for(Invoker())
+    runtime.endpoint_retry_attempts = 1
+    final = (list(runtime._iter_stream_updates(_request()))[-1].response
+             if streaming else runtime.generate(_request()).response)
+    assert "upstream unavailable" in final.text
+    assert "PRIVATE_STACK_FRAME" not in final.text
+    assert "hidden-secret" not in final.text
+    assert "PRIVATE_STACK_FRAME" in final.message.metadata["error_diagnostic"]
+
+
 def test_generation_failure_preserves_every_attempt_and_redacts_secrets(monkeypatch):
     class Invoker:
         calls = 0
@@ -69,6 +196,8 @@ def test_stream_failure_preserves_reason_but_revokes_incomplete_tool_calls():
     assert final.message.message_id == partial.message.message_id
     assert final.finish_reason == "error"
     assert not final.tool_calls
+    assert "backend diagnostic: upstream disconnected" in final.text
+    assert "partial answer" not in final.text
     assert "backend diagnostic: upstream disconnected" in str(dict(final.message.metadata))
     signal = _capture_turn_failure_signal(final)
     assert "backend diagnostic: upstream disconnected" in signal.primary_blocker
@@ -207,8 +336,8 @@ def test_compaction_keeps_actual_error_in_result(mode, monkeypatch, caplog):
     assert "failed_at=" in caplog.text
     assert result.diagnostic_reference.removeprefix("compact ") in caplog.text
     assert "hidden-secret" not in caplog.text
-    assert "backend diagnostic" not in result.user_notice
-    assert "compaction provider diagnostic" not in result.user_notice
+    assert ("compaction provider diagnostic" if mode == "error_response" else "backend diagnostic: upstream disconnected") in result.user_notice
+    assert "Traceback" not in result.user_notice
     if mode != "error_response":
         assert "Traceback (most recent call last)" in caplog.text
         assert "direct cause" in caplog.text
@@ -221,7 +350,8 @@ def test_responses_decoder_delivers_provider_error_body(event):
     from pal.llm.shapes.openai_response import OpenAIResponseDecoder
     decoder = OpenAIResponseDecoder(ShapeContext(wire_shape=WireShape.OPENAI_RESPONSE, endpoint_id="ep", model_id="test"))
     payload = {"status": "failed", "output": [], "error": {"code": "provider_failure",
-        "message": "original Responses diagnostic", "api_key": "hidden-secret"}}
+        "message": "original Responses diagnostic", "api_key": "hidden-secret",
+        "stackTrace": "PRIVATE_PROVIDER_FRAME"}}
     if event == "response.failed":
         payload = {"type": event, "response": payload}
     elif event == "error":
@@ -237,6 +367,7 @@ def test_responses_decoder_delivers_provider_error_body(event):
     final = runtime.generate(_request())
     assert "original Responses diagnostic" in final.text
     assert "hidden-secret" not in final.text
+    assert "PRIVATE_PROVIDER_FRAME" not in final.text
 
 
 @pytest.mark.parametrize("streaming", [False, True])

@@ -13,7 +13,7 @@ from pal.shared import (
     PromptIRBlock,
 )
 from pal.shared.payloads import extract_text_from_payload
-from pal.shared.diagnostics import exception_summary
+from pal.shared.diagnostics import exception_reason
 from pal.shared.prompt_rendering import render_runtime_context_update, render_runtime_reminder, render_system_reminder, render_xml_block
 
 
@@ -926,7 +926,7 @@ class PromptCompiler:
                 "memory_pack": None,
                 "memory_context_errors": {
                     **assembly_context.metadata.get("memory_context_errors", {}),
-                    "memory_pack": exception_summary(exc),
+                    "memory_pack": exception_reason(exc),
                 },
             })
         metadata = dict(assembly_context.metadata)

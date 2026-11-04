@@ -64,8 +64,7 @@ from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt
 from pal.foundation import AttachmentSpec, EventEnvelope, utc_now
 from pal.foundation.log_paths import pal_log_path
-from pal.foundation.diagnostics import diagnostic_text, exception_report
-from pal.shared.result_rendering import render_structured_for_llm
+from pal.foundation.diagnostics import exception_report, exception_reason
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import LLMGenerationResult
 from pal.llm.ir import LLMRequestIR
@@ -1581,7 +1580,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         try:
             resolved = setter(requested)
         except ValueError as exc:
-            await self._complete_action_reply_async(action, exception_report(exc))
+            await self._complete_action_reply_async(action, exception_reason(exc))
             return
         status_builder = getattr(llm_runtime, "thinking_status", None)
         status = status_builder() if callable(status_builder) else {}
@@ -1637,7 +1636,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 if isinstance(result, dict):
                     dependent_refreshes[port_name] = dict(result)
             except Exception as exc:
-                dependent_refresh_errors[port_name] = exception_report(exc)
+                dependent_refresh_errors[port_name] = exception_reason(exc)
         enabled_count = payload.get("enabled_count")
         primary = payload.get("primary_endpoint_id") or "-"
         active = payload.get("active_endpoint_id") or "-"
@@ -1775,7 +1774,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     await result
             except Exception as exc:
                 error = exception_report(exc)
-                update_errors.append(f"{port_name}: {error}")
+                update_errors.append(f"{port_name}: {exception_reason(exc)}")
                 self.state.diagnostics.append(
                     {
                         "kind": "runtime.prompt_log.dependent_update_failed",
@@ -2157,7 +2156,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             self.cache_warm_deadline.configure(enabled=False)
             message = "Compaction reminders before cache expiry are disabled."
         except Exception as exc:
-            message = f"Could not disable cache reminders: {exception_report(exc)}"
+            message = f"Could not disable cache reminders: {exception_reason(exc)}"
         return {
             "delivery": control_interactions.terminal_delivery_for_action(
                 action,
@@ -2181,16 +2180,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         result = await self.context.execution_runtime.execute_async(
             CapabilityCall(name=capability_name, args=dict(action.args))
         )
-        text = str(result.llm_text or result.text)
-        if result.status != RuntimeStatus.OK:
-            text = diagnostic_text(render_structured_for_llm({
-                "status": result.status, "text": result.text, "llm_text": result.llm_text,
-                "structured": result.structured,
-                "effect_receipt": result.effect_receipt.model_dump(mode="json") if result.effect_receipt else None,
-                "recovery": result.recovery_hint,
-                "affordances": [item.model_dump(mode="json") for item in result.affordances],
-            }), limit=None)
-        await self._complete_action_reply_async(action, text)
+        await self._complete_action_reply_async(action, result.user_text)
 
     async def _render_reset_prompt_async(self, request) -> None:
         already_opened = bool(request.payload.get("opened"))

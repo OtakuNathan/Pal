@@ -318,7 +318,7 @@ def test_log_control_reports_partial_update_and_full_cause(control):
     assert_diagnostic(core.state.diagnostics[-1]["error"])
 
 
-def test_button_tool_failure_delivers_full_result_and_effect(control):
+def test_button_tool_failure_delivers_owner_message_and_effect(control):
     core, route = control
     result = CapabilityResult(status="error", text="x" * 500 + " original reason at end", llm_text="short failure",
         structured={"diagnostic": "hidden detail"}, effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN),
@@ -327,7 +327,8 @@ def test_button_tool_failure_delivers_full_result_and_effect(control):
     asyncio.run(core.handle_control_action_async(ControlAction("invoke_capability", "runtime", target_id="probe", route=route,
         args={"interaction_origin": "button", "interaction_id": "i", "interaction_kind": "control_panel"})))
     text = reply(core)
-    assert "original reason at end" in text and "hidden detail" in text
+    assert "short failure" in text
+    assert "original reason at end" not in text and "hidden detail" not in text
     assert "unknown" in text and "inspect state before retry" in text
 
 
@@ -346,9 +347,9 @@ def test_manual_compaction_delivers_log_reference_and_retains_diagnostics(contro
     monkeypatch.setattr(core, "_deliver_compact_candidates_async", AsyncMock())
     asyncio.run(core.handle_control_action_async(ControlAction("compact_memory", "memory", route=route)))
     text = reply(core)
-    assert "see service logs" in text
+    assert "see service logs" in text.lower()
     assert result.diagnostic_reference in text
-    assert "storage root cause" not in text
+    assert "storage root cause" in text
     assert "Traceback" not in text
     assert "hidden-secret" not in text
     assert_diagnostic(result.diagnostic_details)

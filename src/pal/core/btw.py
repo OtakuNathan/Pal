@@ -15,6 +15,7 @@ from pal.core.turns import (
     EffectResult, LLMPreflightEffect, LLMRequestEffect, MemoryCompactEffect,
     TurnContinuation, TurnOutcome, channel_turn_program,
 )
+from pal.foundation.diagnostics import exception_reason
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest, LLM_SIDE_TURNS
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
@@ -207,7 +208,7 @@ class BtwTurn:
         except Exception as exc:
             self.core.state.diagnostics.append({"kind": "btw.failed", "turn_id": self.turn_id,
                                                 "error": f"{type(exc).__name__}: {exc}"})
-            await self.core._reply_to_route_async(self.action.route, f"Side question failed: {exc}")
+            await self.core._reply_to_route_async(self.action.route, f"Side question failed: {exception_reason(exc)}")
         finally:
             cleanup = asyncio.create_task(self.execution.finish_transient_turn(self.turn_id))
             cancelled = False
@@ -278,7 +279,7 @@ async def start_btw(core: Any, action: ControlAction) -> None:
     try:
         turn = BtwTurn(core, action)
     except Exception as exc:
-        await core._reply_to_route_async(action.route, f"Could not start side question: {exc}")
+        await core._reply_to_route_async(action.route, f"Could not start side question: {exception_reason(exc)}")
         return
     core._btw_turn = turn
     turn.start()

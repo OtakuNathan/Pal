@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.foundation.diagnostics import diagnostic_text, exception_report
+from pal.foundation.diagnostics import diagnostic_text, exception_reason
 
 import asyncio
 import json
@@ -218,7 +218,7 @@ class DreamingPipeline:
             except ValueError as exc:
                 # Only structural errors cause correction calls. Provider
                 # failures use the shared LLM runtime's bounded retries.
-                error = exception_report(exc)
+                error = exception_reason(exc)
                 if attempt == 2:
                     raise ValueError("dreaming output failed structural validation") from exc
         return by_id
@@ -312,7 +312,7 @@ class DreamingPipeline:
                             except ValueError as exc:
                                 if attempt == 2:
                                     raise ValueError("dreaming review failed structural validation") from exc
-                                correction = exception_report(exc)
+                                correction = exception_reason(exc)
                         if review_record is not None:
                             review_record = review.model_dump()
                             if not review.approved or review.issues:

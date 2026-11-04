@@ -55,12 +55,12 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.result_rendering import render_titled_structured_for_llm, render_diagnostic_record_for_llm
 from pal.shared.inspection import inspection_snapshot
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_reason
 from pal.web_fetch.browser_service import BrowserServiceError, browser_session_key
 from pal.web_fetch.service import WebFetchService
-from pal.web_fetch.tools import BrowserScreenshotTool, browser_tool_error
+from pal.web_fetch.tools import BrowserScreenshotTool, browser_tool_error, public_browser_payload
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -194,7 +194,7 @@ class WebFetchIntrospectionProvider:
                 session_key=key, action="inspect", args=dict(call.args), persistent=persistent, timeout_ms=15000)
         payload = inspection_snapshot(payload, sections=sections, source="browser_host")
         failed = bool(call.args.get("extension_id") and payload["diagnostics"]["partial"])
-        return _result(RuntimeStatus.ERROR if failed else RuntimeStatus.OK, "Browser inspection", payload)
+        return _result(RuntimeStatus.ERROR if failed else RuntimeStatus.OK, "Browser inspection", payload, diagnostic=True)
 
 
     def navigate(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
@@ -432,7 +432,8 @@ class WebFetchIntrospectionProvider:
             if call.meta.get("broker_run_id"):
                 # The receiving worker owns the readable output file. Host paths
                 # are not usable inside its sandbox; transport raw text once.
-                return replace(result, llm_text="Browser content captured for worker delivery")
+                return replace(result, structured=public_browser_payload(payload),
+                               llm_text="Browser content captured for worker delivery")
             return self._document_result(call, result)
         if "_full_text" in payload or "_full_files" in payload:
             result = IntrospectionResult(status=RuntimeStatus.OK, text=title, structured=payload, llm_text=title)
@@ -447,7 +448,7 @@ class WebFetchIntrospectionProvider:
         if "_full_text" in document:
             files["text_file"] = document.pop("_full_text")
         if not files:
-            return replace(result, llm_text=render_titled_structured_for_llm(result.text, payload))
+            return replace(result, llm_text=render_titled_structured_for_llm(result.text, public_browser_payload(payload)))
         refs = []
         runtime = call.meta.get("execution_runtime")
         for label, text in files.items():
@@ -462,7 +463,7 @@ class WebFetchIntrospectionProvider:
                 document[label] = {"file_path": ref.path, "size_bytes": ref.size_bytes,
                                   "sha256": ref.digest, "read_only": True}
             except (OSError, RuntimeError) as exc:
-                document[label + "_error"] = exception_report(exc)
+                document[label + "_error"] = exception_reason(exc)
                 # The browser already returned the full capture. Keep it for
                 # ordinary result budgeting when dedicated storage fails.
                 document[label + "_content"] = text
@@ -476,7 +477,7 @@ class WebFetchIntrospectionProvider:
         if nested_document:
             payload[document_key] = document
         return CapabilityResult(status=result.status, text=result.text, structured=payload,
-                       llm_text=render_titled_structured_for_llm(result.text, payload), snapshot_refs=tuple(refs))
+                       llm_text=render_titled_structured_for_llm(result.text, public_browser_payload(payload)), snapshot_refs=tuple(refs))
 
     @staticmethod
     def _scope(call: IntrospectionCall) -> tuple[str, bool]:
@@ -493,12 +494,13 @@ class WebFetchIntrospectionProvider:
         raise ValueError("browser action has no conversation execution scope")
 
 
-def _result(status: str, title: str, payload: dict[str, Any]) -> IntrospectionResult:
+def _result(status: str, title: str, payload: dict[str, Any], *, diagnostic: bool = False) -> IntrospectionResult:
     return IntrospectionResult(
         status=status,
         text=title.lower(),
         structured=payload,
-        llm_text=render_titled_structured_for_llm(title, payload),
+        llm_text=(render_diagnostic_record_for_llm(title, payload) if diagnostic
+                  else render_titled_structured_for_llm(title, public_browser_payload(payload))),
     )
 
 

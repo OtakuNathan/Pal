@@ -1,9 +1,42 @@
 """The same authorization engine is exported to standalone remote workers."""
 import copy
+import os
 import pytest
 
 from pal.execution.file_registry import FileRegistry, FileRegistryError
 from pal.execution.session_state import FileDeliveryManifest
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Directory fsync is not available on Windows')
+def test_post_commit_failure_delivers_applied_and_failed_edit_receipts(tmp_path, monkeypatch):
+    import stat
+    from pal.execution import file_state
+
+    path = tmp_path / 'source.txt'
+    path.write_text('first\nsecond\n')
+    registry = FileRegistry()
+    registry.sync('scope', 0, {})
+    read = registry.execute('scope', 0, 'read', 'read', {'file_path': str(path)})
+    registry.sync('scope', 1, {'read-result': {'operation_id': 'read', 'manifest': read['context_delivery']}})
+    fsync = os.fsync
+    def fail_directory_sync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError('directory durability failed')
+        return fsync(fd)
+    monkeypatch.setattr(file_state.os, 'fsync', fail_directory_sync)
+    result = registry.execute('scope', 1, 'edit', 'edit', {'file_path': str(path), 'edits': [
+        {'old_string': 'first', 'new_string': 'changed'},
+        {'old_string': 'missing', 'new_string': 'unused'},
+    ]})
+    assert result['status'] == 'error'
+    assert path.read_text() == 'changed\nsecond\n'
+    assert result['effect_receipt']['outcome'] == 'applied'
+    assert 'directory durability failed' in result['llm_text']
+    assert '"applied_edit_indices":[0]' in result['llm_text']
+    assert '"edit_index":1' in result['llm_text']
+    assert 'Traceback' not in result['llm_text']
+    assert result['text'] == result['llm_text']
+    assert result['recovery_hint']
 
 
 @pytest.mark.parametrize('target', [0, 5, 'surface', '5'])

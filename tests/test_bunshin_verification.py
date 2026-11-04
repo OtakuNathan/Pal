@@ -121,7 +121,7 @@ class _FakeExecutionAdapter:
                 name=call.name,
                 ok=True,
                 text="diagnostics",
-                llm_text="diagnostics",
+                llm_text=json.dumps(self.lsp_structured),
                 structured=dict(self.lsp_structured),
                 status=RuntimeStatus.OK,
                 call_id=call.call_id,

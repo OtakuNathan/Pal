@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.foundation.diagnostics import diagnostic_text, exception_report, exception_summary
+from pal.foundation.diagnostics import diagnostic_text, diagnostic_reason, exception_report, exception_reason
 
 import asyncio
 import hashlib
@@ -96,7 +96,9 @@ class LLMEndpointInvocationError(RuntimeError):
 
 
 class LLMEndpointResponseError(LLMEndpointInvocationError):
-    pass
+    def __init__(self, message: str, *, public_reason: str = "") -> None:
+        super().__init__(message)
+        self.public_reason = public_reason
 
 
 class LLMRequestPreparationError(LLMEndpointInvocationError):
@@ -830,7 +832,7 @@ class LLMRuntime:
             endpoints = self._enabled_endpoints(request)
         except Exception as exc:
             self.usage_ledger.record_failed_request()
-            return _failure_result(str(exc), exc=exc)
+            return _failure_result(_public_failure_text(exc), exc=exc)
         if not endpoints:
             return _failure_result("Selected LLM endpoint is unavailable or not configured. Select one with /model.")
         last_error: Exception | None = None
@@ -852,7 +854,7 @@ class LLMRuntime:
                     prepared = self._compile_request(endpoint, request)
                 except CacheProfileError as exc:
                     self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
-                    return _failure_result(str(exc), exc=exc)
+                    return _failure_result(_public_failure_text(exc), exc=exc)
                 except Exception as exc:
                     last_error = exc
                     failure_attempts.append({"endpoint_id": endpoint.endpoint_id, "error": exception_report(exc)})
@@ -1082,7 +1084,7 @@ class LLMRuntime:
             endpoints = self._enabled_endpoints(request)
         except Exception as exc:
             self.usage_ledger.record_failed_request()
-            response = _failure_result(str(exc), exc=exc).response
+            response = _failure_result(_public_failure_text(exc), exc=exc).response
             yield LLMResponseUpdate(
                 response,
                 delta_kind=LLMResponseDeltaKind.STATE,
@@ -1110,7 +1112,7 @@ class LLMRuntime:
                     prepared = self._compile_request(endpoint, request)
                 except CacheProfileError as exc:
                     self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
-                    yield LLMResponseUpdate(_failure_result(str(exc), exc=exc).response, delta_kind=LLMResponseDeltaKind.STATE)
+                    yield LLMResponseUpdate(_failure_result(_public_failure_text(exc), exc=exc).response, delta_kind=LLMResponseDeltaKind.STATE)
                     return
                 except Exception as exc:
                     last_error = exc
@@ -1149,6 +1151,12 @@ class LLMRuntime:
                         **invoke_kwargs,
                     ):
                         last_update = update
+                        # A provider error envelope may contain text updates
+                        # before its terminal state. Keep that payload private;
+                        # only the owner-rendered failure below may be delivered.
+                        if (update.response.finish_reason == LLMFinishReason.ERROR
+                                or update.response.message.metadata.get("provider_error")):
+                            continue
                         semantic_seen = semantic_seen or (
                             update.delta_kind != LLMResponseDeltaKind.STATE
                             and bool(update.response.message.parts)
@@ -1156,7 +1164,7 @@ class LLMRuntime:
                         if (
                             update.delta_kind == LLMResponseDeltaKind.STATE
                             and update.response.finish_reason
-                            in {LLMFinishReason.LENGTH, LLMFinishReason.ERROR}
+                            == LLMFinishReason.LENGTH
                         ):
                             continue
                         yield update
@@ -1273,7 +1281,7 @@ class LLMRuntime:
         )
         _log_decode_failure(last_error, endpoints[-1].endpoint_id if endpoints else "")
         response = _failure_result(
-            str(last_error or "LLM stream failed"),
+            _public_failure_text(last_error),
             exc=last_error,
             failure_attempts=failure_attempts,
         ).response
@@ -1336,7 +1344,7 @@ class LLMRuntime:
                     error = TimeoutError(f"LLM stream exceeded the {wall_timeout:g}s wall-clock limit")
                     response = (_response_with_failure(last_update.response, error,
                         partial_output_chars=len(last_update.response.text)) if last_update is not None
-                        else _failure_result(str(error), exc=error).response)
+                        else _failure_result(_public_failure_text(error), exc=error).response)
                     yield LLMResponseUpdate(
                         response,
                         delta_kind=LLMResponseDeltaKind.STATE,
@@ -1967,7 +1975,7 @@ def _failure_result(
     exc: Exception | None = None,
     failure_attempts: list[dict[str, Any]] | None = None,
 ) -> LLMGenerationResult:
-    detail = exception_summary(exc) if exc is not None else ""
+    detail = _llm_failure_reason(exc) if exc is not None else ""
     text = diagnostic_text(text, limit=None)
     if detail and detail not in text:
         text += "\n" + detail
@@ -1991,13 +1999,14 @@ def _response_with_failure(
 ) -> LLMResponseIR:
     response = replace(response, message=replace(
         response.message,
-        parts=tuple(part for part in response.message.parts if not isinstance(part, ToolCallIR)),
+        parts=(TextPartIR(_public_failure_text(exc) + "\n" + _llm_failure_reason(exc)),),
         replay=None,
     ))
     metadata = dict(response.message.metadata)
     metadata.update(_failure_metadata(exc))
     if partial_output_chars > 0:
         metadata["partial_output_chars"] = int(partial_output_chars)
+        metadata["failure_evidence"]["partial_output_chars"] = int(partial_output_chars)
     return replace(
         response,
         message=replace(response.message, metadata=metadata),
@@ -2024,6 +2033,7 @@ def _failure_metadata(exc: Exception | None) -> dict[str, Any]:
         ),
         "failure_kind": error_kind,
         "error_type": type(exc).__name__ if exc is not None else "UnknownError",
+        "failure_evidence": {"failure_kind": error_kind, "error_type": type(exc).__name__ if exc is not None else "UnknownError"},
         **({"error_diagnostic": exception_report(exc)} if exc is not None else {}),
     }
 
@@ -2111,11 +2121,8 @@ def _public_failure_text(exc: Exception | None) -> str:
     if subscription is not None:
         return subscription.user_message
     if exc is None:
-        return "LLM invocation failed: kind=unknown type=UnknownError"
-    return (
-        "LLM invocation failed: "
-        f"kind={_classify_retry_error(exc)} type={type(exc).__name__}"
-    )
+        return "LLM invocation failed; no error detail was provided."
+    return "LLM invocation failed."
 
 
 def _estimate_request_tokens(request: LLMRequestIR) -> int:
@@ -2155,9 +2162,55 @@ def _is_stub_endpoint(endpoint: LLMEndpointModel) -> bool:
     )
 
 
+def _provider_error_reason(detail: Any) -> str:
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except (ValueError, RecursionError):
+            pass
+    # Codecs retain complete provider error envelopes privately. Select the
+    # error within the known response/event envelopes before public rendering.
+    for _ in range(3):
+        if not isinstance(detail, Mapping):
+            break
+        if isinstance(detail.get("response"), Mapping):
+            detail = detail["response"]
+        elif detail.get("error"):
+            detail = detail["error"]
+        else:
+            break
+    return diagnostic_reason(detail or "Provider returned an error response.")
+
+
+def _llm_failure_reason(exc: Exception) -> str:
+    from anthropic import APIStatusError as AnthropicStatusError
+    from openai import APIStatusError as OpenAIStatusError
+    from pal.llm.chatgpt import ChatGPTError
+    from pal.llm.transport_contracts import LLMHTTPTransportError
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ChatGPTError):
+            detail = current.diagnostic or {"code": current.code}
+        elif isinstance(current, (OpenAIStatusError, AnthropicStatusError)):
+            detail = current.body or str(current)
+        elif isinstance(current, LLMHTTPTransportError):
+            detail = current.payload
+        else:
+            current = current.__cause__
+            continue
+        logging.getLogger(__name__).warning("%s", exception_report(exc))
+        return _provider_error_reason(detail)
+    return exception_reason(exc)
+
+
 def _accounted_response_error(endpoint: Any, response: LLMResponseIR) -> LLMEndpointResponseError:
+    reason = _provider_error_reason(thaw_json(response.message.metadata.get("provider_error")) or response.text)
     error = LLMEndpointResponseError(diagnostic_text(
         f"endpoint {endpoint.endpoint_id} returned finish_reason=error\n{response.text}\n"
-        + json.dumps(thaw_json(response.message.metadata), ensure_ascii=False, default=str), limit=None))
+        + json.dumps(thaw_json(response.message.metadata), ensure_ascii=False, default=str), limit=None),
+        public_reason=f"endpoint {endpoint.endpoint_id}: {reason}")
     error.llm_attempt_recorded = bool(response.attempt_ids)
     return error

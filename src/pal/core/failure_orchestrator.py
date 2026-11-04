@@ -28,7 +28,7 @@ from pal.failure import (
     VerificationResult,
 )
 from pal.foundation import utc_now
-from pal.shared.diagnostics import exception_report, exception_summary
+from pal.shared.diagnostics import exception_reason
 from pal.llm.conversions import request_ir_from_prompt
 from pal.llm.ir import LLMRequestIR
 from pal.memory.contracts import L2Entry
@@ -241,7 +241,7 @@ class FailureOrchestrator:
                 try:
                     outcome = await llm_runtime.agenerate(request)
                 except Exception as exc:
-                    diagnostic = exception_summary(exc)
+                    diagnostic = exception_reason(exc)
                     return FailureFlowOutcome(
                         verification=VerificationResult(
                             status=FAILURE_VERIFICATION_FAILED,
@@ -270,14 +270,7 @@ class FailureOrchestrator:
                 try:
                     tool_result = await self.context.execution_runtime.execute_tool_async(effect.tool_call, allow_tools=True)
                 except Exception as exc:
-                    text = "safe-mode tool failed:\n" + exception_report(exc)
-                    tool_result = ToolExecutionResult(
-                        name=effect.tool_call.name,
-                        ok=False,
-                        llm_text=text,
-                        text=text,
-                        structured={"error_type": type(exc).__name__},
-                    )
+                    tool_result = self.context.execution_runtime.tool_call_failed_result(effect.tool_call, exc)
                 if not tool_result.ok:
                     bus.emit(TURN_TOOL_CALL_FAILED, {**tool_event, "ok": False})
                 bus.emit(TURN_TOOL_CALL_AFTER, {**tool_event, "ok": tool_result.ok})
@@ -288,6 +281,7 @@ class FailureOrchestrator:
                     ok=tool_result.ok,
                     text=tool_result.text,
                     structured=tool_result.structured,
+                    call_id=effect.tool_call.call_id,
                 )
                 current = EffectResult(
                     status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
@@ -419,7 +413,7 @@ class FailureOrchestrator:
 
 def _failure_flow_exception_outcome(exc: Exception, *, phase: str) -> FailureFlowOutcome:
     error_type = type(exc).__name__
-    reason = f"Failure safe-mode flow crashed during {phase}: {error_type}: {exc}"
+    reason = f"Failure safe-mode flow crashed during {phase}: {exception_reason(exc)}"
     return FailureFlowOutcome(
         verification=VerificationResult(
             status=FAILURE_VERIFICATION_FAILED,

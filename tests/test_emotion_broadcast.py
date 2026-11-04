@@ -71,7 +71,7 @@ def test_broadcast_skips_unsupported_and_attempts_every_receiver_after_failure(e
     assert result.ok
     assert result.structured["outcome"] == "partial"
     assert result.structured["accepted"] == ["face", "desktop-2"]
-    assert result.structured["failures"] == [{"renderer": "broken", "reason": "transport unavailable"}]
+    assert result.structured["failures"] == [{"renderer": "broken", "reason": "RuntimeError: transport unavailable"}]
     assert calls.count(("desktop-2", "happy")) == 1
 
 

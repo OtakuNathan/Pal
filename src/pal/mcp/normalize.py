@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
 from typing import Any
 
@@ -10,7 +12,7 @@ from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpProtocolError
 # Keep validators and the exceptions caught below in the same module generation.
 from pal.mcp.protocol import validate_message, validate_tool_result
 from pal.shared import RuntimeStatus
-from pal.shared.diagnostics import diagnostic_text, exception_report
+from pal.shared.diagnostics import diagnostic_text, exception_reason, diagnostic_reason
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
@@ -79,6 +81,43 @@ def prompt_arguments_schema(prompt: McpPromptSpec) -> dict[str, Any]:
     }
 
 
+def _tool_error_reason(value: Any, *, depth: int = 0) -> str:
+    """Adapt server error envelopes without serializing their private diagnostics."""
+    if depth > 8:
+        return ""
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            # Some servers prefix their serialized error with an operation
+            # label. Decode the complete trailing envelope, not its escapes.
+            match = re.search(r"[\[{]", value)
+            if match and match.start() > 0:
+                try:
+                    decoded = json.loads(value[match.start():])
+                except ValueError:
+                    pass
+                else:
+                    reason = _tool_error_reason(decoded, depth=depth + 1)
+                    if reason:
+                        return reason
+            return diagnostic_reason(value)
+        return _tool_error_reason(decoded, depth=depth + 1)
+    if isinstance(value, dict):
+        # Explicit causes take precedence over wrapper messages. These are
+        # server conventions, so their interpretation belongs in the adapter.
+        fields = {re.sub(r"[^a-z]", "", str(key).lower()): item for key, item in value.items()}
+        for key in ("cause", "rootcause", "innererror", "reason", "rawresponse", "details", "error", "message", "detail", "errors",
+                    "traceback", "stack", "stacktrace"):
+            reason = _tool_error_reason(fields.get(key), depth=depth + 1)
+            if reason:
+                return reason
+    if isinstance(value, list):
+        reasons = [_tool_error_reason(item, depth=depth + 1) for item in value]
+        return diagnostic_reason("; ".join(dict.fromkeys(reason for reason in reasons if reason)))
+    return ""
+
+
 def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: str) -> CapabilityResult:
     try:
         validate_tool_result(result)
@@ -112,19 +151,36 @@ def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: 
     visible = {key: value for key, value in structured.items() if key not in {"tool_text", "raw_result"}}
     visible["result"] = _protocol_payload_for_llm(raw)
     llm_text = render_titled_structured_for_llm(title, visible)
+    if is_error:
+        # Server output remains protocol evidence. The adapter owns its failure
+        # presentation; a remote error never proves absence of side effects.
+        logging.getLogger(__name__).warning("MCP %s/%s tool error: %s", server_id, tool_name,
+            diagnostic_text(json.dumps(raw, ensure_ascii=False), limit=None))
+        text = (_tool_error_reason(raw.get("structuredContent"))
+                or _tool_error_reason([item["text"] for item in raw.get("content", [])
+                                       if item.get("type") == "text" and item.get("text")])
+                or "Server reported a tool error")
+        llm_text = f"MCP {tool_name}: {text}"
     return CapabilityResult(
         status=status,
         text=text,
         structured=structured,
         llm_text=llm_text,
         llm_failure_details=visible if is_error else None,
+        recovery_hint=structured.get("next_step", "") if is_error else "",
+        effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN) if is_error else None,
     )
 
 
 def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind: str) -> CapabilityResult:
-    error_text = exception_report(exc)
+    error_text = exception_reason(exc)
     remote_error = isinstance(exc, McpRemoteError) or (
         isinstance(exc, McpManagerRpcError) and exc.kind == "remote")
+    if remote_error and isinstance(exc, (McpRemoteError, McpManagerRpcError)):
+        # JSON-RPC errors travel directly or inside the manager sidecar's
+        # error.details.raw_response envelope. Decode before presenting them.
+        error_text = (_tool_error_reason(exc.payload)
+                      or _tool_error_reason(str(exc)) or "Server rejected the request")
     structured = {
         "mcp": {"server_id": server_id, "name": name, "kind": kind},
         "error_kind": "remote" if remote_error else "protocol",
@@ -139,7 +195,9 @@ def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind:
         status=RuntimeStatus.ERROR,
         text=f"MCP {kind} protocol error: {error_text}",
         structured=structured,
-        llm_text=diagnostic_text(render_titled_structured_for_llm("MCP protocol error", structured), limit=None),
+        llm_text=f"MCP {name}: {error_text}",
+        recovery_hint=structured["next_step"],
+        effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN),
     )
 
 

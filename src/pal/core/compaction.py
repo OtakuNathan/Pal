@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.foundation.diagnostics import diagnostic_text, exception_report
+from pal.foundation.diagnostics import diagnostic_text, exception_report, diagnostic_reason
 
 from pal.llm.contracts import LLMRuntimePort, LLMGenerationResult, LLMPreflightAdvice
 
@@ -203,9 +203,15 @@ class CompactionRunResult:
 
     @property
     def user_notice(self) -> str:
-        if not self.diagnostic_details:
+        metadata = self.memory_result.metadata if self.memory_result is not None else {}
+        follow_up = str(metadata.get("post_commit_detail") or "")
+        if self.success and not follow_up:
             return ""
-        return "Compaction encountered an error; see service logs" + (
+        detail = follow_up or next(iter(reversed(self.failure_details)), "") or next(iter(reversed(self.failures)), "")
+        if not detail:
+            return ""
+        prefix = "Compaction completed; follow-up failed: " if self.success else "Compaction error: "
+        return prefix + diagnostic_reason(detail) + ". See service logs" + (
             f" ({self.diagnostic_reference})." if self.diagnostic_reference else "."
         )
 

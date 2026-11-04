@@ -57,10 +57,14 @@ Notes:
   their authored relations remain available for future registry generations
 - invocation returns a discriminated `complete`, `rejected`, or
   `failed` result; effect outcome and retry direction are explicit
-- failures must deliver their original cause, exception chain and diagnostic
-  details to the model. Recovery or transport errors add evidence; they must
-  not replace the original result or erase its effect/retry semantics. The
-  shared tool policy explains these fields in normal and failure prompts
+- each tool/provider owns its failure presentation at its execution exit:
+  a concise cause, an observed effect receipt and result-specific recovery.
+  Execution preserves that text and those facts; it does not append private
+  structured diagnostics to a provider's message. Unexpected dispatch faults
+  use an Execution-owned fallback with unknown effect and reconciliation first.
+  Core delivers the resulting tool text without deriving business recovery
+- control replies use `CapabilityResult.user_text`: the owner message plus its
+  effect and recovery when needed, without private structured diagnostics
 - capability and workflow result adapters retain effect receipts, recovery
   guidance, context attachments and snapshot references across wrapper boundaries
 - diagnostic fields are redacted before JSON serialization. Already encoded
@@ -70,12 +74,18 @@ Notes:
   immutable UTF-8 file with a bounded head/tail preview and its local path. Use
   `rg` or `read_file` to inspect the copy; business-query pagination is unchanged
 - errors, status, retry decisions and recovery guidance do not consume the
-  normal-output budget. Error messages show concise causes; full stack traces
-  and large diagnostic details remain available in explicit snapshots. Short
-  errors are not shortened merely because a caller requested a tiny output budget
+  normal-output budget. Delivery does not summarize or truncate owner-authored
+  errors, even when long; per-item receipts and recovery constraints stay intact.
+  Owners keep stack traces in logs or explicit diagnostic snapshots. Execution's
+  output validator captures its own rejected output at the validation boundary
+- output-validation failures retain the provider's reported result and explicit
+  effect receipt in `operation_result` and `effect_receipt` metadata, together
+  with recovery guidance. These remain visible without reading the diagnostic
+  snapshot and do not consume the normal-output budget; validation does not
+  establish or reverse the provider's reported effects
 - a completed operation may carry `delivery_error` metadata for a secondary
   output or guidance fault. This diagnostic is shown outside the normal-output
-  budget, with a separate snapshot when needed; it does not change the operation's
+  budget without re-summarizing the owner's message; it does not change the operation's
   status or effect and does not authorize repeating completed side effects
 - MCP `tools/call` and `prompts/get` use separate result envelopes. Prompt
   retrieval preserves messages and supplies a read receipt instead of applying
@@ -90,9 +100,12 @@ Notes:
 - `read_file` preserves CRLF and CR between numbered lines and tells the model
   their JSON escapes. `edit_file` continues to match exact authorized bytes;
   callers remove display labels and preserve the delivered line endings
-- if a result's full text cannot be saved, deliver it inline with the storage
-  error and an explicit budget exception. A preview without a complete snapshot
-  must not become the only remaining account of why the tool failed
+- full exception chains belong in redacted service logs or diagnostic snapshots.
+  Owners use `exception_reason` at their error exit, and may use
+  `render_diagnostic_record_for_llm` for health/lifecycle records. A failed
+  diagnostic snapshot must still produce a brief error; it never authorizes
+  dumping a traceback into a conversation. Successful business output retains
+  its existing lossless storage-failure behavior
 - tool-result delivery metadata is stored on the L1 `ToolResultIR`. A delivered
   read result remains verbatim in prompt history and owns its file grant until
   compaction retires that result. Snapshot files are owned by explicit L1 references, pending delivery and

@@ -889,7 +889,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertIn("Tool boom failed", result.text)
+        self.assertIn("boom: RuntimeError: boom", result.text)
+        self.assertNotIn("Traceback", result.text)
         # The declared fallback now rides the typed recovery field, rendered
         # once through the metadata channel — never concatenated into the
         # body and never accompanied by a fabricated read_tool affordance.

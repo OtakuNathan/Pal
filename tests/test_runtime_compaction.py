@@ -1221,11 +1221,14 @@ def test_manual_compaction_logs_validation_traceback_without_sending_it(monkeypa
     assert "Traceback (most recent call last)" in caplog.text
     assert "ValueError" in caplog.text
     assert replies[-1].startswith("Context compacted." if recovers else "Compaction did not complete")
-    assert "see service logs" in replies[-1]
-    assert "compact run=" in replies[-1]
+    if recovers:
+        assert "error" not in replies[-1].lower()
+        assert "compact run=" not in replies[-1]
+    else:
+        assert "see service logs" in replies[-1].lower()
+        assert "compact run=" in replies[-1]
+        assert "checkpoint has extra fields" in replies[-1]
     assert "Traceback" not in replies[-1]
-    assert "ValueError" not in replies[-1]
-    assert "unexpected" not in replies[-1]
     finished = next(r for r in caplog.records if "compact finished" in r.message)
     assert finished.levelname == ("INFO" if recovers else "ERROR")
     assert all(r.levelname == "WARNING" for r in caplog.records if "attempt_failed" in r.message)

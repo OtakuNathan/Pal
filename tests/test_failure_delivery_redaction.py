@@ -24,7 +24,8 @@ CANARY = "SYNTHETIC_FAILURE_DELIVERY_CANARY_917"
 def test_nested_diagnostic_redaction_preserves_evidence_after_newline(runtime):
     details = {"nested": [{"message": f'token={CANARY}\nRetain this cause',
                            "quoted": f'api_key="{CANARY} SECRET_TAIL"; retain this action'}]}
-    raw = FailedResult(error_code="provider_failed", error="provider failed", llm_text="provider failed",
+    raw = FailedResult(error_code="provider_failed", error="provider failed",
+        llm_text=details["nested"][0]["message"] + "\n" + details["nested"][0]["quoted"],
         details=details, effect=EffectOutcome.NONE, retry=RetryDirective.SAFE)
     mount(runtime, "nested_diagnostic", lambda _: raw)
     result = invoke(runtime, "nested_diagnostic", {})
@@ -91,9 +92,12 @@ def test_unvalidated_output_diagnostics_redact_nested_credentials(runtime, direc
     assert metadata(result)["error_code"] == "output_validation_failed"
     assert CANARY not in result.llm_text
     assert "provider summary" in result.llm_text
-    assert "src/pal/execution/runtime.py" in result.llm_text
-    assert "https://example.invalid/v1" in result.llm_text
-    assert "decode response" in result.llm_text
+    assert metadata(result)["operation_result"] == "provider summary"
+    saved = "\n".join(Path(ref.path).read_text() for ref in result.snapshot_refs)
+    assert CANARY not in saved
+    assert "src/pal/execution/runtime.py" in saved
+    assert "https://example.invalid/v1" in saved
+    assert "decode response" in saved
     # Host evidence is distinct from its redacted model-facing projection.
     assert CANARY in result.invocation_result.details["raw_output_text"]
     assert candidate["nested"][0]["token"] == CANARY
@@ -114,7 +118,7 @@ def test_typed_failure_body_is_redacted_at_the_same_exit(runtime, rejected):
     assert CANARY in raw.llm_text  # Do not mutate the handler-owned result.
 
 
-def test_full_failure_snapshot_and_long_recovery_are_redacted(runtime):
+def test_full_public_failure_and_long_recovery_are_redacted_without_truncation(runtime):
     def fail(_):
         raise ToolExecutionError(
             f"Original diagnostic token={CANARY}; " + "evidence " * 1000,
@@ -123,13 +127,12 @@ def test_full_failure_snapshot_and_long_recovery_are_redacted(runtime):
     mount(runtime, "snapshot_redaction", fail)
     result = runtime.execute_tool(new_tool_call(name="snapshot_redaction", args={}),
         turn_id="review", budget=ToolCallBudget(max_output_chars=1200, preview_chars=300))
-    assert result.snapshot_refs
+    assert not result.snapshot_refs
     assert CANARY not in result.llm_text
-    snapshots = "\n".join(Path(ref.path).read_text() for ref in result.snapshot_refs)
-    assert CANARY not in snapshots
-    assert "Original diagnostic" in snapshots
-    assert "keep the backup" in snapshots
-    assert "password=[redacted]" in snapshots
+    assert "evidence " * 1000 in result.llm_text
+    assert "Original diagnostic" in result.llm_text
+    assert "keep the backup" in result.llm_text
+    assert "password=[redacted]" in result.llm_text
 
 
 def test_typed_error_stays_redacted_in_the_failure_prompt(runtime):
@@ -212,10 +215,9 @@ def test_nested_authorization_is_redacted_in_tool_delivery_and_snapshot(runtime,
     mount(runtime, "header_redaction", lambda _: raw)
     result = invoke(runtime, "header_redaction", {})
     assert CANARY not in result.llm_text
-    assert result.snapshot_refs
-    snapshots = "\n".join(Path(ref.path).read_text() for ref in result.snapshot_refs)
-    assert CANARY not in snapshots
-    assert "application/json" in snapshots and "retain evidence" in snapshots
+    assert not result.snapshot_refs
+    assert "application/json" not in result.llm_text
+    assert "retain evidence" not in result.llm_text
     assert raw.details == details
     assert raw.details["responses"][0]["request"]["headers"]["Authorization"] == f"{scheme} {CANARY}"
     assert (metadata(result)["error_code"], metadata(result)["effect"], metadata(result)["retry"]) == (

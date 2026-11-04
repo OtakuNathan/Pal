@@ -56,7 +56,8 @@ def test_plugin_load_failure_delivers_cause_now(runtime, host, monkeypatch, acti
         CapabilityCall(name="probe", args={"name": "fidelity_plugin"})), DIRECT_LOCAL_READ))
     result = invoke(runtime, "plugin_load_probe", {})
     assert not result.ok
-    assert "plugin start failed" in result.llm_text and "underlying cause" in result.llm_text
+    assert "underlying cause" in result.llm_text
+    assert "Traceback" not in result.llm_text
     assert "hidden-token" not in result.llm_text
     assert metadata(result)["error_code"] == "plugin_load_failed"
 
@@ -191,7 +192,7 @@ def test_worker_adapter_preserves_untyped_failure_and_attachments(runtime, kind,
     ref = runtime.result_snapshots.capture("worker complete diagnostic", call_id="worker-original", lifetime="review")
     descriptor, binding = _workflow_capability(name="op_bunshin_artifact_write",
         spec=_WORKSPACE_TOOL_SPECS["op_bunshin_artifact_write"], handler=lambda *a: ToolExecutionResult(
-            name="write_artifact", ok=False, text="original backend failure", llm_text="worker summary",
+            name="write_artifact", ok=False, text="original backend failure", llm_text="original backend failure",
             structured={"error_code": "worker_specific_error", "kind": kind, "effect": effect,
                         "retry": retry, "diagnostic": "worker backend detail", "recovery": "preserve existing artifact"},
             context_messages=context, snapshot_refs=(ref,)))
@@ -200,7 +201,9 @@ def test_worker_adapter_preserves_untyped_failure_and_attachments(runtime, kind,
     mount(runtime, "worker_adapter_probe", lambda _: raw)
     result = invoke(runtime, "worker_adapter_probe", {})
     assert not result.ok
-    assert "original backend failure" in result.llm_text and "worker backend detail" in result.llm_text
+    assert "original backend failure" in result.llm_text
+    assert "worker backend detail" not in result.llm_text
+    assert result.structured["details"]["diagnostic"] == "worker backend detail"
     assert "preserve existing artifact" in result.llm_text
     info = metadata(result)
     assert (info["kind"], info["effect"], info["retry"], info["error_code"]) == (kind, effect, retry, "worker_specific_error")
@@ -273,7 +276,8 @@ def test_mcp_management_error_cannot_be_overwritten_by_cached_success(runtime, t
     mount(runtime, "mcp_management_probe", handler)
     result = invoke(runtime, "mcp_management_probe", {})
     assert not result.ok
-    assert "current MCP failure" in result.llm_text and "underlying cause" in result.llm_text
+    assert "underlying cause" in result.llm_text
+    assert "Traceback" not in result.llm_text
     assert "OLD_RESULT" not in result.llm_text
     assert "hidden-token" not in result.llm_text
     assert metadata(result)["error_code"] == "mcp_manager_failed"

@@ -20,3 +20,7 @@ results, effect/retry outcomes, and recovery affordances. LLM, Execution,
 Memory, and Bunshin consume this protocol; none may define a private
 tool-call or tool-result envelope. Received calls require an explicit call ID.
 Only Pal-originated calls may allocate one through `new_tool_call()`.
+
+Failed delivery may retain an owner's reported operation result and effect
+receipt independently of its validation diagnostic. Execution renders those
+fields as guidance metadata outside the normal-output budget.

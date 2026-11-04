@@ -6,7 +6,7 @@ from pal.bunshin.ipc import BunshinManagerRpcError
 from pal.execution.tool_facade import rejection
 from pal.shared import RuntimeStatus, ToolExecutionResult
 from pal.shared.tool_protocol import EffectOutcome, FailedResult, RetryDirective, ToolCallIR
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_reason
 
 
 class SubmissionValidationError(ValueError):
@@ -37,7 +37,7 @@ def submission_error_result(
     invalid = not submission_accepted and (remote_validation or (
         isinstance(exc, SubmissionValidationError) and not filesystem_cause
     ))
-    text = exception_report(exc)
+    text = exception_reason(exc)
     if submission_accepted:
         category = "submission_post_acceptance_error"
         advice = (

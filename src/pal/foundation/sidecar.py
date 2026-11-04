@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import msgpack
 
-from pal.foundation.diagnostics import diagnostic_text, diagnostic_value, exception_report
+from pal.foundation.diagnostics import diagnostic_text, diagnostic_value, exception_report, exception_reason
 from pal.foundation.fd_lease import (
     FdCancellationControl,
     FdCloseOutcome,
@@ -684,7 +684,7 @@ async def dispatch_sidecar_request(
                 "kind": kind,
                 # A compact summary plus a complete report avoids duplicating
                 # a large exception message inside the bounded wire frame.
-                "message": diagnostic_text(f"{exc.__class__.__name__}: {exc}"),
+                "message": exception_reason(exc),
                 "diagnostic": exception_report(exc),
                 **({"details": diagnostic_value(error_details(exc))} if error_details is not None else {}),
             },

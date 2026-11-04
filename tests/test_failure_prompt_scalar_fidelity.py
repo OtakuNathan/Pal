@@ -11,6 +11,33 @@ from pal.failure import FailureDraft
 from tests.test_failure_flow import _core_with_failure_runtime, _ToolLoopFailureLLM
 
 
+def test_recovery_preserves_owner_authored_results_and_receipts():
+    text = "Write failed.\n" + "\n".join(
+        f"item_{i}: {'applied; do not retry' if i == 91 else 'skipped'}"
+        for i in range(190))
+    # Successful tools may return source code or diagnostic files as business
+    # data; the recovery wrapper must not interpret that content as its error.
+    source = 'Traceback (most recent call last):\n  File "user_source.py", line 7\nOSError: example'
+    for body, ok in ((text, False), (source, True)):
+        draft = FailureDraft(subsystem="execution", component="probe", failure_kind="capability_failure",
+            severity="medium", primary_blocker=text, maintenance_outcomes=[{
+                "action_name": "probe", "status": "ok" if ok else "error", "ok": ok, "text": body}])
+        packet = json.loads(_render_failure_primary_input(draft, allowed_tools=[], stage="verify",
+            observations=[ToolObservation(tool_name="probe", ok=ok, summary=body, structured={})]))
+        assert packet["recent_observations"][0]["summary"] == body
+        assert packet["failure"]["maintenance_outcomes"][0]["text"] == body
+        assert packet["failure"]["primary_blocker"] == text
+
+
+def test_secondary_failures_reach_recovery_without_frames():
+    report = 'Traceback (most recent call last):\n  File "private.py", line 7\nOSError: cleanup failed'
+    draft = FailureDraft(subsystem='execution', component='probe', failure_kind='capability_failure',
+        severity='medium', primary_blocker='probe failed', secondary_issues=[report])
+    packet = json.loads(_render_failure_primary_input(draft, allowed_tools=[], observations=[], stage='diagnose'))
+    assert packet['failure']['secondary_issues'] == ['OSError: cleanup failed']
+    assert draft.secondary_issues == [report]
+
+
 def test_failure_packet_preserves_diagnostic_values_and_complete_causes():
     state = {
         "enabled": False, "healthy": True, "returncode": 0,
@@ -45,8 +72,8 @@ def test_failure_packet_preserves_diagnostic_values_and_complete_causes():
         packet["recent_observations"][0]["structured_summary"],
     ):
         assert json.dumps(projected) == json.dumps(original)
-    assert packet["recent_observations"][0]["summary"] == state["message"]
-    assert packet["failure"]["maintenance_outcomes"][0]["text"] == state["message"]
+    assert "ROOT CAUSE: permission denied" in packet["recent_observations"][0]["summary"]
+    assert "ROOT CAUSE: permission denied" in packet["failure"]["maintenance_outcomes"][0]["text"]
     assert state == original
 
 
@@ -85,15 +112,30 @@ def test_safe_mode_tool_exception_chain_reaches_verification_request():
     assert len(llm.requests) == 3
     for request in llm.requests[1:]:
         packet = json.loads(request.messages[1].text)
-        for text in (
-            packet["recent_observations"][0]["summary"],
-            packet["failure"]["maintenance_outcomes"][0]["text"],
-        ):
+        assert packet["recent_observations"] == []
+        for text in (packet["failure"]["maintenance_outcomes"][0]["text"],):
             assert "PermissionError" in text
             assert "cannot read report" in text
-            assert "RuntimeError" in text
-            assert "transport wrapper failed" in text
+            assert "RuntimeError" not in text
+            assert "transport wrapper failed" not in text
+            assert "Traceback" not in text
             assert "PRIVATE_CANARY" not in text
+
+
+def test_recovery_places_each_call_once_without_merging_identical_separate_calls():
+    body = "Written item_91; do not repeat it."
+    draft = FailureDraft(subsystem="execution", component="probe", failure_kind="capability_failure",
+        severity="medium", primary_blocker="probe failed", maintenance_outcomes=[{
+            "call_id": "first", "action_name": "probe", "status": "error", "ok": False,
+            "text": body, "structured": {"effect": "applied"}}])
+    observations = [ToolObservation(tool_name="probe", ok=False, summary=body,
+        structured={"effect": "applied"}, call_id=call_id) for call_id in ("first", "second")]
+    packet = json.loads(_render_failure_primary_input(draft, allowed_tools=[], observations=observations, stage="verify"))
+    assert len(packet["failure"]["maintenance_outcomes"]) == 1
+    assert len(packet["recent_observations"]) == 1
+    assert packet["recent_observations"][0]["call_id"] == "second"
+    assert packet["recent_observations"][0]["summary"] == body
+    assert packet["failure"]["maintenance_outcomes"][0]["text"] == body
 
 
 def test_safe_mode_model_exception_keeps_root_cause_without_stack():
@@ -114,7 +156,7 @@ def test_safe_mode_model_exception_keeps_root_cause_without_stack():
         result = asyncio.run(core.failure_orchestrator._run_failure_flow_async(draft, allowed_tools=[]))
         for text in (result.verification.reason, result.enriched_fields["current_blocker"]):
             assert "endpoint refused connection" in text
-            assert "model request failed" in text
+            assert "model request failed" not in text
             assert "PRIVATE_CANARY" not in text
             assert "Traceback" not in text
     finally:

@@ -17,7 +17,7 @@ from dataclasses import InitVar, dataclass, field
 from typing import Any
 
 from pal.foundation import utc_now
-from pal.foundation.diagnostics import exception_report, exception_summary
+from pal.foundation.diagnostics import exception_reason
 from pal.memory import (
     L2Entry,
     L3CommitRequest,
@@ -78,10 +78,11 @@ def _provider_recovery(handler):
         try:
             result = handler(self, call)
         except Exception as exc:
+            reason = exception_reason(exc)
             result = CapabilityResult(
-                status=RuntimeStatus.ERROR, text=exception_summary(exc),
-                llm_text=exception_summary(exc),
-                structured={"error": exception_report(exc), "provider_id": provider_name},
+                status=RuntimeStatus.ERROR, text=reason,
+                llm_text=reason,
+                structured={"error": reason, "provider_id": provider_name},
                 effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN),
             )
         if isinstance(result, IntrospectionResult) and result.status == RuntimeStatus.INVALID:
@@ -113,8 +114,9 @@ def _provider_mutation_result(operation: str, result: L3MutationResult) -> Capab
         )
     except Exception as exc:
         # Backend completion is known even when presentation subsequently fails.
-        return CapabilityResult(status=RuntimeStatus.ERROR, text=exception_summary(exc),
-            llm_text=exception_summary(exc), structured={"error": exception_report(exc),
+        reason = exception_reason(exc)
+        return CapabilityResult(status=RuntimeStatus.ERROR, text=reason,
+            llm_text=reason, structured={"error": reason,
                 "mem_ref": result.document_id, "backend_status": result.status},
             effect_receipt=EffectReceipt(outcome=EffectOutcome.APPLIED
                 if result.status == RuntimeStatus.OK else EffectOutcome.UNKNOWN))
@@ -665,7 +667,7 @@ class SQLiteVecL3Plugin:
                 raise RuntimeError("embedding provider returned mismatched batch size")
             self.last_embedding_error = ""
         except Exception as exc:
-            self.last_embedding_error = exception_report(exc)
+            self.last_embedding_error = exception_reason(exc)
             with self.repository.write_lock:
                 if not self.repository.frozen:
                     with self.repository.write_transaction():
@@ -765,7 +767,7 @@ class SQLiteVecL3Plugin:
             query_vector = self.embedding_provider.embed_query(search_text)
             self.last_embedding_error = ""
         except Exception as exc:
-            self.last_embedding_error = exception_report(exc)
+            self.last_embedding_error = exception_reason(exc)
             return {}
         sqlite_vec_scores = self.repository.query_vector_candidates_sqlite_vec(
             provider_id=self._embedding_provider_id(),
@@ -845,7 +847,7 @@ class SQLiteVecL3Plugin:
                 "provider_id": self._embedding_provider_id(),
                 "transport": self._embedding_transport(),
                 "model_name": self._embedding_model_name(),
-                "last_error": exception_report(exc),
+                "last_error": exception_reason(exc),
             }
         if not bool(payload.get("healthy")) and payload.get("last_error"):
             self.last_embedding_error = str(payload.get("last_error"))

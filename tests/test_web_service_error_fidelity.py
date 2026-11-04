@@ -40,6 +40,54 @@ def failure(message="upstream failed"):
             return exc
 
 
+@pytest.mark.parametrize("action", ["click", "close", "read", "evaluate"])
+@pytest.mark.parametrize("field", ["page_state_error", "profile_state_error", "profile_cleanup_error"])
+def test_browser_post_action_failures_are_brief_without_changing_business_content(action, field, caplog):
+    from pal.shared import IntrospectionCall
+    from pal.web_fetch.capabilities import WebFetchIntrospectionProvider
+
+    report = exception_report(failure())
+    error = {"reason": "OSError: backend root cause", "diagnostic": report,
+             "message": "wrapper failed", "code": "page_unavailable"} if field == "page_state_error" else report
+    # Script/page data may legitimately contain stack traces or error fields.
+    business = {"error": "user data", "stack": "BUSINESS_STACK"}
+    payload = {"action_completed": True, field: error, "result": business}
+    if action == "read":
+        payload["document"] = {"preview": "BUSINESS_DOCUMENT"}
+    if action == "evaluate":
+        payload["_full_text"] = "BUSINESS_FULL_TEXT"
+    provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=lambda **_: payload))
+    result = provider._action(IntrospectionCall(name=action, args={}, meta={"turn_id": "audit"}), action, "Completed")
+    assert result.status == "ok"
+    assert "backend root cause" in result.llm_text
+    assert "Traceback" not in result.llm_text
+    assert "wrapper failed" not in result.llm_text
+    assert "hidden-secret" not in result.llm_text
+    assert "do not repeat" in result.llm_text
+    assert "BUSINESS_STACK" in result.llm_text
+    if action == "read":
+        assert "BUSINESS_DOCUMENT" in result.llm_text
+    if action == "evaluate":
+        assert "BUSINESS_FULL_TEXT" in result.llm_text
+    assert result.structured[field] == error
+    assert "Traceback" in caplog.text
+
+
+def test_browser_worker_delivery_projects_diagnostics_before_forwarding():
+    from pal.shared import IntrospectionCall
+    from pal.web_fetch.capabilities import WebFetchIntrospectionProvider
+
+    report = exception_report(failure())
+    payload = {"profile_state_error": report, "document": {"_full_text": "BUSINESS_DOCUMENT"}}
+    provider = WebFetchIntrospectionProvider(service=SimpleNamespace(execute=lambda **_: payload))
+    result = provider._action(IntrospectionCall(name="read", meta={"broker_run_id": "audit"}), "read", "Read")
+    assert "Traceback" not in json.dumps(result.structured)
+    assert "backend root cause" in result.structured["profile_state_error"]
+    assert result.structured["document"]["_full_text"] == "BUSINESS_DOCUMENT"
+    assert "do not repeat" in result.structured["followup_recovery"]
+    assert payload["profile_state_error"] == report
+
+
 def assert_diagnostic(text):
     assert "backend root cause" in text
     assert "hidden-secret" not in text
@@ -64,7 +112,7 @@ def core(tmp_path):
 
 
 @pytest.mark.parametrize("fallback", [False, True])
-def test_search_tool_preserves_all_failures_even_when_fallback_succeeds(core, fallback):
+def test_search_tool_preserves_all_failures_even_when_fallback_succeeds(core, fallback, caplog):
     first = SimpleNamespace(search=MagicMock(side_effect=failure("first provider failed")))
     second = SimpleNamespace(search=MagicMock(return_value=[]) if fallback else MagicMock(side_effect=failure("second provider failed")))
     service = search_service(first, second)
@@ -73,7 +121,7 @@ def test_search_tool_preserves_all_failures_even_when_fallback_succeeds(core, fa
     result = core.context.execution_runtime.execute_tool(new_tool_call(name="search_web", args={"query": "anything"}))
     assert result.ok is fallback
     assert_diagnostic(result.llm_text)
-    assert "first provider failed" in result.llm_text
+    assert "first provider failed" in caplog.text
     assert "Traceback" not in result.llm_text
     if fallback:
         assert result.structured["items"] == []
@@ -83,7 +131,7 @@ def test_search_tool_preserves_all_failures_even_when_fallback_succeeds(core, fa
         assert 'File "' not in result.llm_text
         assert "Traceback" in result.structured["provider_errors"][0]["error"]
     else:
-        assert "second provider failed" in result.llm_text
+        assert "second provider failed" in caplog.text
         assert metadata(result)["error_code"] == "web_search_failed"
         assert metadata(result)["effect"] == "none"
 
@@ -109,7 +157,7 @@ def test_search_http_error_keeps_complete_response_body(monkeypatch):
 
 
 @pytest.mark.parametrize("fallback", [False, True])
-def test_long_search_errors_reach_shared_tool_snapshots(core, fallback):
+def test_long_search_errors_reach_shared_tool_snapshots(core, fallback, caplog):
     providers = [SimpleNamespace(search=MagicMock(side_effect=failure(
         f"provider {index}: " + "detail " * 1000 + f"ROOT_CAUSE_{index}; token=hidden-secret"
     ))) for index in range(6)]
@@ -122,8 +170,8 @@ def test_long_search_errors_reach_shared_tool_snapshots(core, fallback):
         budget=ToolCallBudget(max_output_chars=2000, preview_chars=200),
     )
     assert result.ok is fallback
-    assert result.snapshot_refs
-    complete = "\n".join(Path(ref.path).read_text() for ref in result.snapshot_refs)
+    complete = caplog.text
+    assert "Traceback" not in result.llm_text
     for index in range(6):
         assert f"ROOT_CAUSE_{index}" in complete
     assert "backend root cause" in complete

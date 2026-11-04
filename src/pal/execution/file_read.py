@@ -34,7 +34,7 @@ from pal.execution.session_state import (
     LogicalExecutionStateBackend,
 )
 from pal.shared import RuntimeStatus
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_reason
 
 
 # Error codes
@@ -245,7 +245,7 @@ class FileReadTool:
         try:
             raw = read_utf8_text_exact(resolved)
         except UnicodeDecodeError as exc:
-            diagnostic = exception_report(exc)
+            diagnostic = exception_reason(exc)
             msg = _ERROR_LLMS[ERR_UNSUPPORTED_TEXT_ENCODING] + "\n" + diagnostic
             return _result(
                 RuntimeStatus.ERROR,
@@ -255,7 +255,7 @@ class FileReadTool:
                 diagnostic=diagnostic,
             )
         except OSError as exc:
-            diagnostic = exception_report(exc)
+            diagnostic = exception_reason(exc)
             return _result(
                 RuntimeStatus.ERROR,
                 f"failed to read file:\n{diagnostic}",

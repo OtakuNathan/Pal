@@ -10,6 +10,8 @@ OLED keeps the control/status readout.
 
 from __future__ import annotations
 
+from pal.foundation.diagnostics import exception_reason, diagnostic_reason
+
 import asyncio
 import json
 import socket
@@ -46,7 +48,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.result_rendering import render_titled_structured_for_llm, render_diagnostic_record_for_llm
 from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
@@ -106,7 +108,7 @@ def _send_command(cmd: str, socket_path: Path, *, timeout: float = 3.0) -> str:
         conn.close()
         return response
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller verbatim
-        return f"ERR: {exc}"
+        return "ERR: " + exception_reason(exc)
 
 
 def _sidecar_is_alive(socket_path: Path) -> bool:
@@ -373,10 +375,11 @@ class FaceIntrospectionProvider:
                 structured={"emotion": emotion, "response": result},
                 llm_text=f"Showing '{emotion}' on the colour panel.",
             )
+        reason = diagnostic_reason(result)
         return IntrospectionResult(
             status=RuntimeStatus.ERROR,
-            text=f"failed to show face: {result}",
-            llm_text=f"Failed to show '{emotion}' on the colour panel: {result}",
+            text=f"failed to show face: {reason}",
+            llm_text=f"Failed to show '{emotion}' on the colour panel: {reason}",
         )
 
     @capability_action(
@@ -416,7 +419,7 @@ class FaceIntrospectionProvider:
 
         payload = inspection_snapshot({"configuration": configuration}, sections={"health": health}, source="face_panel")
         return IntrospectionResult(status=RuntimeStatus.OK, text="face panel diagnostics", structured=payload,
-            llm_text=render_titled_structured_for_llm("Face panel", payload))
+            llm_text=render_diagnostic_record_for_llm("Face panel", payload))
 
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         payload = {

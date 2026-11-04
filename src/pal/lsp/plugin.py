@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_report, public_diagnostics
 
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
@@ -47,7 +47,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.result_rendering import render_diagnostic_record_for_llm, render_titled_structured_for_llm
 from pal.shared.inspection import inspection_snapshot
 from pal.shared.tool_protocol import ToolAffordance
 
@@ -280,10 +280,10 @@ class LspManagerPluginProvider:
             self.last_health = dict(payload)
             status = payload.get("status") or RuntimeStatus.OK
             self.last_error = "; ".join(str(error) for error in payload.get("errors", ())) if status != RuntimeStatus.OK else ""
-            return IntrospectionResult(status=status, text="lsp rescan" if status == RuntimeStatus.OK else "lsp rescan failed", structured=payload, llm_text=render_titled_structured_for_llm("LSP rescan", payload))
+            return IntrospectionResult(status=status, text="lsp rescan" if status == RuntimeStatus.OK else "lsp rescan failed", structured=payload, llm_text=render_diagnostic_record_for_llm("LSP rescan", payload))
         except Exception as exc:
             payload = self._rpc_error("rescan", exc)
-            return IntrospectionResult(status=RuntimeStatus.ERROR, text="lsp rescan failed", structured=payload, llm_text=render_titled_structured_for_llm("LSP rescan failed", payload))
+            return IntrospectionResult(status=RuntimeStatus.ERROR, text="lsp rescan failed", structured=payload, llm_text=render_diagnostic_record_for_llm("LSP rescan failed", payload))
 
     def _ensure_manager_started(self) -> None:
         with self._lifecycle_lock:
@@ -578,6 +578,9 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
     evidence = payload.get("evidence")
     if isinstance(evidence, dict) and "result" in payload and evidence.get("result") == payload["result"]:
         projection["evidence"] = {key: value for key, value in evidence.items() if key != "result"}
+    visible = public_diagnostics({key: value for key, value in projection.items() if key != "result"})
+    if "result" in projection:
+        visible["result"] = projection["result"]
     return CapabilityResult(status=status, text=title, structured=payload,
-                            llm_text=render_titled_structured_for_llm(title, projection),
+                            llm_text=render_titled_structured_for_llm(title, visible),
                             recovery_hint=str(payload.get("next_step") or "") if status != RuntimeStatus.OK else "")

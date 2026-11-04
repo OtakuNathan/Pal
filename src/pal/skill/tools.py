@@ -6,7 +6,7 @@ from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_reason
 from pal.shared import RuntimeStatus
 from pal.shared.text_search import jieba_search_terms
 from pal.shared.prompt_rendering import render_xml_block
@@ -19,7 +19,7 @@ def _skill_failure(service: SkillService, action: str, exc: Exception) -> Capabi
     rejected = isinstance(exc, SkillInputError)
     structured = {"reason": "invalid_request" if rejected else f"{action}_failed",
                   "error_code": "invalid_request" if rejected else f"skill_{action}_failed",
-                  "error": exception_report(exc)}
+                  "error": exception_reason(exc)}
     if rejected:
         structured.update(kind="rejected", retry="correct_input")
     elif action in {"commit", "update"}:

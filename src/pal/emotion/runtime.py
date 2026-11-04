@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.foundation.diagnostics import exception_reason
+
 from dataclasses import dataclass
 import threading
 from typing import Callable, Literal
@@ -118,7 +120,7 @@ class EmotionRegistry:
             try:
                 receivers = renderer.receivers()
             except Exception as exc:
-                failures.append({"renderer": name, "reason": str(exc)[:200] or type(exc).__name__})
+                failures.append({"renderer": name, "reason": exception_reason(exc)})
                 continue
             for receiver in receivers:
                 targets += 1
@@ -128,7 +130,7 @@ class EmotionRegistry:
                 try:
                     receiver.send(emotion)
                 except Exception as exc:
-                    failures.append({"renderer": receiver.name, "reason": str(exc)[:200] or type(exc).__name__})
+                    failures.append({"renderer": receiver.name, "reason": exception_reason(exc)})
                 else:
                     accepted.append(receiver.name)
         outcome = ("partial" if failures else "accepted") if accepted else (
@@ -140,6 +142,8 @@ class EmotionRegistry:
             text="Emotion broadcast", structured=payload,
             llm_text=render_titled_structured_for_llm("Emotion broadcast", payload),
             effect_receipt=EffectReceipt(outcome=effect),
+            recovery_hint=("Inspect the failed renderer health; accepted receivers may already display the emotion."
+                           if failures else ""),
         )
 
     def build_mounted_subtree(self, *, module_id, lifecycle_scope, detachable):

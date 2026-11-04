@@ -194,7 +194,9 @@ class _StartedFailingShapeInvoker(ShapeEndpointInvoker):
         yield  # pragma: no cover - keeps this an iterator
 
 
-def _capture_turn_failure_signal(response: LLMResponseIR):
+def _capture_turn_failure_signal(response: LLMResponseIR, *, final_replies=None):
+    from pal.core.failure_orchestrator import FailureOrchestrator
+    from pal.failure.contracts import FailureUserFeedback
     class _FailingRuntime(NonStreamingLLM):
         projection_port = None
         def supports_streaming(self, request=None):
@@ -211,7 +213,9 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
 
     async def handle_failure(signal, **_kwargs):
         captured.append(signal)
-        return SimpleNamespace(user_feedback="feedback")
+        return SimpleNamespace(user_feedback=FailureUserFeedback(
+            status="failed", summary="The request could not complete.", blocker=signal.primary_blocker,
+            next_step="Restore the endpoint before retrying."))
 
     executor = TurnExecutor(
         SimpleNamespace(require_port=lambda _name: runtime, port_registry={}),
@@ -223,7 +227,7 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
         debug_log_reply=lambda *args, **kwargs: None,
         build_llm_tool_contracts=lambda: [],
         handle_failure_async=handle_failure,
-        render_failure_feedback_text=lambda _feedback: "feedback",
+        render_failure_feedback_text=lambda feedback: FailureOrchestrator.render_failure_feedback_text(None, feedback),
         should_enter_failure_flow_for_tool_result=lambda _result: False,
     )
     executor.build_turn_prompt = lambda *args, **kwargs: _request()
@@ -239,13 +243,26 @@ def _capture_turn_failure_signal(response: LLMResponseIR):
         turn_id="turn-failure",
     )
 
-    asyncio.run(
+    result = asyncio.run(
         executor._handle_llm_request(
             LLMRequestEffect(assembly_context=PromptAssemblyContext()),
             continuation,
         )
     )
+    if final_replies is not None:
+        final_replies.append(result.payload.text)
     return captured[0]
+
+
+def test_llm_failure_root_is_displayed_in_blocker_only():
+    root = "ConnectionError: upstream unavailable"
+    response = LLMResponseIR(LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR(root),)), LLMFinishReason.ERROR)
+    replies = []
+    _capture_turn_failure_signal(response, final_replies=replies)
+    assert len(replies) == 1
+    assert replies[0].count(root) == 1
+    assert f"Blocker: {root}" in replies[0]
+    assert "Next step: Restore the endpoint before retrying." in replies[0]
 
 
 class LLMRuntimeIRTests(unittest.TestCase):
@@ -384,14 +401,14 @@ class LLMRuntimeIRTests(unittest.TestCase):
         signal = _capture_turn_failure_signal(response)
 
         self.assertEqual(signal.failure_kind, "rate_limit")
-        self.assertIn("RuntimeError (rate_limit)", signal.primary_blocker)
+        self.assertEqual(signal.primary_blocker, response.text)
         self.assertNotIn("partial output", signal.primary_blocker)
 
     def test_turn_failure_feedback_reports_explicit_partial_output_marker(self) -> None:
         response = LLMResponseIR(
             LLMMessageIR(
                 MessageRole.ASSISTANT,
-                (TextPartIR("partial"),),
+                (TextPartIR("Stream interrupted: upstream disconnected"),),
                 metadata={
                     "failure_subsystem": "llm",
                     "failure_kind": "connection",
@@ -404,10 +421,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         signal = _capture_turn_failure_signal(response)
 
         self.assertEqual(signal.failure_kind, "connection")
-        self.assertIn(
-            "stream interrupted after 7 chars of partial output",
-            signal.primary_blocker,
-        )
+        self.assertEqual(signal.primary_blocker, response.text)
 
     def test_turn_database_failure_is_not_described_as_partial_llm_output(self) -> None:
         response = LLMResponseIR(
@@ -426,7 +440,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
 
         self.assertEqual(signal.component, "runtime_database")
         self.assertEqual(signal.failure_kind, "local_state")
-        self.assertIn("DatabaseError (local_state)", signal.primary_blocker)
+        self.assertEqual(signal.primary_blocker, "file is not a database")
         self.assertNotIn("partial output", signal.primary_blocker)
 
     def test_local_database_failure_is_not_reported_as_provider_failure(self) -> None:
@@ -668,8 +682,8 @@ class LLMRuntimeIRTests(unittest.TestCase):
 
         self.assertEqual(invoker.attempts, 1)
         self.assertEqual(updates[-1].response.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("kind=unknown", updates[-1].response.text)
-        self.assertNotIn("provider disconnected", updates[-1].response.text)
+        self.assertEqual(updates[-1].response.message.metadata["failure_kind"], "unknown")
+        self.assertIn("provider disconnected", updates[-1].response.text)
         self.assertNotIn(
             "partial_output_chars",
             updates[-1].response.message.metadata,
@@ -840,7 +854,7 @@ def adjust_messages(messages):
 
         self.assertEqual(invoker.attempts, 2)
         self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("kind=response_error", result.text)
+        self.assertEqual(result.response.message.metadata["failure_kind"], "response_error")
         self.assertIn("DSML response is malformed", result.text)
 
     def test_output_recovery_adapts_dsml_at_the_raw_invoker_boundary(self) -> None:

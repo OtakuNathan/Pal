@@ -11,6 +11,7 @@ from pal.shared.tool_protocol import new_tool_call
 import json
 import hashlib
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
@@ -19,6 +20,14 @@ from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification_readiness import verification_corpus_snapshot, record_verification_execution, lsp_verification_status, shell_execution_output, bind_recorded_case_execution, case_corpus_binding, case_definition_fingerprint
 from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.shared import RuntimeStatus, ToolExecutionResult
+from pal.shared.diagnostics import exception_reason
+from pal.shared.result_snapshot import ResultSnapshotRef
+
+
+@dataclass
+class _EvidenceProgress:
+    result: ToolExecutionResult | None = None
+    recorded: bool = False
 
 
 async def run_shell_evidence(
@@ -32,6 +41,7 @@ async def run_shell_evidence(
     turn_id: str | None = None,
 ) -> ToolExecutionResult:
     execution_started = False
+    progress = _EvidenceProgress()
     try:
         args = dict(call.args or {})
         try:
@@ -49,8 +59,7 @@ async def run_shell_evidence(
         if call.call_id:
             replay = store.read_operation(context, operation_key=call.call_id, request=args)
             if replay is not None:
-                return _success_result(call, "Replayed recorded operation; no fresh execution occurred.",
-                                       {**replay, "replayed": True})
+                return _replay_result(call, replay, _artifact_store(workspace))
         snapshot = store.read(context, seed=_empty_payload())
         existing = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).get(name)
         artifacts = _artifact_store(workspace)
@@ -77,6 +86,7 @@ async def run_shell_evidence(
                 stdout=stdout,
                 stderr=stderr,
             )
+            public = _recorded_public_result(artifacts, existing)
             return _success_result(
                 call,
                 f"reused recorded {name}: {existing.get('status')}",
@@ -85,7 +95,9 @@ async def run_shell_evidence(
                     "case": dict(existing),
                     "execution": execution,
                 },
-                llm_text=_shell_execution_text(name, execution, reused=True),
+                llm_text=(_evidence_text(name, str(existing.get("status")), public, reused=True)
+                          if public.get("ok") is False else _shell_execution_text(name, execution, reused=True)),
+                snapshot_refs=_public_snapshot_refs(public),
             )
         cwd = str(workspace.get("repo_path") or "").strip() or None
         execution_call = new_tool_call(
@@ -100,6 +112,7 @@ async def run_shell_evidence(
             allow_tools=True,
             turn_id=turn_id,
         )
+        progress.result = result
         record_verification_execution(workspace, execution_call, result, before)
         structured = shell_execution_output(result)
         exit_code = structured.get("returncode")
@@ -137,6 +150,7 @@ async def run_shell_evidence(
             "exit_code": exit_code if type(exit_code) is int else None,
             "stdout_ref": stdout_ref.to_dict(),
             "stderr_ref": stderr_ref.to_dict(),
+            "public_result_ref": _save_public_result(artifacts, result),
             "environment": {"cwd": cwd or "", "runner": "scoped_shell"},
             "summary": f"exit {exit_code}; expected {expected_exit_codes}" if exit_code is not None else stderr[:500],
             "request_fingerprint": request_fingerprint,
@@ -148,7 +162,7 @@ async def run_shell_evidence(
         }
 
         mutation = _commit_executed_case(
-            store, context, snapshot, call, args, case, workspace, before, request_fingerprint,
+            store, context, snapshot, call, args, case, workspace, before, request_fingerprint, progress,
         )
         execution = _shell_execution_projection(
             case,
@@ -159,10 +173,12 @@ async def run_shell_evidence(
             call,
             f"recorded {name}: {status}",
             {**mutation, "execution": execution},
-            llm_text=_shell_execution_text(name, execution),
+            llm_text=(_shell_execution_text(name, execution) if result.ok
+                      else f"Recorded {name}: {status}\n\n{result.llm_text}"),
+            snapshot_refs=result.snapshot_refs,
         )
     except Exception as exc:
-        return _error_result(call, exc, execution_started=execution_started)
+        return _error_result(call, exc, execution_started=execution_started, progress=progress)
 
 
 async def run_lsp_evidence(
@@ -175,6 +191,7 @@ async def run_lsp_evidence(
     turn_id: str | None = None,
 ) -> ToolExecutionResult:
     execution_started = False
+    progress = _EvidenceProgress()
     try:
         args = dict(call.args or {})
         try:
@@ -191,8 +208,7 @@ async def run_lsp_evidence(
         if call.call_id:
             replay = store.read_operation(context, operation_key=call.call_id, request=args)
             if replay is not None:
-                return _success_result(call, "Replayed recorded operation; no fresh execution occurred.",
-                                       {**replay, "replayed": True})
+                return _replay_result(call, replay, _artifact_store(workspace))
         snapshot = store.read(context, seed=_empty_payload())
         existing = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).get(name)
         artifacts = _artifact_store(workspace)
@@ -213,6 +229,7 @@ async def run_lsp_evidence(
             and int(existing.get("recorded_case_revision", -1)) == int(snapshot.payload.get("case_revision") or 0)
         ):
             recorded_result = _artifact_json(artifacts, existing.get("stdout_ref"))
+            public = _recorded_public_result(artifacts, existing)
             return _success_result(
                 call,
                 f"reused recorded {name}: {existing.get('status')}",
@@ -221,12 +238,13 @@ async def run_lsp_evidence(
                     "case": dict(existing),
                     "execution": recorded_result,
                 },
-                llm_text=_lsp_execution_text(
+                llm_text=_evidence_text(
                     name,
                     str(existing.get("status") or ""),
-                    recorded_result,
+                    public,
                     reused=True,
                 ),
+                snapshot_refs=_public_snapshot_refs(public),
             )
         execution_call = new_tool_call(
             name="op_lsp_diagnostics", args={"file": file_path,
@@ -240,6 +258,7 @@ async def run_lsp_evidence(
             allow_tools=True,
             turn_id=turn_id,
         )
+        progress.result = result
         record_verification_execution(workspace, execution_call, result, before)
         serialized = json.dumps(dict(result.structured or {}), ensure_ascii=False, sort_keys=True)
         stdout_ref = artifacts.put_bytes(
@@ -274,6 +293,7 @@ async def run_lsp_evidence(
             "exit_code": 1 if status == "FAIL" else 0 if status == "PASS" else None,
             "stdout_ref": stdout_ref.to_dict(),
             "stderr_ref": stderr_ref.to_dict(),
+            "public_result_ref": _save_public_result(artifacts, result),
             "environment": {
                 "workspace_root": str(workspace.get("repo_path") or ""),
                 "runner": "lsp",
@@ -293,16 +313,17 @@ async def run_lsp_evidence(
         }
 
         mutation = _commit_executed_case(
-            store, context, snapshot, call, args, case, workspace, before, request_fingerprint,
+            store, context, snapshot, call, args, case, workspace, before, request_fingerprint, progress,
         )
         return _success_result(
             call,
             f"recorded {name}: {status}",
             {**mutation, "execution": structured},
-            llm_text=_lsp_execution_text(name, status, structured),
+            llm_text=f"Recorded {name}: {status}\n\n{result.llm_text}",
+            snapshot_refs=result.snapshot_refs,
         )
     except Exception as exc:
-        return _error_result(call, exc, execution_started=execution_started)
+        return _error_result(call, exc, execution_started=execution_started, progress=progress)
 
 
 def record_unavailable_evidence(
@@ -354,7 +375,7 @@ def record_unavailable_evidence(
         return _error_result(call, exc)
 
 
-def _commit_executed_case(store, context, snapshot, call, args, case, workspace, before, request_fingerprint):
+def _commit_executed_case(store, context, snapshot, call, args, case, workspace, before, request_fingerprint, progress):
     case["definition_fingerprint"] = case_definition_fingerprint(case)
 
     def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
@@ -369,6 +390,7 @@ def _commit_executed_case(store, context, snapshot, call, args, case, workspace,
         seed=_empty_payload(),
         expected_version=snapshot.version,
     )
+    progress.recorded = True
     bind_recorded_case_execution(workspace, before, int(mutation.get("case_revision") or 0))
     return mutation
 
@@ -657,18 +679,46 @@ def _shell_execution_text(
     return "\n".join(lines)
 
 
-def _lsp_execution_text(
+def _save_public_result(artifacts: ContentAddressedArtifactStore, result: ToolExecutionResult) -> dict[str, Any]:
+    return artifacts.put_json({
+        "ok": result.ok, "llm_text": result.llm_text,
+        "snapshot_refs": [ref.to_dict() for ref in result.snapshot_refs],
+    }, artifact_type="VerificationPublicResultArtifact").to_dict()
+
+
+def _recorded_public_result(artifacts: ContentAddressedArtifactStore, case: Mapping[str, Any]) -> dict[str, Any]:
+    # Older records retain private evidence only. Never recreate a public
+    # message by dumping it, and never rerun a tool just to recover its text.
+    return _artifact_json(artifacts, case.get("public_result_ref"))
+
+
+def _public_snapshot_refs(public: Mapping[str, Any]) -> tuple[ResultSnapshotRef, ...]:
+    return tuple(ResultSnapshotRef.from_dict(ref) for ref in public.get("snapshot_refs", ()))
+
+
+def _evidence_text(
     name: str,
     status: str,
-    execution: Mapping[str, Any],
+    public: Mapping[str, Any],
     *,
     reused: bool = False,
 ) -> str:
     prefix = "Reused" if reused else "Recorded"
     return (
         f"{prefix} {name}: {status}\n\n"
-        + json.dumps(dict(execution), ensure_ascii=False, indent=2, sort_keys=True)
+        + str(public.get("llm_text") or "The original public response was not saved with this older record. "
+              "Inspect its evidence artifacts if needed; no fresh tool execution occurred.")
     )
+
+
+def _replay_result(call, replay, artifacts) -> ToolExecutionResult:
+    case = replay.get("case") or {}
+    public = _recorded_public_result(artifacts, case)
+    return _success_result(call, "Replayed recorded operation; no fresh execution occurred.",
+        {**replay, "replayed": True},
+        llm_text=_evidence_text(str(case.get("name") or "operation"), str(case.get("status") or "UNKNOWN"),
+                                public, reused=True),
+        snapshot_refs=_public_snapshot_refs(public))
 
 
 def _success_result(
@@ -677,6 +727,7 @@ def _success_result(
     structured: Mapping[str, Any],
     *,
     llm_text: str | None = None,
+    snapshot_refs: tuple[ResultSnapshotRef, ...] = (),
 ) -> ToolExecutionResult:
     return ToolExecutionResult(
         name=call.name,
@@ -686,21 +737,37 @@ def _success_result(
         structured=dict(structured),
         call_id=call.call_id,
         status=RuntimeStatus.OK,
+        snapshot_refs=snapshot_refs,
     )
 
 
-def _error_result(call: ToolCallIR, exc: Exception, *, execution_started: bool = True, input_rejected: bool = False) -> ToolExecutionResult:
+def _error_result(call: ToolCallIR, exc: Exception, *, execution_started: bool = True, input_rejected: bool = False,
+                  progress: _EvidenceProgress | None = None) -> ToolExecutionResult:
     record_verifier_failure(exc)
-    text = f"{exc.__class__.__name__}: {exc}"
+    text = exception_reason(exc)
+    source = progress.result if progress else None
+    details = {"error": str(exc), "error_type": exc.__class__.__name__}
+    if source is not None:
+        recorded = bool(progress and progress.recorded)
+        details.update(execution=source.structured, evidence_recorded=recorded,
+                       effect="applied" if recorded else "unknown")
+        advice = ("Evidence was recorded; a follow-up step failed." if recorded else
+                  "Evidence recording did not finish; some artifacts or a record may already exist.")
+        public_text = (source.llm_text + "\n\nEvidence recording failed: " + text + "\n" + advice
+                       + " Inspect the recorded evidence before repairing it; do not rerun the underlying tool "
+                         "just to repair evidence recording.")
+    else:
+        public_text = text + (" Execution may have started; reconcile before retrying." if execution_started
+                              else " Correct the pre-execution issue before retrying.")
     return ToolExecutionResult(
         name=call.name,
         ok=False,
         text=text,
-        llm_text=text + (" Execution may have started; reconcile before retrying." if execution_started
-                         else " Correct the pre-execution issue before retrying."),
-        structured={"error": str(exc), "error_type": exc.__class__.__name__},
+        llm_text=public_text,
+        structured=details,
         call_id=call.call_id,
-        status=RuntimeStatus.INVALID,
+        status=RuntimeStatus.INVALID if input_rejected else RuntimeStatus.ERROR,
+        snapshot_refs=source.snapshot_refs if source else (),
         invocation_result=(rejection("verification_preflight", text + " No command ran. Correct the input and retry.",
                                      details={"error": str(exc), "error_type": type(exc).__name__})
                            if input_rejected and not isinstance(exc.__cause__, OSError) else None),

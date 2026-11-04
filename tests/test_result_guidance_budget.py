@@ -76,7 +76,7 @@ def _mount_boom(runtime, *, handler, alias="boom", mode=InvocationMode.DIRECT) -
 
 
 class TestOutputAndDiagnosticPresentation:
-    def test_sync_handler_exception_retains_full_diagnostic(self, tmp_path):
+    def test_sync_handler_exception_retains_full_diagnostic(self, tmp_path, caplog):
         core = _core()
         runtime = core.context.execution_runtime
 
@@ -92,13 +92,13 @@ class TestOutputAndDiagnosticPresentation:
             )
             assert not result.ok
             assert "RuntimeError" in result.llm_text
-            assert result.snapshot_refs
-            assert Path(result.snapshot_refs[0].path).read_text()
-            assert "Full diagnostic:" in result.llm_text
+            assert _big_text() in caplog.text
+            assert "Traceback" not in result.llm_text
+            assert len(result.llm_text) < LIMIT
         finally:
             core.close()
 
-    def test_async_handler_exception_retains_full_diagnostic(self, tmp_path):
+    def test_async_handler_exception_retains_full_diagnostic(self, tmp_path, caplog):
         core = _core()
         runtime = core.context.execution_runtime
 
@@ -115,13 +115,13 @@ class TestOutputAndDiagnosticPresentation:
                 )
             )
             assert not result.ok
-            assert result.snapshot_refs
-            assert Path(result.snapshot_refs[0].path).read_text()
-            assert "Full diagnostic:" in result.llm_text
+            assert _big_text() in caplog.text
+            assert "Traceback" not in result.llm_text
+            assert len(result.llm_text) < LIMIT
         finally:
             core.close()
 
-    def test_huge_error_payloads_have_readable_details(self, tmp_path):
+    def test_explicit_public_error_is_preserved_independently_of_output_budget(self, tmp_path, caplog):
         core = _core()
         runtime = core.context.execution_runtime
 
@@ -146,9 +146,10 @@ class TestOutputAndDiagnosticPresentation:
                 turn_id="d3",
             )
             assert not result.ok
-            assert result.snapshot_refs
-            assert Path(result.snapshot_refs[0].path).read_text()
-            assert "Full diagnostic:" in result.llm_text
+            assert _big_text() in caplog.text
+            assert "Traceback" not in result.llm_text
+            assert _big_text() in result.llm_text
+            assert not result.snapshot_refs
         finally:
             core.close()
 
@@ -219,10 +220,8 @@ class TestOutputAndDiagnosticPresentation:
             )
             assert not result.ok
             assert result.status == "inner_boom"
-            # The complete traceback may also contain the message in the
-            # source line that raised it. Check the exception and envelope,
-            # rather than mistaking that source evidence for a second result.
-            assert result.llm_text.count("ToolExecutionError: inner business failure") == 1
+            assert result.llm_text.count("inner business failure") == 1
+            assert "Traceback" not in result.llm_text
             assert result.llm_text.count("Tool result metadata:") == 1
             assert len(result.llm_text) <= LIMIT
         finally:

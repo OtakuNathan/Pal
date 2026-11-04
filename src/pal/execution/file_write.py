@@ -24,7 +24,7 @@ from pal.execution.session_state import (
     count_text_lines,
 )
 from pal.shared import RuntimeStatus
-from pal.shared.diagnostics import diagnostic_text, exception_report
+from pal.shared.diagnostics import diagnostic_text, exception_reason
 
 
 MAX_CONTENT_BYTES = 1_000_000
@@ -81,7 +81,7 @@ class FileWriteTool:
         try:
             resolved = resolve_file_path(file_path)
         except (OSError, ValueError) as exc:
-            return _err(RuntimeStatus.INVALID, ERR_WRITE_FAILED, file_path=file_path, details=exception_report(exc))
+            return _err(RuntimeStatus.INVALID, ERR_WRITE_FAILED, file_path=file_path, details=exception_reason(exc))
 
         if resolved.exists():
             return self._overwrite(resolved, content)
@@ -100,7 +100,7 @@ class FileWriteTool:
             try:
                 parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_report(exc))
+                return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_reason(exc))
         if not parent.is_dir():
             return _err(RuntimeStatus.INVALID, ERR_PARENT_NOT_DIRECTORY, file_path=str(resolved),
                         effect_receipt=_parent_creation_receipt(parent, parent_creation_attempted))
@@ -114,10 +114,10 @@ class FileWriteTool:
             )
         except FileContentChangedError as exc:
             return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved),
-                        details=exception_report(exc),
+                        details=exception_reason(exc),
                         effect_receipt=_parent_creation_receipt(parent, parent_creation_attempted))
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_report(exc), commit_uncertain=True)
+            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_reason(exc), commit_uncertain=True)
 
         self.cache.mark_read(resolved, content)
         return _ok(
@@ -141,9 +141,9 @@ class FileWriteTool:
             )
         except FileContentChangedError as exc:
             self.cache.invalidate(resolved)
-            return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved), details=exception_report(exc))
+            return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_FILE, file_path=str(resolved), details=exception_reason(exc))
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_report(exc), commit_uncertain=True)
+            return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=exception_reason(exc), commit_uncertain=True)
 
         self.cache.mark_read(resolved, content)
         return _ok(
@@ -164,7 +164,7 @@ class FileWriteTool:
         try:
             cached_state = self.cache.get_valid_state(resolved)
         except FileSnapshotReadError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_READ_FAILED, file_path=str(resolved), details=exception_report(exc))
+            return _err(RuntimeStatus.ERROR, ERR_READ_FAILED, file_path=str(resolved), details=exception_reason(exc))
         if cached_state is None:
             if not had_record:
                 return _err(RuntimeStatus.FORBIDDEN, ERR_NOT_READ, file_path=str(resolved))

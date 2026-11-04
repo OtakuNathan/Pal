@@ -2859,7 +2859,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(result.status, RuntimeStatus.ERROR)
         self.assertIn("browser unavailable", result.llm_text)
-        self.assertIn("curl", result.llm_text)
+        self.assertIn("curl", result.recovery_hint)
         self.assertNotIn("fallback_used", result.structured)
 
         asyncio.run(handle.stop_async())

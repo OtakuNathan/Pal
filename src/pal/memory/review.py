@@ -11,7 +11,7 @@ from pal.control.contracts import (ControlRoute, InteractionButtonSpec, Interact
     InteractionItemSpec, InteractionMessageSpec)
 from pal.control.interactions import delivery_for_interaction, delivery_for_reply
 from pal.foundation import utc_now
-from pal.foundation.diagnostics import diagnostic_text
+from pal.foundation.diagnostics import diagnostic_reason
 from pal.memory.contracts import L3BatchCommitRequest, L3CommitRequest
 from pal.memory.mutations import content_hash
 from pal.memory.proposals import MemoryProposalBatch, STAR_FIELDS, normalize_memory_candidates
@@ -22,6 +22,18 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS memory_reviews (
 )"""
 FIELD_LABELS = {"title": "Title", "summary": "Body", "search_text": "Search text", "topics": "Topics",
     "situation": "Situation", "task": "Task", "action": "Action", "result": "Result"}
+
+
+def _batch_failure_notice(result: dict) -> str:
+    reasons = []
+    for receipt in (result, *result.get("results", ())):
+        metadata = receipt.get("metadata") or {}
+        reason = metadata.get("error") or metadata.get("backend_error") or metadata.get("reason")
+        if reason:
+            reasons.append(diagnostic_reason(reason))
+    cause = diagnostic_reason("; ".join(dict.fromkeys(reasons)))
+    return (f"Batch returned {result.get('status', 'error')}. " + (cause + "\n" if cause else "")
+            + "Review decisions are saved. Inspect the provider result before retrying.")
 
 
 class MemoryReviewService:
@@ -250,9 +262,7 @@ class MemoryReviewService:
                     self._finish(state, [item.document_id for item in result.results])
                 else:
                     state["status"] = "failed"
-                    state["error"] = diagnostic_text(
-                        f"Batch returned {result.status}. Inspect the provider result before retrying: "
-                        + json.dumps(asdict(result), ensure_ascii=False), limit=None)
+                    state["error"] = _batch_failure_notice(asdict(result))
                     state["revision"] += 1
                 state["result"]["provider_result"] = asdict(result)
                 self._save(db, state)
@@ -291,7 +301,12 @@ class MemoryReviewService:
             text += "\nSource: " + str(state["source"]["source_label"])
         if state["diagnostics"]:
             text += f"\nExtraction normalized or skipped {len(state['diagnostics'])} format issues."
-        text += ("\n" + (banner or state["error"])) if banner or state["error"] else ""
+        error = state["error"]
+        provider_result = state.get("result", {}).get("provider_result")
+        if error and isinstance(provider_result, dict):
+            # Reopened cards may contain an older full diagnostic dump.
+            error = _batch_failure_notice(provider_result)
+        text += ("\n" + (banner or diagnostic_reason(error))) if banner or error else ""
         selected = next((item for item in drafts if item["candidate_id"] == candidate_id), None)
         if view not in {"view", "edit", "field"} or selected is None:
             selected = next((item for item in drafts if item["decision"] == "pending"), None)

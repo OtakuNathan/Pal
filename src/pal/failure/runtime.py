@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pal.foundation.diagnostics import diagnostic_reason
 from typing import Any
 from uuid import uuid4
 
@@ -48,11 +49,13 @@ class FailureRuntime:
         ok: bool,
         text: str = "",
         structured: dict[str, Any] | None = None,
+        call_id: str = "",
     ) -> None:
         draft.attempted_actions.append(action_name)
         draft.maintenance_outcomes.append(
             {
                 "action_name": action_name,
+                "call_id": call_id,
                 "status": status,
                 "ok": ok,
                 "text": text,
@@ -120,14 +123,14 @@ class FailureRuntime:
             return FailureUserFeedback(
                 status=FAILURE_VERIFICATION_OK,
                 summary=f"I repaired the {draft.subsystem} issue in this turn.",
-                blocker=draft.primary_blocker,
+                blocker=diagnostic_reason(draft.primary_blocker, limit=None),
                 next_step="Continuing with the updated runtime state.",
             )
         if verification.status == FAILURE_VERIFICATION_DEGRADED:
             feedback = FailureUserFeedback(
                 status=FAILURE_VERIFICATION_DEGRADED,
                 summary=f"I stabilized the {draft.subsystem} issue enough to continue in degraded mode.",
-                blocker=draft.primary_blocker,
+                blocker=diagnostic_reason(draft.primary_blocker, limit=None),
                 next_step="Some functionality may remain limited until a fuller repair is performed.",
             )
             self.recent_failures.append(
@@ -144,7 +147,7 @@ class FailureRuntime:
         return FailureUserFeedback(
             status=FAILURE_VERIFICATION_FAILED,
             summary=f"I could not repair the {draft.subsystem} issue inline.",
-            blocker=report.current_blocker if report is not None else draft.primary_blocker,
+            blocker=diagnostic_reason(report.current_blocker if report is not None else draft.primary_blocker, limit=None),
             next_step=report.recommended_next_step if report is not None else "Developer escalation is required.",
         )
 
@@ -185,7 +188,7 @@ class FailureRuntime:
             subsystem=draft.subsystem,
             component=draft.component,
             repair_domain=draft.repair_domain,
-            primary_blocker=draft.primary_blocker,
+            primary_blocker=diagnostic_reason(draft.primary_blocker),
             summary=f"Inline repair was insufficient for {draft.subsystem}:{draft.component}.",
             related_ids=dict(draft.related_ids),
         )

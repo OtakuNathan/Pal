@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.foundation.diagnostics import diagnostic_text
+from pal.foundation.diagnostics import diagnostic_reason, public_diagnostics
 from pal.memory.contracts import L3MutationResult, L3RecallResult, L3RecallView, MemoryQuery
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
@@ -86,15 +86,14 @@ def render_mutation_result_for_llm(action: str, result: L3MutationResult, *, pro
     if mem_ref:
         lines.append(f"mem_ref: {mem_ref}")
     metadata = result.metadata or {}
-    # The shared tool presenter owns diagnostic summaries and full snapshots.
-    # Keep complete diagnostics here without exposing the memory body itself.
+    # The memory owner presents errors; structured metadata retains the report.
     if metadata.get("reason"):
-        lines.append("reason: " + diagnostic_text(str(metadata['reason']), limit=None))
+        lines.append("reason: " + diagnostic_reason(metadata['reason']))
     if metadata.get('warning'):
-        lines.append("warning: " + diagnostic_text(str(metadata['warning']), limit=None))
+        lines.append("warning: " + diagnostic_reason(metadata['warning']))
     for key in ('error', 'backend_error'):
         if metadata.get(key):
-            lines.append("error: " + diagnostic_text(str(metadata[key]), limit=None))
+            lines.append("error: " + diagnostic_reason(metadata[key]))
     if metadata.get("successors"):
         lines.append("successors: " + ", ".join(metadata["successors"]))
     for key in ('replayed', 'deduplicated', 'deleted', 'forgotten', 'changed', 'no_changes'):
@@ -105,6 +104,7 @@ def render_mutation_result_for_llm(action: str, result: L3MutationResult, *, pro
 
 def render_batch_result_for_llm(payload: dict[str, object]) -> str:
     visible = {key: value for key, value in payload.items() if key != "provider_result"}
+    visible.update(public_diagnostics({key: payload[key] for key in ("error", "warning", "reason") if key in payload}))
     provider = payload.get("provider_result")
     if isinstance(provider, dict):
         receipt = L3MutationResult(status=str(provider.get("status") or "unknown"), document_id="",

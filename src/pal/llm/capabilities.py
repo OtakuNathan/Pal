@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pal.execution.tool_facade import ToolGuidance
 from pal.execution.tool_semantics import INDIRECT_LOCAL_READ
-from pal.foundation.diagnostics import diagnostic_summary, diagnostic_text
+from pal.foundation.diagnostics import diagnostic_reason
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -160,7 +160,7 @@ class LLMIntrospectionProvider:
             payload["usage"] = _usage_summary(usage)
         for section in ("thinking", "usage"):
             if "error" in payload[section]:
-                payload[section]["error"] = diagnostic_text(diagnostic_summary(payload[section]["error"]), limit=560)
+                payload[section]["error"] = diagnostic_reason(payload[section]["error"], limit=560)
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="llm runtime snapshot",

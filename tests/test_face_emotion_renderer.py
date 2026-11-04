@@ -6,6 +6,24 @@ from types import SimpleNamespace
 from pal.shared import IntrospectionCall
 
 
+def test_face_status_and_command_failures_do_not_publish_frames(monkeypatch):
+    import json
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / 'plugins/st7789_face'))
+    module = importlib.import_module('face_introspection')
+    report = 'Traceback (most recent call last):\n  File "private.py", line 7\nOSError: display disconnected'
+    provider = module.FaceIntrospectionProvider(sidecar_manager=SimpleNamespace(
+        sidecar_socket=Path('/unused'), plugin_dir=Path('/unused')))
+    monkeypatch.setattr(module, '_send_command', lambda *a, **k: report)
+    result = provider.show_face(IntrospectionCall(name='internal_renderer', args={'emotion': 'stretch'}))
+    assert 'OSError: display disconnected' in result.llm_text
+    assert 'Traceback' not in result.llm_text
+    monkeypatch.setattr(module, '_send_command', lambda *a, **k: json.dumps({'last_error': report}))
+    result = provider.status(IntrospectionCall(name='status'))
+    assert 'OSError: display disconnected' in result.llm_text
+    assert 'Traceback' not in result.llm_text
+    assert result.structured['health']['last_error'] == report
+
+
 def test_face_maps_alias_locally_and_contributes_no_duplicate_action(monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "plugins/st7789_face"))
     module = importlib.import_module("face_introspection")

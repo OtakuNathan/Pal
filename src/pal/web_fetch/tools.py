@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt, RetryDirective, ToolExecutionError
 from pal.foundation import ArtifactIngestor
 from pal.shared import RuntimeStatus
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_reason, diagnostic_reason, public_diagnostics
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.web_fetch.browser_service import BrowserServiceError
 from pal.web_fetch.service import WebFetchService
@@ -19,6 +20,22 @@ def browser_tool_error(
     action: str, exc: BrowserServiceError, *, allow_curl: bool = False, worker_scope: bool = False,
 ) -> ToolExecutionError:
     error = exc.to_dict()
+    reason = exception_reason(exc)
+    if exc.diagnostic:
+        diagnostic = exc.diagnostic
+        try:
+            envelope = json.loads(diagnostic)
+        except (ValueError, TypeError):
+            envelope = None
+        if isinstance(envelope, dict) and isinstance(envelope.get("error"), dict):
+            remote_error = envelope["error"]
+            diagnostic = remote_error.get("reason") or remote_error.get("diagnostic") or remote_error.get("message") or diagnostic
+        reason = diagnostic_reason(diagnostic)
+    # Remote stack reports stay in the owner's logs, not in the model context.
+    error.pop("diagnostic", None)
+    error.pop("reason", None)
+    error["message"] = reason
+    error["details"] = public_diagnostics(exc.details)
     if error["curl_applicable"] and allow_curl and not worker_scope:
         error["fallback_hint"] = "Use run_shell with curl only when raw HTTP content is sufficient."
     pre_effect = not exc.state_unknown and exc.code in {
@@ -67,8 +84,10 @@ def browser_tool_error(
                 "If recovery requires unavailable host or browser-management tools, report an environment "
                 "blocker to the Manager; do not probe or repair the host runtime."
             )
+    if error.get("fallback_hint"):
+        recovery += " " + error["fallback_hint"]
     return ToolExecutionError(
-        f"Browser {action} failed: {exc}", error_code=exc.code,
+        f"Browser {action} failed: {reason}", error_code=exc.code,
         effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED if pre_effect else EffectOutcome.UNKNOWN),
         retry=retry, details={"error": error}, recovery_hint=recovery,
     )
@@ -118,7 +137,7 @@ class BrowserScreenshotTool:
             raise browser_tool_error("screenshot", exc) from exc
         except Exception as exc:
             raise ToolExecutionError(
-                f"Browser screenshot failed: {exc}", error_code="screenshot_failed",
+                f"Browser screenshot failed: {exception_reason(exc)}", error_code="screenshot_failed",
                 effect_receipt=EffectReceipt(outcome=EffectOutcome.UNKNOWN), retry=RetryDirective.DO_NOT_RETRY,
                 recovery_hint="Inspect the screenshot error and any saved artifact before deciding how to continue.",
             ) from exc
@@ -134,7 +153,7 @@ class BrowserScreenshotTool:
             imported = await register(stored, runtime=runtime, turn_id=turn_id, source_channel="web_fetch")
         except Exception as exc:
             payload["registration"] = "unknown"
-            payload["registration_error"] = exception_report(exc)
+            payload["registration_error"] = exception_reason(exc)
             payload["next_step"] = "Screenshot saved; registration outcome is uncertain and no inline image was delivered. Reconcile with search_artifacts before importing the saved path again; omit query to browse this conversation's artifacts."
             return _result(RuntimeStatus.OK, "Browser screenshot saved", payload)
         if imported.status != RuntimeStatus.OK:
@@ -163,10 +182,32 @@ def _screenshot_file_name(url: str) -> str:
     return f"{(cleaned or 'web_page')[:80]}.png"
 
 
+def public_browser_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    # Project only post-action diagnostics, never page or script content.
+    # Full reports remain in the host's structured evidence and service logs.
+    failures = {key: payload[key] for key in (
+        "page_state_error", "profile_state_error", "profile_cleanup_error", "screenshot_cleanup_error", "registration_error",
+    ) if key in payload}
+    if not failures:
+        return payload
+    visible = public_diagnostics(failures)
+    for error in visible.values():
+        if isinstance(error, dict) and error.get("reason"):
+            error.pop("diagnostic", None)
+            error.pop("message", None)
+    if failures.keys() - {"registration_error"}:
+        visible["followup_recovery"] = (
+            "The action completed; do not repeat it to recover state or cleanup. "
+            "Inspect the browser session before further actions; resolve the reported "
+            "state or profile failure first."
+        )
+    return {**payload, **visible}
+
+
 def _result(status: str, title: str, structured: dict[str, Any]) -> CapabilityResult:
     return CapabilityResult(
         status=status,
         text=title.lower(),
         structured=structured,
-        llm_text=render_titled_structured_for_llm(title, structured),
+        llm_text=render_titled_structured_for_llm(title, public_browser_payload(structured)),
     )

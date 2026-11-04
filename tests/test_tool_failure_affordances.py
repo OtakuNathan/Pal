@@ -80,7 +80,7 @@ def test_decode_failure_preserves_actual_error(runtime, tmp_path):
     assert metadata(result)["effect"] == "none"
 
 
-def test_read_os_failure_preserves_complete_cause(runtime, tmp_path, monkeypatch):
+def test_read_os_failure_preserves_complete_cause(runtime, tmp_path, monkeypatch, caplog):
     path = tmp_path / "source"
     path.write_text("text")
     def fail(_):
@@ -91,7 +91,9 @@ def test_read_os_failure_preserves_complete_cause(runtime, tmp_path, monkeypatch
     monkeypatch.setattr("pal.execution.file_read.read_utf8_text_exact", fail)
     result = invoke(runtime, "read_file", {"file_path": str(path)})
     assert not result.ok
-    assert "underlying read cause" in result.llm_text and "diagnostic-tail" in result.llm_text
+    assert "underlying read cause" in result.llm_text
+    assert "diagnostic-tail" in caplog.text
+    assert "Traceback" not in result.llm_text
     assert metadata(result)["error_code"] == "READ_FAILED"
     assert metadata(result)["effect"] == "none"
 
@@ -201,7 +203,7 @@ def test_validation_is_compact_and_has_metadata_through_both_modes(runtime, asyn
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("direct", [False, True])
-def test_unexpected_exception_is_complete_redacted_and_read_label_is_not_a_receipt(runtime, asynchronous, direct):
+def test_unexpected_exception_is_complete_redacted_and_read_label_is_not_a_receipt(runtime, asynchronous, direct, caplog):
     def fail(_):
         raise KeyError("missing configuration; token=hidden " + "x" * 5000 + " diagnostic-tail")
     mount_test_capability(runtime, alias="broken_reader", canonical_path="op_test_broken_reader",
@@ -214,12 +216,13 @@ def test_unexpected_exception_is_complete_redacted_and_read_label_is_not_a_recei
     assert "diagnostic-tail" in result.llm_text
     assert "Traceback" not in result.llm_text
     from pathlib import Path
-    assert "Traceback" in Path(result.snapshot_refs[0].path).read_text()
+    assert "Traceback" in caplog.text
+    assert "hidden" not in caplog.text
     assert metadata(result)["error_code"] == "handler_exception"
     assert metadata(result)["effect"] == "unknown"
 
 
-def test_long_exception_budget_retains_complete_diagnostic_in_readable_snapshot(runtime):
+def test_long_exception_budget_retains_complete_diagnostic_in_readable_snapshot(runtime, caplog):
     def fail(_):
         try:
             raise ValueError("original cause")
@@ -231,13 +234,12 @@ def test_long_exception_budget_retains_complete_diagnostic_in_readable_snapshot(
     result = runtime.execute_tool(new_tool_call(name="long_failure", args={}), turn_id="review",
         budget=ToolCallBudget(max_output_chars=1200, preview_chars=400))
     assert not result.ok
-    assert result.snapshot_refs
-    from pathlib import Path
-    complete = Path(result.snapshot_refs[0].path).read_text()
+    complete = caplog.text
     assert "original cause" in complete and "diagnostic-tail" in complete
     assert "hidden" not in complete
     assert "Traceback" in complete
-    assert result.snapshot_refs[0].path in result.llm_text
+    assert "original cause" in result.llm_text
+    assert "Traceback" not in result.llm_text
     assert metadata(result)["error_code"] == "handler_exception"
 
 
@@ -257,12 +259,12 @@ def test_capability_entrypoint_preserves_full_declared_failure(runtime, asynchro
     assert result.structured["error_code"] == "specific_failure"
     assert result.structured["retry"] == "do_not_retry"
     assert result.structured["item"] == "original item"
-    assert "original item" in result.llm_text
+    assert "Traceback" not in result.llm_text
     assert result.effect_receipt.outcome is EffectOutcome.NOT_APPLIED
     assert result.recovery_hint == "repair the specific cause"
 
 
-def test_handler_summary_cannot_hide_structured_error_details(runtime):
+def test_owner_summary_is_not_augmented_with_private_diagnostics(runtime):
     def fail(_):
         return CapabilityResult(status=RuntimeStatus.ERROR, text="operation failed", llm_text="operation failed",
             structured={"error_code": "backend_error", "error": {
@@ -273,9 +275,11 @@ def test_handler_summary_cannot_hide_structured_error_details(runtime):
                           execution=INDIRECT_LOCAL_READ)
     result = invoke(runtime, "hidden_diagnostic", {})
     assert result.llm_text.startswith("operation failed")
-    assert "actual underlying cause" in result.llm_text
-    assert "complete backend diagnostic" in result.llm_text
-    assert '"retryable":false' in result.llm_text
+    assert "actual underlying cause" not in result.llm_text
+    assert result.structured["details"]["error"]["message"] == "actual underlying cause"
+    assert "complete backend diagnostic" not in result.llm_text
+    assert result.structured["details"]["stderr"] == "complete backend diagnostic"
+    assert result.structured["details"]["error"]["retryable"] is False
     assert metadata(result)["error_code"] == "backend_error"
 
 
@@ -286,6 +290,7 @@ def test_builtin_output_failure_retains_original_error_and_output(runtime, monke
     record = runtime.registry_generation.direct_aliases["search_tools"]
     result = runtime._complete_builtin(record, {"original_output": "complete output"}, llm_text="original summary")
     assert result.error_code == "output_validation_failed"
+    assert "Traceback" not in result.llm_text
     assert "diagnostic-tail" in result.llm_text
     assert "complete output" in result.llm_text and "original summary" in result.llm_text
     assert result.details["raw_output"] == {"original_output": "complete output"}
@@ -310,13 +315,15 @@ def test_missing_receipt_preserves_handler_evidence(runtime, tmp_path):
 def test_rejection_preserves_corrective_details(runtime):
     def reject(_):
         raise ToolRejectedError("unknown target", error_code="unknown_target",
+            recovery_hint="Use real-target instead.",
             details={"available_names": ["real-target"], "diagnostic": "token=hidden configuration hint"})
     mount_test_capability(runtime, alias="reject_target", canonical_path="op_test_reject_target",
         InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=reject, execution=DIRECT_LOCAL_READ)
     result = invoke(runtime, "reject_target", {})
     assert metadata(result)["effect"] == "not_started"
     assert "real-target" in result.llm_text
-    assert "configuration hint" in result.llm_text
+    assert "configuration hint" not in result.llm_text
+    assert result.structured["details"]["available_names"] == ["real-target"]
     assert "hidden" not in result.llm_text
 
 
@@ -383,8 +390,7 @@ def test_long_recovery_preserves_final_constraints_outside_output_budget(runtime
         InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=fail, execution=INDIRECT_LOCAL_READ)
     result = runtime.execute_tool(new_tool_call(name="call_tool", args={"name": "long_recovery", "args": {}}),
         turn_id="review", budget=ToolCallBudget(max_output_chars=1500, preview_chars=300))
-    assert result.snapshot_refs
-    assert hint in Path(result.snapshot_refs[-1].path).read_text()
+    assert "Traceback" not in result.llm_text
     assert metadata(result)["recovery"] == hint
 
 

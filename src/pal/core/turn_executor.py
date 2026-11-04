@@ -5,7 +5,7 @@ from pal.memory.contracts import MEMORY
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
-from pal.shared.diagnostics import diagnostic_text, exception_summary, exception_report
+from pal.shared.diagnostics import diagnostic_text, exception_summary, exception_report, exception_reason
 
 import asyncio
 import inspect
@@ -590,26 +590,9 @@ class TurnExecutor:
                 failure_metadata.get("failure_kind")
                 or ("local_state" if local_state_failure else "provider_failure")
             )
-            error_type = str(failure_metadata.get("error_type") or "UnknownError")
-            try:
-                partial_chars = max(
-                    0,
-                    int(failure_metadata.get("partial_output_chars") or 0),
-                )
-            except (TypeError, ValueError):
-                partial_chars = 0
-            blocker_text = (
-                f"LLM generation failed on {failure_component}: "
-                f"{error_type} ({failure_kind})"
-                + (
-                    f"; stream interrupted after {partial_chars} chars of partial output."
-                    if partial_chars
-                    else "."
-                )
-            )
-            failure_detail = diagnostic_text(
-                str(outcome.text or "") + "\n" + json.dumps(thaw_json(failure_metadata), ensure_ascii=False, default=str), limit=None)
-            blocker_text += "\n" + failure_detail
+            # The LLM owner has already rendered the failure. Private metadata
+            # is diagnostic evidence, never reply text or a second model prompt.
+            blocker_text = str(outcome.text or "LLM invocation failed.")
             try:
                 failure_result = await self._handle_failure_async(
                     FailureSignal(
@@ -621,7 +604,7 @@ class TurnExecutor:
                         evidence={
                             "llm_text": outcome.text,
                             "preferred_model_id": continuation.preferred_llm_model_id,
-                            **failure_metadata,
+                            **dict(failure_metadata.get("failure_evidence") or {}),
                         },
                         related_ids={"turn_id": continuation.turn_id},
                         safe_to_retry=False,
@@ -634,9 +617,9 @@ class TurnExecutor:
                 )
                 feedback_text = self._render_failure_feedback_text(failure_result.user_feedback)
             except Exception as exc:
-                feedback_text = "Failure recovery also failed:\n" + exception_report(exc)
+                feedback_text = "Blocker: " + blocker_text + "\nFailure recovery also failed: " + exception_reason(exc)
             outcome = self._generation_result_from_text(
-                blocker_text + "\n\n" + feedback_text,
+                feedback_text,
                 finish_reason=LLMFinishReason.FALLBACK,
                 response_mode=LLMResponseMode.CHAT,
             )
@@ -717,38 +700,7 @@ class TurnExecutor:
                 tool_result = await self.context.execution_runtime.execute_tool_async(execution_call, allow_tools=not continuation.finalization_only, budget=tool_budget, turn_id=continuation.turn_id)
         except Exception as exc:
             self._log_tool_call_exception(continuation, execution_call, exc)
-            detail = exception_report(exc)
-            failure = (
-                f"Tool {execution_call.name} timed out before returning a result.\n{detail}"
-                if isinstance(exc, TimeoutError)
-                else (
-                    f"Tool {execution_call.name} did not return a result: "
-                    f"\n{detail}"
-                )
-            )
-            guidance = (
-                "Its side effects may be incomplete or unknown. Inspect the current state, "
-                "then retry the operation if appropriate."
-            )
-            receipt = {
-                "kind": "failed",
-                "error_code": "tool_timeout" if isinstance(exc, TimeoutError) else "tool_rpc_failed",
-                "effect": "unknown",
-                "retry": "reconcile_first",
-            }
-            rendered = f"{failure}\n{guidance}\n\nTool result metadata: " + json.dumps(receipt, sort_keys=True)
-            tool_result = ToolExecutionResult(
-                name=execution_call.name,
-                ok=False,
-                text=rendered,
-                llm_text=rendered,
-                structured={
-                    **receipt,
-                    "error_type": exc.__class__.__name__,
-                    "error": detail,
-                },
-                call_id=getattr(execution_call, "call_id", None),
-            )
+            tool_result = self.context.execution_runtime.tool_call_failed_result(execution_call, exc)
         if not tool_result.ok:
             self.context.core_event_bus.emit(TURN_TOOL_CALL_FAILED, {**tool_event, "ok": False})
         if self._should_enter_failure_flow_for_tool_result(tool_result):
@@ -776,7 +728,7 @@ class TurnExecutor:
             except Exception as exc:
                 # Recovery is additional evidence; its own failure must not
                 # discard the tool result that was already obtained.
-                diagnostic = exception_report(exc)
+                diagnostic = exception_reason(exc)
                 feedback_text = "Failure recovery also failed:\n" + diagnostic
                 failure_metadata = {"failure_recovery_error": diagnostic}
             tool_result = ToolExecutionResult(

@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_reason
 
 
 def inspection_snapshot(
@@ -30,7 +30,7 @@ def inspection_snapshot(
                 if isinstance(status, str) and status in {"error", "failed", "invalid", "not_found", "unavailable"}:
                     unavailable[name] = value.get("reason") or status
         except Exception as exc:
-            payload[name] = {"status": "unavailable", "error": exception_report(exc)}
+            payload[name] = {"status": "unavailable", "error": exception_reason(exc)}
             unavailable[name] = f"{type(exc).__name__}: section_unavailable"
     payload["diagnostics"] = {
         "observed_at": datetime.now(timezone.utc).isoformat(),

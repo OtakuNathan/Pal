@@ -18,7 +18,7 @@ from pal.llm.ir import LLMRequestIR, PromptRegionIR, ThinkingLevel
 from pal.memory.context_view import projected_messages
 from pal.memory.contracts import MEMORY
 from pal.shared import PromptAssemblyContext
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_reason
 
 if TYPE_CHECKING:
     from pal.llm.runtime import LLMRuntime, ModelSwitchAdvice
@@ -98,7 +98,7 @@ class ModelSwitchMixin:
         try:
             advice = self._model_switch_advice(llm, target_id, status["current"])
         except Exception as exc:
-            await self._complete_action_reply_async(action, f"Cannot switch models: {exception_report(exc)}")
+            await self._complete_action_reply_async(action, f"Cannot switch models: {exception_reason(exc)}")
             return
         request = PendingControlRequest(
             request_id=f"model_{uuid4().hex[:12]}", request_kind="model_switch",
@@ -267,7 +267,7 @@ class ModelSwitchMixin:
                 if compact_result and compact_result.success else ""
             )
             await self._complete_model_switch_reply_async(
-                action, request, f"Model switch failed: {exception_report(exc)}{suffix}",
+                action, request, f"Model switch failed: {exception_reason(exc)}{suffix}",
                 preserve_panel=scope.pending_requests.get("model_switch") is not request,
             )
         else:

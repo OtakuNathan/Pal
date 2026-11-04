@@ -24,7 +24,7 @@ from pal.control.contracts import ControlAction, InteractionMessageSpec
 from pal.control.interactions import delivery_for_interaction
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_reason
 from pal.memory.mutations import mutation_id_from_call
 from pal.memory.review_models import CommitMemoryCandidatesInput
 from pal.memory.dreaming.tool_models import DreamingInput, MemoryHistoryInput
@@ -48,7 +48,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.result_rendering import render_diagnostic_record_for_llm, render_titled_structured_for_llm
 from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
@@ -122,7 +122,7 @@ class MemoryIntrospectionProvider:
                 changes = call.args.get("config") if operation == "configure" else {"enabled": operation == "enable"}
                 result = service.configure(changes)
             except (ValueError, TypeError) as exc:
-                error = "Invalid dreaming configuration: " + exception_report(exc)
+                error = "Invalid dreaming configuration: " + exception_reason(exc)
                 return IntrospectionResult(status="invalid", text=error, llm_text=error)
         elif operation == "config":
             result = service.status()["current_configuration"]
@@ -135,7 +135,7 @@ class MemoryIntrospectionProvider:
         else:
             return IntrospectionResult(status="invalid", text="Unsupported dreaming operation.", llm_text="Unsupported dreaming operation.")
         return IntrospectionResult(status="ok", text="Dreaming", structured=result,
-            llm_text=render_titled_structured_for_llm("Dreaming", result))
+            llm_text=render_diagnostic_record_for_llm("Dreaming", result))
 
     async def dreaming_async(self, call: IntrospectionCall) -> IntrospectionResult:
         return self.dreaming(call)
@@ -174,7 +174,7 @@ class MemoryIntrospectionProvider:
             result = self.service.reviews.commit(str(call.args.get("batch_id") or ""),
                 validate_source=getattr(manager, "validate_memory_proposal_source", None))
         except ValueError as exc:
-            error = exception_report(exc)
+            error = exception_reason(exc)
             return IntrospectionResult(status="invalid", text=error, llm_text=error)
         return CapabilityResult(status=result["status"], text="Memory review batch commit", structured=result,
             llm_text=render_batch_result_for_llm(result), llm_failure_details={})
@@ -210,6 +210,8 @@ class MemoryIntrospectionProvider:
                 if str(getattr(result, "status", "")) != "ok":
                     banner = "Submission did not complete. Your review decisions are saved; you can retry."
                 state = reviews.get(state["batch_id"], action.route)
+                if state.get("error"):
+                    banner = ""  # The review owner has a specific failure notice.
             operation = action.args.get("decision")
             view = "view" if operation == "save" else operation if operation in {"edit", "field", "view"} else "overview"
             return {"delivery": reviews.delivery(state, action.route, view=view,
@@ -240,7 +242,7 @@ class MemoryIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="memory snapshot",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Memory hub", payload),
+            llm_text=render_diagnostic_record_for_llm("Memory hub", payload),
         )
 
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -254,14 +256,14 @@ class MemoryIntrospectionProvider:
                     "provider_id": provider_id,
                     "module_id": getattr(provider, "module_id", f"l3.{provider_id}") if provider is not None else f"l3.{provider_id}",
                     "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
-                    "last_error": str(getattr(provider, "last_embedding_error", "") or "")[:300],
+                    "last_error": str(getattr(provider, "last_embedding_error", "") or ""),
                 }
             )
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="memory l3 providers",
             structured={"items": items},
-            llm_text=render_titled_structured_for_llm("Memory L3 providers", {"items": items}),
+            llm_text=render_diagnostic_record_for_llm("Memory L3 providers", {"items": items}),
         )
 
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -272,7 +274,7 @@ class MemoryIntrospectionProvider:
             "provider_id": provider_id,
             "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
             "read_only": bool(getattr(provider, "read_only", False)),
-            "last_error": str(getattr(provider, "last_embedding_error", "") or "")[:300],
+            "last_error": str(getattr(provider, "last_embedding_error", "") or ""),
         }
         if provider is not None:
             try:
@@ -284,12 +286,12 @@ class MemoryIntrospectionProvider:
                 for key in ("read_only", "embedding_configured"):
                     if key in inventory:
                         payload[key] = inventory[key]
-                payload["last_error"] = str(inventory.get("last_embedding_error") or payload["last_error"])[:300]
+                payload["last_error"] = str(inventory.get("last_embedding_error") or payload["last_error"])
             except Exception as exc:
-                payload["inspection_error"] = str(exc)[:300] or type(exc).__name__
+                payload["inspection_error"] = exception_reason(exc)
         return IntrospectionResult(
             status=RuntimeStatus.OK, text="memory active l3 provider", structured=payload,
-            llm_text=render_titled_structured_for_llm("Memory active L3 provider", payload),
+            llm_text=render_diagnostic_record_for_llm("Memory active L3 provider", payload),
         )
 
     @capability_action(
@@ -581,7 +583,7 @@ class MemoryIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="memory active l3 provider updated",
             structured={"active_provider_id": provider_id},
-            llm_text=render_titled_structured_for_llm("Memory active L3 provider updated", {"active_provider_id": provider_id}),
+            llm_text=render_diagnostic_record_for_llm("Memory active L3 provider updated", {"active_provider_id": provider_id}),
         )
 
 

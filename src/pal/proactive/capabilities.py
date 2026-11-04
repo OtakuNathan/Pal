@@ -7,7 +7,7 @@ from pal.execution.tool_semantics import (
 )
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt, StrictToolModel, ToolAffordance, ToolGuidance, ToolRejectedError
 from pal.execution.contracts import CapabilityResult
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_reason
 from pydantic import Field
 
 from pal.execution.generated_tool_models import (
@@ -39,7 +39,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.result_rendering import render_diagnostic_record_for_llm
 from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
@@ -186,7 +186,7 @@ class ProactiveIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="proactive snapshot",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive hub", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive hub", payload),
         )
 
     @capability_action(
@@ -225,7 +225,7 @@ class ProactiveIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="configured proactive tasks",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Configured proactive tasks", payload),
+            llm_text=render_diagnostic_record_for_llm("Configured proactive tasks", payload),
         )
 
     @capability_action(
@@ -267,13 +267,13 @@ class ProactiveIntrospectionProvider:
         if latest.status != RuntimeStatus.OK:
             payload["diagnostics"].update(partial=True, unavailable_sections={"latest_run": payload.get("error") or payload.get("reason")})
             return CapabilityResult(status=latest.status, text=latest.text, structured=payload,
-                                    llm_text=render_titled_structured_for_llm("Proactive task", payload),
+                                    llm_text=render_diagnostic_record_for_llm("Proactive task", payload),
                                     effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE))
         return IntrospectionResult(
             status=latest.status,
             text="proactive task snapshot",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive task snapshot", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive task snapshot", payload),
         )
 
     def last_run(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
@@ -286,7 +286,7 @@ class ProactiveIntrospectionProvider:
                 status=RuntimeStatus.OK,
                 text="proactive run history unavailable",
                 structured=payload,
-                llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
+                llm_text=render_diagnostic_record_for_llm("Proactive latest run", payload),
             )
         try:
             run = repository.latest_run(target.proactive_id)
@@ -298,14 +298,14 @@ class ProactiveIntrospectionProvider:
                 status=RuntimeStatus.OK,
                 text="no durable proactive run record",
                 structured=payload,
-                llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
+                llm_text=render_diagnostic_record_for_llm("Proactive latest run", payload),
             )
         payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "run": self._render_run(run), "history_status": "available"}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive latest run",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive latest run", payload),
         )
 
     @capability_action(
@@ -334,7 +334,7 @@ class ProactiveIntrospectionProvider:
                 status=RuntimeStatus.OK,
                 text="proactive run history unavailable",
                 structured=payload,
-                llm_text=render_titled_structured_for_llm("Proactive run history", payload),
+                llm_text=render_diagnostic_record_for_llm("Proactive run history", payload),
             )
         limit = max(1, min(50, int(call.args.get("limit") or 10)))
         try:
@@ -346,7 +346,7 @@ class ProactiveIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="proactive run history",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive run history", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive run history", payload),
         )
 
     @capability_action(
@@ -429,7 +429,7 @@ class ProactiveIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="proactive task created",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive task created", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive task created", payload),
         )
 
     @capability_action(
@@ -479,7 +479,7 @@ class ProactiveIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="proactive task deleted",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive task deleted", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive task deleted", payload),
         )
 
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -561,7 +561,7 @@ class ProactiveIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="proactive output destination updated",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive output destination updated", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive output destination updated", payload),
         )
 
     @capability_action(
@@ -607,7 +607,7 @@ class ProactiveIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="proactive schedule updated",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive schedule updated", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive schedule updated", payload),
         )
 
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
@@ -637,7 +637,7 @@ class ProactiveIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="proactive task enabled" if enabled else "proactive task disabled",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive state updated", payload),
+            llm_text=render_diagnostic_record_for_llm("Proactive state updated", payload),
         )
 
     def _require_proactive_target(self, call: IntrospectionCall, *, include_history: bool = True) -> ProactiveTarget:
@@ -670,10 +670,10 @@ class ProactiveIntrospectionProvider:
 
     def _history_error(self, proactive_id: str, exc: Exception) -> CapabilityResult:
         payload = {"proactive_id": proactive_id, "history_status": "unavailable",
-                   "error_code": "proactive_history_read_failed", "error": exception_report(exc),
+                   "error_code": "proactive_history_read_failed", "error": exception_reason(exc),
                    "runtime_failures": self._runtime_failures(proactive_id)}
         return CapabilityResult(status=RuntimeStatus.ERROR, text="proactive run history could not be read",
-            structured=payload, llm_text=render_titled_structured_for_llm("Proactive history read failed", payload),
+            structured=payload, llm_text=render_diagnostic_record_for_llm("Proactive history read failed", payload),
             effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE))
 
     def _render_run(self, run) -> dict[str, object]:

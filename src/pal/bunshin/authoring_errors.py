@@ -6,7 +6,7 @@ from pal.bunshin.ipc import BunshinManagerRpcError
 from pal.bunshin.submission_errors import SubmissionValidationError, submission_validation
 from pal.execution.tool_facade import rejection
 from pal.shared import RuntimeStatus, ToolExecutionResult
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_reason
 from pal.shared.tool_protocol import EffectOutcome, FailedResult, RetryDirective, ToolCallIR
 
 
@@ -37,7 +37,7 @@ def authoring_error_result(
     call: ToolCallIR, exc: Exception, progress: AuthoringProgress, *, correction: str,
     invalid_code: str = 'invalid_work_item',
 ) -> ToolExecutionResult:
-    cause = exception_report(exc)
+    cause = exception_reason(exc)
     io_cause = isinstance(exc.__cause__, OSError)
     invalid = not progress.applied and not io_cause and (
         isinstance(exc, SubmissionValidationError)

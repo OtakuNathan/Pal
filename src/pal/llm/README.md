@@ -99,6 +99,9 @@ Invariants:
 - failed provider attempts retain bounded private response frames, exception
   chains and the owner's pre-submission R snapshot, when available; successful
   attempts and cancellation do not write failure captures
+- LLM failure replies contain the public cause and applicable recovery guidance.
+  Raw exception text, provider error envelopes and attempt metadata stay private;
+  known error-envelope text never streams as assistant output
 - decoder state and provider stream events remain private to LLM; only validated
   response IR crosses into Core, L1 and Channel
 - closed L1 turns preserve reasoning parts and replay envelopes until explicit compaction

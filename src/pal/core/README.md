@@ -39,6 +39,10 @@ Exposes:
 - mailbox and turn-effect contracts
 
 Interaction rule:
+- failure recovery presents a maintenance tool call once, identified by its
+  call ID; repeated calls remain separate even when their text is identical.
+  User-facing LLM failures place the cause in the failure owner's `Blocker`
+  field rather than prepending a second copy to that feedback
 - `PalCore` is the only governance center
 - all channel input enters one resident mailbox and one L1/execution lifetime;
   channels select only the response transport and never create a persona,
@@ -66,6 +70,9 @@ Interaction rule:
 - one shared continuity policy owns schema, prompt, validation and full rendering.
   Host adapters retain only task-source semantics, clocks, and memory-candidate policy;
   replay keeps the original generation settings and appends a user compaction request
+- compaction attempts retain full private diagnostics. A successful retry does
+  not emit an error notice; terminal failures and failed post-commit work expose
+  a concise cause with the run's service-log reference
 - `Execution` is the only official invocation plane
 - `Pal` should call capabilities through `PalCore -> Execution`
 - turn computations yield effect requests and are resumed by `PalCore`

@@ -16,6 +16,7 @@ from pal.execution.file_write import FileWriteTool
 from pal.execution.file_state import SessionFileStateCache
 from pal.execution.session_state import FileDeliveryManifest, InMemoryLogicalExecutionState
 from pal.execution.tool_facade import ToolExecutionError
+from pal.shared.diagnostics import exception_reason
 
 
 class FileRegistryError(ValueError):
@@ -150,7 +151,8 @@ class FileRegistry:
             try:
                 result = tool.invoke(args)
             except ToolExecutionError as exc:
-                return {'status': 'error', 'llm_text': str(exc), 'text': str(exc),
+                reason = exception_reason(exc)
+                return {'status': 'error', 'llm_text': reason, 'text': reason,
                     'structured': {'error_code': exc.error_code, **exc.details},
                     'effect_receipt': {'outcome': exc.effect_receipt.outcome,
                         'receipt': exc.effect_receipt.receipt} if exc.effect_receipt else None,

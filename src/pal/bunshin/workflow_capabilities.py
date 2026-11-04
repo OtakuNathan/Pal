@@ -28,7 +28,7 @@ from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.tool_facade import StrictToolModel, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_CONTROL
 from pal.bunshin.service import BunshinWorkflowService
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_reason
 from pal.foundation.sidecar import SidecarRpcError
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -39,7 +39,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.result_rendering import render_diagnostic_record_for_llm, render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -315,7 +315,7 @@ class BunshinPublicProvider:
                 status=RuntimeStatus.ERROR,
                 text="bunshin catalog read failed",
                 structured=payload,
-                llm_text=render_titled_structured_for_llm("Bunshin catalog read failed", payload),
+                llm_text=render_diagnostic_record_for_llm("Bunshin catalog read failed", payload),
             )
 
     # Configuration maintenance is exposed through the official Pal CLI.
@@ -492,7 +492,7 @@ class BunshinPublicProvider:
                 status=RuntimeStatus.INVALID,
                 text="bunshin V2 task search invalid",
                 structured=_exception_payload(exc),
-                llm_text=render_titled_structured_for_llm(
+                llm_text=render_diagnostic_record_for_llm(
                     "Bunshin V2 task search invalid",
                     _exception_payload(exc),
                 ),
@@ -502,7 +502,7 @@ class BunshinPublicProvider:
                 status=RuntimeStatus.ERROR,
                 text="bunshin V2 task search failed",
                 structured=_exception_payload(exc),
-                llm_text=render_titled_structured_for_llm(
+                llm_text=render_diagnostic_record_for_llm(
                     "Bunshin V2 task search failed",
                     _exception_payload(exc),
                 ),
@@ -941,7 +941,7 @@ def _public_result(title: str, payload: dict[str, Any]) -> CapabilityResult:
         status=RuntimeStatus.OK,
         text=title,
         structured=public,
-        llm_text=render_titled_structured_for_llm(title, public),
+        llm_text=render_diagnostic_record_for_llm(title, public),
     )
 
 
@@ -993,7 +993,7 @@ def _public_payload(value: Any) -> Any:
 
 
 def _exception_payload(exc: Exception) -> dict[str, Any]:
-    payload: dict[str, Any] = {"error": exception_report(exc), "error_type": type(exc).__name__}
+    payload: dict[str, Any] = {"error": exception_reason(exc), "error_type": type(exc).__name__}
     if isinstance(exc, SidecarRpcError):
         payload["rpc_kind"] = exc.kind
         payload["rpc_details"] = exc.payload
@@ -1006,7 +1006,7 @@ def _invalid(title: str, exc: Exception) -> CapabilityResult:
         status=RuntimeStatus.INVALID,
         text=title,
         structured=payload,
-        llm_text=render_titled_structured_for_llm(title, payload),
+        llm_text=f"{title}: {payload['error']}",
     )
 
 
@@ -1016,5 +1016,5 @@ def _error(title: str, exc: Exception) -> CapabilityResult:
         status=RuntimeStatus.ERROR,
         text=title,
         structured=payload,
-        llm_text=render_titled_structured_for_llm(title, payload),
+        llm_text=f"{title}: {payload['error']}",
     )

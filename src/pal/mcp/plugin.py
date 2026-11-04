@@ -40,7 +40,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.result_rendering import render_diagnostic_record_for_llm
 from pal.shared.inspection import inspection_snapshot
 from pal.skill.contracts import SkillDescriptor
 
@@ -142,7 +142,7 @@ class McpManagerPluginProvider:
             status=RuntimeStatus.OK,
             text="mcp manager status",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("MCP manager status", payload),
+            llm_text=render_diagnostic_record_for_llm("MCP manager status", payload),
         )
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="mcp_server", action_name="list",
@@ -499,7 +499,7 @@ def _introspection_from_rpc(title: str, payload: dict[str, Any]) -> Introspectio
         status=status,
         text=title,
         structured=payload,
-        llm_text=render_titled_structured_for_llm(title, payload),
+        llm_text=render_diagnostic_record_for_llm(title, payload),
     )
 
 
@@ -527,7 +527,7 @@ def _error_result(text: str, exc: Exception) -> IntrospectionResult:
         status=RuntimeStatus.ERROR,
         text=text,
         structured=payload,
-        llm_text=render_titled_structured_for_llm(text, payload),
+        llm_text=render_diagnostic_record_for_llm(text, payload),
     )
 
 

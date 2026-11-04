@@ -21,7 +21,7 @@ from uuid import uuid4
 import httpx
 
 from pal.llm.secret_store import SecretRef, SecretStorePort, TransactionalSecretStorePort
-from pal.foundation.diagnostics import diagnostic_text, exception_summary
+from pal.foundation.diagnostics import diagnostic_text, diagnostic_value, exception_summary
 from pal.shared.json_values import thaw_json
 
 PROFILE = "openai_chatgpt"
@@ -56,7 +56,12 @@ class ChatGPTError(RuntimeError):
         self.status = status
         self.param = str(param or "")
         self.request_id = str(request_id or "")
-        self.diagnostic = diagnostic_text(diagnostic, limit=None)
+        try:
+            payload = json.loads(diagnostic)
+        except (ValueError, RecursionError):
+            self.diagnostic = diagnostic_text(diagnostic, limit=None)
+        else:
+            self.diagnostic = json.dumps(diagnostic_value(payload), ensure_ascii=False)
         context = []
         if self.status is not None:
             context.append(f"HTTP {self.status}")

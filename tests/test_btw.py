@@ -99,6 +99,48 @@ def action(text="side question", route=ROUTE):
     return ControlAction("start_btw", "runtime", args={"text": text}, route=route)
 
 
+@pytest.mark.parametrize("phase", ["start", "run"])
+def test_side_question_failure_reply_uses_root_without_stack(monkeypatch, caplog, phase):
+    from pal.core.btw import BtwTurn, BtwTurnExecutor
+
+    def fail(*args, **kwargs):
+        try:
+            raise OSError('Traceback (most recent call last):\n'
+                          '  File "private_provider.py", line 7\n'
+                          'ConnectionError: server unavailable; token=PRIVATE_CANARY')
+        except OSError as cause:
+            raise RuntimeError("side question wrapper failed") from cause
+
+    async def fail_async(*args, **kwargs):
+        fail()
+
+    if phase == "start":
+        monkeypatch.setattr(BtwTurn, "__init__", fail)
+    else:
+        monkeypatch.setattr(BtwTurnExecutor, "execute_turn_effect_async", fail_async)
+
+    async def scenario():
+        core, _ = make_core(Model())
+        try:
+            await start_btw(core, action())
+            if phase == "run":
+                await core._btw_turn.task
+                await asyncio.sleep(0)
+            reply = core.context.require_port("channel:channel").replies[-1][1]
+            assert "server unavailable" in reply
+            assert "side question wrapper failed" not in reply
+            assert "Traceback" not in reply
+            assert "private_provider.py" not in reply
+            assert "PRIVATE_CANARY" not in reply
+        finally:
+            core.close()
+
+    asyncio.run(scenario())
+    assert "Traceback" in caplog.text
+    assert "side question wrapper failed" in caplog.text
+    assert "PRIVATE_CANARY" not in caplog.text
+
+
 def seed_left(memory):
     turn = L1TurnIR(turn_id="old", state=L1TurnState.SETTLED, messages=(
         LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR("old question"),), message_id="old-u"),

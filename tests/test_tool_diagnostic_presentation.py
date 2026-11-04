@@ -1,21 +1,83 @@
-"""Errors are concise evidence, independent of the normal-output budget."""
+"""Owner-authored errors and receipts are independent of the output budget."""
 
 from pathlib import Path
+import asyncio
 import json
 
 import pytest
 
 from pal.execution.contracts import CapabilityResult, ToolCallBudget
-from pal.execution.tool_facade import ToolHandlerResult, CompleteResult, EffectOutcome
+from pal.execution.tool_facade import (
+    ToolHandlerResult, CompleteResult, EffectOutcome, InvocationMode, ToolExecutionError,
+)
 from pal.shared import RuntimeStatus
 from pal.shared.diagnostics import diagnostic_text
-from pal.shared.tool_protocol import ToolAffordance, new_tool_call
+from pal.shared.tool_protocol import (
+    FailedResult, RejectedResult, RetryDirective, ToolAffordance, new_tool_call,
+)
 from tests.test_result_guidance_budget import _core, _mount_boom
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("source", ["capability", "failed", "rejected", "exception", "delivery"])
+def test_public_error_receipts_survive_delivery(source, wrapped, asynchronous):
+    core = _core()
+    runtime = core.context.execution_runtime
+    message = "Write failed: disk full.\n" + "\n".join(
+        f"item_{i}: {'written; do not repeat' if i == 91 else 'skipped'}"
+        for i in range(190)
+    )
+    recovery = "Reconcile every written item before retrying skipped items."
+    calls = []
+
+    def handler(_):
+        calls.append("executed")
+        if source == "exception":
+            raise ToolExecutionError(message, recovery_hint=recovery)
+        if source == "capability":
+            return CapabilityResult(status=RuntimeStatus.ERROR, text=message,
+                llm_text=message, recovery_hint=recovery)
+        if source == "delivery":
+            return CompleteResult(output={"ok": True}, effect=EffectOutcome.APPLIED,
+                llm_text="Completed writes.", output_error=message, recovery_hint=recovery)
+        result_type = RejectedResult if source == "rejected" else FailedResult
+        return result_type(error_code="write_failed", error="disk full", llm_text=message,
+            effect=EffectOutcome.NOT_STARTED if source == "rejected" else EffectOutcome.APPLIED,
+            retry=RetryDirective.DO_NOT_RETRY, recovery_hint=recovery)
+
+    async def async_handler(value):
+        return handler(value)
+
+    _mount_boom(runtime, handler=async_handler if asynchronous else handler,
+        mode=InvocationMode.INDIRECT if wrapped else InvocationMode.DIRECT)
+    call = new_tool_call(name="call_tool" if wrapped else "boom",
+        args={"name": "boom", "args": {}} if wrapped else {})
+    try:
+        budget = ToolCallBudget(max_output_chars=1, preview_chars=1)
+        result = (asyncio.run(runtime.execute_tool_async(call, budget=budget)) if asynchronous
+                  else runtime.execute_tool(call, budget=budget))
+        assert calls == ["executed"]
+        assert result.ok == (source == "delivery")
+        invocation = result.invocation_result
+        if source == "delivery":
+            assert invocation.output_error == message
+            metadata = json.loads(result.llm_text.rsplit("Tool result metadata: ", 1)[1])
+            assert metadata["delivery_error"] == message
+            assert metadata["effect"] == "applied"
+        else:
+            assert message in result.llm_text
+            assert invocation.llm_text == ("boom: " + message if source == "exception" else message)
+            assert not result.snapshot_refs
+        assert invocation.recovery_hint == recovery
+        assert recovery in result.llm_text
+    finally:
+        core.close()
 
 
 @pytest.mark.parametrize("budget_chars", [1, 1000])
 @pytest.mark.parametrize("source", ["provider", "guidance", "candidate"])
-def test_success_delivery_errors_remain_visible_outside_output_budget(monkeypatch, source, budget_chars):
+def test_success_delivery_errors_remain_visible_outside_output_budget(monkeypatch, source, budget_chars, caplog):
     from pal.execution.runtime import ExecutionRuntime
 
     core = _core()
@@ -58,11 +120,8 @@ def test_success_delivery_errors_remain_visible_outside_output_budget(monkeypatc
         else:
             assert any(Path(ref.path).read_text() == body for ref in result.snapshot_refs)
         if source != "provider":
-            reports = [Path(ref.path).read_text() for ref in result.snapshot_refs
-                       if ref.coverage == "complete delivery diagnostic"]
-            assert len(reports) == 1
-            assert "Traceback" in reports[0]
-            assert "PRIVATE_CANARY" not in reports[0]
+            assert "Traceback" in caplog.text
+            assert "PRIVATE_CANARY" not in caplog.text
     finally:
         core.close()
 
@@ -122,20 +181,20 @@ def test_failure_summary_keeps_structured_cause_when_body_is_a_title():
     runtime = core.context.execution_runtime
     cause = {"code": "EACCES", "message": "cannot open report", "path": "/tmp/report"}
     _mount_boom(runtime, handler=lambda _: CapabilityResult(
-        status=RuntimeStatus.ERROR, text="Provider result", llm_text="Provider result",
+        status=RuntimeStatus.ERROR, text="Provider result", llm_text="EACCES: cannot open report /tmp/report",
         structured={"error": cause, "provider_trace": "x" * 4000}))
     try:
         result = runtime.execute_tool(new_tool_call(name="boom", args={}),
             budget=ToolCallBudget(max_output_chars=1))
         assert "cannot open report" in result.llm_text
         assert "EACCES" in result.llm_text and "/tmp/report" in result.llm_text
-        assert result.snapshot_refs
-        assert "x" * 4000 in Path(result.snapshot_refs[-1].path).read_text()
+        assert "x" * 4000 not in result.llm_text
+        assert result.structured["details"]["provider_trace"] == "x" * 4000
     finally:
         core.close()
 
 
-def test_exception_summary_shows_causes_and_retains_stack_separately():
+def test_exception_summary_shows_causes_and_retains_stack_separately(caplog):
     core = _core()
     runtime = core.context.execution_runtime
     def fail(_):
@@ -147,11 +206,11 @@ def test_exception_summary_shows_causes_and_retains_stack_separately():
     try:
         result = runtime.execute_tool(new_tool_call(name="boom", args={}),
             budget=ToolCallBudget(max_output_chars=1))
-        assert "RuntimeError: provider unavailable" in result.llm_text
+        assert "RuntimeError: provider unavailable" not in result.llm_text
         assert "PermissionError: cannot open /tmp/report" in result.llm_text
         assert "Traceback" not in result.llm_text
         assert "PRIVATE_CANARY" not in result.llm_text
-        full = Path(result.snapshot_refs[0].path).read_text()
+        full = caplog.text
         assert "Traceback" in full
         assert "PRIVATE_CANARY" not in full
         assert len(result.llm_text) < 1000

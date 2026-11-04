@@ -212,6 +212,7 @@ def test_native_case_contract_and_recovery_keep_nested_object_constraints(memory
     assert invalid.effect == "not_started"
     assert invalid.details["input_schema"] == schema
     assert "JSON objects must not be stringified" in invalid.llm_text
+    assert '"properties"' not in invalid.llm_text
     assert not provider.recall(MemoryQuery(queries=["reload_plugin"])).hits
     args["star"] = {"situation": "Old plugin behavior", "task": "Load code", "action": "reload_plugin", "result": "Verified"}
     assert Draft202012Validator(schema).is_valid(args)
@@ -257,7 +258,7 @@ def test_hub_health_keeps_counts_without_backend_network_probe(memory_runtime, m
     ("update_memory", "correct", {"mem_ref": "fact:one", "content": "demo"}),
     ("forget_memory", "delete", {"mem_ref": "fact:one"}),
 ])
-def test_memory_write_errors_keep_full_diagnostics_without_memory_body(memory_runtime, monkeypatch, alias, method, args):
+def test_memory_write_errors_keep_full_diagnostics_in_logs_without_memory_body(memory_runtime, monkeypatch, alias, method, args, caplog):
     runtime, provider, _ = memory_runtime
     diagnostic = "storage detail " * 1000 + "ROOT_CAUSE: write permission denied; token=hidden-secret"
     monkeypatch.setattr(provider, method, lambda _: L3MutationResult(
@@ -265,8 +266,10 @@ def test_memory_write_errors_keep_full_diagnostics_without_memory_body(memory_ru
         metadata={"backend_error": diagnostic}))
     result = runtime.invoke_indirect_tool(new_tool_call(name=alias, args=args))
     assert result.kind == "failed"
-    assert result.snapshot_refs
-    complete = "\n".join(Path(ref.path).read_text() for ref in result.snapshot_refs)
+    assert not result.snapshot_refs
+    complete = caplog.text
     assert "ROOT_CAUSE: write permission denied" in complete
+    assert "ROOT_CAUSE: write permission denied" in result.llm_text
+    assert diagnostic == result.details['metadata']['backend_error']
     assert "PRIVATE_MEMORY_BODY" not in complete + result.llm_text
     assert "hidden-secret" not in complete + result.llm_text

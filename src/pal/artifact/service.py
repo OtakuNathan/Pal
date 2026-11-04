@@ -11,7 +11,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_report, diagnostic_reason, public_diagnostics
 from pal.artifact.contracts import (
     ARTIFACT_KIND_AUDIO,
     ARTIFACT_KIND_IMAGE,
@@ -913,7 +913,7 @@ class ArtifactManager:
             status=record.status,
             available_actions=("inspect_artifact_info",),
             text_file=text_file,
-            notes=record.notes,
+            notes=diagnostic_reason(record.notes),
         )
 
     def _text_file_for_record(self, record: ArtifactRecord) -> dict[str, Any]:
@@ -940,7 +940,7 @@ class ArtifactManager:
             "file_name": record.file_name,
             "summary": record.summary,
             "status": record.status,
-            "notes": record.notes,
+            "notes": diagnostic_reason(record.notes),
             "source_channel": record.source_channel,
             "mime_type": record.original_mime_type,
             "size_bytes": record.original_size_bytes,
@@ -1043,7 +1043,7 @@ def _retired_handler_manifest(record: ArtifactRecord) -> str:
     content = ("managed bytes and representations deleted" if cleanup == "complete"
                else "handler unavailable; deletion of managed bytes is not confirmed")
     diagnostic = record.metadata.get("cleanup_error")
-    diagnostic_line = f"  cleanup_error: {_prompt_scalar(diagnostic)}\n" if diagnostic else ""
+    diagnostic_line = f"  cleanup_error: {_prompt_scalar(diagnostic_reason(diagnostic))}\n" if diagnostic else ""
     return (
         f"- artifact_id: {record.artifact_id}\n"
         f"  file_name: {_prompt_scalar(record.file_name)}\n"
@@ -1140,7 +1140,7 @@ def _sanitize_metadata_for_llm(metadata: dict[str, Any]) -> dict[str, Any]:
             cleaned[key] = {k: v for k, v in value.items() if k not in _LLVM_HIDDEN_NESTED_KEYS}
         else:
             cleaned[key] = value
-    return cleaned
+    return public_diagnostics(cleaned)
 
 
 def _prompt_actions_for(record: ArtifactRecord, *, image_inlined: bool) -> tuple[str, ...]:

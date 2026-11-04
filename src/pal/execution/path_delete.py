@@ -12,7 +12,7 @@ from typing import Any
 from pal.execution.contracts import CapabilityResult
 from pal.execution.file_state import resolve_path_entry
 from pal.shared import RuntimeStatus
-from pal.shared.diagnostics import diagnostic_text, exception_report
+from pal.shared.diagnostics import diagnostic_text, exception_reason
 
 
 ERR_DELETE_FAILED = "DELETE_FAILED"
@@ -62,7 +62,7 @@ class PathDeleteTool:
             # symbolic link must never delete the object it points to.
             resolved = resolve_path_entry(file_path)
         except (OSError, ValueError) as exc:
-            return _err(RuntimeStatus.INVALID, ERR_DELETE_FAILED, file_path=file_path, details=exception_report(exc))
+            return _err(RuntimeStatus.INVALID, ERR_DELETE_FAILED, file_path=file_path, details=exception_reason(exc))
 
         if _is_unsafe_delete_target(resolved):
             return _err(RuntimeStatus.FORBIDDEN, ERR_UNSAFE_PATH, file_path=str(resolved))
@@ -86,7 +86,7 @@ class PathDeleteTool:
         try:
             content = resolved.read_bytes()
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_READ_FAILED, file_path=str(resolved), details=exception_report(exc))
+            return _err(RuntimeStatus.ERROR, ERR_READ_FAILED, file_path=str(resolved), details=exception_reason(exc))
 
         digest = hashlib.sha256(content).hexdigest()
         if expected_sha256 and digest != expected_sha256:
@@ -111,7 +111,7 @@ class PathDeleteTool:
             else:
                 resolved.unlink()
         except OSError as exc:
-            return _err(RuntimeStatus.ERROR, ERR_DELETE_FAILED, file_path=str(resolved), details=exception_report(exc))
+            return _err(RuntimeStatus.ERROR, ERR_DELETE_FAILED, file_path=str(resolved), details=exception_reason(exc))
 
         structured: dict[str, Any] = {
             "file_path": str(resolved),

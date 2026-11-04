@@ -41,6 +41,82 @@ def fail_with_cause(*args, **kwargs):
         raise ValueError("operation failed") from exc
 
 
+@pytest.mark.parametrize('status', ['ok', 'error'])
+def test_memory_mutation_and_batch_errors_are_short_with_receipts_intact(status):
+    from dataclasses import asdict
+    from pal.memory.rendering import render_batch_result_for_llm
+
+    report = 'Traceback (most recent call last):\n  File "private.py", line 7\nOSError: storage offline'
+    metadata = {'error': report, 'changed': True, 'replayed': False}
+    result = L3MutationResult(status=status, document_id='fact:one', metadata=metadata)
+    text = render_mutation_result_for_llm('write', result)
+    batch = render_batch_result_for_llm({'status': status, 'provider_result': {
+        'status': status, 'results': [asdict(result)], 'metadata': metadata}})
+    for value in (text, batch):
+        assert 'OSError: storage offline' in value
+        assert 'changed: True' in value
+        assert 'fact:one' in value
+        assert 'Traceback' not in value and 'private.py' not in value
+    assert build_mutation_structured_payload(result)['metadata']['error'] == report
+
+
+def test_memory_health_retains_root_after_long_frames():
+    from pal.memory.capabilities import MemoryIntrospectionProvider
+    from pal.shared import IntrospectionCall
+
+    report = 'Traceback (most recent call last):\n' + '  File "private.py", line 7\n    save()\n' * 30 + 'OSError: storage offline'
+    backend = SimpleNamespace(last_embedding_error=report, inspect_summary=lambda: {'last_embedding_error': report})
+    registry = SimpleNamespace(plugins={'test': backend}, get=lambda _: backend)
+    provider = MemoryIntrospectionProvider(
+        service=SimpleNamespace(l3_selector=SimpleNamespace(active_provider_id='test')),
+        context=SimpleNamespace(execution_runtime=SimpleNamespace(l3_plugin_registry=registry)))
+    for action in (provider.active_provider, provider.list_providers):
+        result = action(IntrospectionCall(name='audit'))
+        assert 'OSError: storage offline' in result.llm_text
+        assert 'Traceback' not in result.llm_text and 'private.py' not in result.llm_text
+
+
+def test_memory_review_error_card_keeps_roots_and_private_provider_result(setup_review, monkeypatch):
+    from pal.memory.rendering import render_batch_result_for_llm
+
+    reviews, provider, _ = setup_review
+    state = decision(reviews, stage(reviews), 'accept', candidate_id='c1')
+    state = decision(reviews, state, 'submit')
+    report = 'Traceback (most recent call last):\n  File "private.py", line 7\nOSError: storage offline'
+    result = L3BatchCommitResult(status='error', metadata={'error': report})
+    monkeypatch.setattr(provider, 'commit_batch', lambda _: result)
+    output = reviews.commit(state['batch_id'])
+    saved = reviews.get(state['batch_id'], ROUTE)
+    assert saved['result']['provider_result']['metadata']['error'] == report
+    for legacy in (False, True):
+        if legacy:
+            saved['error'] = 'Old diagnostic dump: ' + json.dumps(saved['result'])
+        card = reviews.delivery(saved, ROUTE).interaction
+        assert 'OSError: storage offline' in card.text
+        assert 'Traceback' not in card.text and 'private.py' not in card.text
+        assert 'before retrying' in card.text
+    assert 'Traceback' not in render_batch_result_for_llm(output)
+
+
+def test_memory_submission_control_delivers_the_owner_cause(setup_review, monkeypatch):
+    from pal.control.contracts import ControlAction
+    from pal.memory.capabilities import MemoryIntrospectionProvider
+
+    reviews, backend, _ = setup_review
+    state = decision(reviews, stage(reviews), 'accept', candidate_id='c1')
+    monkeypatch.setattr(backend, 'commit_batch', lambda _: L3BatchCommitResult(
+        status='error', metadata={'error': 'OSError: storage offline'}))
+    async def execute(call):
+        return SimpleNamespace(status=reviews.commit(call.args['batch_id'])['status'])
+    provider = MemoryIntrospectionProvider(service=reviews.memory,
+        context=SimpleNamespace(execution_runtime=SimpleNamespace(execute_async=execute)))
+    result = asyncio.run(provider.handle_memory_candidate_decision_async(ControlAction(
+        'memory_candidate_decision', 'memory', target_id=state['batch_id'], route=ROUTE,
+        args={'decision': 'submit', 'revision': state['revision']})))
+    assert 'OSError: storage offline' in result['delivery'].text
+    assert 'before retrying' in result['delivery'].text
+
+
 @pytest.fixture
 def services(tmp_path):
     db = PalV2Database(tmp_path / "services.sqlite3")
@@ -118,7 +194,7 @@ def test_skill_sanitizer_failure_keeps_provider_response(services, runtime, fini
     assert finish in final.llm_text
 
 
-def test_skill_invalid_sanitizer_json_keeps_cause_and_response(services, runtime):
+def test_skill_invalid_sanitizer_json_keeps_cause_and_response(services, runtime, caplog):
     service, _ = services
     class LLM:
         async def agenerate(self, request):
@@ -126,10 +202,11 @@ def test_skill_invalid_sanitizer_json_keeps_cause_and_response(services, runtime
     service.llm_runtime = LLM()
     final = deliver(runtime, lambda: asyncio.run(SkillAssimilateTool(service).ainvoke({"source_text": "Do work"})))
     assert "JSONDecodeError" in final.llm_text
-    assert "not JSON: provider payload" in final.llm_text
+    assert "not JSON: provider payload" in caplog.text
+    assert "Traceback" not in final.llm_text
 
 
-def test_skill_unusable_sanitizer_payload_keeps_provider_details(services, runtime):
+def test_skill_unusable_sanitizer_payload_keeps_provider_details(services, runtime, caplog):
     service, _ = services
     class LLM:
         async def agenerate(self, request):
@@ -137,7 +214,7 @@ def test_skill_unusable_sanitizer_payload_keeps_provider_details(services, runti
     service.llm_runtime = LLM()
     final = deliver(runtime, lambda: asyncio.run(SkillAssimilateTool(service).ainvoke({"source_text": "Do work"})))
     assert not final.ok
-    assert "provider diagnostic for invalid candidate" in final.llm_text
+    assert "provider diagnostic for invalid candidate" in caplog.text
     assert "manual_text is required" in final.llm_text
 
 
@@ -188,10 +265,13 @@ def test_artifact_processor_failure_reaches_import_ref_and_info(services, tmp_pa
     assert "backend detail: storage unavailable" in final.llm_text
     assert metadata(final)["effect"] == "applied"
     ref = manager.list_hot("audit")[0]
+    assert "Traceback" in manager.repository.get_record(ref.artifact_id).notes
+    assert "Traceback" not in final.llm_text
     assert "backend detail: storage unavailable" in ref.to_dict()["notes"]
     assert "backend detail: storage unavailable" in manager.info(ref.artifact_id, "audit")["artifact"]["notes"]
     exposure = manager.select_prompt_exposure("audit", "review", "", {}, artifact_ids=(ref.artifact_id,))
     assert "backend detail: storage unavailable" in exposure.text
+    assert "Traceback" not in exposure.text
 
 
 def test_existing_transcript_read_failure_preserves_original_result(services, tmp_path, monkeypatch, runtime):

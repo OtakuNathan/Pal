@@ -31,7 +31,7 @@ from pal.execution.session_state import (
     count_text_lines,
 )
 from pal.shared import RuntimeStatus
-from pal.shared.diagnostics import exception_report
+from pal.shared.diagnostics import exception_reason
 
 
 # Error codes
@@ -90,7 +90,7 @@ class FileEditTool:
         try:
             cached_state = self.cache.get_valid_state(file_path)
         except FileSnapshotReadError as exc:
-            return _err(RuntimeStatus.ERROR, "Could not read the file before editing.\n" + exception_report(exc),
+            return _err(RuntimeStatus.ERROR, "Could not read the file before editing.\n" + exception_reason(exc),
                         error_code="READ_FAILED", file_path=file_path)
         if cached_state is None:
             if not had_record:
@@ -115,7 +115,7 @@ class FileEditTool:
         except OSError as exc:
             return _err(
                 RuntimeStatus.ERROR,
-                "Failed to resolve file before editing:\n" + exception_report(exc),
+                "Failed to resolve file before editing:\n" + exception_reason(exc),
                 error_code="READ_FAILED",
                 file_path=file_path,
             )
@@ -161,12 +161,17 @@ class FileEditTool:
             if exc.effect_receipt is not None and exc.effect_receipt.outcome == EffectOutcome.APPLIED:
                 exc.details.update(applied_edit_indices=sorted({item[3] for item in replacements}),
                                    failed_edits=_failure_details(failures))
+                exc.public_reason += "\n" + json.dumps({
+                    "applied_edit_indices": exc.details["applied_edit_indices"],
+                    "failed_edits": [{"edit_index": item["edit_index"], "error_code": item["error_code"]}
+                                     for item in exc.details["failed_edits"]],
+                }, separators=(",", ":"))
             raise
         except FileContentChangedError as exc:
             self.cache.invalidate(file_path)
             return _err(
                 RuntimeStatus.FORBIDDEN,
-                _ERROR_LLMS[ERR_STALE_FILE] + "\n" + exception_report(exc),
+                _ERROR_LLMS[ERR_STALE_FILE] + "\n" + exception_reason(exc),
                 error_code=ERR_STALE_FILE,
                 file_path=file_path,
             )
@@ -174,7 +179,7 @@ class FileEditTool:
             self.cache.invalidate(file_path)
             return _err(
                 RuntimeStatus.ERROR,
-                "File write reported an error. Commit outcome is uncertain; read the current file before retrying.\n" + exception_report(exc),
+                "File write reported an error. Commit outcome is uncertain; read the current file before retrying.\n" + exception_reason(exc),
                 error_code="WRITE_FAILED",
                 file_path=file_path,
             )

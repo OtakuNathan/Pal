@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.foundation.diagnostics import exception_report
+from pal.foundation.diagnostics import exception_reason
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
@@ -48,7 +48,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.shared.result_rendering import render_diagnostic_record_for_llm
 from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
@@ -154,7 +154,7 @@ class ChannelIntrospectionProvider:
                 record = self.repository.get(hub.endpoint_id)
             except Exception as exc:
                 record = None
-                state_error = exception_report(exc)
+                state_error = exception_reason(exc)
             runtime_endpoint = self.runtime.get_endpoint(hub.endpoint_id)
             targets.append(
                 ChannelEndpointTarget(
@@ -208,7 +208,7 @@ class ChannelIntrospectionProvider:
                        "reason": "inventory_read_failed" if errors else "endpoint_health_requires_object_inspection"},
         })
         return IntrospectionResult(status=RuntimeStatus.OK, text="channel hub state", structured=payload,
-                                   llm_text=render_titled_structured_for_llm("Channel hub", payload))
+                                   llm_text=render_diagnostic_record_for_llm("Channel hub", payload))
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -246,14 +246,14 @@ class ChannelIntrospectionProvider:
         if errors:
             details = {"items": payload, "state_errors": errors, "error_code": "channel_state_read_failed"}
             return CapabilityResult(status=RuntimeStatus.ERROR, text="channel endpoint inventory is incomplete",
-                structured=details, llm_text=render_titled_structured_for_llm(
+                structured=details, llm_text=render_diagnostic_record_for_llm(
                     "Channel runtime endpoints found, but durable state could not be read", details),
                 effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE))
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="channel endpoints",
             structured={"items": payload},
-            llm_text=render_titled_structured_for_llm("Channel endpoints", {"items": payload}),
+            llm_text=render_diagnostic_record_for_llm("Channel endpoints", {"items": payload}),
         )
 
     @capability_action(
@@ -386,7 +386,7 @@ class ChannelIntrospectionProvider:
                 "channel_id": channel_id,
                 "reason": reason,
                 "error_code": reason,
-                "error": exception_report(exc),
+                "error": exception_reason(exc),
                 "permanent": bool(exc.permanent),
             }
             not_started = reason in {
@@ -398,7 +398,7 @@ class ChannelIntrospectionProvider:
                 status=status,
                 text=payload["error"],
                 structured=payload,
-                llm_text=render_titled_structured_for_llm(
+                llm_text=render_diagnostic_record_for_llm(
                     "Channel message rejected before sending" if not_started else "Channel message delivery failed; acceptance is uncertain", payload),
                 effect_receipt=EffectReceipt(outcome=EffectOutcome.NOT_STARTED if not_started else EffectOutcome.UNKNOWN),
                 recovery_hint=("Inspect list_channel_endpoints and correct the endpoint state before retrying."
@@ -413,7 +413,7 @@ class ChannelIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="channel message accepted",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Channel message accepted", payload),
+            llm_text=render_diagnostic_record_for_llm("Channel message accepted", payload),
         )
 
     def _is_current_peer_reply(self, *, turn_id: str, channel_id: str) -> bool:
@@ -493,7 +493,7 @@ class ChannelIntrospectionProvider:
             status=status,
             text=text,
             structured=payload,
-            llm_text=render_titled_structured_for_llm(text, payload),
+            llm_text=render_diagnostic_record_for_llm(text, payload),
         )
 
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -556,7 +556,7 @@ class ChannelIntrospectionProvider:
             payload["diagnostics"]["partial"] = True
             payload["diagnostics"]["unavailable_sections"]["durable_config"] = "durable_config_read_failed"
         return IntrospectionResult(status=RuntimeStatus.OK, text="channel endpoint state", structured=payload,
-                                   llm_text=render_titled_structured_for_llm("Channel endpoint", payload))
+                                   llm_text=render_diagnostic_record_for_llm("Channel endpoint", payload))
 
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
@@ -718,14 +718,14 @@ class ChannelIntrospectionProvider:
                 structured={"endpoint_id": endpoint_id, "enabled": previous_enabled},
                 llm_text=("Channel endpoint durable state update failed. "
                           f"Runtime enabled state restored to {previous_enabled}; inspect durable state before retrying. "
-                          f"Cause: {exception_report(exc)}"),
+                          f"Cause: {exception_reason(exc)}"),
             )
         payload = {"endpoint_id": endpoint_id, "enabled": enabled}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text=f"channel endpoint {'enabled' if enabled else 'disabled'}",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Channel endpoint state updated", payload),
+            llm_text=render_diagnostic_record_for_llm("Channel endpoint state updated", payload),
         )
 
     def _set_attached(self, call: IntrospectionCall, *, attached: bool) -> IntrospectionResult:
@@ -782,7 +782,7 @@ class ChannelIntrospectionProvider:
             owner_id=self.owner_id,
             fresh_instance=fresh_instance and result.status == RuntimeStatus.OK,
             reload_modules=normalized_reload_modules,
-            error=(render_titled_structured_for_llm(result.llm_text or result.text,
+            error=(render_diagnostic_record_for_llm(result.llm_text or result.text,
                    {"text": result.text, "details": structured}) if result.status != RuntimeStatus.OK else None),
             payload={"endpoint_id": endpoint_id, "channel_result": structured},
         )

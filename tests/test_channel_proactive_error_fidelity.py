@@ -176,7 +176,7 @@ def test_unresolved_proactive_output_is_recorded_as_failure(destination):
 
 @pytest.mark.parametrize("alias", ["read_proactive_task", "list_proactive_runs"])
 @pytest.mark.parametrize("history_read_fails", [False, True])
-def test_history_inspection_exposes_failure_when_begin_run_cannot_be_saved(env, monkeypatch, alias, history_read_fails):
+def test_history_inspection_exposes_failure_when_begin_run_cannot_be_saved(env, monkeypatch, alias, history_read_fails, caplog):
     runtime, manager, _ = env
     manager.create_task(proactive_id="job", goal="check")
     from pal.core import PalCore
@@ -198,12 +198,12 @@ def test_history_inspection_exposes_failure_when_begin_run_cannot_be_saved(env, 
     finally:
         model_core.close()
     assert result.ok is not history_read_fails, result.llm_text
-    assert "begin run storage unavailable" in result.llm_text
+    assert "begin run storage unavailable" in caplog.text
     assert "transport root cause" in result.llm_text
     assert "private-value" not in result.llm_text
     assert "runtime_failures" in result.llm_text
     if history_read_fails:
-        assert "history read unavailable" in result.llm_text
+        assert "history read unavailable" in caplog.text
         assert metadata(result)["effect"] == "none"
 
 
@@ -277,7 +277,7 @@ def test_channel_health_projection_keeps_text_receipt_and_last_delivery_error(ch
     assert result.recovery_hint == original.recovery_hint
 
 
-def test_provider_attach_keeps_primary_and_cleanup_errors(channel_env, monkeypatch):
+def test_provider_attach_keeps_primary_and_cleanup_errors(channel_env, monkeypatch, caplog):
     core, _, _ = channel_env
     manager = core.context.module_registry.get("channel").introspection_provider.provider_manager
     monkeypatch.setattr(manager, "_provider_id_for_endpoint", lambda _: "test-provider")
@@ -286,7 +286,10 @@ def test_provider_attach_keeps_primary_and_cleanup_errors(channel_env, monkeypat
     monkeypatch.setattr(manager, "_ensure_provider_loaded", lambda *a: fail_with_cause("provider load failed"))
     monkeypatch.setattr(manager, "_unload_provider_if_idle", lambda *a: fail_with_cause("provider cleanup failed"))
     result = manager.attach_endpoint("channel-main")
-    assert all(text in result.llm_text for text in ("provider load failed", "provider cleanup failed", "transport root cause"))
+    assert "transport root cause" in result.llm_text
+    assert "Provider cleanup failed" in result.llm_text
+    assert all(text in caplog.text for text in ("provider load failed", "provider cleanup failed"))
+    assert "Traceback" not in result.llm_text
     assert "private-value" not in result.llm_text
 
 
