@@ -94,7 +94,8 @@ class TestOutputAndDiagnosticPresentation:
             assert "RuntimeError" in result.llm_text
             assert _big_text() in caplog.text
             assert "Traceback" not in result.llm_text
-            assert len(result.llm_text) < LIMIT
+            assert _big_text() in result.llm_text
+            assert not result.snapshot_refs
         finally:
             core.close()
 
@@ -117,7 +118,8 @@ class TestOutputAndDiagnosticPresentation:
             assert not result.ok
             assert _big_text() in caplog.text
             assert "Traceback" not in result.llm_text
-            assert len(result.llm_text) < LIMIT
+            assert _big_text() in result.llm_text
+            assert not result.snapshot_refs
         finally:
             core.close()
 
