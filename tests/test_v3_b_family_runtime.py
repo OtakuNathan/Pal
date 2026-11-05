@@ -492,15 +492,15 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
         self.assertEqual(outcome.status.value, "ok",
                          f"compact effect failed: {outcome.text}")
 
-        # Counters kept, downgrade kept, permissions NOT restored: the
-        # finalization_only turn still resolves to zero tool contracts and
-        # the underlying contract builder is never consulted for it.
+        # Counters and the execution downgrade survive compact. Keeping the
+        # schemas visible preserves the input prefix; it does not restore
+        # permission to execute another tool in this turn.
         self.assertTrue(continuation.finalization_only)
         self.assertEqual(continuation.llm_round_index, 4)
         self.assertEqual(len(continuation.tool_observations), 1)
         resolved = executor._resolve_llm_tools(continuation, None)
-        self.assertEqual(resolved, [])
-        self.assertEqual(tool_contract_calls, [])
+        self.assertEqual(resolved, [{"name": "TOOL_RESTORED"}])
+        self.assertEqual(tool_contract_calls, [1])
         # No new task was recognized from the new left: the work tail is
         # still the same R turn.
         right = service.history_root.right_turns()

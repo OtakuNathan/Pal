@@ -666,7 +666,10 @@ class TurnExecutor:
     def _resolve_llm_tools(self, continuation, tools_override: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         if tools_override is not None:
             return list(tools_override)
-        return [] if continuation.finalization_only else self._build_llm_tool_contracts()
+        # Finalization revokes execution authority, not the input contract.
+        # Keep schemas and tool_choice stable; the chronological directive and
+        # _finalize_generation_outcome close the turn even if tools are returned.
+        return self._build_llm_tool_contracts()
 
     @_dispatch_effect.register(ToolCallEffect)
     async def _handle_tool_call(self, effect, continuation):
@@ -771,7 +774,20 @@ class TurnExecutor:
         continuation.tool_batch_count += 1
         verdict = self.turn_manager.guard.observe_batch(continuation.turn_id, [record])
         if verdict.recommended_action == GuardAction.TERMINATE_TOOL_LOOP:
+            LOGGER.info("tool loop finalization turn=%s tool=%s status=%s sequence=%d",
+                        continuation.turn_id, execution_call.name, verdict.status, record.sequence)
             continuation.finalization_only = True
+        if (execution_call.name == "search_tools"
+                and self.turn_manager.guard.last_result_repeated(continuation.turn_id)):
+            # The guard fingerprints the owner's observation before this hint.
+            # Advice must not turn a third unchanged search into fresh evidence.
+            tool_result = replace(tool_result, llm_text=(
+                tool_result.llm_text + "\n\nDiscovery repetition: the same search arguments "
+                "returned the same result consecutively in this turn; this adds no new information. "
+                "Do not repeat this unchanged search. Reuse the returned directory or contract; "
+                "if unresolved, change the query/domain/filters meaningfully or explain that "
+                "no suitable tool was found and any uncertainty."
+            ))
         self.context.turn_event_bus.emit("turn.tool_call_after", {
             **tool_event, "ok": tool_result.ok,
         })

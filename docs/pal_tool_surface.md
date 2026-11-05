@@ -420,7 +420,15 @@ capability may be unavailable; explain that possibility, the checked scope and
 any uncertainty. Reuse unchanged inventory and complete contracts, and use a
 suitable contract once found. This guidance appears in the system tool policy,
 tool-window guidance, search schema/guidance and result hints. There is no fixed
-search-round budget or reset mechanism. Earlier three-round trials remain in
+search-round budget or reset mechanism. In one turn, a second consecutive
+`search_tools` call with unchanged arguments and result receives an explicit
+no-new-information reminder. The reminder does not alter result fingerprints or
+the existing stagnation guard threshold; changed observations do not receive it.
+When the guard terminates a tool loop, schemas and tool choice remain unchanged
+so finalization does not rewrite the existing request prefix. A chronological
+finalization directive requests text only; the execution gate remains closed,
+and any returned tool calls are discarded in favor of the text fallback.
+Earlier three-round trials remain in
 test logs as superseded experiments.
 
 The paired GLM 5.3 lexical-fusion trial used 70 positive runs (51 distinct cases)

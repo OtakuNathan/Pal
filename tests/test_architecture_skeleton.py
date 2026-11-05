@@ -3720,7 +3720,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Tool output contract error", tool_message.parts[0].content)
         self.assertNotIn("memory recall", tool_message.parts[0].content)
 
-    def test_stagnation_guard_forces_finalization_only_and_strips_tools(self) -> None:
+    def test_stagnation_guard_preserves_tool_prefix_and_revokes_execution(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
@@ -3736,7 +3736,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             ]
         )
         core.context.port_registry["llm:llm"] = scripted_llm
-        register_test_tool(core.context.execution_runtime, EchoTool())
+        executions = []
+
+        class CountingEcho(EchoTool):
+            def invoke(self, args):
+                executions.append(args)
+                return super().invoke(args)
+
+        register_test_tool(core.context.execution_runtime, CountingEcho())
 
         outcome = core.process_channel_turn(
             ChannelEnvelope(
@@ -3747,7 +3754,33 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
-        self.assertEqual(generate_requests[-1].tools, ())
+        self.assertEqual(len(executions), 3)
+        self.assertTrue(generate_requests[0].tools)
+        for request in generate_requests[1:]:
+            self.assertEqual(request.tools, generate_requests[0].tools)
+            self.assertEqual(request.policy.tool_choice, generate_requests[0].policy.tool_choice)
+        # Compare the encoded input, including schemas and the preexisting
+        # message prefix, across the transition to finalization. Only new
+        # chronological tool results and the finalization directive may append.
+        from pal.llm.ir import WireShape
+        from pal.llm.shapes import codec_for_shape
+        from pal.llm.shapes.base import ShapeContext
+        for shape in WireShape:
+            context = ShapeContext(wire_shape=shape, endpoint_id="test", model_id="test")
+            codec = codec_for_shape(shape)
+            before = codec.encode(generate_requests[-2], context)
+            after = codec.encode(generate_requests[-1], context)
+            self.assertEqual(after.payload["tools"], before.payload["tools"])
+            self.assertEqual(after.payload.get("tool_choice"), before.payload.get("tool_choice"))
+            self.assertEqual(after.payload.get("system"), before.payload.get("system"))
+            key = "input" if shape == WireShape.OPENAI_RESPONSE else "messages"
+            self.assertEqual(after.payload[key][:len(before.payload[key])], before.payload[key])
+            before_spans = {span.message_id: span.cache_prefix_fingerprint for span in before.message_spans}
+            after_spans = {span.message_id: span.cache_prefix_fingerprint for span in after.message_spans}
+            self.assertTrue(before_spans)
+            for identity, fingerprint in before_spans.items():
+                self.assertTrue(fingerprint)
+                self.assertEqual(after_spans[identity], fingerprint)
         self.assertIn("<operating_rules>", generate_requests[-1].messages[0].text)
         self.assertIn("Finalization Directive", generate_requests[-1].messages[-1].text)
         self.assertEqual(

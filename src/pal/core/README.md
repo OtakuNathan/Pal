@@ -14,7 +14,11 @@ Owns:
 - shared compaction orchestration: immutable snapshots, atomic history units,
   budget preflight, an independently configured model-attempt budget,
   validation, transactional commit ordering, and no mutation on failure
-- stagnation guard orchestration
+- stagnation guard orchestration; unchanged consecutive `search_tools` results
+  receive a second-call reminder, without changing the guard's observation or
+  termination threshold. Finalization retains tool schemas and tool choice;
+  its directive appends chronologically while execution authority remains
+  revoked and returned tool calls are replaced by a text fallback
 - module runtime-state orchestration: deterministic snapshot/restore order,
   reverse-order whole-runtime reset, exact incarnation checks, and encrypted
   composite envelopes

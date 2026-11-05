@@ -115,6 +115,15 @@ class ToolStagnationGuardProcess:
             return oscillation_verdict
         return ToolStagnationVerdict(status=GuardStatus.OK)
 
+    def last_result_repeated(self, turn_id: str) -> bool:
+        """Observe an unchanged consecutive result without changing stop policy."""
+        history = self.history_by_turn.get(turn_id, ())
+        if len(history) < 2:
+            return False
+        previous, current = history[-2:]
+        return (previous.tool_signature_hash == current.tool_signature_hash
+                and previous.result_fingerprint == current.result_fingerprint)
+
     def clear(self, turn_id: str) -> None:
         self.history_by_turn.pop(turn_id, None)
 
