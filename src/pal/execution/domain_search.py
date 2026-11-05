@@ -100,7 +100,7 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
                                           "tags": sorted(tags)}.items() if value}
     result = {"hits": [], "total_count": 0, "returned_count": 0, "top_k": limit,
               "truncated": False, "omitted_weaker_count": 0, "applied_filters": applied}
-    browse = args.get("directory_offset") is not None or not query
+    browse = not query
     words = set(tool_search_terms(query))
     requested_alias = next((alias for alias in sorted(generation.search_records) if alias.lower() == query), None)
     excluded_alias = requested_alias is not None and requested_alias not in records
@@ -153,18 +153,14 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
         result["available_domains"] = sorted(domains - {""})
         result["usage_hint"] = "Unknown or unavailable domain. No other bucket was searched; choose available_domains or explicitly omit domain for broad discovery."
     elif domain and not result["hits"] and not result.get("suggestions") and records:
-        offset = max(0, int(args.get("directory_offset") or 0))
         page = []
-        for alias in sorted(records)[offset:offset + 16]:
+        for alias in sorted(records):
             purpose = str(records[alias].get("purpose") or "")
             page.append({"alias": alias, "purpose": purpose if len(purpose) <= 160 else purpose[:159].rstrip() + "…",
                          **({"purpose_truncated": True} if len(purpose) > 160 else {})})
-        next_offset = offset + len(page)
-        result["directory"] = {"domain": domain, "tools": page, "total_count": len(records),
-                               "offset": offset, "page_size": 16,
-                               "next_offset": next_offset if next_offset < len(records) else None}
+        result["directory"] = {"domain": domain, "tools": page, "total_count": len(records)}
         result["usage_hint"] = "Domain directory requested." if browse else "No positive query evidence; directory entries are navigation, not matches."
-        result["usage_hint"] += " Read a plausible contract before invocation; use next_offset for more, or query the purpose within the same domain."
+        result["usage_hint"] += " Read a plausible contract before invocation, or query the purpose within the same domain. Large results use the ordinary output snapshot; use read_file to inspect omitted content."
     elif not result["hits"] and not result.get("suggestions"):
         result.setdefault("usage_hint", "No matching tools within this domain and supplied filters.")
     if result.get("usage_hint"):

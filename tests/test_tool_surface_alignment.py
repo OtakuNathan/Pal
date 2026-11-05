@@ -30,7 +30,7 @@ def test_execution_recovery_uses_domain_discovery_instead_of_retired_inventory(c
     contracts = core.tool_surface.build_tool_contracts_from_descriptors(descriptors)
     assert {item['function']['name'] for item in contracts} == {'read_tool', 'search_tools'}
     runtime = core.context.execution_runtime
-    domains = runtime.execute_tool(new_tool_call(name='search_tools', args={'directory_offset': 0}))
+    domains = runtime.execute_tool(new_tool_call(name='search_tools', args={}))
     assert domains.ok and 'file' in domains.structured['available_domains']
     directory = runtime.execute_tool(new_tool_call(name='search_tools', args={'domain': 'file'}))
     assert directory.ok and directory.structured['directory']['tools']

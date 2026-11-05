@@ -39,7 +39,9 @@ def test_word_search_distinguishes_install_and_uninstall_and_splits_alias(runtim
         assert "uninstall_plugin" not in aliases
     result = runtime.execute_tool(new_tool_call(name="search_tools", args={}))
     assert result.structured["top_k"] == 3
-    assert len(result.structured["hits"]) == 3
+    assert result.structured["hits"] == []
+    assert "plugin" in result.structured["available_domains"]
+    assert "file" in result.structured["available_domains"]
 
 
 def test_generic_word_hits_do_not_substitute_for_missing_domain(runtime):

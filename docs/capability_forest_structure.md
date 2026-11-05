@@ -240,11 +240,11 @@ It accepts:
 - `tags`
 - `top_k` / `limit`
 - `facets`
-- `directory_offset`
 
-`search_tools(domain=...)` without query browses a compact domain directory;
-`search_tools(directory_offset=0)` without query/domain lists available domains.
-Directory entries are navigation, not query matches or full contracts.
+`search_tools(domain=...)` without query returns the complete compact domain directory;
+`search_tools()` without query/domain lists available domains. Large directories
+use the ordinary output snapshot and `read_file` line ranges. Directory entries
+are navigation, not query matches or full contracts; there is no directory cursor.
 
 `facets` defaults to false. When true, the result includes namespace, module, and
 family counts over the deduplicated candidate set. Facets are a narrowing aid,

@@ -334,8 +334,8 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput = _stric
 ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput',
     {
-        'query': (str, Field(None, description="Use a short affirmative English description of the desired operation within the selected domain (tool purposes are primarily English), or supply an exact alias. Keep excluded alternatives and constraints in the original task for contract review. Domain searches rank affirmative purpose and tool-authored auxiliary terms/intents; action/object naming and complete word coverage are not required. Candidates are not proof that every requested feature is supported: compare the complete contract and unmatched_terms with the original task. Spelling recovery runs only after a lexical miss. Without domain, exact aliases and conservative keyword hits take priority; on no hits, purpose search across filtered visible tools requires at least two positive term matches. Do not search indefinitely. If reasonable query or inventory checks still reveal no suitable callable, the capability may be unavailable; explain that possibility and any uncertainty.")),
-        'domain': (str, Field(None, description="Optional strict operation-owner bucket, e.g. browser, llm, plugin, channel, file, shell, lsp. With domain alone, return a compact directory: up to 16 names and brief purposes; read the selected contract. Add query to rank full contracts or directory_offset to browse another page. Declared full names such as 'large language model' normalize to llm. Reloading an lsp plugin belongs to plugin, not lsp. Unknown or wrong domains do not fall back across buckets; omit if unsure. Distinct from module_name/family.")),
+        'query': (str, Field(None, description="Omit query to list available domains, or with domain to browse its complete compact directory. Use a short affirmative English description of the desired operation within the selected domain (tool purposes are primarily English), or supply an exact alias. Keep excluded alternatives and constraints in the original task for contract review. Domain searches rank affirmative purpose and tool-authored auxiliary terms/intents; action/object naming and complete word coverage are not required. Candidates are not proof that every requested feature is supported: compare the complete contract and unmatched_terms with the original task. Spelling recovery runs only after a lexical miss. Without domain, exact aliases and conservative keyword hits take priority; on no hits, purpose search across filtered visible tools requires at least two positive term matches. Do not search indefinitely. If reasonable query or inventory checks still reveal no suitable callable, the capability may be unavailable; explain that possibility and any uncertainty.")),
+        'domain': (str, Field(None, description="Optional strict operation-owner bucket, e.g. browser, llm, plugin, channel, file, shell, lsp. With domain alone, return the complete compact directory of names and brief purposes; read the selected contract. Large results use the ordinary output snapshot, readable with read_file. Add query to rank full contracts. Declared full names such as 'large language model' normalize to llm. Reloading an lsp plugin belongs to plugin, not lsp. Unknown or wrong domains do not fall back across buckets; omit if unsure. Distinct from module_name/family.")),
         'namespace': (Literal['inspect', 'action', 'introspection', 'operation'], Field(None, description='Optional registry namespace from hits/facets. inspect aliases introspection; action aliases operation. Omit when unknown; read-only tools can also be registered under operation.')),
         'family': (str, Field(None, description='Exact explicitly declared family copied from hits/facets. Empty family in a hit means undeclared, not its namespace or module. Omit on initial search; use module_name for channel/skill/etc.')),
         'module_name': (str, Field(None, description='Optional semantic module name filter such as llm, memory, channel, artifact, bunshin, or web_search.')),
@@ -343,7 +343,6 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput = _strict_model(
         'top_k': (int, Field(None, description='Maximum callable hits, from 1 to 5; default up to 3 strongest matches, or one exact match. Set explicitly to include lower-ranked relevant matches.', ge=1, le=5)),
         'limit': (int, Field(None, description='Alias for top_k, from 1 to 5; top_k takes precedence when both are supplied.', ge=1, le=5)),
         'facets': (bool, Field(None, description='Default false. Set true to include namespace/module/family counts for broad-search narrowing.')),
-        'directory_offset': (int, Field(None, ge=0, description='Browse a compact directory page in an explicit domain. Use 0 for the first page or directory.next_offset for the next. Query words are ignored; all other filters still apply. Read a plausible contract before selecting it. Reuse checked pages; if reasonable directory checks reveal no suitable callable, it may be unavailable. Explain that possibility instead of browsing indefinitely.')),
     },
 )
 
@@ -395,9 +394,6 @@ ExecutionToolSearchDirectory = _strict_model(
         'domain': (str, Field(...)),
         'tools': (list[ExecutionToolSearchDirectoryItem], Field(...)),
         'total_count': (int, Field(...)),
-        'offset': (int, Field(...)),
-        'page_size': (int, Field(...)),
-        'next_offset': (int | None, Field(None)),
     },
 )
 
@@ -405,9 +401,9 @@ ExecutionToolSearchDirectory = _strict_model(
 ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput = _strict_model(
     'ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput',
     {
-        'available_domains': (list[str], Field(None, description='Domains in this visible tool generation, returned on misses without a valid explicit domain. Choose one to browse with directory_offset=0; no automatic substitution.')),
+        'available_domains': (list[str], Field(None, description='Domains in this visible tool generation, returned on misses without a valid explicit domain. Choose one and pass domain alone to browse its directory; no automatic substitution.')),
         'suggestions': (list[ExecutionToolSearchSuggestion], Field(None, description='Lexical retrieval candidates with full callable contracts; unmatched words may be essential requirements. Review against the original task and invoke directly if suitable. Separate from hits and their counts.')),
-        'directory': (ExecutionToolSearchDirectory, Field(None, description='Compact navigation page of visible tools in the explicitly selected domain and filters. Independent of query relevance; entries are not hits or proof that the requested operation exists. Use read_tool to inspect a plausible contract.')),
+        'directory': (ExecutionToolSearchDirectory, Field(None, description='Complete compact navigation directory of visible tools in the explicitly selected domain and filters. Independent of query relevance; entries are not hits or proof that the requested operation exists. Use read_tool to inspect a plausible contract.')),
         'hits': (list[ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutputHitsItem], Field(None)),
         'total_count': (int, Field(None)),
         'returned_count': (int, Field(None)),

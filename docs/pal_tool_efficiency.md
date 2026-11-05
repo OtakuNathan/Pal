@@ -116,7 +116,7 @@ Without a domain, exact aliases and conservative keyword matches take priority;
 purpose fallback requires at least two positive term matches. Spelling recovery
 runs after a lexical miss. Review the contract and unmatched terms before calling;
 partial matches do not establish support for every requested feature. Use
-`search_tools(directory_offset=0)` without query/domain to find current domains,
+`search_tools()` without query/domain to find current domains,
 or `search_tools(domain=owner)` for a compact domain directory.
 
 Default results contain at most three strongest matches, with exact aliases or

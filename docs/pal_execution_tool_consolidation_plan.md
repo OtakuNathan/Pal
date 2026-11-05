@@ -50,6 +50,11 @@ Prompt conventions:
 
 ## list_tools: Absorbed by the Existing Domain Directory
 
+Implementation update (2026-11-05): directory-specific pagination below has been
+retired. `search_tools()` lists visible domains; domain alone returns the complete
+compact directory. Large results use ordinary output snapshots and `read_file`.
+The following describes the earlier plan.
+
 Currently, `list_tools` returns the names, purposes, owning modules, and invocation modes of all registered tools at once, for a global inventory browse.
 
 When `search_tools(domain="shell")` is called without a query, it already provides paginated directory listings for that domain, at most 16 names and brief purposes per page, supporting `directory_offset` / `next_offset`. This kind of directory navigation differs from the full candidate contract for relevance search; the latter continues to default to at most 3 candidates, capped at 5.

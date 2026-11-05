@@ -104,6 +104,7 @@ class ToolSearchTests(unittest.TestCase):
 
     def test_filters_apply_to_generation_metadata(self) -> None:
         payload = self.search(
+            query="lookup",
             namespace="action",
             module_name="memory",
             family="memory",

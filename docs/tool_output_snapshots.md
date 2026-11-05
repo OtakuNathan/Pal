@@ -72,6 +72,10 @@ session's captured export; a one-shot result without a session supplies an
 consequence of a disk error. Generic save failures preserve validated structured
 results and host context/control messages while marking the model preview incomplete.
 All successful handler and discovery-tool results use the same budget boundary.
+`search_tools(domain=...)` without a query returns the complete compact directory;
+large directories use this ordinary snapshot mechanism and `read_file` line ranges,
+with no separate directory cursor. `search_tools()` lists available domains;
+ranked query hits retain their independent 3-default/5-maximum limit.
 
 `read_tool_result` and the `paged` invocation variant are retired, including
 legacy handle storage, restoration/migration, and pager TTL configuration. The

@@ -73,6 +73,10 @@ Notes:
 - complete output is validated before budgeting. Large output is saved as an
   immutable UTF-8 file with a bounded head/tail preview and its local path. Use
   `rg` or `read_file` to inspect the copy; business-query pagination is unchanged
+- `search_tools()` lists visible owner domains. With domain alone it returns the
+  complete compact directory, ordered by alias, with supplied filters preserved.
+  Large directories use the ordinary output snapshot and `read_file`, not a
+  separate directory cursor. Ranked searches retain their independent hit limit
 - errors, status, retry decisions and recovery guidance do not consume the
   normal-output budget. Delivery does not summarize or truncate owner-authored
   errors, even when long; per-item receipts and recovery constraints stay intact.

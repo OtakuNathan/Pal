@@ -67,7 +67,7 @@ def test_intents_obey_explicit_owner_filters_and_directory_mode():
                     {'domain': 'browser', 'namespace': 'introspection'}):
         result = lookup('set input field value', **filters)
         assert not result['hits'] and not result.get('suggestions')
-    result = lookup('set input field value', domain='browser', directory_offset=0)
+    result = lookup('', domain='browser')
     assert not result.get('suggestions') and result['directory']['total_count'] == 2
     assert lookup('fill_browser_field', domain='browser')['hits'][0]['alias'] == 'fill_browser_field'
 

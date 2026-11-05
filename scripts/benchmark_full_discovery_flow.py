@@ -184,7 +184,7 @@ def summarize(rows,cases):
     return result
 
 
-async def run_case(llm,values,case,generation,search,schema,prompt,*,max_output_tokens=8192,discovery_description=None):
+async def run_case(llm,values,case,generation,search,schema,prompt,*,max_output_tokens=8192,discovery_description=None,legacy_search=False):
     from jsonschema import Draft202012Validator
     from pal.llm.conversions import message_ir_from_dict,tool_definition_ir_from_dict
     from pal.llm.ir import GenerationPolicyIR,LLMRequestIR
@@ -193,14 +193,14 @@ async def run_case(llm,values,case,generation,search,schema,prompt,*,max_output_
     row=dict(**case,searches=[],reads=[],usage=[],responses=[],rejections=[],correct=False)
     definitions={
         'search_tools':{'type':'function','function':{'name':'search_tools','description':
-            discovery_description or 'Choose the strict owner domain and describe the task in query. Purpose and tool-authored auxiliary terms/intents rank up to three full contracts by default; action/object naming is not required. A candidate is not proof that every requested feature exists: compare its complete contract and unmatched_terms with the original request before invoking. Exact aliases remain supported. On a lexical miss, spelling recovery can return suggestions with full contracts. Domain alone or directory_offset browses up to 16 names and brief purposes; read a plausible directory contract. Domains stay strict; omit domain only if the owner is unknown. Do not search indefinitely for this capability. Try a reasonable change of query or owner and inspect relevant inventory if useful. If those checks reveal no suitable callable, it may be unavailable; explain that possibility and any uncertainty. Reuse unchanged inventory and complete contracts.', 'parameters':schema}},
+            discovery_description or 'Choose the strict owner domain and describe the task in query. Purpose and tool-authored auxiliary terms/intents rank up to three full contracts by default; action/object naming is not required. A candidate is not proof that every requested feature exists: compare its complete contract and unmatched_terms with the original request before invoking. Exact aliases remain supported. On a lexical miss, spelling recovery can return suggestions with full contracts. Domain alone browses all names and brief purposes; read a plausible directory contract. Large results use the ordinary output snapshot, readable with read_file. Domains stay strict; omit domain only if the owner is unknown. Do not search indefinitely for this capability. Try a reasonable change of query or owner and inspect relevant inventory if useful. If those checks reveal no suitable callable, it may be unavailable; explain that possibility and any uncertainty. Reuse unchanged inventory and complete contracts.', 'parameters':schema}},
         'read_tool':{'type':'function','function':{'name':'read_tool','description':'Read an exact visible alias contract.',
             'parameters':{'type':'object','properties':{'name':{'type':'string'}},'required':['name'],'additionalProperties':False}}},
         'select_tool':{'type':'function','function':{'name':'select_tool','description':
             'EVALUATION ONLY: submit the final tool name and its direct/indirect invocation_mode for the original task. No business arguments are needed and no business tool executes. A valid decision ends the case; rejected mode/name decisions may be corrected.',
             'parameters':{'type':'object','properties':{'name':{'type':'string','minLength':1,'pattern':r'\S'},'invocation_mode':{'type':'string','enum':['direct','indirect']}},'required':['name','invocation_mode'],'additionalProperties':False}}},
     }
-    if 'directory_offset' not in schema['properties']:
+    if legacy_search:
         definitions['search_tools']['function']['description']='Search for tools with short action/object words and an optional strict domain. Positive purpose text supplies relevance. Review fuzzy suggestions; shorten or list tools on misses.'
     messages=list(prompt)
     messages.append(message_ir_from_dict({'role':'system','content':
@@ -297,7 +297,6 @@ async def main(args):
         cases = [{**c, 'repetition': repetition} for repetition in range(args.repetitions) for c in cases]
     schemas={'current':SearchInput.model_json_schema()}
     schemas['before']=json.loads(json.dumps(schemas['current']))
-    schemas['before']['properties'].pop('directory_offset',None)
     for schema in schemas.values():
         for key in ('namespace','family','module_name','tags','facets'):
             schema['properties'].pop(key,None)
@@ -331,7 +330,7 @@ async def main(args):
         async with semaphore:
             if stopped:return
             try:
-                row=await run_case(llm,values,case,generations[case['group']],searches[variant],schemas[variant],prompts[variant],max_output_tokens=args.max_output_tokens)
+                row=await run_case(llm,values,case,generations[case['group']],searches[variant],schemas[variant],prompts[variant],max_output_tokens=args.max_output_tokens,legacy_search=variant=='before')
                 if row.get('error')=='endpoint_failure':failures+=1
                 else:failures=0
             except Exception as exc:

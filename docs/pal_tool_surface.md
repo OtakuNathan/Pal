@@ -437,7 +437,7 @@ used 38 repeated original positive requests and 16 independent positive requests
 plus eight negative requests per variant. Both variants selected all 54 positive
 tools correctly, while directory-first discovery increased mean rounds from
 2.39 to 2.50 and reported input tokens per positive case from 9943 to 10917.
-Consequently bounded domain browsing remains an option rather than the default
+Consequently domain browsing remains an option rather than the default
 first step for every unfamiliar capability. Input-token counts are not billing
 costs; this isolated evaluation validates alias/mode selection, not business
 execution. Records are in `test-logs/discovery-domain-directory-glm53/`.
@@ -446,12 +446,15 @@ query recall: entries are not added to hits or suggestions and do not imply that
 the original request is supported. Read a plausible tool's contract before
 selecting it; retain the original task's constraints.
 
-Use `directory_offset=0` with an explicit domain to browse directly, or follow
-`directory.next_offset` using the same domain and filters. Query words are ignored
-for explicit directory pages. Ordering is by alias and belongs to the selected
-visible registry generation. Without a valid domain, misses return
-`available_domains` so the caller can select a bucket explicitly. Directory pages
-do not silently cross domains or expose tools outside the visible generation.
+Call `search_tools()` without a query or domain for available domains, then
+`search_tools(domain="browser")` for a complete compact directory. Entries are
+ordered by alias within the selected visible registry generation. All supplied
+filters still apply. Directories do not cross domains or expose tools outside the
+visible generation. Large output uses the same immutable snapshot and bounded
+preview as other tools; inspect omitted content with `read_file` or `rg`.
+Small directories remain inline. There is no directory-specific cursor or page
+limit, and `top_k` limits callable search hits only. A directory returned after a
+query miss remains navigation, not query evidence.
 
 Keep network observation indexed by `network`/`api`/`traffic` rather than the
 page-fetch action `fetch`.
@@ -498,8 +501,6 @@ Important arguments:
   may inspect the visible bucket internally without returning it to the model.
 - `facets`: defaults to false; when true, include namespace/module/family counts
   for broad-search narrowing
-- `directory_offset`: browse a compact page in an explicit domain; use 0 to
-  begin, then `directory.next_offset` to continue. Separate from hit limits.
 
 Each hit includes purpose, use/avoid conditions, invocation and effect semantics,
 and a title-stripped input JSON Schema that retains validation constraints.

@@ -1111,8 +1111,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             from pal.execution.domain_search import search_domain
             return search_domain(generation, args)
         result = ExecutionRuntime._search_keywords(generation, args)
-        if (not result["hits"] and str(args.get("query") or "").strip()
-                and args.get("directory_offset") is None):
+        if not result["hits"] and str(args.get("query") or "").strip():
             from pal.execution.domain_search import search_domain
             purpose_result = search_domain(generation, args)
             if purpose_result["hits"]:
@@ -1135,7 +1134,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             if str(item).strip()
         }
         include_facets = bool(args.get("facets", False))
-        browse_directory = args.get("directory_offset") is not None or bool(domain and not raw_query)
+        browse_directory = not raw_query
         directory_records = []
         explicit_limit = args.get("top_k") is not None or args.get("limit") is not None
         try:
@@ -1335,39 +1334,33 @@ class ExecutionRuntime(ExecutionRuntimePort):
             # Navigation is independent of query matching. Only the visible,
             # explicitly selected bucket and all supplied filters are listed.
             # Directory entries do not establish support for the original task.
-            offset = max(0, int(args.get("directory_offset") or 0))
-            page_size = 16
             directory_records.sort(key=lambda item: item["alias"])
             page = []
-            for item in directory_records[offset:offset + page_size]:
+            for item in directory_records:
                 purpose = str(item['purpose'])
                 compact = {'alias': item['alias'], 'purpose': purpose}
                 if len(purpose) > 160:
                     compact['purpose'] = purpose[:159].rstrip() + '…'
                     compact['purpose_truncated'] = True
                 page.append(compact)
-            next_offset = offset + len(page)
             result["directory"] = {
                 "domain": domain, "tools": page, "total_count": len(directory_records),
-                "offset": offset, "page_size": page_size,
-                "next_offset": next_offset if next_offset < len(directory_records) else None,
             }
             result["usage_hint"] = (
                 ("Domain directory requested. " if browse_directory else "No query match was returned. ") +
-                "The directory lists up to 16 available tool names and brief purposes in this domain, "
+                "The directory lists all available tool names and brief purposes in this domain, "
                 "not matches for the requested task. Compare their purposes with the whole original request. "
                 "Purposes may be shortened; full contracts remain available through read_tool. "
                 "Use read_tool on a plausible alias to check its contract, then invoke only if it supports the task. "
-                "If next_offset is present, request the next page with the same domain and filters and "
-                "directory_offset=next_offset, or omit directory_offset and supply short query words to rank full contracts. "
-                "Query words are ignored for explicit directory pages. "
+                "Large results use the ordinary output snapshot; use read_file to inspect omitted content. "
+                "Supply query words within the same domain to rank full contracts. "
                 "If this domain has no suitable tool, choose another domain explicitly or report it unresolved."
             )
         elif not hits and (not domain or domain not in available_domains):
             result["available_domains"] = sorted(available_domains - {""})
             result["usage_hint"] = (
                 result.get("usage_hint", "") +
-                " Choose a domain from available_domains and set directory_offset=0 to browse its compact directory."
+                " Choose a domain from available_domains and pass domain alone to browse its compact directory."
             ).strip()
         if result.get("usage_hint"):
             from pal.shared.tool_routing import TOOL_DISCOVERY_STOP_HINT
