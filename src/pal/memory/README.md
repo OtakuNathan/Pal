@@ -41,7 +41,9 @@ Interaction rule:
 - L1 preserves accepted reasoning and native provider continuation in IR through
   turn closure and restart. Recovery repairs unmatched/duplicate tool protocol
   and incomplete streams without inventing outcomes. Explicit LEFT compaction
-  replaces that history with a lossy continuity summary; RIGHT remains intact.
+  replaces captured history with a text seed or an opaque native window. Native
+  capture may include a completed RIGHT prefix without moving the live cut before
+  commit; the uncaptured RIGHT suffix remains intact.
 - Streaming assistant messages remain response drafts until a terminal response
   is accepted. Interrupt/abort and restart recovery move an unfinished response
   intact into private `discarded_assistant_drafts` diagnostics; they never mark

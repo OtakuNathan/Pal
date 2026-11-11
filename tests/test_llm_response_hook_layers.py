@@ -435,7 +435,7 @@ def test_proxy_hook_refresh_cannot_republish_an_old_binding_after_configuration_
         yield from rewrite(updates, lambda _: '{"generation":2}')
     original = endpoint_module.compile_endpoint_codec
     first = True
-    def pause_compile(spec, registry):
+    def pause_compile(spec, registry, model_hooks=None):
         nonlocal first
         if first:
             first = False
@@ -444,7 +444,7 @@ def test_proxy_hook_refresh_cannot_republish_an_old_binding_after_configuration_
             # Without serialized admission, refresh completes here and the old
             # compilation would subsequently overwrite the newly cleared cache.
             refreshed.wait(0.2)
-        return original(spec, registry)
+        return original(spec, registry, model_hooks)
 
     ep = _endpoint(provider="vendor", wire_shape="openai_completion")
     invoker = ShapeEndpointInvoker(transport=Transport(frames(WireShape.OPENAI_COMPLETION, '{}', False)),

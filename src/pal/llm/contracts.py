@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR as _ToolCallIR
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Protocol
+from typing import Any, AsyncGenerator, Callable, Protocol, runtime_checkable
 
 from pal.llm.ir import (
     LLMFinishReason,
@@ -14,6 +14,7 @@ from pal.llm.ir import (
     LLMUsageIR,
     MessageRole,
     ReasoningPartIR,
+    ReplayEnvelope,
     TextPartIR,
 )
 from pal.llm.conversions import request_ir_from_prompt
@@ -355,3 +356,10 @@ def _normalize_finish_reason(value: LLMFinishReason | str) -> LLMFinishReason:
     if normalized in {"error", "failed", "cancelled", "canceled"}:
         return LLMFinishReason.ERROR
     return LLMFinishReason(normalized or LLMFinishReason.STOP.value)
+
+
+@runtime_checkable
+class NativeCompactionRuntimePort(Protocol):
+    def compaction_strategy(self, endpoint_id: str | None = None) -> str: ...
+    async def acompact_native(self, request: LLMRequestIR, *, timeout_seconds: float = 180.0,
+                              next_request: LLMRequestIR | None = None) -> tuple[ReplayEnvelope, int, dict[str, Any]]: ...

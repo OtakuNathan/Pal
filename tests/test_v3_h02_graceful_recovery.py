@@ -273,7 +273,7 @@ class H02GracefulRecoveryTests(unittest.TestCase):
         fresh_root = restored_service.history_root
         self.assertNotEqual(fresh_root.incarnation, original_incarnation)
         self.assertEqual(fresh_root.cut.turn_count, sum(t.state != L1TurnState.ACTIVE for t in restored_service.l1_store.turns.turns))
-        self.assertEqual(MEMORY_RUNTIME_STATE_SCHEMA_VERSION, "4")
+        self.assertEqual(MEMORY_RUNTIME_STATE_SCHEMA_VERSION, "5")
 
     def test_H03_failed_publish_keeps_previous_checkpoint_readable(self):
         """H03: a shutdown write that fails mid-replace leaves the previous

@@ -36,8 +36,10 @@ Exposes:
   database edits
 - `/status` for active-model, request, token, cache-hit, reasoning-token, and
   provider-reported cost statistics
-- compaction uses the standard `agenerate` contract with tools and generic
-  max-output continuation disabled by Core
+- semantic compaction uses `agenerate`; bound native strategies use the same endpoint
+  auth/transport lifecycle for standalone compact and exact input-token counting
+- model adapters bind request hooks, response normalizers and compaction policy;
+  see [model compaction](../../../docs/llm_compaction.md)
 
 Invariants:
 - provider is credential/display/telemetry identity and may select only a

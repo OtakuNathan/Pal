@@ -95,6 +95,7 @@ class AuthenticatedTransportRequest:
     extra_body: Mapping[str, Any] = field(default_factory=dict)
     stream_control: LLMStreamControl | None = None
     on_submitted: Callable[[], None] | None = None
+    operation: str = "generate"
 
 
 SDKTransportRequest = AuthenticatedTransportRequest
@@ -113,6 +114,7 @@ class EncodedTransportRequest:
     extra_body: Mapping[str, Any] = field(default_factory=dict)
     stream_control: LLMStreamControl | None = None
     on_submitted: Callable[[], None] | None = None
+    operation: str = "generate"
 
 
 class LLMJSONTransportPort(Protocol):

@@ -83,7 +83,10 @@ class SDKJSONTransport:
         extra_body = thaw_json(request.extra_body)
         if extra_body:
             payload["extra_body"] = extra_body
-        payload["stream"] = bool(request.stream)
+        if request.operation == "generate":
+            payload["stream"] = bool(request.stream)
+        elif request.operation not in {"compact", "input_tokens"} or request.wire_shape != WireShape.OPENAI_RESPONSE:
+            raise LLMTransportError("unsupported endpoint operation")
         if request.stream and request.wire_shape == WireShape.OPENAI_COMPLETION:
             payload.setdefault("stream_options", {"include_usage": True})
         key, entry, capability = self._acquire(request)
@@ -273,9 +276,17 @@ def _open_sdk_response(
     if graph.response is not None or graph.frames is not None:
         raise FdLeaseInvariantError("SDK client graph already has an active response")
     resource = graph.resource
+    method = "create"
+    if request.operation == "compact":
+        method = "compact"
+    elif request.operation == "input_tokens":
+        resource = resource.input_tokens
+        method = "count"
     streaming_response = getattr(resource, "with_streaming_response", None)
     if streaming_response is not None:
-        manager = streaming_response.create(**payload)
+        invoke = streaming_response.compact if method == "compact" else (
+            streaming_response.count if method == "count" else streaming_response.create)
+        manager = invoke(**payload)
         raw = manager.__enter__()
         graph.response_context = manager
         graph.response = raw
@@ -284,9 +295,13 @@ def _open_sdk_response(
             request.on_submitted()
         if request.stream_control is not None:
             request.stream_control.mark_provider_started()
-        response = raw.parse()
+        # Auxiliary Responses APIs return canonical history. Decode raw JSON
+        # rather than round-tripping unknown items through SDK union models.
+        response = raw.parse() if request.operation == "generate" else raw.json()
     else:
-        response = resource.create(**payload)
+        invoke = resource.compact if method == "compact" else (
+            resource.count if method == "count" else resource.create)
+        response = invoke(**payload)
         if request.on_submitted is not None:
             request.on_submitted()
     graph.response = response

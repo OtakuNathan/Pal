@@ -55,8 +55,9 @@ Interaction rule:
   they do not maintain separate prompt compilers or turn executors
 - automatic compaction is requested only by the real model context-budget
   path; host clocks annotate snapshots but never trigger fixed-round compact
-- the immutable submitted LEFT snapshot is compaction's sole semantic input;
-  pending RIGHT content stays outside compaction and unchanged at install.
+- the immutable captured history is compaction's sole semantic input. Native
+  strategies may prospectively include a continuous completed RIGHT prefix;
+  pending RIGHT content stays outside capture and unchanged at install.
   Provider projections, recall caches, and role anchors are not parallel truth sources
 - accepted reasoning and native continuation survive turn closure and restart
   until explicit LEFT compaction. Crash recovery repairs unfinished or invalid

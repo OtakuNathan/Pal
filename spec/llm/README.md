@@ -112,3 +112,9 @@ java -jar /path/to/tla2tools.jar -cleanup \
 PYTHONPATH=src python -m pytest -q tests/test_llm_fallback_switch.py \
   tests/test_llm_sticky_fallback.py tests/test_model_switch.py tests/test_llm_ir_shapes.py
 ```
+
+`RoundSubmission` also models prospective native compaction of a continuous
+accepted, protocol-closed RIGHT prefix. Capture leaves the live cut frozen; only
+install transfers captured facts. The `early_native_cut` negative case detects
+premature cut movement. Pending input and incomplete tool exchanges are outside
+the model's accepted-fact abstraction and are covered by runtime regressions.

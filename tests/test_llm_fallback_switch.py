@@ -61,17 +61,23 @@ class _SwitchSettingsRepository:
         _ = endpoint_id, value
 
 
-def _runtime(repository: _SwitchSettingsRepository, active: str | None = None) -> LLMRuntime:
+def _runtime(
+    repository: _SwitchSettingsRepository,
+    active: str | None = None,
+    *,
+    endpoints=None,
+    invoker=None,
+) -> LLMRuntime:
     repository.values["active"] = active
     return LLMRuntime(
         endpoint_resolver=EndpointResolver(
-            endpoints=(
+            endpoints=endpoints if endpoints is not None else (
                 _fake_endpoint("alpha"),
                 _fake_endpoint("beta"),
             )
         ),
         settings_repository=repository,
-        endpoint_invoker=object(),
+        endpoint_invoker=invoker if invoker is not None else object(),
         active_endpoint_id=active,
     )
 

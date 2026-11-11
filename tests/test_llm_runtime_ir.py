@@ -365,6 +365,8 @@ class LLMRuntimeIRTests(unittest.TestCase):
                 )
             }
         )
+        runtime.model_adapters = runtime._bind_model_adapters(
+            runtime.endpoint_resolver.endpoints, runtime.model_hooks, runtime.provider_response_hooks)
         prepared = runtime._compile_request(endpoint, _request()).request
         replay = replace(
             prepared,

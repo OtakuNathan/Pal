@@ -22,6 +22,7 @@ from pal.llm.attempts import LLMAttemptResult
 from pal.llm.decode_diagnostics import DecodeFailureCapture
 from pal.llm.response_evidence import WireResponseEvidence
 from pal.llm.models import LLMEndpointModel
+from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.endpoint_components import EndpointCodec, LLMEndpoint, compile_endpoint_codec
 from pal.llm.endpoint_spec import LLMEndpointSpec, endpoint_spec_fingerprint
 from pal.llm.prompt_cache import PromptCacheCoordinator
@@ -57,18 +58,20 @@ class ShapeEndpointInvoker:
     )
     prompt_cache: PromptCacheCoordinator = field(default_factory=PromptCacheCoordinator)
     attempt_sink: Callable[[LLMAttemptResult], Any] | None = None
+    model_hooks: ModelHookRegistry = field(default_factory=lambda: ModelHookRegistry({}))
     _codecs: dict[str, tuple[str, EndpointCodec]] = field(default_factory=dict, init=False, repr=False)
     _binding_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if isinstance(self.transport, DirectEndpointTransport):
             self.transport.configure_response_hooks(self.response_hooks)
+            self.transport.configure_model_hooks(self.model_hooks)
             return
         if self.credential_resolver is not None:
             self.transport = DirectEndpointTransport(
                 credential_resolver=self.credential_resolver,
                 sdk_transport=self.transport or SDKJSONTransport(),
-                response_hooks=self.response_hooks,
+                response_hooks=self.response_hooks, model_hooks=self.model_hooks,
             )
             return
         if self.transport is None:
@@ -112,7 +115,7 @@ class ShapeEndpointInvoker:
             else:
                 self._codecs = {
                     str(endpoint.endpoint_id): (endpoint_spec_fingerprint(endpoint),
-                        compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint), self.response_hooks))
+                        compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint), self.response_hooks, self.model_hooks))
                     for endpoint in endpoints
                 }
 
@@ -123,7 +126,7 @@ class ShapeEndpointInvoker:
             fingerprint = endpoint_spec_fingerprint(endpoint)
             current = self._codecs.get(str(endpoint.endpoint_id))
             if current is None or current[0] != fingerprint:
-                current = (fingerprint, compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint), self.response_hooks))
+                current = (fingerprint, compile_endpoint_codec(LLMEndpointSpec.from_value(endpoint), self.response_hooks, self.model_hooks))
                 self._codecs[str(endpoint.endpoint_id)] = current
             return current[1]
 
@@ -133,6 +136,63 @@ class ShapeEndpointInvoker:
             self._codecs.clear()
             if isinstance(self.transport, DirectEndpointTransport):
                 self.transport.configure_response_hooks(registry)
+
+    def configure_model_hooks(self, registry: ModelHookRegistry) -> None:
+        with self._binding_lock:
+            self.model_hooks = registry
+            self._codecs.clear()
+            if isinstance(self.transport, DirectEndpointTransport):
+                self.transport.configure_model_hooks(registry)
+
+    def encode_request(self, endpoint: LLMEndpointModel, request: LLMRequestIR) -> EncodedRequest:
+        from pal.llm.replay_compatibility import REPLAY_BINDINGS_KEY
+        binding = self._binding(endpoint)
+        context = replace(binding.context, capabilities={
+            **binding.context.capabilities,
+            REPLAY_BINDINGS_KEY: request.metadata.get(REPLAY_BINDINGS_KEY, ()),
+        })
+        return apply_provider_request_hooks(binding.codec.encode(request, context), context)
+
+    def invoke_operation(
+        self, endpoint: LLMEndpointModel, payload: dict[str, Any], *, operation: str,
+        timeout_seconds: float = 180.0, stream_control: LLMStreamControl | None = None,
+    ) -> dict[str, Any]:
+        from pal.llm.usage_normalization import usage_from_mapping
+        binding = self._binding(endpoint)
+        from pal.llm.model_adapter import supports_native_compaction
+        if binding.adapter is None or not supports_native_compaction(binding.spec):
+            raise ValueError("endpoint has no native compaction operation")
+        request_id = f"llm_{operation}_{uuid4().hex}"
+        request = EncodedTransportRequest(
+            request_id=request_id, wire_shape=binding.context.wire_shape,
+            timeout_seconds=timeout_seconds, payload=payload, stream=False,
+            operation=operation, stream_control=stream_control,
+        )
+        started = time.monotonic()
+        result: dict[str, Any] = {}
+        status, error_type = "failed", ""
+        try:
+            frames = (binding.frames(request) if isinstance(binding, LLMEndpoint)
+                      else self.transport.frames(binding.spec, request))
+            with contextlib.closing(frames):
+                for frame in frames:
+                    result = dict(frame.payload)
+            if not result or result.get("error"):
+                raise ValueError(f"{operation} returned no successful result")
+            status = "success"
+            return result
+        except Exception as exc:
+            error_type = type(exc).__name__
+            raise
+        finally:
+            if self.attempt_sink is not None and operation == "compact":
+                raw = result.get("usage") or {}
+                self.attempt_sink(LLMAttemptResult(
+                    attempt_id=request_id, endpoint_id=binding.spec.endpoint_id,
+                    model_id=binding.spec.model_id, provider=binding.spec.provider,
+                    status=status, usage=usage_from_mapping(raw or None, input_accounting="inclusive_cache", final=True),
+                    elapsed_seconds=time.monotonic() - started, error_type=error_type,
+                ))
 
     def configure_attempt_sink(self, sink: Callable[[LLMAttemptResult], Any]) -> None:
         self.attempt_sink = sink

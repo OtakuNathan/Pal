@@ -4,7 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
-from pal.llm.ir import LLMMessageIR, MessageRole, PromptRegionIR, TextPartIR
+from pal.llm.ir import LLMMessageIR, MessageRole, PromptRegionIR, TextPartIR, ReplayEnvelope
+from pal.llm.compaction import is_native_window, validate_native_window
 from pal.memory.contracts import L1MessageKind, L2Entry
 from pal.shared.json_values import thaw_json
 
@@ -26,9 +27,15 @@ class Continuity:
     entry: L2Entry
     part: TextPartIR
     anchor: str = ""
+    native_window: ReplayEnvelope | None = None
 
     @classmethod
     def from_message(cls, message: LLMMessageIR, metadata: Mapping[str, Any]) -> Continuity:
+        if is_native_window(message):
+            validate_native_window(message.replay)
+            entry = L2Entry(entry_id="memory_summary_current", kind="summary", scope="system",
+                            title="Compacted history", summary="", rendered="", payload=thaw_json(message.metadata))
+            return cls(message.message_id, entry, TextPartIR(""), native_window=message.replay)
         payload = thaw_json(message.metadata)
         summary = payload.get("summary", {})
         summary = summary if isinstance(summary, dict) else {}
@@ -57,6 +64,11 @@ class Continuity:
         and one canonical mapping (raw source id -> this message id).
         """
 
+        if self.native_window is not None:
+            return LLMMessageIR(role=MessageRole.ASSISTANT, replay=self.native_window,
+                message_id=self.standalone_id, semantic_kind="conversation_continuity",
+                prompt_region=PromptRegionIR.SETTLED_HISTORY,
+                metadata={"continuity_id": self.source_id})
         return LLMMessageIR(
             role=MessageRole.USER, parts=(self.part,), message_id=self.standalone_id,
             semantic_kind="conversation_continuity", prompt_region=PromptRegionIR.SETTLED_HISTORY,
@@ -64,6 +76,8 @@ class Continuity:
 
     def project(self, messages: list[LLMMessageIR]) -> list[LLMMessageIR]:
         """Attach the seed to already-selected request messages, not raw L1."""
+        if self.native_window is not None:
+            return self.project_standalone(messages)
         messages = list(messages)
         for index, message in enumerate(messages):
             if message.message_id == self.anchor:

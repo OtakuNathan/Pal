@@ -97,6 +97,7 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     add_parser.add_argument("--wire-shape", choices=tuple(item.value for item in WireShape), default=None)
     add_parser.add_argument("--transport", choices=("http", "websocket"), default=None)
     add_parser.add_argument("--base-url", default=None)
+    add_parser.add_argument("--compaction-strategy", choices=("auto", "semantic_checkpoint", "openai_responses"), default=None)
     add_parser.add_argument("--cache-mode", choices=("implicit", "hybrid", "explicit"), default=None,
                             help="Cache policy: automatic, fixed anchors plus automatic, or rolling explicit anchors")
     add_parser.add_argument("--cache-protocol", choices=("general", *(item.value for item in PromptCacheDialect)),
@@ -271,6 +272,8 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
         if same_model
         else {}
     )
+    if args.compaction_strategy is not None:
+        capabilities["compaction_strategy"] = args.compaction_strategy
     for name, value in dict(model_defaults.get("capabilities") or {}).items():
         capabilities[name] = value
     payload = {

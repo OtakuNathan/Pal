@@ -103,6 +103,8 @@ class LLMEndpointSpec:
                 f"endpoint {endpoint_id} max_output_tokens exceeds context_window"
             )
         capabilities = _json_mapping(source.get("capabilities_blob"))
+        if capabilities.get("compaction_strategy", "auto") not in {"auto", "semantic_checkpoint", "openai_responses"}:
+            raise LLMEndpointSpecError("invalid capabilities_blob.compaction_strategy")
         access_profile = capabilities.get("access_profile")
         if access_profile is not None:
             from pal.llm.chatgpt import API_URL, PROFILE

@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 from pal.llm.replay_compatibility import accepts_replay
+from pal.llm.compaction import NATIVE_WINDOW_KEY, is_native_window, validate_native_window
 from pal.llm.ir import (
     ImagePartIR,
     LLMFinishReason,
@@ -53,6 +54,15 @@ class OpenAIResponseCodec(ShapeCodecBase):
         input_items: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
+            if is_native_window(message):
+                validate_native_window(message.replay)
+                if not accepts_replay(message.replay, capabilities=context.capabilities,
+                        wire_shape=self.wire_shape, endpoint_id=context.endpoint_id, model_id=context.model_id):
+                    raise ShapeDecodeError("native compact history needs a handoff on its source endpoint")
+                prefix = thaw_json(message.replay.payload[NATIVE_WINDOW_KEY].get("covered_prefix", ()))
+                if prefix and input_items[-len(prefix):] == prefix:
+                    del input_items[-len(prefix):]
+                    spans = [EncodedMessageSpan(span.message_id) for span in spans]
             wire_start = len(input_items)
             try:
                 targets: list[tuple[str | int, ...]] = []

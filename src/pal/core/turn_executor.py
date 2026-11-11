@@ -2109,6 +2109,7 @@ class TurnExecutor:
         timeout_seconds: float | None = None,
         cache_epoch: str = "",
         commit_guard: Callable[[], bool] | None = None,
+        force_semantic: bool = False,
     ) -> CompactionRunResult:
         engine = self._compaction_engine
         if engine is None:
@@ -2196,6 +2197,14 @@ class TurnExecutor:
             return tuple(dict.fromkeys(ids))
 
         result_ids_before_compact = current_l1_result_ids()
+        from pal.llm.contracts import NativeCompactionRuntimePort
+        strategy = (llm_runtime.compaction_strategy(preferred_endpoint_id)
+                    if isinstance(llm_runtime, NativeCompactionRuntimePort) else "semantic_checkpoint")
+        if force_semantic:
+            strategy = "semantic_checkpoint"
+        metadata["compaction_strategy"] = strategy
+        metadata["retained_result_call_ids"] = result_ids_before_compact
+
 
         after_compact = None
         retire_tool_results = getattr(
@@ -2249,7 +2258,7 @@ class TurnExecutor:
                 clock_kind=engine.policy.clock_kind,
             )
         try:
-            if continuation is None:
+            if continuation is None and strategy != "openai_responses":
                 root.promote()
         except Exception as exc:
             LOGGER.warning("compact promote_failed failed_at=%s\n%s",
@@ -2279,6 +2288,8 @@ class TurnExecutor:
                     str(continuation.turn_id) if continuation is not None else ""
                 ),
                 deadline_at=deadline_at,
+                **({"include_completed_tail": True} if strategy == "openai_responses" else {}),
+                **({"allow_summary": True} if force_semantic else {}),
             )
         except Exception as exc:
             LOGGER.warning("compact begin_failed run=%s failed_at=%s\n%s",
@@ -2308,7 +2319,7 @@ class TurnExecutor:
         try:
             left_ids = tuple(
                 str(message.message_id)
-                for message in root.left_messages()
+                for turn in left_snapshot.turns for message in turn.messages
             )
             replay_request, replay_dialect, replay_wire_shape = (
                 self._resident_compaction_replay_request(
@@ -2355,6 +2366,53 @@ class TurnExecutor:
                     "dialect": replay_dialect,
                     "wire_shape": replay_wire_shape,
                 })
+
+        from pal.llm.compaction import is_native_window
+        from pal.shared import PromptAssemblyContext
+        from pal.llm.conversions import tool_definition_ir_from_dict
+        from pal.llm.serde import message_from_payload
+        from pal.memory.continuity import Continuity
+        captured_messages = tuple(message for turn in left_snapshot.turns for message in turn.messages)
+        metadata["compact_source_ids"] = tuple(m.message_id for m in captured_messages)
+        native_source = any(is_native_window(m) for m in captured_messages)
+        native_next_request = None
+        if strategy == "openai_responses" or native_source:
+            try:
+                capabilities = self._resolve_llm_capabilities_for_endpoint(preferred_endpoint_id)
+                source_ids = set(left_snapshot.message_ids())
+                messages = []
+                tail = []
+                for turn in root.all_turns():
+                    projected = self._project_messages_for_prompt(list(turn.messages),
+                        turn_id=turn.turn_id, artifact_scope_key=logical_scope_id, capabilities=capabilities)
+                    for message in projected:
+                        if message.message_id in source_ids:
+                            messages.append(Continuity.from_message(message, {}).standalone_message()
+                                if message.semantic_kind == "runtime_context_summary" else message)
+                        else:
+                            tail.append(message)
+                shell = self._build_canonical_prompt(
+                    assembly_context or PromptAssemblyContext(metadata={"typed_l1_projection": True}),
+                    max_output_tokens=max(512, reserved_output_tokens), model_hint=preferred_model_id)
+                stable = tuple(m for m in shell.messages if m.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER})
+                source_stable = stable
+                for turn in reversed(left_snapshot.turns):
+                    frozen = turn.metadata.get("prompt_context_state", {}).get("stable", ())
+                    if frozen:
+                        source_stable = tuple(message_from_payload(m) for m in frozen)
+                        break
+                tools = tuple(tool_definition_ir_from_dict(tool) for tool in self._build_llm_tool_contracts())
+                shell = replace(shell, tools=tools, metadata={**shell.metadata, **metadata,
+                    "preferred_endpoint_id": preferred_endpoint_id})
+                if replay_request is None or native_source:
+                    replay_request = replace(shell, messages=(*source_stable, *messages))
+                native_next_request = replace(shell, messages=(*stable, *tail))
+                replay_wire_shape = "openai_response"
+                replay_dialect = "canonical_history"
+            except Exception as exc:
+                root.close_run(run_id, cancelled=False, reason="native_source_unavailable")
+                return CompactionRunResult(status="source_unavailable", failures=(exception_report(exc),),
+                                           clock_kind=engine.policy.clock_kind, clock_value=clock_value)
 
         def close_run_terminal(*, cancel: bool, reason: str) -> None:
             """Idempotent close of OUR run (F1 / review R2-b).
@@ -2458,6 +2516,7 @@ class TurnExecutor:
                 clock_value=clock_value,
                 metadata=metadata,
                 replay_request=replay_request,
+                next_request=native_next_request,
                 replay_dialect=replay_dialect,
                 replay_wire_shape=replay_wire_shape,
             )
@@ -2602,6 +2661,9 @@ class TurnExecutor:
         # Use the ordinary codec with the complete, isolated current request.
         if request.metadata.get("history_visibility") == "active_turn":
             return None
+        from pal.llm.compaction import is_native_window
+        if any(is_native_window(message) for message in request.messages):
+            return None  # The complete canonical native window is encoded once by the codec.
         projection = llm_runtime.projection_port
         if projection is None:
             return None

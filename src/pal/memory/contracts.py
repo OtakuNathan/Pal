@@ -7,7 +7,7 @@ from pal.memory.history_contracts import HistoryReadPort, HistoryRootPort
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 if False:  # pragma: no cover - typing-only names without runtime import cycles
     from pal.llm.ir import LLMMessageIR
@@ -415,3 +415,8 @@ class MemoryServicePort(Protocol):
 
 
 MEMORY = PortKey[MemoryServicePort]("memory:memory", MemoryServicePort)
+
+
+@runtime_checkable
+class CompactionSnapshotSourcePort(Protocol):
+    def snapshot_transcripts(self, snapshot: Any) -> list[list[L1TranscriptMessage]]: ...

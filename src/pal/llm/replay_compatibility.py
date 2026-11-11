@@ -20,7 +20,13 @@ def endpoints_replay_compatible(source: Any, target: Any) -> bool:
     """Only opt proven, same-service and same-auth endpoints into reuse."""
     if source is None or target is None:
         return False
-    return (
+    same_identity = (
+        source.model_id == target.model_id and source.wire_shape == target.wire_shape
+        and str(source.base_url).rstrip("/") == str(target.base_url).rstrip("/")
+        and source.auth_kind == target.auth_kind and source.credential_ref == target.credential_ref
+        and (source.capabilities_blob or {}).get("access_profile") == (target.capabilities_blob or {}).get("access_profile")
+    )
+    return same_identity or (
         source.wire_shape == target.wire_shape == WireShape.OPENAI_RESPONSE.value
         and source.model_id in _OPENAI_56
         and target.model_id in _OPENAI_56

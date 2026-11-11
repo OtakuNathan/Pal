@@ -5,6 +5,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from threading import RLock
 
+from pal.llm.model_adapter import BoundModelAdapter, bind_model_adapter
+from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.endpoint_auth import EndpointAuth
 from pal.llm.chatgpt import is_chatgpt
 from pal.llm.endpoint_spec import LLMEndpointSpec
@@ -28,10 +30,12 @@ class EndpointCodec:
     codec: ShapeCodec
     context: ShapeContext
     response_hooks: BoundResponseHooks = field(default_factory=BoundResponseHooks, kw_only=True)
+    adapter: BoundModelAdapter | None = field(default=None, kw_only=True)
 
 
 def compile_endpoint_codec(
     spec: LLMEndpointSpec, response_hooks: ProviderResponseHookRegistry | None = None,
+    model_hooks: ModelHookRegistry | None = None,
 ) -> EndpointCodec:
     spec = replace(spec, capabilities_blob=freeze_json_mapping(spec.capabilities_blob))
     shape = WireShape(spec.wire_shape)
@@ -39,10 +43,11 @@ def compile_endpoint_codec(
     if isinstance(codec, OpenAIResponseCodec):
         codec = replace(codec, subscription=is_chatgpt(spec))
     registry = response_hooks if response_hooks is not None else ProviderResponseHookRegistry.builtin()
+    adapter = bind_model_adapter(spec, model_hooks, registry)
     return EndpointCodec(spec, codec, ShapeContext(
         wire_shape=shape, endpoint_id=spec.endpoint_id, model_id=spec.model_id,
         provider_id=spec.provider, base_url=spec.base_url, capabilities=spec.capabilities_blob,
-    ), response_hooks=registry.bind(endpoint_id=spec.endpoint_id, provider_id=spec.provider))
+    ), response_hooks=adapter.response_hooks, adapter=adapter)
 
 
 @dataclass(frozen=True)
@@ -76,7 +81,7 @@ class LLMEndpoint(EndpointCodec):
             wire_shape=self.context.wire_shape, api_key=credential, base_url=self.spec.base_url,
             timeout_seconds=request.timeout_seconds, payload=request.payload, extra_body=request.extra_body,
             stream=self.auth.force_stream or request.stream, stream_control=request.stream_control,
-            on_submitted=request.on_submitted,
+            on_submitted=request.on_submitted, operation=request.operation,
         ))
         try:
             for frame in iterator:

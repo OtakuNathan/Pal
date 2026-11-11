@@ -612,10 +612,12 @@ def test_runtime_quota_never_executes_partial_tool_or_falls_back(stream):
                 "type": "function_call", "name": "probe", "call_id": "call1", "arguments": "{}", "namespace": "pal",
             }})
             yield _JSONFrame(1, {"type": "response.failed", "response": {"error": {"code": QUOTA_CODE}}})
-    runtime = _runtime(_SwitchSettingsRepository(True), active="chatgpt")
-    runtime.endpoint_resolver.endpoints = (endpoint(), _fake_endpoint("paid-api"))
-    runtime.endpoint_invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(
-        LLMCredentialResolver(store).resolve_api_key, websocket_transport=SDK()))
+    runtime = _runtime(
+        _SwitchSettingsRepository(True), active="chatgpt",
+        endpoints=(endpoint(), _fake_endpoint("paid-api")),
+        invoker=ShapeEndpointInvoker(transport=DirectSDKTransport(
+            LLMCredentialResolver(store).resolve_api_key, websocket_transport=SDK())),
+    )
     if stream:
         final = list(runtime._iter_stream_updates(request()))[-1].response
     else:
