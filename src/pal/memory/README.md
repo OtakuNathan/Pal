@@ -59,6 +59,10 @@ Interaction rule:
   checkpoint without a model call. Startup restores working state before
   endpoints start; unfinished execution becomes interrupted context and is not
   replayed. This is boundary-driven persistence, not timer-driven compaction
+- Startup accepts older schemas only when every state port declares them readable
+  and the saved contract hash matches the recorded module schemas and resident
+  identity. Successful restore rebases to current schemas before normal writes;
+  a failed restore preserves the recovery point and blocks compact explicitly.
 - Compact/reset archive only dialogue removed from L1 into credential-redacted
   daily JSONL under `data/conversation-history/`, by message date in Pal's timezone.
   Startup, shutdown and midnight do not archive active working dialogue.

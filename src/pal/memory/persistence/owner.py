@@ -304,7 +304,8 @@ class ResidentHistory:
 
     def inspect(self) -> dict:
         pending = self.archives.pending_count()
-        return {"status": self.status, "saved_sequence": self.store.sequence,
+        return {"status": self.status, "restore_failed": self.restore_failed,
+                "saved_sequence": self.store.sequence,
                 "saved_at": self.saved_at, "last_error": self.last_error,
                 "last_save_ms": self.last_save_ms, "last_write_bytes": self.store.last_bytes,
                 "total_write_bytes": self.total_write_bytes,

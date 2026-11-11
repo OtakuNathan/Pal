@@ -170,7 +170,7 @@ class PalRuntimeApp:
                 return
             expected_spec = self._runtime_spec_hash()
             if str(snapshot.get("runtime_spec_hash") or "") != expected_spec:
-                snapshot = self._upgrade_legacy_checklist_snapshot(snapshot, expected_spec)
+                snapshot = self._upgrade_compatible_snapshot(snapshot, expected_spec)
             self.history.protect(snapshot)
             prepared = _interrupt_active_resident_turns(snapshot)
             await RuntimeSnapshotCoordinator(
@@ -245,22 +245,39 @@ class PalRuntimeApp:
             identity_parts={"host": RESIDENT_LOGICAL_COROUTINE_ID},
         )
 
-    def _upgrade_legacy_checklist_snapshot(self, snapshot: dict, expected_spec: str) -> dict:
-        """Only the addition of an empty checklist port may migrate an old exit snapshot."""
+    def _upgrade_compatible_snapshot(self, snapshot: dict, expected_spec: str) -> dict:
+        """Admit readable schemas after proving the original restore contract.
+
+        Payload migration remains owned by each runtime-state port. The only
+        allowed module-set change is the historical empty-checklist addition.
+        """
         registry = self.handle.core.context.module_registry
         ports = {handle.runtime_state_port.module_id: handle.runtime_state_port
                  for handle in registry.modules.values() if handle.runtime_state_port is not None}
         modules = snapshot.get("modules")
+        if not isinstance(modules, dict):
+            raise ResidentCheckpointError("resident checkpoint modules are invalid")
+        missing = set(ports) - set(modules)
+        add_checklist = (missing == {"checklist"} and ports["checklist"].schema_version == "1")
+        if set(modules) - set(ports) or (missing and not add_checklist):
+            raise ResidentCheckpointError("resident checkpoint module set does not match this runtime")
+        schemas = {}
+        for module_id, record in modules.items():
+            if not isinstance(record, dict):
+                raise ResidentCheckpointError("resident checkpoint module record is invalid")
+            version = str(record.get("schema_version") or "")
+            if version not in ports[module_id].readable_schema_versions:
+                raise ResidentCheckpointError(f"resident checkpoint schema is unsupported for {module_id}")
+            schemas[module_id] = version
         legacy_hash = runtime_spec_hash(
             registry, identity_parts={"host": RESIDENT_LOGICAL_COROUTINE_ID},
-            exclude_module_ids=frozenset({"checklist"}),
+            exclude_module_ids=frozenset(missing), schema_versions=schemas,
         )
-        if ("checklist" not in ports or ports["checklist"].schema_version != "1"
-                or not isinstance(modules, dict) or set(modules) != set(ports) - {"checklist"}
-                or snapshot.get("runtime_spec_hash") != legacy_hash):
+        if snapshot.get("runtime_spec_hash") != legacy_hash:
             raise ResidentCheckpointError("resident checkpoint runtime spec does not match this runtime")
         upgraded = deepcopy(snapshot)
-        upgraded["modules"]["checklist"] = {"schema_version": "1", "payload": {"plan": None}}
+        if add_checklist:
+            upgraded["modules"]["checklist"] = {"schema_version": "1", "payload": {"plan": None}}
         upgraded["runtime_spec_hash"] = expected_spec
         return upgraded
 

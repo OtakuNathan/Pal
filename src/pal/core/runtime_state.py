@@ -130,13 +130,18 @@ def runtime_spec_hash(
     *,
     identity_parts: Mapping[str, Any] | None = None,
     exclude_module_ids: frozenset[str] = frozenset(),
+    schema_versions: Mapping[str, str] | None = None,
 ) -> str:
-    """Return the deterministic restore contract for one logical coroutine."""
+    """Return the deterministic restore contract for one logical coroutine.
+
+    Restore admission may supply recorded schemas to verify an older hash.
+    Callers must separately check each port's readable schema versions.
+    """
 
     modules = sorted(
         (
             str(port.module_id),
-            str(port.schema_version),
+            str((schema_versions or {}).get(port.module_id, port.schema_version)),
         )
         for handle in module_registry.modules.values()
         if (port := handle.runtime_state_port) is not None

@@ -2253,8 +2253,13 @@ class TurnExecutor:
             )
         history = self.context.port_registry.get(RESIDENT_HISTORY.name)
         if history is not None and not await history.reconcile_async():
+            failure = (
+                "resident history recovery failed; persistence must be repaired before compaction"
+                if history.inspect().get("restore_failed")
+                else "pending dialogue archive could not be reconciled"
+            )
             return CompactionRunResult(
-                status="commit_failed", failures=("pending dialogue archive could not be reconciled",),
+                status="commit_failed", failures=(failure,),
                 clock_kind=engine.policy.clock_kind,
             )
         try:
