@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from pal.llm.ir import LLMMessageIR, ReasoningPartIR, ReplayEnvelope, WireShape
+from pal.llm.compaction import NATIVE_WINDOW_KEY, is_native_window, validate_native_window
 from pal.llm.continuation_policy import NativeCandidate, validate_candidate
 from pal.llm.decode_contracts import ShapeDecodeError
 from pal.llm.response_blocks import json_object
@@ -51,6 +52,9 @@ def repair_replay_calls(native: ReplayEnvelope | None, call_ids: set[str]) -> Re
     """Remove only revoked call records; retain reasoning and original source."""
     if native is None:
         return None
+    if NATIVE_WINDOW_KEY in native.payload:
+        validate_native_window(native)
+        return native
     payload = thaw_json(native.payload)
     if native.wire_shape == WireShape.OPENAI_COMPLETION:
         messages = payload.get("messages", [payload.get("message", {})])
@@ -79,6 +83,11 @@ def repair_replay_calls(native: ReplayEnvelope | None, call_ids: set[str]) -> Re
 def validate_native_for_send(message: LLMMessageIR) -> None:
     native = message.replay
     if native is None:
+        return
+    if is_native_window(message):
+        validate_native_window(native)
+        if message.tool_calls:
+            raise ProviderResponseHookError("compacted history cannot contain executable tool calls")
         return
     payload = thaw_json(native.payload)
     if native.wire_shape == WireShape.OPENAI_COMPLETION and "messages" in payload:
@@ -131,6 +140,8 @@ def native_candidate_from_accepted_message(message: LLMMessageIR) -> NativeCandi
     if native is None:
         return None
     validate_native_for_send(message)
+    if is_native_window(message):
+        return None
     if native.wire_shape == WireShape.OPENAI_COMPLETION and "messages" in native.payload:
         return None
     return NativeCandidate(

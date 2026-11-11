@@ -367,6 +367,9 @@ class MemoryService:
 
         return [_transcript_from_turn(turn) for turn in self.history_root.left_turns()]
 
+    def snapshot_transcripts(self, snapshot) -> list[list[L1TranscriptMessage]]:
+        return [_transcript_from_turn(turn) for turn in snapshot.turns]
+
     def begin_left_compaction(
         self,
         run_id: str,
@@ -374,12 +377,15 @@ class MemoryService:
         reason: str,
         parent_turn_id: str = "",
         deadline_at: float | None = None,
+        include_completed_tail: bool = False,
+        allow_summary: bool = False,
     ) -> Any:
         """Open a v3 compact run over the current left segment."""
 
         return self.history_root.begin_compact(
             run_id, reason=reason, parent_turn_id=parent_turn_id,
-            deadline_at=deadline_at,
+            deadline_at=deadline_at, include_completed_tail=include_completed_tail,
+            allow_summary=allow_summary,
         )
 
     def interrupt_compaction_for_turn(self, turn_id: str | None) -> str:

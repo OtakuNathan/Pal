@@ -11,6 +11,7 @@ from typing import Any, Protocol, runtime_checkable
 from pal.llm.attempts import LLMAttemptResult
 from pal.llm.ir import LLMRequestIR, LLMResponseIR, LLMResponseUpdate
 from pal.llm.models import LLMEndpointModel
+from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.request_contracts import RequestSubmission
 from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.shapes.base import EncodedRequest
@@ -59,3 +60,13 @@ class ManagedEndpointInvokerPort(LLMEndpointInvokerPort, Protocol):
         projection: EncodedRequest | None = None,
         submission_sink: Callable[[RequestSubmission], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]: ...
+
+
+@runtime_checkable
+class ModelAdapterInvokerPort(Protocol):
+    def configure_model_hooks(self, registry: "ModelHookRegistry") -> None: ...
+    def encode_request(self, endpoint: LLMEndpointModel, request: LLMRequestIR) -> EncodedRequest: ...
+    def invoke_operation(
+        self, endpoint: LLMEndpointModel, payload: dict[str, Any], *, operation: str,
+        timeout_seconds: float = 180.0, stream_control: LLMStreamControl | None = None,
+    ) -> dict[str, Any]: ...

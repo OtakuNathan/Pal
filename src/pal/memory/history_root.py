@@ -31,7 +31,8 @@ import time
 from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
-from pal.llm.ir import LLMMessageIR, MessageRole, MessageState
+from pal.llm.ir import LLMMessageIR, MessageRole, MessageState, ReplayEnvelope, WireShape
+from pal.llm.compaction import validate_native_window
 from pal.memory.turn_ir import (
     L1TurnIR,
     L1TurnState,
@@ -110,7 +111,15 @@ def default_summary_builder(candidate: Any) -> L1TurnIR:
     if not text:
         raise ValueError("summary candidate has no rendered or summary text")
     payload = getattr(candidate, "payload", None) or {}
-    return _summary_turn(text, payload if isinstance(payload, Mapping) else None)
+    payload = dict(payload) if isinstance(payload, Mapping) else {}
+    native = payload.pop("native_window", None)
+    turn = _summary_turn(text, payload)
+    if native is not None:
+        replay = ReplayEnvelope(WireShape(native["wire_shape"]), native["endpoint_id"],
+                                native["model_id"], native["payload"])
+        validate_native_window(replay)
+        turn = replace(turn, messages=(replace(turn.messages[0], parts=(), replay=replay),))
+    return replace(turn, metadata={"compact_retained_result_refs": payload.get("retained_result_refs", ())})
 
 
 class HistoryRoot:
@@ -184,11 +193,14 @@ class HistoryRoot:
         return list(self.store.turns)
 
     def left_turns(self) -> tuple[L1TurnIR, ...]:
+        return self._turns_through(self._cut)
+
+    def _turns_through(self, cut: CutPosition) -> tuple[L1TurnIR, ...]:
         turns = self._ordered_turns()
-        whole = turns[: self._cut.turn_count]
-        if self._cut.intra_messages:
-            boundary = turns[self._cut.turn_count]
-            prefix = self._boundary_prefix(boundary, self._cut.intra_messages)
+        whole = turns[: cut.turn_count]
+        if cut.intra_messages:
+            boundary = turns[cut.turn_count]
+            prefix = self._boundary_prefix(boundary, cut.intra_messages)
             if prefix is not None:
                 whole = [*whole, prefix]
         return tuple(whole)
@@ -511,7 +523,7 @@ class HistoryRoot:
         messages = turn.messages
         limit = len(messages)
         for index, message in enumerate(messages):
-            if message.state == MessageState.IN_PROGRESS:
+            if message.state in {MessageState.IN_PROGRESS, MessageState.INCOMPLETE}:
                 limit = index
                 break
         best = 0
@@ -586,6 +598,8 @@ class HistoryRoot:
         reason: str,
         parent_turn_id: str = "",
         deadline_at: float | None = None,
+        include_completed_tail: bool = False,
+        allow_summary: bool = False,
     ) -> LeftSnapshot:
         key = str(run_id or "").strip()
         if not key:
@@ -599,19 +613,23 @@ class HistoryRoot:
                 active_run_id=live.run_id,
                 requested_run_id=key,
             )
-        left = self.left_turns()
+        captured_cut = self._cut
+        if include_completed_tail:
+            whole, intra = self.promotable_turn_count(include_active=True)
+            captured_cut = replace(self._cut, turn_count=whole, intra_messages=intra)
+        left = self._turns_through(captured_cut)
         if not left:
             raise NoBeneficialCompaction("left is empty; nothing to compact", run_id=key)
-        if all(self._is_summary_only(turn) for turn in left):
+        if not allow_summary and all(self._is_summary_only(turn) for turn in left):
             raise NoBeneficialCompaction(
                 "left is already the minimal summary seed", run_id=key,
                 left_turn_count=len(left),
             )
         snapshot = LeftSnapshot(
             run_id=key,
-            cut=self._cut,
+            cut=captured_cut,
             turns=tuple(left),
-            stamp=self._left_stamp(),
+            stamp=self._snapshot_stamp(captured_cut),
         )
         self._run = CompactRun(
             run_id=key,
@@ -621,6 +639,9 @@ class HistoryRoot:
             deadline_at=deadline_at,
         )
         return snapshot
+
+    def _snapshot_stamp(self, cut: CutPosition) -> str:
+        return left_span_stamp(self._turns_through(cut)) + f"@{self._cut.revision}:{self._cut.cut_id}"
 
     @staticmethod
     def _is_summary_only(turn: L1TurnIR) -> bool:
@@ -830,14 +851,14 @@ class HistoryRoot:
         if not isinstance(seed_turn, L1TurnIR) or not seed_turn.messages:
             raise HistoryRootError("summary builder must return a non-empty L1TurnIR",
                                    run_id=key)
-        if self._left_stamp() != run.snapshot.stamp:
+        if self._snapshot_stamp(run.snapshot.cut) != run.snapshot.stamp:
             raise LeftChangedSinceCapture(
                 "left changed since capture",
                 run_id=key,
                 expected_stamp=run.snapshot.stamp,
-                actual_stamp=self._left_stamp(),
+                actual_stamp=self._snapshot_stamp(run.snapshot.cut),
             )
-        right = self._physical_right_for_install()
+        right = self._physical_right_for_install(run.snapshot.cut)
         # ---- final admission, immediately before the non-awaiting publish
         # (review N1-R3): all expensive local construction is complete; the
         # run must still be ours and READY, the captured left identity must
@@ -850,12 +871,12 @@ class HistoryRoot:
                 run_id=key,
                 phase=current.phase.value,
             )
-        if self._left_stamp() != run.snapshot.stamp:
+        if self._snapshot_stamp(run.snapshot.cut) != run.snapshot.stamp:
             raise LeftChangedSinceCapture(
                 "left changed since capture",
                 run_id=key,
                 expected_stamp=run.snapshot.stamp,
-                actual_stamp=self._left_stamp(),
+                actual_stamp=self._snapshot_stamp(run.snapshot.cut),
             )
         if run.deadline_at is not None and time.monotonic() >= float(run.deadline_at):
             self.fail(key, reason="deadline")
@@ -884,7 +905,7 @@ class HistoryRoot:
             seed_turn_id=SUMMARY_TURN_ID,
         )
 
-    def _physical_right_for_install(self) -> tuple[L1TurnIR, ...]:
+    def _physical_right_for_install(self, cut: CutPosition | None = None) -> tuple[L1TurnIR, ...]:
         """Materialize the install-time right side (I05: R content preserved).
 
         A boundary turn whose closed prefix moved into L keeps its identity
@@ -899,19 +920,20 @@ class HistoryRoot:
         (F04) instead of refusing them.
         """
 
+        cut = cut or self._cut
         turns = self._ordered_turns()
         folded: set[str] = set()
-        if not self._cut.intra_messages:
-            tail = list(turns[self._cut.turn_count:])
+        if not cut.intra_messages:
+            tail = list(turns[cut.turn_count:])
         else:
-            boundary = turns[self._cut.turn_count]
+            boundary = turns[cut.turn_count]
             current = self.store.get(boundary.turn_id) or boundary
             remainder = replace(
                 current,
-                messages=current.messages[self._cut.intra_messages:],
+                messages=current.messages[cut.intra_messages:],
                 revision=current.revision + 1,
             )
-            tail = [remainder, *turns[self._cut.turn_count + 1:]]
+            tail = [remainder, *turns[cut.turn_count + 1:]]
             folded.add(boundary.turn_id)
         physical: list[L1TurnIR] = []
         for turn in tail:

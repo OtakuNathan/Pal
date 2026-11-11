@@ -3806,5 +3806,13 @@
   "src/pal/llm/transport.py:DirectEndpointTransport.refresh_credentials:getattr(self.credential_resolver, '__self__', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
+  },
+  "src/pal/llm/model_hooks.py:_hook_from_module:getattr(module, 'MODEL_ADAPTER', None)": {
+    "count": 1,
+    "reason": "Explicit optional exports of runtime model modules; normalize into the immutable model adapter contract at load time."
+  },
+  "src/pal/llm/model_hooks.py:_hook_from_module:getattr(module, 'COMPACTION_STRATEGY', 'auto')": {
+    "count": 1,
+    "reason": "Explicit optional exports of runtime model modules; normalize into the immutable model adapter contract at load time."
   }
 }

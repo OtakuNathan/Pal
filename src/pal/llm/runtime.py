@@ -54,6 +54,11 @@ from pal.llm.projection_contracts import (
 )
 from pal.llm.projection_session import EndpointProjectionSession
 from pal.llm.model_hooks import ModelHookRegistry
+from pal.llm.model_adapter import BoundModelAdapter, bind_model_adapter
+from pal.llm.invocation_contracts import ModelAdapterInvokerPort
+from pal.llm.ir import ReplayEnvelope
+from pal.llm.compaction import (NATIVE_WINDOW_KEY, is_native_window, native_origin,
+                                validate_native_window, token_count_payload)
 from pal.llm.models import LLMEndpointModel
 from pal.llm.output_recovery import (
     continuation_request,
@@ -179,10 +184,14 @@ class LLMRuntime:
     last_projection_receipt: Any = None
     think_level: str = ""
     active_endpoint_id: str | None = None
+    _selection_loaded: bool = field(default=False, init=False)
+    _observed_configured_selection: str | None = field(default=None, init=False)
     event_sink: Callable[[dict[str, Any]], None] | None = None
     usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
     cache_profile_generation: int = field(default=1, init=False)
     model_hooks: ModelHookRegistry = field(init=False)
+    model_adapters: dict[str, BoundModelAdapter] = field(default_factory=dict, init=False)
+    _native_token_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     provider_response_hooks: ProviderResponseHookRegistry = field(init=False)
     _response_hook_defaults: ProviderResponseHookRegistry = field(init=False, repr=False)
     _detached_stream_tasks: set[asyncio.Task[Any]] = field(
@@ -215,6 +224,10 @@ class LLMRuntime:
                 runtime_root=runtime_root,
                 response_hooks=self.provider_response_hooks,
             )
+        self.model_adapters = self._bind_model_adapters(self.endpoint_resolver.endpoints,
+                                                      self.model_hooks, self.provider_response_hooks)
+        if isinstance(self.endpoint_invoker, ModelAdapterInvokerPort):
+            self.endpoint_invoker.configure_model_hooks(self.model_hooks)
         managed = self._managed_invoker()
         if managed is not None:
             managed.configure_response_hooks(self.provider_response_hooks)
@@ -225,6 +238,103 @@ class LLMRuntime:
             int(getattr(self.config, "llm_endpoint_retry_attempts", self.endpoint_retry_attempts) or 1),
         )
         self.refresh_runtime_settings()
+
+    @staticmethod
+    def _bind_model_adapters(endpoints, models, responses) -> dict[str, BoundModelAdapter]:
+        return {endpoint.endpoint_id: bind_model_adapter(LLMEndpointSpec.from_value(endpoint), models, responses)
+                for endpoint in endpoints}
+
+    def compaction_strategy(self, endpoint_id: str | None = None) -> str:
+        adapter = self.model_adapters.get(endpoint_id or self.active_endpoint_id or "")
+        return adapter.compaction_strategy if adapter is not None else "semantic_checkpoint"
+
+    def _count_native_input(self, endpoint, request: LLMRequestIR, *, control=None) -> int:
+        invoker = self.endpoint_invoker
+        if not isinstance(invoker, ModelAdapterInvokerPort):
+            raise LLMRequestPreparationError("Native history requires an endpoint with exact token counting")
+        encoded = invoker.encode_request(endpoint, request)
+        payload = token_count_payload(encoded.payload)
+        digest = hashlib.sha256((self._endpoint_config_digest(endpoint) + json.dumps(
+            payload, ensure_ascii=False, sort_keys=True)).encode()).hexdigest()
+        if digest not in self._native_token_counts:
+            result = invoker.invoke_operation(endpoint, payload, operation="input_tokens", stream_control=control)
+            count = result.get("input_tokens")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise LLMRequestPreparationError("Token counting returned no valid input_tokens")
+            if len(self._native_token_counts) >= 128:
+                self._native_token_counts.clear()
+            self._native_token_counts[digest] = count
+        return self._native_token_counts[digest]
+
+    async def acompact_native(self, request: LLMRequestIR, *, timeout_seconds: float = 180.0,
+                              next_request: LLMRequestIR | None = None) -> tuple["ReplayEnvelope", int, dict[str, Any]]:
+        """One native attempt, through the same auth, cancellation and usage owner."""
+        from pal.llm.ir import LLMMessageIR, MessageRole, ReplayEnvelope
+        from pal.llm.transport_contracts import LLMStreamControl
+        endpoints = self._enabled_endpoints(request)
+        if not endpoints:
+            raise LLMRequestPreparationError("Selected compact endpoint is unavailable")
+        endpoint = LLMEndpointSpec.from_value(endpoints[0])
+        adapter = self.model_adapters[endpoint.endpoint_id]
+        invoker = self.endpoint_invoker
+        if adapter.compaction_strategy != "openai_responses" or not isinstance(invoker, ModelAdapterInvokerPort):
+            raise LLMRequestPreparationError("Selected endpoint cannot perform native compaction")
+        control = LLMStreamControl()
+
+        def perform():
+            prepared = self._compile_request(endpoint, request, count_native=False)
+            source_tokens = self._count_native_input(endpoint, prepared.request, control=control)
+            if endpoint.context_window and source_tokens >= endpoint.context_window:
+                raise LLMRequestPreparationError("Native compact source exceeds the model context window")
+            encoded = invoker.encode_request(endpoint, prepared.request)
+            result = invoker.invoke_operation(endpoint, adapter.compact_payload(encoded.payload),
+                operation="compact", timeout_seconds=timeout_seconds, stream_control=control)
+            output = result.get("output")
+            prefix = []
+            for item in encoded.payload.get("input", ()):
+                if item.get("role") not in {"system", "developer"}:
+                    break
+                prefix.append(thaw_json(item))
+            replay = ReplayEnvelope(WireShape.OPENAI_RESPONSE, endpoint.endpoint_id, endpoint.model_id,
+                {"output": output, NATIVE_WINDOW_KEY: {
+                    "version": 1, "origin": native_origin(endpoint), "covered_prefix": prefix,
+                    "adapter": adapter.identity,
+                }})
+            validate_native_window(replay)
+            seed = LLMMessageIR(role=MessageRole.ASSISTANT, replay=replay,
+                                semantic_kind="conversation_continuity")
+            if next_request is None:
+                successor = replace(prepared.request, messages=(seed,), metadata={
+                    **prepared.request.metadata, "model_hooks_already_applied": True})
+            else:
+                messages = list(next_request.messages)
+                insertion = next((i for i, m in enumerate(messages)
+                    if m.role not in {MessageRole.SYSTEM, MessageRole.DEVELOPER}), len(messages))
+                messages.insert(insertion, seed)
+                successor = replace(next_request, messages=tuple(messages))
+            next_prepared = self._compile_request(endpoint, successor, count_native=False)
+            tokens = self._count_native_input(endpoint, next_prepared.request, control=control)
+            if next_prepared.target_input_budget and tokens > next_prepared.target_input_budget:
+                raise LLMRequestPreparationError("Native compact output exceeds the next request budget")
+            if self.model_adapters.get(endpoint.endpoint_id) is not adapter:
+                raise LLMRequestPreparationError("Endpoint adapter changed during compaction; retry with the current binding")
+            replay = replace(replay, payload={**replay.payload, NATIVE_WINDOW_KEY: {
+                **replay.payload[NATIVE_WINDOW_KEY], "input_token_upper_bound": tokens}})
+            return replay, tokens, thaw_json(result.get("usage") or {})
+
+        return await self._await_native_job(perform, control)
+
+    async def _await_native_job(self, perform, control):
+        task = asyncio.create_task(asyncio.to_thread(perform))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            control.cancel()
+            # The SDK worker owns the borrowed endpoint until its finally path.
+            self._detached_stream_tasks.add(task)
+            task.add_done_callback(self._detached_stream_tasks.discard)
+            task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            raise
 
     def active_endpoint(self) -> LLMEndpointModel | None:
         return self._endpoint_by_id(self.active_endpoint_id)
@@ -395,6 +505,7 @@ class LLMRuntime:
         configuration identity."""
 
         return {
+            "adapter": self.model_adapters[endpoint.endpoint_id].identity,
             "endpoint_id": str(endpoint.endpoint_id),
             "model_id": str(endpoint.model_id),
             "wire_shape": str(endpoint.wire_shape),
@@ -539,7 +650,12 @@ class LLMRuntime:
     def refresh_runtime_settings(self) -> None:
         previous = self.active_endpoint()
         configured = self.settings_repository.get_active_llm_endpoint_id()
-        self.active_endpoint_id = configured
+        self._observed_configured_selection = configured
+        if not self._selection_loaded:
+            self.active_endpoint_id = configured
+            self._selection_loaded = True
+        # External settings refresh cannot perform a history handoff. Keep the
+        # admitted source model until the idle control path commits a selection.
         endpoint = self.active_endpoint()
         self.think_level = self._effective_thinking_level(endpoint) or ""
         if endpoint is not None and (
@@ -556,11 +672,21 @@ class LLMRuntime:
             runtime_root, defaults=self._response_hook_defaults,
         )
         before = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
-        self.endpoint_resolver.refresh()
+        previous_endpoints = self.endpoint_resolver.endpoints
+        try:
+            self.endpoint_resolver.refresh()
+            adapters = self._bind_model_adapters(self.endpoint_resolver.endpoints, model_hooks, response_hooks)
+        except Exception:
+            self.endpoint_resolver.endpoints = previous_endpoints
+            raise
         refresh_settings = getattr(self.settings_repository, "refresh", None)
         if callable(refresh_settings):
             refresh_settings()
         self.model_hooks = model_hooks
+        self.model_adapters = adapters
+        self._native_token_counts.clear()
+        if isinstance(self.endpoint_invoker, ModelAdapterInvokerPort):
+            self.endpoint_invoker.configure_model_hooks(model_hooks)
         self.provider_response_hooks = response_hooks
         self.cache_profile_generation += 1
         refresh_credentials = getattr(
@@ -608,6 +734,7 @@ class LLMRuntime:
             raise ValueError(f"unknown enabled LLM endpoint: {normalized}")
         self.settings_repository.set_active_llm_endpoint_id(normalized)
         self.active_endpoint_id = normalized
+        self._observed_configured_selection = normalized
         self.think_level = self._effective_thinking_level(self.active_endpoint()) or ""
         activate = getattr(self.endpoint_invoker, "activate_endpoint", None)
         if callable(activate):
@@ -620,15 +747,17 @@ class LLMRuntime:
         if endpoint is None or think_level not in self._thinking_levels(endpoint):
             raise ValueError("Model endpoint or thinking level is no longer available.")
         previous, previous_think = self.active_endpoint_id, self.think_level
+        observed = self._observed_configured_selection
         try:
             with self.settings_repository.selection_transaction():
-                if self.settings_repository.get_active_llm_endpoint_id() != previous:
+                if self.settings_repository.get_active_llm_endpoint_id() != observed:
                     raise ValueError("Active model configuration changed during selection.")
                 self.set_think_level(think_level, endpoint_id=endpoint_id)
                 self.set_active_endpoint(endpoint_id)
                 self.resume_subscription(endpoint_id)
         except Exception:
             self.active_endpoint_id, self.think_level = previous, previous_think
+            self._observed_configured_selection = observed
             activate = getattr(self.endpoint_invoker, "activate_endpoint", None)
             if previous and callable(activate):
                 with suppress(Exception):
@@ -647,13 +776,19 @@ class LLMRuntime:
         capabilities = {REPLAY_BINDINGS_KEY: prepared.request.metadata[REPLAY_BINDINGS_KEY]}
         incompatible = any(
             has_opaque_continuation(message) and (
-                message.replay is None or not accepts_replay(
+                message.replay is None or (is_native_window(message) and
+                    message.replay.payload[NATIVE_WINDOW_KEY]["origin"] != native_origin(endpoint)) or not accepts_replay(
                     message.replay, wire_shape=WireShape(endpoint.wire_shape),
                     endpoint_id=endpoint.endpoint_id, model_id=endpoint.model_id,
                     capabilities=capabilities,
                 )
             ) for message in (*request.messages, *prepared.request.messages)
         )
+        source = self.active_endpoint()
+        cross_model = source is not None and source.model_id != endpoint.model_id and any(
+            m.prompt_region == PromptRegionIR.SETTLED_HISTORY
+            and (is_native_window(m) or m.semantic_kind not in {"conversation_continuity", "runtime_context_summary"})
+            for m in request.messages)
         base = replace(prepared.request, messages=tuple(
             m for m in prepared.request.messages if m.prompt_region != PromptRegionIR.SETTLED_HISTORY
         ))
@@ -662,7 +797,7 @@ class LLMRuntime:
         if target > 0 and base_tokens >= target:
             raise ValueError("The target model cannot fit Pal's fixed prompt and tools; Compact cannot help.")
         return ModelSwitchAdvice(
-            compact_required=incompatible or prepared.compact_required,
+            compact_required=cross_model or incompatible or prepared.compact_required,
             target_input_budget=max(0, target - base_tokens) if target else 0,
             reserved_output_tokens=prepared.request.policy.max_output_tokens,
         )
@@ -705,13 +840,13 @@ class LLMRuntime:
             self.think_level = normalized
         return normalized
 
-    def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+    def preflight(self, request: LLMPreflightRequest, *, stream_control: LLMStreamControl | None = None) -> LLMPreflightAdvice:
         self.refresh_runtime_settings()
         endpoints = self._enabled_endpoints(request.request)
         endpoint = endpoints[0] if endpoints else None
         if endpoint is None:
             raise LLMEndpointInvocationError("Selected LLM endpoint is unavailable or not configured. Select one with /model.")
-        prepared = self._compile_request(endpoint, request.request)
+        prepared = self._compile_request(endpoint, request.request, stream_control=stream_control)
         return LLMPreflightAdvice(
             status=(
                 LLMPreflightStatus.COMPACT_REQUIRED
@@ -729,6 +864,9 @@ class LLMRuntime:
         )
 
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+        if any(is_native_window(m) for m in request.request.messages):
+            control = LLMStreamControl()
+            return await self._await_native_job(lambda: self.preflight(request, stream_control=control), control)
         return self.preflight(request)
 
     def resolve_endpoint_facts(
@@ -1109,7 +1247,7 @@ class LLMRuntime:
                 prepared = generation_plan.prepared
             else:
                 try:
-                    prepared = self._compile_request(endpoint, request)
+                    prepared = self._compile_request(endpoint, request, stream_control=stream_control)
                 except CacheProfileError as exc:
                     self.usage_ledger.record_failed_request(endpoint_id=endpoint.endpoint_id)
                     yield LLMResponseUpdate(_failure_result(_public_failure_text(exc), exc=exc).response, delta_kind=LLMResponseDeltaKind.STATE)
@@ -1559,13 +1697,15 @@ class LLMRuntime:
         request: LLMRequestIR,
         *,
         check_replay: bool = True,
+        count_native: bool = True,
+        stream_control: LLMStreamControl | None = None,
     ) -> PreparedLLMRequest:
         LLMEndpointSpec.from_value(endpoint)
         endpoint_request = replace(request, model_hint=endpoint.model_id)
         hooked = (
             endpoint_request
             if bool(request.metadata.get("model_hooks_already_applied"))
-            else self.model_hooks.apply(endpoint.model_id, endpoint_request)
+            else self.model_adapters[endpoint.endpoint_id].apply(endpoint_request)
         )
         from pal.llm.prompt_cache import CacheProfileError, validate_cache_policy
         from pal.llm.shapes.base import ShapeContext
@@ -1631,6 +1771,10 @@ class LLMRuntime:
         # history's model binding and thereby bypass the replay guard.
         for message in (*request.messages, *prepared.messages):
             replay = message.replay
+            if check_replay and is_native_window(message):
+                validate_native_window(replay)
+                if replay.payload[NATIVE_WINDOW_KEY]["origin"] != native_origin(endpoint):
+                    raise LLMRequestPreparationError("Native compact history belongs to another model or service; hand off on the previous endpoint first")
             if check_replay and replay is not None and has_opaque_continuation(message) and not accepts_replay(replay,
                 capabilities={REPLAY_BINDINGS_KEY: replay_bindings},
                 wire_shape=WireShape(endpoint.wire_shape),
@@ -1647,7 +1791,9 @@ class LLMRuntime:
         return PreparedLLMRequest(
             endpoint=LLMEndpointSpec.from_value(endpoint),
             request=prepared,
-            estimated_input_tokens=_estimate_request_tokens(prepared),
+            estimated_input_tokens=(self._count_native_input(endpoint, prepared, control=stream_control)
+                if check_replay and count_native and any(is_native_window(m) for m in prepared.messages)
+                else _estimate_request_tokens(prepared)),
             target_input_budget=target,
         )
 
@@ -2127,7 +2273,13 @@ def _public_failure_text(exc: Exception | None) -> str:
 
 def _estimate_request_tokens(request: LLMRequestIR) -> int:
     chars = 0
+    native_tokens = 0
     for message in request.messages:
+        if is_native_window(message):
+            # Advice can use a provider-counted upper bound. Actual sends count
+            # the complete effective input; ciphertext length is never a proxy.
+            native_tokens += int(message.replay.payload[NATIVE_WINDOW_KEY].get("input_token_upper_bound", 0))
+            continue
         if message.replay is not None:
             # The continuation replaces the semantic representation on the
             # wire. Count it once; source_payload is local provenance only.
@@ -2138,7 +2290,7 @@ def _estimate_request_tokens(request: LLMRequestIR) -> int:
             chars += len(call.name) + len(json.dumps(thaw_json(call.arguments), ensure_ascii=False))
     for tool in request.tools:
         chars += len(tool.name) + len(tool.description) + len(json.dumps(thaw_json(tool.input_schema), ensure_ascii=False))
-    return max(1, (chars + 3) // 4)
+    return max(1, native_tokens + (chars + 3) // 4)
 
 
 def _request_has_image_input(request: LLMRequestIR) -> bool:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import freeze_json_mapping, thaw_json
 from pal.memory.continuity import ANCHOR_KEY, Continuity
+from pal.llm.compaction import is_native_window
 from pal.llm.serde import message_to_payload
 
 from dataclasses import dataclass, field, replace
@@ -280,7 +281,7 @@ class L1TurnIR:
                     for part in message.parts
                     if not isinstance(part, ToolCallIR) or part.call_id not in pending
                 )
-                if not parts:
+                if not parts and not is_native_window(message):
                     continue
                 protocol_changed = parts != message.parts
                 message = replace(
@@ -424,13 +425,15 @@ class L1TurnStore:
     @staticmethod
     def _read_continuity(turn: L1TurnIR) -> Continuity | None:
         message = next((m for m in turn.messages
-                        if m.semantic_kind == "runtime_context_summary" and m.text.strip()), None)
+                        if m.semantic_kind == "runtime_context_summary" and (m.text.strip() or is_native_window(m))), None)
         return Continuity.from_message(message, turn.metadata) if message is not None else None
 
     def project_continuity(self, messages: list[LLMMessageIR]) -> list[LLMMessageIR]:
         continuity = self.continuity
         if continuity is None:
             return messages
+        if continuity.native_window is not None:
+            return continuity.project_standalone(messages)
         if not continuity.anchor:
             from pal.memory.continuity import is_summary_projection
             visible = {m.message_id for m in messages}

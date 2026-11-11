@@ -21,6 +21,8 @@ from pal.llm.contracts import (
     LLMPreflightRequest,
 )
 from pal.llm.conversions import request_ir_from_prompt
+from pal.llm.compaction import is_native_window
+from pal.memory.compaction_candidate import CompactionCandidate
 from pal.llm.ir import (
     LLMMessageIR,
     LLMRequestIR,
@@ -29,6 +31,7 @@ from pal.llm.ir import (
     TextPartIR,
 )
 from pal.memory.contracts import (
+    CompactionSnapshotSourcePort,
     L1MessageKind,
     L1TranscriptMessage,
     L2Entry,
@@ -81,6 +84,7 @@ class CompactionSnapshot:
     clock_value: int
     memory_items: tuple[tuple[L1TranscriptMessage, ...], ...] = ()
     replay_request: LLMRequestIR | None = None
+    next_request: LLMRequestIR | None = None
     replay_dialect: str = ""
     replay_wire_shape: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -103,6 +107,7 @@ class CompactionSnapshot:
         clock_value: int,
         metadata: dict[str, Any] | None = None,
         replay_request: LLMRequestIR | None = None,
+        next_request: LLMRequestIR | None = None,
         replay_dialect: str = "",
         replay_wire_shape: str = "",
     ) -> "CompactionSnapshot":
@@ -123,9 +128,11 @@ class CompactionSnapshot:
             raise RuntimeError(
                 "memory service does not expose left_transcripts for v3 compaction"
             )
+        captured = (memory_service.snapshot_transcripts(left_snapshot)
+                    if isinstance(memory_service, CompactionSnapshotSourcePort) else transcripts())
         memory_items = tuple(
             tuple(_copy_l1_message(item) for item in transcript)
-            for transcript in transcripts()
+            for transcript in captured
         )
         merged = dict(metadata or {})
         merged["two_segment_run_id"] = str(left_snapshot.run_id)
@@ -136,6 +143,7 @@ class CompactionSnapshot:
             clock_value=max(0, int(clock_value or 0)),
             memory_items=memory_items,
             replay_request=replay_request,
+            next_request=next_request,
             replay_dialect=str(replay_dialect or "").strip(),
             replay_wire_shape=str(replay_wire_shape or "").strip(),
             metadata=deepcopy(merged),
@@ -196,6 +204,7 @@ class CompactionRunResult:
     usage: dict[str, Any] | None = None
     failure_details: tuple[str, ...] = ()
     diagnostic_reference: str = ""
+    candidate: CompactionCandidate | None = None
 
     @property
     def success(self) -> bool:
@@ -261,7 +270,14 @@ class CompactionEngine:
         commit_guard: Callable[[], bool] | None = None,
         commit_hooks: CompactionCommitHooks | None = None,
     ) -> CompactionRunResult:
-        snapshot = _scope_safe_snapshot(snapshot)
+        if snapshot.metadata.get("compaction_strategy") == "openai_responses":
+            return await self._run_native(snapshot, llm_runtime=llm_runtime,
+                memory_service=memory_service, after_commit=after_commit,
+                commit_guard=commit_guard, commit_hooks=commit_hooks)
+        native_source = snapshot.replay_request is not None and any(
+            is_native_window(m) for m in snapshot.replay_request.messages)
+        if not native_source:
+            snapshot = _scope_safe_snapshot(snapshot)
         units = list(build_compaction_units(snapshot))
         retained = list(units)
         source_sizes: list[int] = []
@@ -346,6 +362,8 @@ class CompactionEngine:
                 thinking_budget = snapshot.replay_request.policy.thinking_budget_tokens
                 if thinking_budget is not None and thinking_budget >= output_allowance:
                     _LOGGER.info("compact replay unavailable reason=thinking_budget_over_output_limit run=%s", run_id)
+                    if native_source:
+                        return finish(snapshot, status="source_too_large", attempts=attempts, failures=failures)
                     snapshot = replace(snapshot, replay_request=None, replay_dialect="", replay_wire_shape="")
             if hot_replay_unavailable():
                 return finish(
@@ -384,6 +402,8 @@ class CompactionEngine:
                     continue
             if _preflight_requires_compaction(advice):
                 if snapshot.replay_request is not None:
+                    if native_source:
+                        return finish(snapshot, status="source_too_large", attempts=attempts, failures=failures)
                     # The provider-identical replay is useful only while it
                     # fits.  Fall back to the bounded frozen-L1 source so the
                     # ordinary shrink policy can still recover an oversized
@@ -462,6 +482,8 @@ class CompactionEngine:
             if finish_reason == LLMFinishReason.COMPACT_REQUIRED:
                 log_failure("endpoint:compact_required")
                 if snapshot.replay_request is not None:
+                    if native_source:
+                        return finish(snapshot, status="source_too_large", attempts=attempts, failures=failures)
                     snapshot = replace(
                         snapshot,
                         replay_request=None,
@@ -640,6 +662,66 @@ class CompactionEngine:
             source_sizes=source_sizes,
             failures=failures,
         )
+
+    async def _run_native(
+        self, snapshot: CompactionSnapshot, *, llm_runtime: Any, memory_service: Any,
+        after_commit=None, commit_guard=None, commit_hooks=None,
+    ) -> CompactionRunResult:
+        request = snapshot.replay_request
+        if request is None:
+            return self._result(snapshot, status="source_unavailable", attempts=0,
+                                failures=("Native compact requires the canonical captured history",))
+        failures: list[str] = []
+        for attempt in range(1, max(1, self.max_attempts) + 1):
+            try:
+                replay, tokens, usage = await llm_runtime.acompact_native(request, timeout_seconds=self.timeout_seconds,
+                    **({"next_request": snapshot.next_request} if snapshot.next_request is not None else {}))
+                headroom = int(snapshot.metadata.get("next_round_headroom_tokens") or 0)
+                if snapshot.target_input_budget and tokens + headroom > snapshot.target_input_budget:
+                    raise ValueError("native compact output does not fit the next input budget")
+                refs = {}
+                call_ids = set(snapshot.metadata.get("retained_result_call_ids") or ())
+                for transcript in snapshot.memory_items:
+                    for message in transcript:
+                        meta = message.payload
+                        for ref in (*meta.get("result_snapshots", ()),
+                                    *dict(meta.get("_pal_result_state") or {}).get("snapshot_refs", ())):
+                            refs[ref["snapshot_id"]] = ref
+                candidate = CompactionCandidate(native_window=replay,
+                    source_ids=tuple(snapshot.metadata.get("compact_source_ids") or ()),
+                    retained_result_refs=tuple(sorted(call_ids)), result_snapshots=tuple(refs.values()), usage=usage)
+                entry = candidate.as_entry()
+                if commit_hooks is not None:
+                    entry = commit_hooks.decorate(entry)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures.append(f"native:{type(exc).__name__}: {exc}")
+                _LOGGER.warning("native compact attempt=%s failed: %s", attempt, type(exc).__name__)
+                continue
+            if commit_guard is not None and not commit_guard():
+                return self._result(snapshot, status="ticket_cancelled", attempts=attempt, failures=failures)
+            if commit_hooks is not None:
+                try:
+                    staged = asyncio.create_task(asyncio.to_thread(commit_hooks.stage))
+                    try:
+                        await asyncio.shield(staged)
+                    except asyncio.CancelledError:
+                        await staged
+                        raise
+                except Exception as exc:
+                    return self._result(snapshot, status="commit_failed", attempts=attempt,
+                                        failures=(*failures, f"archive:{type(exc).__name__}"))
+                if commit_guard is not None and not commit_guard():
+                    return self._result(snapshot, status="ticket_cancelled", attempts=attempt, failures=failures)
+            committed = await self._commit(snapshot, memory_service=memory_service,
+                                           summary_entry=entry, after_commit=after_commit)
+            if isinstance(committed, Exception):
+                return self._result(snapshot, status="commit_failed", attempts=attempt,
+                                    failures=(*failures, f"commit:{type(committed).__name__}"))
+            return replace(self._result(snapshot, status="compacted", attempts=attempt,
+                summary_entry=entry, memory_result=committed, usage=usage, failures=failures), candidate=candidate)
+        return self._result(snapshot, status="failed", attempts=max(1, self.max_attempts), failures=failures)
 
     def _request(
         self,
@@ -902,6 +984,9 @@ class CompactionEngine:
             attempts=max(0, int(attempts)),
             summary_entry=summary_entry,
             memory_result=memory_result,
+            candidate=(CompactionCandidate(checkpoint=summary_entry,
+                source_ids=tuple(snapshot.metadata.get("compact_source_ids") or ()))
+                if summary_entry is not None and "native_window" not in summary_entry.payload else None),
             source_sizes=tuple(max(0, int(size)) for size in source_sizes),
             failures=tuple(str(item) for item in failures if str(item)),
             clock_kind=snapshot.clock_kind,

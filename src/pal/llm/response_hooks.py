@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,7 @@ class EndpointResponseHook:
 class ProviderResponseHookRegistry:
     hooks: Mapping[str, ProviderResponseHook]
     endpoint_hooks: Mapping[str, EndpointResponseHook] = field(default_factory=dict)
+    revision: str = "builtin-v1"
 
     def __post_init__(self) -> None:
         providers = {str(key).strip().lower(): hook for key, hook in self.hooks.items()}
@@ -66,11 +68,14 @@ class ProviderResponseHookRegistry:
     ) -> "ProviderResponseHookRegistry":
         base = defaults if defaults is not None else cls.builtin()
         providers, endpoints = dict(base.hooks), dict(base.endpoint_hooks)
-        providers.update({key: ProviderResponseHook(key, normalizer) for key, normalizer in
-                          _load_hook_files(Path(runtime_root) / "llm/providers", "PROVIDER_ID", provider=True).items()})
-        endpoints.update({key: EndpointResponseHook(key, normalizer) for key, normalizer in
-                          _load_hook_files(Path(runtime_root) / "llm/endpoints", "ENDPOINT_ID").items()})
-        return cls(providers, endpoints)
+        provider_hooks, provider_revision = _load_hook_files(
+            Path(runtime_root) / "llm/providers", "PROVIDER_ID", provider=True)
+        endpoint_hooks, endpoint_revision = _load_hook_files(
+            Path(runtime_root) / "llm/endpoints", "ENDPOINT_ID")
+        providers.update({key: ProviderResponseHook(key, normalizer) for key, normalizer in provider_hooks.items()})
+        endpoints.update({key: EndpointResponseHook(key, normalizer) for key, normalizer in endpoint_hooks.items()})
+        revision = hashlib.sha256((base.revision + provider_revision + endpoint_revision).encode()).hexdigest()
+        return cls(providers, endpoints, revision)
 
     def bind(self, *, endpoint_id: str, provider_id: str) -> BoundResponseHooks:
         provider = self.hooks.get(str(provider_id).strip().lower())
@@ -100,10 +105,11 @@ class ProviderResponseHookRegistry:
 
 def _load_hook_files(
     root: Path, identity_key: str, *, provider: bool = False,
-) -> dict[str, ResponseNormalizer]:
+) -> tuple[dict[str, ResponseNormalizer], str]:
     loaded: dict[str, ResponseNormalizer] = {}
+    digest = hashlib.sha256()
     if not root.is_dir():
-        return loaded
+        return loaded, digest.hexdigest()
     for path in sorted(root.rglob("*.py")):
         if path.name.startswith("_"):
             continue
@@ -115,7 +121,10 @@ def _load_hook_files(
         module = importlib.util.module_from_spec(spec)
         try:
             # Reload edits even if size and filesystem timestamp match cached bytecode.
-            exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+            source = path.read_bytes()
+            exec(compile(source, str(path), "exec"), module.__dict__)
+            digest.update(str(path.relative_to(root)).encode())
+            digest.update(source)
         except Exception as exc:
             raise ProviderResponseHookError(f"response hook import failed: {path}") from exc
         identity = str(module.__dict__.get(identity_key) or "").strip()
@@ -129,4 +138,4 @@ def _load_hook_files(
         if identity in loaded:
             raise ProviderResponseHookError(f"duplicate response hook for {identity}: {path}")
         loaded[identity] = normalizer
-    return loaded
+    return loaded, digest.hexdigest()

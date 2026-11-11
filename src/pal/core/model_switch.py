@@ -244,7 +244,7 @@ class ModelSwitchMixin:
                     ticket, preferred_endpoint_id=source,
                     target_input_budget=advice.target_input_budget,
                     reserved_output_tokens=advice.reserved_output_tokens,
-                    commit_guard=current,
+                    commit_guard=current, force_semantic=True,
                 )
                 if not compact_result.success:
                     await self._complete_model_switch_reply_async(

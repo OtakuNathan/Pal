@@ -96,6 +96,8 @@ class ReplayCompatibilityTests(unittest.TestCase):
                 runtime.model_hooks = ModelHookRegistry({target.model_id: ModelHook(
                     target.model_id, adjust_messages=transform,
                 )})
+                runtime.model_adapters = runtime._bind_model_adapters(
+                    runtime.endpoint_resolver.endpoints, runtime.model_hooks, runtime.provider_response_hooks)
                 self.assertTrue(runtime.model_switch_advice("b", request).compact_required)
                 with self.assertRaisesRegex(LLMRequestPreparationError, "previous model"):
                     runtime._compile_request(target, request)
@@ -108,7 +110,8 @@ class ReplayCompatibilityTests(unittest.TestCase):
         old_plan = runtime.prepare_generation_plan(request)
         old_identity = runtime.endpoint_projection_session("test", plan=old_plan).identity
         advice = runtime.model_switch_advice("b", request)
-        self.assertFalse(advice.compact_required)
+        # Cross-model control switches hand off even when low-level replay is compatible.
+        self.assertTrue(advice.compact_required)
         plan = runtime.prepare_generation_plan(replace(request, metadata={"preferred_endpoint_id": "b"}))
         self.assertIsNotNone(plan)
         session = runtime.endpoint_projection_session("test", plan=plan)
@@ -620,8 +623,8 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.compact_calls, [])
         self.assertEqual(self.llm.active_endpoint_id, "a")
 
-    async def test_family_switch_and_empty_history_do_not_compact(self):
-        self.target.model_id = "gpt-5.6-luna"
+    async def test_same_model_compatible_switch_does_not_compact(self):
+        self.target.model_id = "gpt-5.6-sol"
         request = await self.select()
         self.assertEqual(request.payload["stage"], "think")
         await self.step(request, "think", think_level="low")

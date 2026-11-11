@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.llm.compaction import is_native_window
+
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Mapping
 from uuid import uuid4
@@ -15,7 +17,7 @@ from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
 
 
-MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "4"
+MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "5"
 
 _RECEIPT_FIELDS = (
     "op_id", "status", "epoch_before", "epoch_after", "summary_source_id",
@@ -97,7 +99,7 @@ class MemoryRuntimeStatePort:
     service: MemoryService
     module_id: str = "memory"
     schema_version: str = MEMORY_RUNTIME_STATE_SCHEMA_VERSION
-    readable_schema_versions = ("1", "2", "3", "4")
+    readable_schema_versions = ("1", "2", "3", "4", "5")
     state_order: int = 100
 
     def finish_restore_state(self, ports) -> None:
@@ -485,7 +487,7 @@ def _normalize_tool_protocol(
             parts = tuple(
                 part for part in parts if not isinstance(part, ReasoningPartIR)
             )
-        if not parts and message.role in {MessageRole.ASSISTANT, MessageRole.TOOL}:
+        if not parts and not is_native_window(message) and message.role in {MessageRole.ASSISTANT, MessageRole.TOOL}:
             repaired = repaired or changed
             continue
         normalized.append(

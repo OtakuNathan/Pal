@@ -8,10 +8,11 @@ from typing import Any
 
 from pal.llm.chatgpt import is_chatgpt
 from pal.llm.endpoint_auth import ChatGPTEndpointAuth, EndpointAuth
-from pal.llm.endpoint_components import LLMEndpoint, compile_endpoint_codec
+from pal.llm.endpoint_components import EndpointCodec, LLMEndpoint, compile_endpoint_codec
 from pal.llm.endpoint_spec import LLMEndpointSpec, endpoint_spec_fingerprint
 from pal.llm.http_transport import DefaultSDKClientFactory, SDKClientFactory, SDKJSONTransport
 from pal.llm.models import LLMEndpointModel
+from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.request_contracts import RequestSubmission
 from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.shapes.base import _JSONFrame
@@ -32,18 +33,19 @@ class DirectEndpointTransport:
     sdk_transport: Any = None
     websocket_transport: AuthenticatedFrameTransport | None = None
     response_hooks: ProviderResponseHookRegistry = field(default_factory=ProviderResponseHookRegistry.builtin)
+    model_hooks: ModelHookRegistry = field(default_factory=lambda: ModelHookRegistry({}))
     _endpoints: dict[str, LLMEndpoint] = field(default_factory=dict, init=False, repr=False)
     _fingerprints: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
-    def bind(self, endpoint: LLMEndpointModel | LLMEndpointSpec) -> LLMEndpoint:
+    def bind(self, endpoint: LLMEndpointModel | LLMEndpointSpec, *, compiled: EndpointCodec | None = None) -> LLMEndpoint:
         spec = LLMEndpointSpec.from_value(endpoint)
         fingerprint = endpoint_spec_fingerprint(spec)
         previous = None
         with self._lock:
             if self._fingerprints.get(spec.endpoint_id) == fingerprint:
                 return self._endpoints[spec.endpoint_id]
-            compiled = compile_endpoint_codec(spec, self.response_hooks)
+            compiled = compiled or compile_endpoint_codec(spec, self.response_hooks, self.model_hooks)
             # Access profile selects credential/failure policy, never transport.
             auth_type = ChatGPTEndpointAuth if is_chatgpt(spec) else EndpointAuth
             auth = auth_type(compiled.spec, self.credential_resolver)
@@ -52,13 +54,19 @@ class DirectEndpointTransport:
             else:
                 port = self.sdk_transport or SDKJSONTransport()
             bound = LLMEndpoint(compiled.spec, compiled.codec, compiled.context, auth, port,
-                                response_hooks=compiled.response_hooks)
+                                response_hooks=compiled.response_hooks, adapter=compiled.adapter)
             previous = self._endpoints.get(spec.endpoint_id)
             self._endpoints[spec.endpoint_id] = bound
             self._fingerprints[spec.endpoint_id] = fingerprint
         if previous is not None:
             previous.retire(close_transport=previous.transport is not bound.transport)
         return bound
+
+    def configure_model_hooks(self, registry: ModelHookRegistry) -> None:
+        with self._lock:
+            if registry is not self.model_hooks:
+                self.model_hooks = registry
+                self._fingerprints.clear()
 
     def configure_response_hooks(self, registry: ProviderResponseHookRegistry) -> None:
         """Future admissions rebind; existing endpoint generations stay frozen."""
@@ -70,8 +78,10 @@ class DirectEndpointTransport:
 
     def prepare_endpoints(self, endpoints: Iterable[LLMEndpointModel | LLMEndpointSpec]) -> None:
         specs = tuple(LLMEndpointSpec.from_value(endpoint) for endpoint in endpoints)
-        for spec in specs:
-            self.bind(spec)
+        # Validate the whole replacement before publishing any new generation.
+        staged = tuple(compile_endpoint_codec(spec, self.response_hooks, self.model_hooks) for spec in specs)
+        for compiled in staged:
+            self.bind(compiled.spec, compiled=compiled)
         live = {spec.endpoint_id for spec in specs}
         retired = []
         with self._lock:

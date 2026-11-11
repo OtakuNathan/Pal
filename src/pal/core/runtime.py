@@ -2086,6 +2086,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         reserved_output_tokens: int = 0, preferred_endpoint_id: str | None = None,
         max_attempts: int | None = None, cache_epoch: str = "",
         commit_guard: Callable[[], bool] | None = None,
+        force_semantic: bool = False,
     ) -> CompactionRunResult:
         gate = self._compaction_gate()
 
@@ -2103,6 +2104,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             reserved_output_tokens=reserved_output_tokens,
             preferred_endpoint_id=preferred_endpoint_id,
             max_attempts=max_attempts, cache_epoch=cache_epoch, commit_guard=eligible,
+            **({"force_semantic": True} if force_semantic else {}),
         )
         if run_result.success:
             async with self.state.channel_turn_transition_lock:

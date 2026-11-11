@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolDefinitionIR
 
+import hashlib
 import importlib.util
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -31,6 +32,8 @@ class ModelHook:
     adjust_messages: MessageHook | None = None
     adjust_tools: ToolHook | None = None
     cache_profile_ref: str | None = None
+    compaction_strategy: str = "auto"
+    revision: str = "builtin-v1"
 
     def __post_init__(self) -> None:
         if not str(self.model_id or "").strip():
@@ -96,14 +99,15 @@ def _load_hook(path: Path) -> ModelHook:
         raise ModelHookError(f"cannot load model hook: {path}")
     module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)
+        source = path.read_bytes()
+        exec(compile(source, str(path), "exec"), module.__dict__)
     except Exception as exc:
         raise ModelHookError(f"model hook failed to import: {path}: {exc}") from exc
-    return _hook_from_module(module, path)
+    return replace(_hook_from_module(module, path), revision=hashlib.sha256(source).hexdigest())
 
 
 def _hook_from_module(module: ModuleType, path: Path) -> ModelHook:
-    exported = getattr(module, "MODEL_HOOK", None)
+    exported = getattr(module, "MODEL_ADAPTER", None) or getattr(module, "MODEL_HOOK", None)
     if isinstance(exported, ModelHook):
         return exported
     model_id = str(getattr(module, "MODEL_ID", "") or "").strip()
@@ -128,6 +132,7 @@ def _hook_from_module(module: ModuleType, path: Path) -> ModelHook:
         adjust_messages=adjust_messages,
         adjust_tools=adjust_tools,
         cache_profile_ref=getattr(module, "CACHE_PROFILE_REF", None),
+        compaction_strategy=getattr(module, "COMPACTION_STRATEGY", "auto"),
     )
 
 

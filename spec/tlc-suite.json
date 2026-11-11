@@ -643,6 +643,12 @@
       "kind": "positive"
     },
     {
+      "config": "spec/llm/RoundSubmission_native_capture.cfg",
+      "module": "spec/llm/RoundSubmission.tla",
+      "kind": "negative",
+      "invariant": "FrozenDuringCompact"
+    },
+    {
       "config": "spec/llm/RoundSubmission_early.cfg",
       "module": "spec/llm/RoundSubmission.tla",
       "kind": "negative",
