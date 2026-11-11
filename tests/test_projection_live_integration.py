@@ -53,6 +53,7 @@ class _Endpoint:
         self.base_url = "http://test.local"
         self.auth_kind = "api_key_ref"
         self.credential_ref = "test-cred-ref"
+        self.capabilities_blob = {}
         self.display_name = endpoint_id
         self.default_thinking_level = "high"
         self.thinking_levels_blob = ["off", "minimal", "low", "medium", "high"]

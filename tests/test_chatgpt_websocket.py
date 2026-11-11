@@ -321,10 +321,11 @@ def test_ambiguous_failure_is_not_automatically_replayed_by_runtime(phase, strea
                      send_error=OSError("write failed") if phase == "send" else None)
     connector = _Connector(socket)
     ws = ResponsesWebSocketTransport(connector)
-    runtime = _runtime(_SwitchSettingsRepository(True), active="chatgpt")
-    runtime.endpoint_resolver.endpoints = (endpoint(),)
-    runtime.endpoint_invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(
-        lambda ep: "token", websocket_transport=ws))
+    runtime = _runtime(
+        _SwitchSettingsRepository(True), active="chatgpt", endpoints=(endpoint(),),
+        invoker=ShapeEndpointInvoker(transport=DirectSDKTransport(
+            lambda ep: "token", websocket_transport=ws)),
+    )
     try:
         if streaming:
             result = list(runtime._iter_stream_updates(request()))[-1].response

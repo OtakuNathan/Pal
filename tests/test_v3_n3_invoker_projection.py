@@ -61,10 +61,10 @@ class CapturingTransport:
         pass
 
 
-def prepared_projection() -> tuple[EncodedRequest, EndpointProjectionSession]:
+def prepared_projection(binding=None) -> tuple[EncodedRequest, EndpointProjectionSession]:
     """A real session-prepared normal request for a two-round lineage."""
     session = EndpointProjectionSession(LogicalSessionId('n3:resident'))
-    session.bind(EndpointBinding(
+    session.bind(binding or EndpointBinding(
         endpoint_id="proj-endpoint", model_id="proj-model",
         wire_shape=WireShape.OPENAI_COMPLETION, endpoint_spec_revision="r1",
         continuation_policy_version="p1", config_fingerprint="f1"))
@@ -151,7 +151,6 @@ class EndpointMatchTests(unittest.TestCase):
         from tests.test_prompt_cache_v2_runtime import runtime as build_runtime
         import tempfile
 
-        projection, session = prepared_projection()
         # A runtime whose resolved endpoint differs from the projection's
         # binding must drop it (cold codec path), never send a prefix that
         # was prepared against another endpoint (W3/N13).
@@ -162,10 +161,16 @@ class EndpointMatchTests(unittest.TestCase):
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }])
         rt = build_runtime(other, transport, tempfile.mkdtemp())
+        target = endpoint()
+        rt.endpoint_resolver.endpoints = (other, target)
+        rt.refresh_llm_endpoints()
+        binding = rt._projection_binding(
+            target, capabilities=rt._projection_capabilities(target, selection=None))
+        projection, session = prepared_projection(binding)
         self.assertIsNone(
             rt._projection_for_endpoint(other, projection, session.binding))
         self.assertIs(
-            rt._projection_for_endpoint(endpoint(), projection, session.binding),
+            rt._projection_for_endpoint(target, projection, session.binding),
             projection)
 
 
