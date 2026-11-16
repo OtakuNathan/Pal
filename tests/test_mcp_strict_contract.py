@@ -26,6 +26,7 @@ for line in sys.stdin:
  if method=='initialize':
   result={'protocolVersion':'2025-06-18','serverInfo':{'name':'strict-test','version':'1'},'capabilities':{'tools':{},'prompts':{}}}
   if mode=='version': result['protocolVersion']='2099-01-01'
+  if mode=='legacy': result['protocolVersion']='2024-11-05'
   if mode=='initialize': result.pop('serverInfo')
  elif method=='tools/list':
   tools=[{'name':'write','inputSchema':{'type':'object'}}]
@@ -53,13 +54,15 @@ for line in sys.stdin:
 '''
 
 
-def config(root, mode):
+def config(root, mode, extra=None):
     script = root / 'server.py'
     script.write_text(SERVER)
     directory = mcp_config_root(root)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / 'demo.json'
-    path.write_text(json.dumps({'command': [sys.executable, str(script), mode], 'request_timeout_ms': 2000}))
+    payload = {'command': [sys.executable, str(script), mode], 'request_timeout_ms': 2000}
+    payload.update(extra or {})
+    path.write_text(json.dumps(payload))
     return path
 
 
@@ -76,6 +79,51 @@ def test_invalid_server_is_rejected_whole_and_not_automatically_retried(tmp_path
         await manager.rescan()
         assert manager.read_server('demo')['failure_details'] == first
         assert manager.states['demo'].connector is None
+        await manager.close_all()
+    asyncio.run(run())
+
+
+def test_legacy_protocol_version_is_rejected_unless_pinned(tmp_path):
+    config(tmp_path, 'legacy')
+    async def run():
+        manager = McpManager(tmp_path)
+        assert not (await manager.rescan())['ok']
+        error = manager.read_server('demo')['failure_details']['error']
+        assert 'unsupported protocol version' in error
+        await manager.close_all()
+    asyncio.run(run())
+
+
+def test_pinned_legacy_protocol_version_attaches_and_calls(tmp_path):
+    config(tmp_path, 'legacy', extra={'protocol_version': '2024-11-05'})
+    async def run():
+        manager = McpManager(tmp_path)
+        assert (await manager.rescan())['ok']
+        assert manager.states['demo'].attached
+        result = await manager.call_tool('demo', 'write', {})
+        assert result['content'][0]['text'] == 'done'
+        await manager.close_all()
+    asyncio.run(run())
+
+
+def test_pin_requires_the_negotiated_version_to_match_exactly(tmp_path):
+    config(tmp_path, 'good', extra={'protocol_version': '2024-11-05'})
+    async def run():
+        manager = McpManager(tmp_path)
+        assert not (await manager.rescan())['ok']
+        error = manager.read_server('demo')['failure_details']['error']
+        assert 'unsupported protocol version' in error
+        await manager.close_all()
+    asyncio.run(run())
+
+
+def test_unsupported_pin_values_are_rejected(tmp_path):
+    config(tmp_path, 'good', extra={'protocol_version': '2099-01-01'})
+    async def run():
+        manager = McpManager(tmp_path)
+        assert not (await manager.rescan())['ok']
+        error = manager.read_server('demo')['failure_details']['error']
+        assert 'Unsupported MCP version: 2099-01-01' in error
         await manager.close_all()
     asyncio.run(run())
 

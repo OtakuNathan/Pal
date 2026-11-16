@@ -18,6 +18,12 @@ from jsonschema.exceptions import SchemaError
 from pal.mcp.model import McpProtocolError
 
 PROTOCOL_VERSION = "2025-06-18"
+# Revisions a server may be pinned to in its config. Pal requests exactly the
+# pinned revision and requires the negotiated reply to match it; there is no
+# silent downgrade. Every message is still validated against the vendored
+# 2025-06-18 schema, so an older server must emit messages the newer schema
+# already accepts.
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, "2024-11-05"})
 _SCHEMA = json.loads(files("pal.mcp").joinpath("schema_2025_06_18.json").read_text())
 _FORMATS = FormatChecker()
 

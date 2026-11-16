@@ -11,6 +11,7 @@ from pal.mcp.ipc import McpManagerRpcError
 from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpProtocolError, McpRemoteError, McpToolSpec
 # Keep validators and the exceptions caught below in the same module generation.
 from pal.mcp.protocol import validate_message, validate_tool_result
+from pal.mcp.schema_translation import translate_tool_schema
 from pal.shared import RuntimeStatus
 from pal.shared.diagnostics import diagnostic_text, exception_reason, diagnostic_reason
 from pal.shared.result_rendering import render_titled_structured_for_llm
@@ -31,8 +32,8 @@ def normalize_tool_payload(payload: dict[str, Any]) -> McpToolSpec:
     return McpToolSpec(
         name=payload["name"],
         description=str(payload.get("description") or "").strip(),
-        input_schema=payload.get("inputSchema"),
-        output_schema=payload.get("outputSchema"),
+        input_schema=translate_tool_schema(payload.get("inputSchema")),
+        output_schema=translate_tool_schema(payload.get("outputSchema")),
         annotations=dict(payload.get("annotations") or {}),
         raw=dict(payload),
     )

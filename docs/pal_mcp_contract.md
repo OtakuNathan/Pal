@@ -68,6 +68,11 @@ Current defaults:
 - `shutdown_timeout_ms = 5000`
 - Pal-to-manager IPC request timeout: `300s`
 
+The default protocol revision is `2025-06-18`. An older server may explicitly
+pin `protocol_version = "2024-11-05"`; its initialize response must match that
+pin. Messages still pass the vendored 2025-06-18 schema checks, so this supports
+the compatible subset of the older revision without automatic negotiation.
+
 ## Lifecycle
 
 Provider readiness precedes capability publication. Callable authority and discovery
@@ -113,10 +118,15 @@ The MCP external tool name is preserved in metadata. The Pal canonical path is g
 
 Tool schema rules:
 
-- `inputSchema` must explicitly declare `type: object`; it is passed through unchanged.
+- `inputSchema` must explicitly declare `type: object`.
 - Missing/invalid schemas, malformed discovery, duplicate identities, or unsupported
   schema dialects reject attachment of the **entire server**. No partial tool list is published.
 - Tool schemas use JSON Schema Draft 2020-12 (also the default when `$schema` is absent).
+  Explicit Draft-07 input/output schemas are translated before registration:
+  definitions, tuple items, dependencies and local references retain their validation
+  semantics. Examples/defaults and literal values are not interpreted as schemas;
+  the original discovery payload remains in `raw`. Mixed dialects and unsupported
+  reference targets are rejected. See the [JSON Schema migration notes](https://json-schema.org/draft/2020-12/release-notes).
   Only local JSON Pointer `$ref` references are supported. Remote references, dynamic
   references and nested resource identities fail explicitly; nothing is fetched or repaired.
 - Initialization, discovery, content blocks and optional standard fields use the vendored

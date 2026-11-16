@@ -16,7 +16,7 @@ from pal.shared.diagnostics import diagnostic_text, exception_summary
 
 from pal.mcp.model import McpProtocolError, McpRemoteError, McpPromptSpec, McpServerConfig, McpToolSpec
 from pal.mcp.normalize import normalize_prompt_payload, normalize_tool_payload
-from pal.mcp.protocol import PROTOCOL_VERSION, validate_message
+from pal.mcp.protocol import SUPPORTED_PROTOCOL_VERSIONS, validate_message
 
 
 from pal.mcp.contracts import McpConnector as McpConnector
@@ -70,8 +70,9 @@ class AsyncStdioMcpConnector:
 
     async def initialize(self) -> None:
         async with self._lifecycle_lock:
-            if self.config.protocol_version != PROTOCOL_VERSION:
-                raise McpProtocolError(f"Unsupported MCP version: {self.config.protocol_version}; supported: {PROTOCOL_VERSION}")
+            if self.config.protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+                supported = ", ".join(sorted(SUPPORTED_PROTOCOL_VERSIONS))
+                raise McpProtocolError(f"Unsupported MCP version: {self.config.protocol_version}; supported: {supported}")
             await self._start()
             result = await self._request(
                 "initialize",
@@ -83,7 +84,7 @@ class AsyncStdioMcpConnector:
                 timeout_ms=self.config.startup_timeout_ms,
             )
             validate_message(result, "InitializeResult")
-            if result["protocolVersion"] != PROTOCOL_VERSION:
+            if result["protocolVersion"] != self.config.protocol_version:
                 raise McpProtocolError("MCP negotiated an unsupported protocol version", payload={"raw_response": result})
             self.server_info = dict(result["serverInfo"])
             self.server_capabilities = dict(result.get("capabilities") or {})
