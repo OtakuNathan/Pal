@@ -53,11 +53,12 @@ class _FakeTelegramBot:
     async def send_message(self, **kwargs) -> None:
         self.messages.append(dict(kwargs))
 
-    async def send_document(self, **kwargs) -> None:
+    async def send_document(self, **kwargs) -> SimpleNamespace:
         document = kwargs.get("document")
         self.documents.append(dict(kwargs))
         assert document is not None
         assert not document.closed
+        return SimpleNamespace(message_id=len(self.documents))
 
 
 class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
