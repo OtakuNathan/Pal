@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import io
 import logging
 import os
 from pathlib import Path
@@ -30,6 +32,7 @@ from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import ChannelStreamUpdateKind, EventKind, LLMFinishReason, SourceKind
 
 from .interaction_store import TelegramInteractionStore
+from .interaction_presentation import SEPARATE_DETAILS_KINDS, decision_text, closed_text
 
 
 logger = logging.getLogger(__name__)
@@ -353,6 +356,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         repr=False,
     )
     _tracked_delivery_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _attachment_delivery_events: list[EventEnvelope] = field(default_factory=list, init=False, repr=False)
+    _delivered_details: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     drop_pending_updates_on_start: bool = True
     _polling_running: bool = False
     _authorized: bool = False
@@ -562,7 +567,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     def flush_attachment_outbox(self) -> list[EventEnvelope]:
         pending = list(self.attachment_outbox)
         self.attachment_outbox.clear()
-        emitted = self._collect_attachment_delivery_results()
+        emitted = [*self._attachment_delivery_events, *self._collect_attachment_delivery_results()]
+        self._attachment_delivery_events.clear()
         if not pending:
             return emitted
         for item in pending:
@@ -755,6 +761,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             loop.create_task(self._apply_control_catalog_async(payload))
             return
         if kind in {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}:
+            # Channel flushes statuses before attachments. Put already queued
+            # review files ahead of their keyboard on this provider's send chain.
+            self._attachment_delivery_events.extend(self.flush_attachment_outbox())
             self._schedule_ordered_send(
                 response_handle,
                 lambda: self._apply_interactive_status_async(
@@ -1251,6 +1260,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return None
         if str(metadata.get("chat_id")) != str(chat_id):
             return None
+        if str(metadata.get("message_id")) != str(getattr(message, "message_id", "")):
+            return None
         if self.is_interaction_metadata_expired(metadata):
             target = self._interactive_messages.pop(interaction_id, None)
             if isinstance(target, dict):
@@ -1726,8 +1737,19 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if thread_id is not None:
             kwargs["message_thread_id"] = thread_id
         try:
-            with path.open("rb") as file_obj:
-                await self.application.bot.send_document(document=file_obj, **kwargs)
+            # Small text artifacts can also serve as an interaction's details.
+            # Pin the exact bytes sent so a later card cannot reuse a different
+            # file that happened to occupy the same path.
+            content = None
+            if path.suffix.lower() in {".md", ".yaml", ".yml", ".txt", ".json"} and path.stat().st_size <= 4 * 1024 * 1024:
+                content = await asyncio.to_thread(path.read_bytes)
+            if content is not None:
+                with io.BytesIO(content) as file_obj:
+                    sent = await self.application.bot.send_document(document=file_obj, **kwargs)
+                self._remember_delivered_details(response_handle, content, sent, document=True)
+            else:
+                with path.open("rb") as file_obj:
+                    await self.application.bot.send_document(document=file_obj, **kwargs)
             self.last_delivery_error = ""
         except Exception as exc:
             self.last_delivery_error = str(exc)
@@ -1736,6 +1758,52 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 permanent=False,
                 reason="telegram_send_failed",
             ) from exc
+
+    def _remember_delivered_details(
+        self, response_handle: ResponseHandle, content: bytes, sent: Any, *, document: bool,
+    ) -> dict[str, Any]:
+        message_id = _safe_int(getattr(sent, "message_id", None))
+        if message_id is None:
+            raise ChannelDeliveryError("Telegram did not return a details message ID", permanent=False,
+                                       reason="telegram_details_unconfirmed")
+        digest = hashlib.sha256(content).hexdigest()
+        target = {"details_digest": digest, "details_message_id": message_id,
+                  "details_document": document, "details_bytes": len(content)}
+        self._delivered_details[(self._typing_key(response_handle), digest)] = target
+        while len(self._delivered_details) > 128:
+            self._delivered_details.pop(next(iter(self._delivered_details)))
+        return target
+
+    async def _send_interaction_details_async(
+        self, response_handle: ResponseHandle, spec: InteractionMessageSpec,
+        existing: dict[str, Any] | None, *, limit: int,
+    ) -> dict[str, Any]:
+        text = interaction_text(spec)
+        content = text.encode("utf-8")
+        digest = hashlib.sha256(content).hexdigest()
+        if existing and existing.get("details_digest") == digest and existing.get("details_message_id"):
+            return {key: existing[key] for key in ("details_digest", "details_message_id", "details_document", "details_bytes")}
+        cached = self._delivered_details.get((self._typing_key(response_handle), digest))
+        if cached is not None:
+            return dict(cached)
+        if not text.strip():
+            return {}
+        kwargs: dict[str, Any] = {"chat_id": _safe_int(response_handle.reply_target.get("chat_id"))}
+        thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        parts = _telegram_interaction_segments(spec, limit=limit)
+        document = len(text.encode("utf-16-le")) // 2 > limit or len(parts) != 1
+        if document:
+            with io.BytesIO(content) as file_obj:
+                sent = await self.application.bot.send_document(document=file_obj, filename="interaction-details.md", **kwargs)
+        else:
+            part = parts[0]
+            kwargs["text"] = part.rendered_text
+            if part.parse_mode is not None:
+                kwargs["parse_mode"] = part.parse_mode
+            sent = await self.application.bot.send_message(**kwargs)
+        return self._remember_delivered_details(response_handle, content, sent, document=document)
 
     async def _apply_interactive_status_async(
         self,
@@ -1773,24 +1841,19 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return
         await self._prune_interactive_messages_async()
         existing = self._restore_interaction(spec.interaction_id)
-        max_chars = max(int(self.endpoint.send_policy.get("max_message_chars") or 4096), 1)
-        if allow_update and existing is not None and len(interaction_text(spec)) <= max_chars:
-            if await self._edit_interaction_message_async(existing, spec=spec):
-                self._remember_interaction(spec, existing)
-                await self._send_interaction_inputs(spec, existing)
-                return
-            if not _telegram_interaction_target_is_stale(self.last_delivery_error):
-                # A transient edit failure must not create a second active
-                # keyboard. Keep the durable target and let a later update
-                # retry the same message.
-                return
-            super().forget_interaction_message(spec.interaction_id)
-            existing = None
+        max_chars = min(max(int(self.endpoint.send_policy.get("max_message_chars") or 4096), 1), 4096)
+        text = interaction_text(spec)
+        separate = (spec.interaction_kind in SEPARATE_DETAILS_KINDS
+                    or len(text.encode("utf-16-le")) // 2 > max_chars
+                    or bool(existing and existing.get("separate_details")))
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
             return
-        if existing is not None:
+        changed_details = bool(separate and existing
+                               and existing.get("details_digest") != hashlib.sha256(text.encode("utf-8")).hexdigest())
+        if existing is not None and (not allow_update or changed_details):
+            # Revoke the old keyboard before showing a different document.
             try:
                 await self.application.bot.edit_message_reply_markup(
                     chat_id=existing["chat_id"], message_id=existing["message_id"], reply_markup=None)
@@ -1798,33 +1861,57 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 if not (_telegram_message_is_not_modified(exc) or _telegram_interaction_target_is_stale(exc)):
                     self.last_delivery_error = str(exc)
                     return
+            self._remember_interaction(replace(spec, buttons=(), items=(), inputs=()), existing)
+        target = dict(existing or {})
+        if separate:
+            try:
+                target.update(await self._send_interaction_details_async(response_handle, spec, existing, limit=max_chars))
+            except Exception as exc:
+                self.last_delivery_error = str(exc)
+                raise ChannelDeliveryError(str(exc) or "Telegram interaction details failed", permanent=False,
+                                           reason="telegram_details_failed") from exc
+            target["separate_details"] = True
+        if allow_update and existing is not None and not changed_details:
+            if await self._edit_interaction_message_async(target, spec=spec):
+                self._remember_interaction(spec, target)
+                await self._send_interaction_inputs(spec, target)
+                return
+            if not _telegram_interaction_target_is_stale(self.last_delivery_error):
+                return
+            super().forget_interaction_message(spec.interaction_id)
         markup = self._build_interaction_markup(spec)
         sent = None
-        parts = _telegram_interaction_segments(spec, limit=max_chars)
+        if separate:
+            card = _truncate_telegram_text(decision_text(spec), limit=1024)
+            parts = [_TelegramTextSegment(card, card, None)]
+        else:
+            parts = _telegram_interaction_segments(spec, limit=max_chars)
         for index, part in enumerate(parts):
             kwargs: dict[str, Any] = {"chat_id": chat_id, "text": part.rendered_text}
             if part.parse_mode is not None:
                 kwargs["parse_mode"] = part.parse_mode
             if thread_id is not None:
                 kwargs["message_thread_id"] = thread_id
+            if separate and target.get("details_message_id"):
+                kwargs["reply_to_message_id"] = target["details_message_id"]
             if index == len(parts) - 1 and markup is not None:
                 kwargs["reply_markup"] = markup
             try:
                 sent = await self.application.bot.send_message(**kwargs)
             except Exception as exc:
                 self.last_delivery_error = str(exc)
-                return
+                raise ChannelDeliveryError(str(exc) or "Telegram decision card failed", permanent=False,
+                                           reason="telegram_interaction_failed") from exc
         if sent is None:
             return
-        self._remember_interaction(
-            spec,
-            {
-                "chat_id": chat_id,
-                "message_id": _safe_int(getattr(sent, "message_id", None)),
-                "thread_id": thread_id,
-            },
-        )
-        await self._send_interaction_inputs(spec, self._restore_interaction(spec.interaction_id))
+        message_id = _safe_int(getattr(sent, "message_id", None))
+        if message_id is None:
+            raise ChannelDeliveryError("Telegram did not confirm the decision card", permanent=False,
+                                       reason="telegram_interaction_unconfirmed")
+        target.update(chat_id=chat_id, message_id=message_id, thread_id=thread_id)
+        self._remember_interaction(spec, target)
+        self.last_delivery_error = ""
+        await self._send_interaction_inputs(spec, target)
 
     async def _resolve_interaction_async(self, spec: InteractionMessageSpec) -> None:
         if self.application is None:
@@ -1832,7 +1919,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         target = self._restore_interaction(spec.interaction_id)
         if target is None:
             return
-        await self._edit_interaction_message_async(target, spec=spec, clear_keyboard=True)
+        # Even if Telegram cannot update the presentation, a closed card must
+        # no longer emit decisions. Keep its target for a later close retry.
+        self._remember_interaction(replace(spec, buttons=(), items=(), inputs=()), target)
+        if not await self._edit_interaction_message_async(target, spec=spec, clear_keyboard=True):
+            if not _telegram_interaction_target_is_stale(self.last_delivery_error):
+                return
         super().forget_interaction_message(spec.interaction_id)
         if self._interaction_store is not None:
             self._interaction_store.set_state(spec.interaction_id, "resolved")
@@ -1890,7 +1982,15 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             "reply_markup": None if clear_keyboard else self._build_interaction_markup(spec),
         }
         max_chars = max(int(self.endpoint.send_policy.get("max_message_chars") or 4096), 1)
-        parts = _telegram_interaction_segments(spec, limit=max_chars)
+        if target.get("separate_details"):
+            text = closed_text(spec, target) if clear_keyboard else decision_text(spec)
+            card = _truncate_telegram_text(text, limit=1024)
+            parts = [_TelegramTextSegment(card, card, None)]
+        elif clear_keyboard and len(interaction_text(spec).encode("utf-16-le")) // 2 > min(max_chars, 4096):
+            card = _truncate_telegram_text(spec.text.rsplit("\n\n", 1)[-1], limit=min(max_chars, 1024))
+            parts = [_TelegramTextSegment(card, card, None)]
+        else:
+            parts = _telegram_interaction_segments(spec, limit=max_chars)
         if len(parts) == 1:
             kwargs["text"] = parts[0].rendered_text
             if parts[0].parse_mode is not None:
@@ -2069,8 +2169,16 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         except ImportError:
             return None
-        return InlineKeyboardMarkup([[InlineKeyboardButton(text=item["label"],
-            callback_data=f'ix:{spec.interaction_id}:{item["token"]}') for item in row] for row in rows])
+        index = 0
+        keyboard = []
+        for row in rows:
+            buttons = []
+            for item in row:
+                label = chr(65 + index) if spec.interaction_kind == "bunshin_clarification" and index < 26 else item["label"]
+                buttons.append(InlineKeyboardButton(text=label, callback_data=f'ix:{spec.interaction_id}:{item["token"]}'))
+                index += 1
+            keyboard.append(buttons)
+        return InlineKeyboardMarkup(keyboard)
 
     async def _send_interaction_inputs(self, spec, target):
         if not spec.inputs or not target or self._interaction_store is None:

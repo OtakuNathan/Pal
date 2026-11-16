@@ -62,6 +62,11 @@ Interaction rule:
   - `open_or_update_interaction(...)`
   - `resolve_interaction(...)`
   - `emit_interaction_result(...)`
+- Telegram separates approval/question/review details from a short decision
+  message. Long details become UTF-8 Markdown documents; existing identical
+  Bunshin attachments are reused. The provider owns message ordering, durable
+  card/detail targets and stale-message rejection. Producer action payloads and
+  decision authority retain their existing channel-neutral contracts.
 - `ChannelRuntime` is the core channel bus for endpoint instances:
   - it lists endpoints
   - polls each endpoint mailbox

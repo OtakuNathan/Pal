@@ -19,15 +19,31 @@ card, in its original chat; the verified Telegram sender becomes the approval
 actor. Approval is single-use and expires. “Approved once” confirms authorization,
 not successful execution; the operation reports its result separately.
 
-Privilege approval cards render the command in a shell code block and any
-standard input in a separate code block. The remote execution plugin owns their
-contents; Telegram renders and splits the text with the existing entity-aware
-Markdown renderer. Approving or rejecting keeps the formatting while removing
-the decision buttons. Other interaction cards retain their plain-text rendering.
+Version 0.3.4 separates interaction details from decisions. Approval requests,
+Bunshin questions and architecture reviews send their details first, followed by
+one short decision message replying to those details. Short details remain chat
+messages; text exceeding `send_policy.max_message_chars` (capped at Telegram's
+4096 UTF-16 units) is sent intact as a UTF-8 Markdown file. Other oversized
+interaction cards use the same presentation. Ordinary replies and short control
+panels keep their existing rendering.
 
-Activate the updated remote plugin and Telegram provider together to get this
-presentation. The display change requires no Pal core restart, native binary
-replacement or worker upgrade.
+Bunshin's existing task YAML and architecture Markdown attachments are sent
+before the decision card. An identical delivered text attachment is reused as
+the details, rather than uploading or pasting it again. A failed upload prevents
+the dependent keyboard from appearing. Short sudo descriptions preserve command
+and stdin code blocks using the existing Markdown renderer.
+
+Decision messages are limited to 1024 UTF-16 units and keep the original action
+mapping. Bunshin question buttons display A/B/C while returning the unchanged
+producer-owned answers. A changed document withdraws the previous keyboard and
+creates a new card; callbacks must match the current card's message ID as well
+as its original chat and owner. Details and card targets survive provider restart.
+Resolution edits only the short card. A failed close revokes its local actions
+but retains the target for a later close retry.
+
+These presentation changes use the existing interaction and attachment contracts.
+Activate the updated Telegram provider at an idle boundary; no Pal core restart,
+native binary replacement, Bunshin data migration or worker upgrade is required.
 
 Build and install the provider independently from Pal core:
 

@@ -3777,6 +3777,17 @@ class _FakeTelegramBot:
     async def edit_message_text(self, **kwargs):
         self.actions.append(("edit_message_text", dict(kwargs)))
 
+    async def edit_message_reply_markup(self, **kwargs):
+        self.actions.append(("edit_message_reply_markup", dict(kwargs)))
+
+    async def send_document(self, **kwargs):
+        payload = dict(kwargs)
+        payload["document"] = kwargs["document"].read()
+        self.actions.append(("document", payload))
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        return types.SimpleNamespace(message_id=message_id)
+
     async def delete_message(self, **kwargs):
         self.actions.append(("delete_message", dict(kwargs)))
 
@@ -4779,7 +4790,11 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         message = next(payload for kind, payload in self.fake_bot.actions if kind == "message")
         self.assertEqual(message["parse_mode"], "MarkdownV2")
         self.assertIn("```sh\nprintf 'hello <&> 中文'\n```", message["text"])
-        self.assertIn("reply_markup", message)
+        self.assertNotIn("reply_markup", message)
+        card = [payload for kind, payload in self.fake_bot.actions if kind == "message"][-1]
+        self.assertIn("reply_markup", card)
+        self.assertNotIn("printf", card["text"])
+        self.assertIn("reply_to_message_id", card)
 
         resolved = InteractionMessageSpec(
             interaction_id=spec.interaction_id,
@@ -4788,8 +4803,8 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.endpoint._resolve_interaction_async(resolved)
         edited = next(payload for kind, payload in self.fake_bot.actions if kind == "edit_message_text")
-        self.assertEqual(edited["parse_mode"], "MarkdownV2")
-        self.assertIn("```sh\nprintf 'hello <&> 中文'\n```", edited["text"])
+        self.assertNotIn("printf", edited["text"])
+        self.assertIn("Approved once", edited["text"])
         self.assertIsNone(edited["reply_markup"])
 
     async def test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message(self) -> None:
@@ -4824,10 +4839,13 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             for kind, payload in self.fake_bot.actions
             if kind == "message"
         ]
-        self.assertGreater(len(messages), 1)
+        self.assertEqual(len(messages), 1)
         self.assertTrue(all(len(str(item["text"])) <= 4096 for item in messages))
-        self.assertNotIn("reply_markup", messages[0])
         self.assertIn("reply_markup", messages[-1])
+        documents = [payload for kind, payload in self.fake_bot.actions if kind == "document"]
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0]["document"], spec.text.encode("utf-8"))
+        self.assertNotIn("architecture contract", messages[-1]["text"].split("\n", 1)[-1])
         self.assertIn("review_long", self.endpoint._interactive_messages)
 
     async def test_telegram_endpoint_restores_durable_interaction_after_endpoint_restart(self) -> None:
@@ -4879,12 +4897,14 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             bot_token="token-123",
         )
 
+        stored_message_id = self.endpoint._restore_interaction("review_restart")["message_id"]
+
         class _CallbackQuery:
             data = "ix:review_restart:b0"
             message = _FakeTelegramMessage(
                 chat_id=42,
                 user_id=42,
-                message_id=999,
+                message_id=stored_message_id,
                 text="",
             )
             from_user = _FakeTelegramUser(42)
