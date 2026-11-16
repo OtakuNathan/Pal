@@ -455,7 +455,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
         self.assertEqual(events[1]["phase"], "llm_endpoint_exhausted")
         self.assertEqual(events[1]["reason"], "bad_request")
 
-    def test_agenerate_timeout_never_switches_endpoint(self) -> None:
+    def test_generation_timeout_never_switches_endpoint(self) -> None:
         class _BlockingInvoker:
             def __init__(self) -> None:
                 self.calls: list[str] = []
@@ -467,8 +467,11 @@ class PalLLMNoFallbackTests(unittest.TestCase):
                     raise TimeoutError("provider exceeded configured timeout")
                 return generation_result_from_values(text=f"ok:{endpoint.endpoint_id}").response, ()
 
-            def invoke_stream(self, endpoint, request):
-                raise NotImplementedError
+            def invoke_updates(self, endpoint, request, **kwargs):
+                from pal.llm.ir import LLMResponseDeltaKind, LLMResponseUpdate
+
+                response, _ = self.invoke(endpoint, request, **kwargs)
+                yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
 
         blocked = _fake_endpoint("blocked", "blocked-model")
         working = _fake_endpoint("working", "working-model")

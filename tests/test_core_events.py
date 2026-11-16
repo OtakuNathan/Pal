@@ -105,7 +105,7 @@ def test_interrupted_safe_mode_clears_only_its_own_failure():
             subsystem="channel", component="ep", failure_kind="delivery_failure",
             severity="medium", primary_blocker="offline",
         ), origin="test"))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), timeout=5)
         assert len(bus.snapshot()["failures"]) == 2
         assert len(bus.snapshot()["safe_modes"]) == 1
         task.cancel()

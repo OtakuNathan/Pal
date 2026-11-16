@@ -11,6 +11,7 @@ from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.main import _build_parser
 from pal.memory.maintenance import MemoryBackendOwner
+from pal.memory.capabilities import register_with_core as register_memory
 from pal.memory.storage import MemoryStorage
 from pal.memory import embedding_migration as migration
 from pal.shared import IntrospectionResult
@@ -114,8 +115,9 @@ def test_resident_controls_select_real_provider_and_reject_busy_mutation(tmp_pat
     core = build_core()
     register_with_core(core.context)
     memory = MemoryService()
+    register_memory(core.context, memory)
     provider = MockL3Plugin(provider_id="fixture")
-    core.context.require_port("memory:memory").providers.register(provider)
+    memory.register_l3_provider(provider)
     owner = MemoryBackendOwner(core, memory)
     try:
         selected = asyncio.run(owner.dispatch("select", {"name": "fixture"}))
@@ -169,8 +171,9 @@ def test_live_memory_cli_uses_resident_owner_and_refuses_offline_migration(store
     async def run():
         core = build_core()
         register_with_core(core.context)
-        core.context.require_port("memory:memory").providers.register(MockL3Plugin(provider_id="fixture"))
         memory = MemoryService()
+        register_memory(core.context, memory)
+        memory.register_l3_provider(MockL3Plugin(provider_id="fixture"))
         service = CoreConfigurationService(root, None, memory_owner=MemoryBackendOwner(core, memory))
         parser = _build_parser()
         def parse(*args):
