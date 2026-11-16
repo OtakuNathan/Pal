@@ -98,7 +98,7 @@ def test_interrupted_safe_mode_clears_only_its_own_failure():
         async def _generate_response(request):
             entered.set()
             await asyncio.Event().wait()
-        core.context.port_registry["llm:llm"] = scripted_llm(complete=_generate_response)
+        core.context.port_registry["llm:llm"] = scripted_llm(respond=_generate_response)
         bus = core.context.core_event_bus
         bus.emit(FAILURE_STARTED, {"failure_id": "other"})
         task = asyncio.create_task(core.handle_failure_async(FailureSignal(

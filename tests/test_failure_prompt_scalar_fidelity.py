@@ -148,7 +148,7 @@ def test_safe_mode_model_exception_keeps_root_cause_without_stack():
         except ConnectionError as exc:
             raise RuntimeError("model request failed") from exc
 
-    core.context.port_registry["llm:llm"] = scripted_llm(complete=fail)
+    core.context.port_registry["llm:llm"] = scripted_llm(respond=fail)
     draft = FailureDraft(
         subsystem="execution", component="probe", failure_kind="capability_failure",
         severity="medium", primary_blocker="probe failed",

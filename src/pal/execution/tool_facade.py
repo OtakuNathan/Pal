@@ -38,8 +38,11 @@ class StrictToolModel(BaseModel):
         for name, field in cls.model_fields.items():
             prop = schema.get("properties", {}).get(field.alias or name, {})
             if "default" in prop and prop["default"] is None:
+                annotation = field.annotation
+                if annotation is None:
+                    annotation = type(None)
                 try:
-                    TypeAdapter(field.annotation).validate_python(None, strict=True)
+                    TypeAdapter(annotation).validate_python(None, strict=True)
                 except ValidationError:
                     prop.pop("default")
         return schema

@@ -353,7 +353,7 @@ def test_claim_waits_for_inflight_interjection_commit(tmp_path):
             await append_proceed.wait()
             return original(turn_id, message)
 
-        service.append_l1_user = blocking_append
+        service.append_interjection = blocking_append
         continuation = SimpleNamespace(turn_id="turn-live", delivery_binding=None)
         inject_task = asyncio.create_task(inject_pending_interjection_async(
             context=core.context, state=core.state, continuation=continuation))

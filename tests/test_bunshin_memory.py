@@ -209,7 +209,14 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                 ),
                 tools=(),
                 policy=GenerationPolicyIR(max_output_tokens=256),
-                metadata={"compiler_only": True},
+                metadata={
+                    "compiler_only": True,
+                    "context_candidates": [{
+                        "key": "role:working-state",
+                        "role": "user",
+                        "content": "dynamic role working state",
+                    }],
+                },
             ),
         )
         assembly = _bunshin_prompt_context(
@@ -299,6 +306,7 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                 ),
                 tools=(),
                 policy=GenerationPolicyIR(max_output_tokens=256),
+                metadata={"context_candidates": []},
             ),
         )
         continuation = make_continuation(
