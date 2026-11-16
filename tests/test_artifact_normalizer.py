@@ -1,4 +1,5 @@
 """Pending batch: normalized files and descriptors, image-only prompt expansion."""
+from tests.core_factory import build_core
 import asyncio
 import json
 from dataclasses import replace
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from pal.artifact.capabilities import register_with_core as register_artifact
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.llm.ir import ArtifactRefPartIR, LLMMessageIR, MessageRole
 from pal.llm.serde import message_to_payload
@@ -89,7 +90,7 @@ def test_l1_retains_reference_while_rendering_only_images_and_manifest(manager):
     Image.new('RGB', (8, 8), color='red').save(path)
     image = manager.register_ingested(path, scope_key='scope', turn_id='opening', source_channel='test')
     text = register(manager, 'notes.txt', 'PRIVATE_BODY')
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     register_artifact(core.context, manager)
     for module in ('execution', 'artifact'):
@@ -114,7 +115,7 @@ def test_l1_retains_reference_while_rendering_only_images_and_manifest(manager):
 
 
 def test_four_public_tools_no_old_read_grep_select_or_list(manager):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     register_artifact(core.context, manager)
     for module in ('execution', 'artifact'):

@@ -10,6 +10,7 @@ repository) still finds the owner-scoped handle; an existing handle is
 never re-requested as a new resource.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from tests.llm_fakes import NonStreamingLLM
 
@@ -52,7 +53,7 @@ def _ingest_artifact(manager: ArtifactManager, tmp: Path, name: str) -> str:
 
 
 def _compact_core(tmp: Path, engine_status: str = "compacted"):
-    core = PalCore()
+    core = build_core()
     service = _memory_with_turns(2)
     database = PalV2Database(tmp / "artifacts.sqlite3")
     database.initialize([
@@ -64,7 +65,7 @@ def _compact_core(tmp: Path, engine_status: str = "compacted"):
     core.context.port_registry["memory:memory"] = service
     core.context.port_registry["llm:llm"] = NonStreamingLLM()
     core.context.port_registry["artifact:artifact"] = manager
-    core.turn_executor._compaction_engine = _BarrierEngine(status=engine_status)
+    core.turn_executor.compaction.engine = _BarrierEngine(status=engine_status)
     return core, service, manager
 
 
@@ -110,11 +111,11 @@ def test_r08_seed_referenced_artifact_survives_cleanup_and_restart():
             task = asyncio.ensure_future(
                 core.turn_executor.execute_turn_effect_async(continuation, _effect())
             )
-            engine = core.turn_executor._compaction_engine
+            engine = core.turn_executor.compaction.engine
             await asyncio.wait_for(engine.entered.wait(), timeout=5)
             engine.release.set()
             result = await task
-            assert result.status == RuntimeStatus.OK
+            assert result.status == RuntimeStatus.OK, result
 
             # Post-install cleanup tick: the L1-referenced handle survives.
             assert manager.reap_expired()["retired"] == 0

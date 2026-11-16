@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
 
 import asyncio
 import importlib.util
@@ -26,8 +27,8 @@ def test_first_call_metric_validates_contract_without_business_execution(benchma
              new_tool_call(name='call_tool', args={'name': 'remember_memory', 'args':
                  {} if invalid else {'kind': 'fact', 'summary': 'Prefers concise Chinese answers.',
                                      'search_text': 'User preference concise Chinese answers'}})]
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[calls.pop(0)],
                 preferred_endpoint_id='fixture', preferred_model_id='glm-5.3',
                 input_tokens=10, output_tokens=2, usage_reported=True)
@@ -45,8 +46,8 @@ def test_first_call_metric_validates_contract_without_business_execution(benchma
 
 def test_missing_search_is_counted_as_failure(benchmark, tmp_path):
     fx = benchmark.fixture(tmp_path)
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(text='Done', preferred_endpoint_id='fixture',
                 preferred_model_id='glm-5.3', usage_reported=True)
     try:
@@ -62,8 +63,8 @@ def test_valid_call_and_search_recall_are_independent(benchmark, tmp_path):
     fx = benchmark.fixture(tmp_path)
     calls = [new_tool_call(name='search_tools', args={'query': 'remember memory'}),
              new_tool_call(name='recall_memory', args={'queries': ['answer style']})]
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[calls.pop(0)],
                 preferred_endpoint_id='fixture', preferred_model_id='glm-5.3', usage_reported=True)
     try:

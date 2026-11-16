@@ -9,6 +9,7 @@ A04's effect-unknown ledger and
 the full crash matrix (R-class) are P4; Bunshin lanes are P4.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 from pathlib import Path
@@ -16,7 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from pal.control.contracts import ControlAction
-from pal.core.compaction import CompactionClockKind, CompactionRunResult
+from pal.llm.compaction_engine import CompactionClockKind, CompactionRunResult
 from pal.core.compaction_coordinator import (
     CompactionGate,
     CompactionPhase,
@@ -59,26 +60,15 @@ class _BarrierEngine:
         self.max_attempts = 3
         self.timeout_seconds = 30.0
 
-    async def run(self, snapshot, *, llm_runtime=None, memory_service=None,
-                  after_commit=None, replay_guard=None, commit_guard=None, commit_hooks=None):
+    async def run(self, snapshot, *, llm_runtime, replay_guard=None, commit_hooks=None):
         self.calls += 1
         self.entered.set()
         await self.release.wait()
-        # This gate-only stub does not install a candidate. Release the
-        # history owner's lane as a real engine would before waking turns.
-        root = memory_service.history_root
-        if root.active_run is not None:
-            root.fail(root.active_run.run_id, reason="gate fixture completed")
-        memory_result = SimpleNamespace(
-            summary="gate summary",
-            projected_entries=[],
-            metadata={"projected_entry_count": 0, "compact_summary_count": 1,
-                      "retired_count": 0},
-        )
+        from pal.llm.resident_compaction import PalCompactionPolicy
         return CompactionRunResult(
-            status=self.status,
+            status="candidate" if self.status == "compacted" else self.status,
             attempts=self.calls,
-            memory_result=memory_result if self.status == "compacted" else None,
+            summary_entry=PalCompactionPolicy().validate_checkpoint(_valid_pal_payload("gate summary"), snapshot),
         )
 
 
@@ -93,7 +83,7 @@ class _BlockingLLM(NonStreamingLLM):
         self.release = asyncio.Event()
         self.requests = 0
 
-    async def apreflight(self, request):
+    async def preflight(self, request):
         from pal.llm import LLMPreflightAdvice
         from pal.shared import LLMPreflightStatus
         return LLMPreflightAdvice(status=LLMPreflightStatus.READY.value, breakdown={})
@@ -101,7 +91,7 @@ class _BlockingLLM(NonStreamingLLM):
     def supports_streaming(self, request=None):
         return False
 
-    async def agenerate(self, request, *, on_submitted=None, **options):
+    async def respond(self, request, *, on_submitted=None, **options):
         self.requests += 1
         await self.release.wait()
         raise AssertionError("blocking llm must never finish in these tests")
@@ -153,12 +143,12 @@ def _action(args: dict | None = None) -> ControlAction:
 
 
 def _build_core(tmp_path: Path, *, engine_status: str = "compacted"):
-    core = PalCore()
+    core = build_core()
     service = _memory_with_turns(2)
     engine = _BarrierEngine(status=engine_status)
     core.context.port_registry["memory:memory"] = service
     core.context.port_registry["llm:llm"] = NonStreamingLLM()
-    core.turn_executor._compaction_engine = engine
+    core.turn_executor.compaction.engine = engine
     replies: list[str] = []
 
     async def record_reply(action, text):
@@ -217,7 +207,7 @@ def test_manual_busy_when_earlier_input_already_queued(tmp_path):
 
 def test_manual_no_op_on_minimal_memory_zero_engine(tmp_path):
     async def scenario():
-        core = PalCore()
+        core = build_core()
         service = MemoryService()
         core.context.port_registry["memory:memory"] = service
         core.context.port_registry["llm:llm"] = NonStreamingLLM()
@@ -499,20 +489,20 @@ def _active_turn(turn_id: str, messages) -> L1TurnIR:
 def test_manual_real_engine_vertical_smoke(tmp_path):
     """HANDOFF P1 vertical smoke: real policy engine + scripted LLM + real
     MemoryService + staging, through the full manual handler."""
-    from pal.core.compaction import CompactionEngine
-    from pal.core.pal_compaction import PalCompactionPolicy
+    from pal.llm.compaction_engine import CompactionEngine
+    from pal.llm.resident_compaction import PalCompactionPolicy
     from pal.llm import generation_result_from_values
     from pal.memory.contracts import L1MessageKind
 
     async def scenario():
-        core = PalCore()
+        core = build_core()
         service = _memory_with_turns(2)
         llm = _ScriptedLLM([
             generation_result_from_values(text=_valid_pal_payload("smoke summary"))
         ])
         core.context.port_registry["memory:memory"] = service
         core.context.port_registry["llm:llm"] = llm
-        core.turn_executor._compaction_engine = CompactionEngine(
+        core.turn_executor.compaction.engine = CompactionEngine(
             policy=PalCompactionPolicy()
         )
         replies: list[str] = []
@@ -537,7 +527,7 @@ def test_manual_real_engine_vertical_smoke(tmp_path):
 
 def test_round_safe_requires_paired_tool_protocol(tmp_path):
     async def scenario():
-        core = PalCore()
+        core = build_core()
         service = MemoryService()
         core.context.port_registry["memory:memory"] = service
         call = new_tool_call(call_id="call_a", name="read_file", args={"path": "x"})
@@ -566,7 +556,7 @@ def test_round_safe_requires_paired_tool_protocol(tmp_path):
 
 def test_round_safe_rejects_open_streaming_round_and_in_progress(tmp_path):
     async def scenario():
-        core = PalCore()
+        core = build_core()
         service = MemoryService()
         core.context.port_registry["memory:memory"] = service
         assistant = LLMMessageIR(

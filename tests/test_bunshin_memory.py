@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pal.shared.ports import PortRegistry
+from tests.core_factory import build_context
 
 from pal.bunshin.runner_components.session_memory import SessionMemory
 
@@ -15,7 +17,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.core import CompactionClockKind, CompactionSnapshot, MainContext
+from pal.llm.compaction_engine import CompactionClockKind, CompactionSnapshot
+from pal.core.main_context import MainContext
 from pal.core.module_registry import ModuleHandle, ModuleRegistry
 from pal.core.runtime_state import RuntimeSnapshotCoordinator, RuntimeSnapshotIdentity
 from pal.core.turn_executor import TurnExecutor
@@ -187,9 +190,9 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
             )
         )
         service.begin_l1_turn(turn_id, user_text="inspect the assigned module")
-        context = MainContext(
+        context = build_context(
             execution_runtime=ExecutionRuntime(),
-            port_registry={"memory:memory": service},
+            port_registry=PortRegistry({"memory:memory": service}),
         )
         executor = self._turn_executor(
             context,
@@ -281,9 +284,9 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
         )
         service.settle_l1_turn(prior_turn_id)
         service.begin_l1_turn(current_turn_id, user_text="continue")
-        context = MainContext(
+        context = build_context(
             execution_runtime=ExecutionRuntime(),
-            port_registry={"memory:memory": service},
+            port_registry=PortRegistry({"memory:memory": service}),
         )
         executor = self._turn_executor(
             context,
@@ -358,9 +361,9 @@ class BunshinMemoryIntegrationTests(unittest.TestCase):
                 content="file contents",
             ),
         )
-        context = MainContext(
+        context = build_context(
             execution_runtime=scoped_runtime,
-            port_registry={"memory:memory": service},
+            port_registry=PortRegistry({"memory:memory": service}),
         )
         executor = self._turn_executor(
             context,

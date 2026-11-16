@@ -1,3 +1,5 @@
+from tests.turn_fakes import continuation as make_continuation
+from tests.core_factory import build_core
 from dataclasses import replace
 
 import pytest
@@ -146,16 +148,16 @@ def test_core_stream_delivery_avoids_snapshots_and_error_discards_only_live_resp
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, patch
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.memory import MemoryService, register_with_core
     from pal.llm.ir import LLMResponseIR, LLMResponseUpdate, LLMResponseDeltaKind, LLMFinishReason
 
     async def scenario():
-        core = PalCore()
+        core = build_core()
         memory = MemoryService()
         register_with_core(core.context, memory)
         memory.begin_l1_turn('turn', user_text='task')
-        continuation = SimpleNamespace(turn_id='turn', interrupted=False)
+        continuation = make_continuation(turn_id='turn', interrupted=False, channel_stream_active=True)
         executor = core.turn_executor
         delivered = AsyncMock()
         message = LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR('a'),), message_id='stream')

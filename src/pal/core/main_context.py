@@ -10,7 +10,8 @@ from pal.core.lifecycle_owner import ModuleLifecycleOwnerRegistry
 from pal.core.module_registry import ModuleHandle, ModuleRegistry
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.turn_events import TurnEventBus
-from pal.execution.runtime import ExecutionRuntime
+from pal.execution.contracts import ExecutionRuntimePort
+from pal.memory.contracts import MEMORY
 from pal.shared import IntrospectionPort
 from pal.shared.ports import PortKey, PortRegistry
 
@@ -19,7 +20,7 @@ T = TypeVar("T")
 
 @dataclass
 class MainContext:
-    execution_runtime: ExecutionRuntime = field(default_factory=ExecutionRuntime)
+    execution_runtime: ExecutionRuntimePort
     module_registry: ModuleRegistry = field(default_factory=ModuleRegistry)
     event_source_registry: EventSourceRegistry = field(default_factory=EventSourceRegistry)
     event_handler_registry: EventHandlerRegistry = field(default_factory=EventHandlerRegistry)
@@ -31,8 +32,6 @@ class MainContext:
     port_registry: PortRegistry = field(default_factory=PortRegistry)
 
     def __post_init__(self):
-        if not isinstance(self.port_registry, PortRegistry):
-            self.port_registry = PortRegistry(self.port_registry)
         from pal.execution.extensions import execution_slot
         self.execution_runtime = execution_slot(self.execution_runtime)
 
@@ -81,17 +80,19 @@ class MainContext:
             self.module_registry.register(handle)
             if introspection is not None:
                 self.introspection_registry[module_id] = introspection
-            for port_name, port in handle.ports.items():
-                key = f"{module_id}:{port_name}"
-                self.port_registry[key] = port
-                registered_ports.append((key, port))
+            bindings = {f"{module_id}:{name}": port for name, port in handle.ports.items()}
+            self.port_registry.publish(bindings)
+            registered_ports.extend(bindings.items())
+            if handle.l3_provider is not None:
+                self.require_port(MEMORY).register_l3_provider(handle.l3_provider)
             for action_kind, handler in handle.control_action_handlers.items():
                 self.control_action_registry.register(module_id, action_kind, handler)
         except Exception:
             self.control_action_registry.unregister_module(module_id)
-            for key, port in registered_ports:
-                if self.port_registry.get(key) is port:
-                    self.port_registry.pop(key, None)
+            self.port_registry.withdraw(dict(registered_ports))
+            memory = self.port_registry.get("memory:memory")
+            if memory is not None and handle.l3_provider is not None:
+                memory.unregister_l3_provider(handle.l3_provider)
             if self.introspection_registry.get(module_id) is introspection:
                 self.introspection_registry.pop(module_id, None)
             self.module_registry.unregister(module_id, expected=handle)
@@ -101,11 +102,10 @@ class MainContext:
         module_id = str(handle.module_id or "").strip()
         if self.module_registry.get(module_id) is not handle:
             return False
+        if handle.l3_provider is not None:
+            self.require_port(MEMORY).unregister_l3_provider(handle.l3_provider)
         self.control_action_registry.unregister_module(module_id)
-        for port_name, port in handle.ports.items():
-            key = f"{module_id}:{port_name}"
-            if self.port_registry.get(key) is port:
-                self.port_registry.pop(key, None)
+        self.port_registry.withdraw({f"{module_id}:{name}": port for name, port in handle.ports.items()})
         if self.introspection_registry.get(module_id) is handle.introspection_provider:
             self.introspection_registry.pop(module_id, None)
         self.module_registry.unregister(module_id, expected=handle)

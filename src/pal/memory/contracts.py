@@ -4,13 +4,15 @@ from pal.shared.tool_protocol import ToolResultIR
 from pal.shared.ports import PortKey
 from pal.memory.history_contracts import HistoryReadPort, HistoryRootPort
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 if False:  # pragma: no cover - typing-only names without runtime import cycles
-    from pal.llm.ir import LLMMessageIR
+    from pal.llm.ir import LLMMessageIR, LLMRequestIR
+    from pal.llm.compaction_engine import CompactionSnapshot, CompactionClockKind, CompactionCommitHooks
+    from pal.memory.history_contracts import LeftSnapshot
     from pal.memory.turn_ir import L1TurnIR
     from pal.memory.context_view import L1ContextView
 
@@ -279,6 +281,33 @@ L3ProviderResolver = Callable[[str], L3ProviderPort]
 
 
 class MemoryServicePort(Protocol):
+    def register_l3_provider(self, provider: L3ProviderPort) -> None: ...
+
+    def unregister_l3_provider(self, provider: L3ProviderPort) -> None: ...
+
+    def borrow_context(self) -> MemoryServicePort: ...
+
+    def begin_left_compaction(self, run_id: str, *, reason: str,
+        parent_turn_id: str = "", deadline_at: float | None = None,
+        include_completed_tail: bool = False, allow_summary: bool = False) -> LeftSnapshot: ...
+
+    def capture_compaction(self, left_snapshot: LeftSnapshot, *, target_input_budget: int,
+        reserved_output_tokens: int, clock_kind: CompactionClockKind, clock_value: int,
+        metadata: dict[str, Any] | None = None, replay_request: LLMRequestIR | None = None,
+        next_request: LLMRequestIR | None = None, replay_dialect: str = "",
+        replay_wire_shape: str = "") -> CompactionSnapshot: ...
+
+    async def install_compaction(self, snapshot: CompactionSnapshot, *, summary_entry: L2Entry,
+        after_commit: Callable[[], None] | None = None, commit_guard: Callable[[], bool] | None = None,
+        commit_hooks: CompactionCommitHooks | None = None) -> MemoryCompactResult | Exception: ...
+
+    def compaction_result(self, run_id: str) -> MemoryCompactResult | None: ...
+
+    def close_compaction(self, run_id: str, *, cancelled: bool, reason: str) -> None: ...
+
+    def prepare_l1_prompt_context(self, turn_id: str, stable: list[LLMMessageIR],
+        candidates: list[dict[str, Any]], *, boundary: str) -> tuple[tuple[LLMMessageIR, ...], L1TurnIR]: ...
+
     @property
     def history(self) -> HistoryReadPort: ...
 
@@ -315,6 +344,8 @@ class MemoryServicePort(Protocol):
     ) -> "L1TurnIR":
         ...
 
+    async def append_interjection(self, turn_id: str, message: LLMMessageIR) -> L1TurnIR: ...
+
     def append_l1_user_contexts(
         self,
         turn_id: str,
@@ -328,7 +359,7 @@ class MemoryServicePort(Protocol):
                                   state: dict[str, Any], *, expected_revision: int) -> "L1TurnIR":
         ...
 
-    def l1_context_view(self, active_turn_id: str, settled_turns=None) -> "L1ContextView":
+    def l1_context_view(self, active_turn_id: str, settled_turns: Sequence[L1TurnIR] | None = None) -> "L1ContextView":
         ...
 
     def project_continuity(self, messages: list["LLMMessageIR"]) -> list["LLMMessageIR"]:
@@ -415,8 +446,3 @@ class MemoryServicePort(Protocol):
 
 
 MEMORY = PortKey[MemoryServicePort]("memory:memory", MemoryServicePort)
-
-
-@runtime_checkable
-class CompactionSnapshotSourcePort(Protocol):
-    def snapshot_transcripts(self, snapshot: Any) -> list[list[L1TranscriptMessage]]: ...

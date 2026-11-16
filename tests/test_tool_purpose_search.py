@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore  # Initialize runtime dependencies in their supported order.
+from pal.core.runtime import PalCore
 from pal.execution.runtime import ExecutionRuntime
 
 

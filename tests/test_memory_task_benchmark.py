@@ -1,4 +1,5 @@
 """The task evaluator checks effects and store identity, not just tool names."""
+from tests.llm_fakes import NonStreamingLLM
 import asyncio
 import re
 
@@ -67,9 +68,9 @@ def test_unknown_provider_requires_observed_failure_and_preserves_store(fixture)
 @pytest.mark.parametrize('goal', ['correct', 'forget'])
 def test_real_execution_verifies_revision_or_deletion_and_preserves_other_memories(goal):
     case = next(c for c in CASES if c.goal == goal)
-    class Model:
+    class Model(NonStreamingLLM):
         done = False
-        async def agenerate(self, request):
+        async def respond(self, request):
             calls = []
             if not self.done:
                 task = next(m.text for m in request.messages if m.role.value == 'user')
@@ -91,9 +92,9 @@ def test_real_execution_verifies_revision_or_deletion_and_preserves_other_memori
 
 def test_invalid_arguments_are_separate_from_identification_and_business_effects():
     case = next(c for c in CASES if c.goal == 'forget')
-    class Model:
+    class Model(NonStreamingLLM):
         done = False
-        async def agenerate(self, request):
+        async def respond(self, request):
             calls = [] if self.done else [new_tool_call(name='call_tool', args={
                 'name': 'forget_memory', 'args': {'mem_ref': 123}})]
             self.done = True
@@ -109,8 +110,8 @@ def test_invalid_arguments_are_separate_from_identification_and_business_effects
 def test_memory_endpoint_failure_preserves_trace_and_fixture_state():
     from pal.llm.runtime import _failure_result
     case=next(c for c in CASES if c.goal=='forget')
-    class Model:
-        async def agenerate(self,request):
+    class Model(NonStreamingLLM):
+        async def respond(self,request):
             return _failure_result('fixture service unavailable',exc=TimeoutError('fixture timeout'))
     row=asyncio.run(run_case(Model(),{'model_id':'fixture','endpoint_id':'fixture'},case,0,{},3))
     assert row['error']=='endpoint_failure'

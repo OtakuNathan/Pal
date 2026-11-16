@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
 
 from pal.bunshin.runner_components.results import Results
 
@@ -25,7 +26,7 @@ from pal.memory.storage import MemoryStorage
 from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
 
 
-class ReviewingLLM:
+class ReviewingLLM(NonStreamingLLM):
     active_endpoint_id = "test"
 
     def __init__(self, *, merge=True, approve=True, fail_review=False, issues=()):
@@ -33,7 +34,7 @@ class ReviewingLLM:
         self.issues = list(issues)
         self.calls = []
 
-    async def agenerate(self, request):
+    async def respond(self, request):
         self.calls.append(request)
         payload = json.loads(request.messages[-1].text)
         if "candidate" in payload:
@@ -94,10 +95,10 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         original_refs = set(self.refs)
         owner = self
         class ObservingLLM(ReviewingLLM):
-            async def agenerate(self, request):
+            async def respond(self, request):
                 owner.assertEqual(owner.storage.current(), owner.head)
                 owner.assertEqual({r["document_id"] for r in owner.provider.repository.list_projection_rows()}, original_refs)
-                return await super().agenerate(request)
+                return await super().respond(request)
         llm = ObservingLLM()
         service = DreamingService(storage=self.storage, provider=self.provider, llm=llm, config=DreamingConfig())
         with patch.object(self.storage, "publish", wraps=self.storage.publish) as publish:
@@ -123,8 +124,8 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 topics=["API"])).document_id)
         original_refs = set(self.refs)
         class MixedLLM(ReviewingLLM):
-            async def agenerate(self, request):
-                response = await super().agenerate(request)
+            async def respond(self, request):
+                response = await super().respond(request)
                 payload = json.loads(request.messages[-1].text)
                 if "clusters" in payload and len(payload["clusters"]) == 2:
                     output = json.loads(response.response.message.parts[0].text)
@@ -152,7 +153,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 topics=["API"])).document_id)
         original_refs = set(self.refs)
         class LimitedParentLLM(ReviewingLLM):
-            async def apreflight(self, request):
+            async def preflight(self, request):
                 payload = json.loads(request.request.messages[-1].text)
                 parent = any(d["document_id"] not in original_refs
                              for c in payload.get("clusters", []) for d in c["members"])
@@ -189,12 +190,12 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 topics=["API"])).document_id)
         original_refs = set(self.refs)
         class FailingParentLLM(ReviewingLLM):
-            async def agenerate(self, request):
+            async def respond(self, request):
                 payload = json.loads(request.messages[-1].text)
                 if "candidate" in payload and any(d["document_id"] not in original_refs
                         for d in payload["input"]["members"]):
                     raise RuntimeError("parent review unavailable")
-                return await super().agenerate(request)
+                return await super().respond(request)
         service = DreamingService(storage=self.storage, provider=self.provider, llm=FailingParentLLM(), config=DreamingConfig())
         result = await service.run()
         self.assertEqual(result["status"], "failed", result)
@@ -211,7 +212,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(levels=levels):
                 llm = ReviewingLLM()
                 llm.thinking_levels_snapshot = lambda: {"test": "max"}
-                llm.resolve_endpoint_facts = lambda **kw: {"endpoint_id": "test", "thinking_levels": levels}
+                llm._endpoint_facts = lambda **kw: {"endpoint_id": "test", "thinking_levels": levels}
                 pipeline = DreamingPipeline(llm=llm, config=DreamingConfig(), storage=self.storage)
                 for review in (False, True):
                     request = pipeline._request({}, kind="fact", review=review)
@@ -219,23 +220,23 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_request_budget_is_half_effective_output_including_prompt_and_review(self):
         llm = ReviewingLLM()
-        llm.resolve_endpoint_facts = lambda **kw: {"endpoint_id": "test", "max_output_tokens": 8000}
+        llm._endpoint_facts = lambda **kw: {"endpoint_id": "test", "max_output_tokens": 8000}
         pipeline = DreamingPipeline(llm=llm, config=DreamingConfig(output_tokens=16000), storage=self.storage)
         for review in (False, True):
             with self.subTest(review=review):
-                async def preflight(request):
+                async def _preflight_response(request):
                     payload = json.loads(request.request.messages[-1].text)
                     return SimpleNamespace(status="ready", breakdown={"estimated_input_tokens":
                         1000 if not payload else payload["tokens"]})
-                llm.apreflight = preflight
+                llm.preflight = _preflight_response
                 self.assertTrue(await pipeline._fits({"tokens": 4000}, kind="fact", review=review))
                 self.assertFalse(await pipeline._fits({"tokens": 4001}, kind="fact", review=review))
                 self.assertEqual(pipeline._request({}, kind="fact", review=review).policy.max_output_tokens, 8000)
 
     async def test_length_splits_batches_and_reviews_only_complete_outputs(self):
         class LimitedLLM(ReviewingLLM):
-            async def agenerate(self, request):
-                response = await super().agenerate(request)
+            async def respond(self, request):
+                response = await super().respond(request)
                 payload = json.loads(request.messages[-1].text)
                 if len(payload.get("clusters", [])) > 1:
                     response.response = replace(response.response, finish_reason="length")
@@ -260,8 +261,8 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_single_truncated_group_does_not_block_other_reviewed_merges(self):
         class LimitedLLM(ReviewingLLM):
-            async def agenerate(self, request):
-                response = await super().agenerate(request)
+            async def respond(self, request):
+                response = await super().respond(request)
                 payload = json.loads(request.messages[-1].text)
                 if any(c["cluster_id"] == "limited" for c in payload.get("clusters", [])):
                     response.response = replace(response.response, finish_reason="length")
@@ -287,14 +288,14 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         for stage in ("merge", "review"):
             with self.subTest(stage=stage):
                 class LimitedLLM(ReviewingLLM):
-                    async def astream(self, request):
-                        response = await super().agenerate(request)
+                    async def respond(self, request):
+                        response = await super().respond(request)
                         payload = json.loads(request.messages[-1].text)
                         if ("candidate" in payload) == (stage == "review"):
                             # Even syntactically complete JSON must be discarded
                             # if the provider marks the response truncated.
                             response.response = replace(response.response, finish_reason="length")
-                        yield response
+                        return response
 
                 llm = LimitedLLM()
                 service = DreamingService(storage=self.storage, provider=self.provider,
@@ -455,9 +456,39 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.storage.current(), self.head)
         self.assertEqual(self.storage.history(self.refs[0]), [])
 
+    async def test_storage_fence_uses_provider_selected_at_admission(self):
+        previous = self.provider.repository
+        current = self.storage.open()
+        def admit():
+            self.provider.repository = current
+            return True
+        core = SimpleNamespace(try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
+            leave_memory_maintenance_async=AsyncMock(), begin_memory_sleep=Mock())
+        service = DreamingService(storage=self.storage, provider=self.provider,
+            llm=ReviewingLLM(merge=False), core=core)
+        try:
+            with patch.object(service, "_resolve_main_provider"), patch.object(previous, "freeze", side_effect=AssertionError("retired repository")), patch.object(current, "freeze", wraps=current.freeze) as freeze:
+                result = await service.run()
+            self.assertEqual(result["status"], "completed", result)
+            freeze.assert_called_once_with()
+            core.leave_memory_maintenance_async.assert_awaited_once_with()
+        finally:
+            previous.close()
+
+    async def test_freeze_failure_releases_core_admission_barrier(self):
+        core = SimpleNamespace(try_enter_memory_maintenance_async=AsyncMock(return_value=True),
+            leave_memory_maintenance_async=AsyncMock(), begin_memory_sleep=Mock())
+        service = DreamingService(storage=self.storage, provider=self.provider, llm=ReviewingLLM(), core=core)
+        with patch.object(service, "_resolve_main_provider"), patch.object(self.provider.repository, "freeze", side_effect=OSError("write fence unavailable")):
+            result = await service.run()
+        self.assertEqual(result["status"], "failed")
+        core.try_enter_memory_maintenance_async.assert_awaited_once_with()
+        core.leave_memory_maintenance_async.assert_awaited_once_with()
+        core.begin_memory_sleep.assert_not_called()
+        self.assertFalse(self.provider.repository.frozen)
+
     async def test_committed_publication_with_mount_failure_keeps_ingress_closed(self):
-        def admit(provider):
-            provider.repository.freeze()
+        def admit():
             return True
         core = SimpleNamespace(try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
             memory_notification_route=lambda: "fixed-route", deliver_memory_notice_async=AsyncMock(return_value=True),
@@ -481,8 +512,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_sleep_is_silent_even_when_last_route_cannot_receive_notifications(self):
         for notice_delivered in (False, True):
             with self.subTest(notice_delivered=notice_delivered):
-                def admit(provider):
-                    provider.repository.freeze()
+                def admit():
                     return True
                 states = []
                 core = SimpleNamespace(
@@ -502,8 +532,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 core.deliver_memory_notice_async.assert_not_awaited()
 
     async def test_successful_sleep_does_not_require_a_user_route(self):
-        def admit(provider):
-            provider.repository.freeze()
+        def admit():
             return True
         core = SimpleNamespace(
             try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
@@ -546,7 +575,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_cached_results_cannot_bypass_an_endpoint_change(self):
         llm = ReviewingLLM(merge=False)
         facts = {"endpoint_id": "test", "model_id": "original-model"}
-        llm.resolve_endpoint_facts = lambda **kwargs: dict(facts)
+        llm._endpoint_facts = lambda **kwargs: dict(facts)
         pipeline = DreamingPipeline(llm=llm, config=DreamingConfig(), storage=self.storage)
         clusters = discover_clusters(self.provider.repository, DreamingConfig())
         await pipeline.process(clusters)

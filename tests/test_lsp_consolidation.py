@@ -1,8 +1,9 @@
+from tests.core_factory import build_core
 from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.lsp import build_lsp_plugin
 from pal.shared.tool_protocol import new_tool_call
@@ -10,7 +11,7 @@ from pal.shared.tool_protocol import new_tool_call
 
 @pytest.fixture
 def lsp_runtime(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     handle = build_lsp_plugin(runtime_root=tmp_path).register_with_core(core.context)
     core.publish_module_capabilities("execution")

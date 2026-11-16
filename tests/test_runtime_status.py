@@ -1,16 +1,17 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from pal.control import ControlAction, ControlRoute
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 
 
 class RuntimeStatusTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.core = PalCore()
+        self.core = build_core()
         self.core._deliver_control_delivery_async = AsyncMock()
         self.route = ControlRoute(endpoint_id="test", channel_kind="test")
         self.action = ControlAction(

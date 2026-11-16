@@ -1,5 +1,6 @@
 """Real session-loop coverage for in-process completion feedback and restarts."""
 from __future__ import annotations
+from tests.core_factory import build_context
 
 import asyncio
 import json
@@ -29,7 +30,7 @@ class SyntheticModel(NonStreamingLLM):
     def __init__(self):
         self.calls = 0
 
-    def generate(self, request, **options):
+    def _generate_response(self, request, **options):
         self.calls += 1
         return generation_result_from_values(
             text=f"local synthetic answer {self.calls}", finish_reason="stop"
@@ -41,7 +42,7 @@ async def noop(*args, **kwargs):
 
 
 def make_bundle():
-    context = MainContext()
+    context = build_context()
     memory = MemoryService()
     register_execution(context)
     register_memory(context, memory)

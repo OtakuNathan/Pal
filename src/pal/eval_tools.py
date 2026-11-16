@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 
@@ -232,7 +233,7 @@ async def _run_case(
                 "preferred_endpoint_source": "tools_eval",
                 "endpoint_fallback_policy": "none",
             })
-        outcome = await llm_runtime.agenerate(
+        outcome = await collect_generation(llm_runtime.generate(
             LLMRequestIR(
                 messages=tuple(messages),
                 policy=GenerationPolicyIR(max_output_tokens=max_output_tokens, temperature=temperature),
@@ -240,7 +241,7 @@ async def _run_case(
                 tools=tuple(tool_definition_ir_from_dict(item) for item in tool_contracts),
                 metadata=metadata,
             )
-        )
+        ))
         usage = getattr(outcome.response, "usage", None)
         usage_rows.append({
             **{key: int(getattr(usage, key, 0) or 0) for key in (

@@ -1,8 +1,8 @@
 """Bunshin host adapter for the shared continuity checkpoint."""
 from dataclasses import dataclass
 
-from pal.core.compaction import CompactionClockKind
-from pal.core.continuity_compaction import ContinuityCompactionPolicy, system_prompt
+from pal.llm.compaction_engine import CompactionClockKind
+from pal.llm.continuity_compaction import ContinuityCompactionPolicy, system_prompt
 
 BUNSHIN_COMPACTION_SYSTEM_PROMPT = system_prompt("bunshin")
 

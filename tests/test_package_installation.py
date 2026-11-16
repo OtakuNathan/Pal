@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import hashlib
 import importlib.util
@@ -191,9 +192,9 @@ def test_install_lock_serializes_threads(tmp_path):
 
 
 def test_package_tools_remain_indirect(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.plugins.host import PluginHost
-    core = PalCore()
+    core = build_core()
     host = PluginHost(core.context, tmp_path)
     host.publish_management_capabilities()
     contracts = core._build_llm_tool_contracts()
@@ -207,14 +208,14 @@ def test_package_tools_remain_indirect(tmp_path):
 
 
 def test_live_job_uses_existing_host_and_rolls_back_failed_attach(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.foundation.persistence import PalV2Database
     from pal.plugins.host import PluginHost
     from pal.plugins.models import PluginBundleModel
     from pal.packages.jobs import PackageJobs
     database = PalV2Database(tmp_path / "pal.sqlite3")
     database.initialize([PluginBundleModel])
-    host = PluginHost(PalCore().context, tmp_path)
+    host = PluginHost(build_core().context, tmp_path)
     jobs = PackageJobs(host)
     runtime = '''from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
 def build_plugin(context):

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
 
@@ -12,19 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from pal.control import ControlAction, ControlRoute
-from pal.core import (
-    CompactionClockKind,
-    CompactionEngine,
-    CompactionSnapshot,
-    L1CommitPayload,
-    MemoryCompactEffect,
-    PalCore,
-    TurnContinuation,
-    TurnOutcome,
-    register_with_core as register_core_with_core,
-)
-from pal.core.compaction import build_compaction_units
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionClockKind, CompactionEngine, CompactionSnapshot
+from pal.core.turns import L1CommitPayload, MemoryCompactEffect, TurnContinuation, TurnOutcome
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
+from pal.llm.compaction_engine import build_compaction_units
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.turns import (
     EffectResult,
@@ -57,7 +51,7 @@ from pal.memory import (
 )
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
 from pal.memory.turn_ir import L1TurnIR
-from pal.core.pal_compaction import COMPACT_PAL_STRUCTURED_SYSTEM
+from pal.llm.resident_compaction import COMPACT_PAL_STRUCTURED_SYSTEM
 from pal.bunshin.compact import BUNSHIN_COMPACTION_SYSTEM_PROMPT, BunshinCompactionPolicy
 from pal.shared import (
     ChannelEnvelope,
@@ -138,13 +132,13 @@ class _ScriptedLLM(NonStreamingLLM):
         self.preflight_requests = []
         self.generate_requests = []
 
-    async def apreflight(self, request):
+    async def preflight(self, request):
         self.preflight_requests.append(request)
         if self.preflight_hook is not None:
             return self.preflight_hook(request)
         return LLMPreflightAdvice(status=LLMPreflightStatus.READY)
 
-    async def agenerate(self, request, **options):
+    async def respond(self, request, **options):
         self.generate_requests.append(request)
         if not self.outcomes:
             raise RuntimeError("no scripted outcome")
@@ -155,7 +149,7 @@ class _ScriptedLLM(NonStreamingLLM):
 
 
 class _SlowLLM(_ScriptedLLM):
-    async def agenerate(self, request, **options):
+    async def respond(self, request, **options):
         self.generate_requests.append(request)
         await asyncio.sleep(1)
         return generation_result_from_values(text=_valid_pal_payload())
@@ -170,11 +164,11 @@ class _PurposeAwareLLM(NonStreamingLLM):
         self.requests = []
         self.memory_candidates = list(memory_candidates or [])
 
-    def preflight(self, request):
+    def _preflight_response(self, request):
         self.requests.append(("preflight", request))
         return LLMPreflightAdvice(status=LLMPreflightStatus.READY)
 
-    def generate(self, request, **options):
+    def _generate_response(self, request, **options):
         self.requests.append(("generate", request))
         if "compaction" in str(request.metadata.get("purpose") or ""):
             return generation_result_from_values(
@@ -497,7 +491,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(closed.metadata["_pal_input_id"], "input-1")
 
     def test_effect_commit_failure_leaves_protocol_and_memory_unchanged(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = _memory_with_turns(2)
         register_memory_with_core(core.context, service)
@@ -515,7 +509,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         before_l1 = deepcopy(service.l1_store.items)
 
         result = asyncio.run(
-            core.turn_executor.compact_memory_async(
+            core.turn_executor.compaction.run(
                 service,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
@@ -527,7 +521,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
 
 
     def test_semantic_compactor_sees_closed_tool_evidence(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = _memory_with_turns(1)
         register_memory_with_core(core.context, service)
@@ -539,7 +533,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         service.l1_store.append(l1_tool_protocol_transcript(_closed_protocol(marker))[0])
 
         async def run_compact():
-            return await core.turn_executor.compact_memory_async(
+            return await core.turn_executor.compaction.run(
                 service,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
@@ -554,7 +548,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertFalse(hasattr(core.turn_executor, "_tool_protocol_projector"))
 
     def test_manual_compact_replays_confirmed_resident_anchor_and_settled_tail(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = MemoryService()
         register_memory_with_core(core.context, service)
@@ -599,7 +593,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         core.context.port_registry["llm:llm"] = llm
 
         result = asyncio.run(
-            core.turn_executor.compact_memory_async(
+            core.turn_executor.compaction.run(
                 service,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
@@ -619,7 +613,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
 
     def test_compaction_does_not_reproject_retained_active_results(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = _memory_with_turns(1)
         register_memory_with_core(core.context, service)
@@ -685,7 +679,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            core.turn_executor.compact_memory_async(
+            core.turn_executor.compaction.run(
                 service,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
@@ -704,7 +698,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertTrue(after.complete)
 
     def test_manual_compact_retires_removed_result_authority_by_lifetime(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = _memory_with_turns(1)
         register_memory_with_core(core.context, service)
@@ -760,7 +754,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            core.turn_executor.compact_memory_async(
+            core.turn_executor.compaction.run(
                 service,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
@@ -777,11 +771,11 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
 
     def test_bunshin_compact_retires_authority_from_bound_execution_lifetime(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = _memory_with_turns(1)
         register_memory_with_core(core.context, service)
-        core.turn_executor._compaction_engine = CompactionEngine(
+        core.turn_executor.compaction.engine = CompactionEngine(
             BunshinCompactionPolicy()
         )
         core.context.port_registry["llm:llm"] = _ScriptedLLM(
@@ -838,7 +832,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            core.turn_executor.compact_memory_async(
+            core.turn_executor.compaction.run(
                 service,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
@@ -866,7 +860,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
 
     def test_manual_compact_uses_same_engine_and_opens_candidate_approval(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = _memory_with_turns(2)
         register_memory_with_core(core.context, service)
@@ -932,7 +926,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(button.action_args["args"]["decision"], "accept")
 
     def test_cache_reminder_compact_is_consumed_before_llm_and_runs_once(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = _memory_with_turns(2)
         register_memory_with_core(core.context, service)
@@ -1004,7 +998,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(candidate_notices), 1)
 
     def test_manual_compact_is_rejected_while_resident_turn_is_active(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = _memory_with_turns(1)
         register_memory_with_core(core.context, service)
@@ -1037,7 +1031,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(service.l1_store.turns.turns), 1)
 
     def test_pal_clock_advances_only_after_successful_user_turn_commit(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = MemoryService()
         register_memory_with_core(core.context, service)
@@ -1102,7 +1096,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(scheduled_deadlines), 2)
         core.context.port_registry["llm:llm"] = _PurposeAwareLLM()
         asyncio.run(
-            core.turn_executor.compact_memory_async(
+            core.turn_executor.compaction.run(
                 service,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
@@ -1112,13 +1106,13 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(scheduled_deadlines), 2)
 
     def test_configured_compaction_retry_count_is_not_silently_clamped(self) -> None:
-        core = PalCore(
+        core = build_core(
             config=RuntimeConfig(llm_compaction_retry_attempts=4)
         )
         self.assertEqual(core.agent_turn_runtime.compaction_engine.max_attempts, 4)
 
     def test_cache_deadline_schedule_failure_cannot_fail_committed_user_turn(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = MemoryService()
         register_memory_with_core(core.context, service)
@@ -1155,7 +1149,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
 
     def test_background_cache_deadline_starts_after_successful_turn_end(self) -> None:
         async def run() -> list[str]:
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             service = MemoryService()
             register_memory_with_core(core.context, service)
@@ -1194,8 +1188,9 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
 
 @pytest.mark.parametrize("recovers", [False, True])
 def test_manual_compaction_logs_validation_traceback_without_sending_it(monkeypatch, caplog, recovers):
-    caplog.set_level("INFO", logger="pal.core.compaction")
-    core = PalCore()
+    caplog.set_level("INFO", logger="pal.llm.compaction_engine")
+    caplog.set_level("INFO", logger="pal.memory.service")
+    core = build_core()
     register_core_with_core(core)
     service = _memory_with_turns(2)
     register_memory_with_core(core.context, service)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.execution.tool_facade import LifecycleAccess
+
 import inspect
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -42,6 +44,7 @@ def build_test_capability_handle(
         failure_next_steps="inspect the focused test failure",
     )
     resolved_execution = execution or ToolExecutionSemantics(
+        lifecycle_access=LifecycleAccess.SHARED,
         invocation_mode=InvocationMode.INDIRECT,
         effect_kind=EffectKind.NONE,
         idempotency=Idempotency.IDEMPOTENT,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 from dataclasses import dataclass, field
@@ -342,9 +343,11 @@ def test_interaction_has_control_actions_and_delete_expiration() -> None:
 
 def test_core_capabilities_inspect_and_persist_deadline_configuration() -> None:
     settings = _Settings()
-    core = PalCore()
+    core = build_core()
 
-    class _LLMRuntime:
+    from tests.llm_fakes import NonStreamingLLM
+
+    class _LLMRuntime(NonStreamingLLM):
         settings_repository = settings
 
         @staticmethod

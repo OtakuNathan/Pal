@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import base64
@@ -8,7 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database
 from pal.shared.tool_protocol import new_tool_call
@@ -77,7 +78,7 @@ class BrowserScreenshotToolTests(unittest.TestCase):
 
     def test_call_tool_reaches_browser_screenshot_with_conversation_scope(self) -> None:
         service = _FakeBrowserService(self.root)
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         register_web_fetch_with_core(core.context, service)  # type: ignore[arg-type]
@@ -139,7 +140,7 @@ class BrowserScreenshotToolTests(unittest.TestCase):
 
     def test_old_screenshot_alias_is_not_registered(self) -> None:
         service = _FakeBrowserService(self.root)
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         register_web_fetch_with_core(core.context, service)  # type: ignore[arg-type]
         core.publish_module_capabilities("web_fetch")

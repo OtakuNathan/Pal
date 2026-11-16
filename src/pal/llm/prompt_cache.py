@@ -265,16 +265,6 @@ class PromptCacheCoordinator:
     )
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
-    def fork_transient(self) -> PromptCacheCoordinator:
-        """Use identical provider routing policy with privately owned cache tails."""
-        return PromptCacheCoordinator(
-            minimum_prefix_tokens=self.minimum_prefix_tokens,
-            rolling_net_threshold_tokens=self.rolling_net_threshold_tokens,
-            observation_ttl_seconds=self.observation_ttl_seconds,
-            max_scope_count=self.max_scope_count,
-            max_attempt_records=self.max_attempt_records,
-        )
-
     def plan(
         self,
         request: LLMRequestIR,

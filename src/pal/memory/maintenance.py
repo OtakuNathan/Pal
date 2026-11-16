@@ -17,7 +17,7 @@ class MemoryBackendOwner:
         return self.core.context.execution_runtime
 
     def _provider(self, name):
-        provider = self.runtime.l3_plugin_registry.get(name)
+        provider = self.service.providers.get(name)
         if provider is None:
             raise ValueError(f"Unknown memory provider: {name}")
         return provider
@@ -42,7 +42,7 @@ class MemoryBackendOwner:
             if command == "providers":
                 return self._result({"active_provider_id": self.service.l3_selector.active_provider_id,
                     "items": [{"provider_id": name, "mounted": bool(getattr(provider, "mounted", True))}
-                              for name, provider in sorted(self.runtime.l3_plugin_registry.plugins.items())]})
+                              for name, provider in sorted(self.service.providers.plugins.items())]})
             name = params.get("name") or self.service.l3_selector.active_provider_id
             provider = self._provider(name)
             if command == "inspect":

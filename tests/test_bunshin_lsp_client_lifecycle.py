@@ -1,5 +1,6 @@
 """Real role/provider lifecycles with synthetic storage and mocked LSP transport."""
 from __future__ import annotations
+from tests.core_factory import build_context
 
 import asyncio
 import errno
@@ -13,7 +14,7 @@ import pytest
 
 from pal.bunshin.ipc import BUNSHIN_RUNTIME_DB_PATH_ENV
 from pal.bunshin.runner_components import runtime_build
-from pal.core import MainContext
+from pal.core.main_context import MainContext
 from pal.execution.contracts import CapabilityCall
 from pal.foundation import PalV2Database
 from pal.foundation.sidecar import SidecarRpcClient
@@ -139,7 +140,7 @@ def test_client_only_provider_reports_unusable_host_without_repair(tmp_path, hos
 @pytest.mark.parametrize("available", [True, False])
 def test_client_only_attachment_start_and_shutdown_do_not_manage_host(tmp_path, host_lsp, available):
     host_lsp.available = available
-    handle = build_lsp_plugin(runtime_root=tmp_path, client_only=True).register_with_core(MainContext())
+    handle = build_lsp_plugin(runtime_root=tmp_path, client_only=True).register_with_core(build_context())
     provider = handle.ports["lsp"]
     assert provider.client_only is True
     handle.shutdown_sync()
@@ -193,7 +194,7 @@ def test_client_only_rescan_is_rejected_without_contacting_host(tmp_path, host_l
 
 def test_resident_plugin_still_defaults_to_owning_mode(tmp_path):
     bundle = build_lsp_plugin(runtime_root=tmp_path)
-    handle = bundle.register_with_core(MainContext())
+    handle = bundle.register_with_core(build_context())
     assert bundle.client_only is False
     assert handle.ports["lsp"].client_only is False
 

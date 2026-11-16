@@ -1,4 +1,8 @@
 from __future__ import annotations
+from tests.core_factory import mount_l3_provider
+from tests.core_factory import build_core
+
+from pal.execution.tool_facade import LifecycleAccess
 
 from tests.llm_fakes import NonStreamingLLM
 
@@ -31,17 +35,10 @@ from pal.channel import (
 from pal.channel.contracts import ChannelDeliveryError
 from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.control.prompt import ControlPromptFragmentProvider
-from pal.core import (
-    CompactionClockKind,
-    CompactionSnapshot,
-    MainLoop,
-    PalCore,
-    ToolExecutionRecord,
-    ToolStagnationGuardProcess,
-    canonical_result_fingerprint,
-    canonical_tool_signature_hash,
-    register_with_core as register_core_with_core,
-)
+from pal.llm.compaction_engine import CompactionClockKind, CompactionSnapshot
+from pal.core.runtime import MainLoop, PalCore
+from pal.core.tool_stagnation import ToolExecutionRecord, ToolStagnationGuardProcess, canonical_result_fingerprint, canonical_tool_signature_hash
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.core.turn_events import TURN_END, TURN_START
@@ -60,7 +57,7 @@ from pal.execution.tool_facade import (
     ToolHandlerResult,
 )
 from pal.execution.tool_semantics import INDIRECT_NONE
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.resident_compaction import PalCompactionPolicy
 from tests.capability_fixture import mount_test_capability
 from pal.failure import (
     FAILURE_VERIFICATION_FAILED,
@@ -87,8 +84,9 @@ from pal.memory import (
     MemoryService,
     register_with_core as register_memory_with_core,
 )
-from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
-from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_core
+from pal.plugins.host import PluginHost
+from pal.plugins.capabilities import register_with_core as register_plugins_with_core
+from pal.plugins.l3 import MockL3Plugin
 from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveRunner, ProactiveTriggerEvent, build_proactive_trigger_input, build_proactive_turn_continuation, register_with_core as register_proactive_with_core
 from pal.proactive.scheduling import compute_next_proactive_run_at_utc, utc_now_dt
 from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, EventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, TurnDeliveryBinding, capability_action, capability_node, default_tool_result_text
@@ -274,6 +272,7 @@ def register_test_tool(runtime, tool) -> str:
                 failure_next_steps="inspect the returned tagged failure",
             ),
             execution=ToolExecutionSemantics(
+                lifecycle_access=LifecycleAccess.SHARED,
                 invocation_mode=InvocationMode.DIRECT,
                 effect_kind=EffectKind.NONE,
                 idempotency=Idempotency.IDEMPOTENT,
@@ -294,7 +293,7 @@ class ScriptedLLMRuntime(NonStreamingLLM):
         self.outcomes = outcomes
         self.requests = []
 
-    def preflight(self, request) -> LLMPreflightAdvice:
+    def _preflight_response(self, request) -> LLMPreflightAdvice:
         self.requests.append(("preflight", request))
         return LLMPreflightAdvice(
             status="ready",
@@ -304,20 +303,20 @@ class ScriptedLLMRuntime(NonStreamingLLM):
             reserved_output_tokens=request.request.policy.max_output_tokens,
         )
 
-    async def apreflight(self, request) -> LLMPreflightAdvice:
-        return self.preflight(request)
+    async def preflight(self, request) -> LLMPreflightAdvice:
+        return self._preflight_response(request)
 
-    def generate(self, request, **options):
+    def _generate_response(self, request, **options):
         self.requests.append(("generate", request))
         if self.outcomes:
             return self.outcomes.pop(0)
         return generation_result_from_values(text="done", tool_calls=[], finish_reason="stop")
 
-    async def agenerate(self, request, **options):
-        return self.generate(request)
+    async def respond(self, request, **options):
+        return self._generate_response(request)
 
-    async def astream(self, request, **options):
-        self.requests.append(("astream", request))
+    async def generate(self, request, **options):
+        self.requests.append(("generate", request))
         if self.outcomes:
             outcome = self.outcomes.pop(0)
         else:
@@ -409,7 +408,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
     def test_public_modules_export_introspection_surface(self) -> None:
         exports = {
-            "pal.core": ("CoreIntrospectionProvider", "register_with_core", "inspect_core"),
+            "pal.core.capabilities": ("CoreIntrospectionProvider", "register_with_core", "inspect_core"),
             "pal.channel": ("ChannelIntrospectionProvider", "register_with_core", "inspect_channel"),
             "pal.identity": ("IdentityIntrospectionProvider", "register_with_core", "inspect_identity"),
             "pal.llm": ("LLMIntrospectionProvider", "register_with_core", "inspect_llm"),
@@ -421,7 +420,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.web_fetch": ("WebFetchIntrospectionProvider", "register_with_core", "inspect_web_fetch"),
             "pal.control": ("ControlIntrospectionProvider", "register_with_core", "inspect_control"),
             "pal.failure": ("FailureIntrospectionProvider", "register_with_core"),
-            "pal.plugins": ("PluginsIntrospectionProvider", "register_with_core"),
+            "pal.plugins.capabilities": ("PluginsIntrospectionProvider", "register_with_core"),
             "pal.bootstrap": ("inspect_bootstrap",),
             "pal.wizard": ("inspect_wizard",),
             "pal.plugins.l3": ("register_with_core",),
@@ -533,7 +532,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_core_no_longer_exports_legacy_dependency_bundle(self) -> None:
         core = importlib.import_module("pal.core")
         self.assertFalse(hasattr(core, "CoreDependencies"))
-        self.assertTrue(hasattr(core, "PromptFragmentRegistry"))
+        self.assertTrue(hasattr(importlib.import_module("pal.core.prompt_fragment_registry"), "PromptFragmentRegistry"))
 
     def test_domain_interaction_specs_stay_out_of_core_and_control_sources(self) -> None:
         core_runtime = (ROOT / "src/pal/core/runtime.py").read_text(encoding="utf-8")
@@ -664,7 +663,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
     def test_execution_calls_registered_capabilities_from_pal_core(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             register_execution_with_core(core.context)
             register_bunshin_with_core(
@@ -684,7 +683,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("No active Bunshin Task", result.llm_text)
 
     def test_execution_compiles_one_facade_generation_without_legacy_tool_registrations(self) -> None:
-        core = PalCore()
+        core = build_core()
 
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
@@ -696,7 +695,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn(alias, generation.indirect_aliases)
 
     def test_shell_exec_builtin_tool_runs_commands(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -712,7 +711,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(result.invocation_result.effect.value, "applied")
 
     def test_shell_exec_builtin_tool_allows_file_operations(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         with tempfile.TemporaryDirectory(prefix="pal_shell_exec_test_") as tmp:
@@ -737,7 +736,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertFalse(target.exists())
 
     def test_execution_exec_shell_capability_routes_to_shell_exec_tool(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -756,12 +755,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(str(compat.structured["stdout"]).strip(), "pong")
 
     def test_capability_compiler_abbreviates_canonical_paths_for_core_and_plugins(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         plugin = MockL3Plugin()
-        register_l3_with_core(core.context, plugin)
+        mount_l3_provider(core.context, plugin)
 
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("memory")
@@ -806,7 +805,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 _ = call
                 return CapabilityResult(status="ok", text="pong", llm_text="pong")
 
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         core.context.register_module(
@@ -844,7 +843,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(found_call.text.startswith("pong"))
 
     def test_module_registration_conflict_does_not_leak_partial_projections(self) -> None:
-        core = PalCore()
+        core = build_core()
         first = ModuleHandle(
             module_id="first",
             tier=MODULE_TIER_DETACHABLE,
@@ -869,7 +868,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIs(core.context.module_registry.get("first"), first)
 
     def test_duplicate_module_registration_preserves_original_handle(self) -> None:
-        core = PalCore()
+        core = build_core()
         original = ModuleHandle(module_id="demo", tier=MODULE_TIER_DETACHABLE)
         replacement = ModuleHandle(module_id="demo", tier=MODULE_TIER_DETACHABLE)
         core.context.register_module(original)
@@ -880,7 +879,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIs(core.context.module_registry.get("demo"), original)
 
     def test_execution_tool_failures_are_isolated(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         register_test_tool(core.context.execution_runtime, RaisingTool())
 
@@ -905,7 +904,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(result.structured["affordances"], [])
 
     def test_execution_tools_introspection_includes_description_and_schema(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -923,7 +922,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.close()
 
     def test_tool_search_discovers_shell_exec_by_natural_language(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -945,7 +944,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("facets", result.structured)
 
     def test_file_tools_are_published_as_llm_capabilities(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -972,7 +971,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(any(name.startswith("op_") or name.startswith("intro_") for name in hit_names))
 
     def test_main_runtime_tool_search_returns_only_public_aliases(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -989,7 +988,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         try:
             path = Path(temp_dir) / "sample.txt"
             path.write_text("hello world\n", encoding="utf-8")
-            core = PalCore()
+            core = build_core()
             register_execution_with_core(core.context)
             core.publish_module_capabilities("execution")
 
@@ -1050,7 +1049,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         try:
             path = Path(temp_dir) / "sample.txt"
             path.write_text("hello\n", encoding="utf-8")
-            core = PalCore()
+            core = build_core()
             register_execution_with_core(core.context)
             core.publish_module_capabilities("execution")
 
@@ -1064,7 +1063,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_l1_has_no_durable_tool_result_truncation_hook(self) -> None:
-        core = PalCore()
+        core = build_core()
 
         self.assertFalse(hasattr(core.turn_manager, "_truncate_tool_result_for_l1"))
 
@@ -1223,7 +1222,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(failures, [])
 
     def test_tool_read_returns_llm_facing_call_contract(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -1266,7 +1265,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
     def test_tool_read_invalid_result_carries_llm_text(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -1280,7 +1279,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn('"retry":"correct_input"', result.llm_text)
 
     def test_successful_introspection_llm_text_contains_key_structured_content(self) -> None:
-        core = PalCore()
+        core = build_core()
         runtime_root, database = self._create_database()
         try:
             service = IdentityService(repository=IdentityRepository())
@@ -1303,7 +1302,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             shutil.rmtree(runtime_root, ignore_errors=True)
 
     def test_invalid_capability_result_preserves_llm_text(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -1318,7 +1317,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_turn_runtime_passes_tool_descriptions_and_input_schemas_to_llm(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             register_execution_with_core(core.context)
             core.publish_module_capabilities("execution")
@@ -1332,10 +1331,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 settings_repository=llm_module.RuntimeSettingRepository(),
             )
             llm_module.register_with_core(core.context, llm_runtime)
-            memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+            memory_service = MemoryService()
             register_memory_with_core(core.context, memory_service)
             l3_plugin = MockL3Plugin()
-            register_l3_with_core(core.context, l3_plugin)
+            mount_l3_provider(core.context, l3_plugin)
             memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
             core.publish_module_capabilities("identity")
             core.publish_module_capabilities("llm")
@@ -1353,7 +1352,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 )
             )
 
-            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "astream"})
+            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate"})
             exposed_names = [item.name for item in request.tools]
             self.assertIn("search_tools", exposed_names)
             self.assertIn("read_tool", exposed_names)
@@ -1445,14 +1444,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.last_query = query
                 return super().recall(query)
 
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_execution_with_core(core.context)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         l3_plugin = RecordingL3Plugin()
-        register_l3_with_core(core.context, l3_plugin)
+        mount_l3_provider(core.context, l3_plugin)
         memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(l3_plugin.module_id)
@@ -1470,13 +1469,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(l3_plugin.last_query.task_id, "task_123")
 
     def test_memory_write_case_requires_star_object(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         l3_plugin = MockL3Plugin()
-        register_l3_with_core(core.context, l3_plugin)
+        mount_l3_provider(core.context, l3_plugin)
         memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(l3_plugin.module_id)
@@ -1515,14 +1514,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(any(record.get("document_kind") == "case" for record in l3_plugin.records))
 
     def test_failure_flow_success_writes_system_case_memory(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_failure_with_core(core, FailureRuntime())
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         l3_plugin = MockL3Plugin()
-        register_l3_with_core(core.context, l3_plugin)
+        mount_l3_provider(core.context, l3_plugin)
         memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
         for module_id in ("execution", "failure", "memory", l3_plugin.module_id):
             core.publish_module_capabilities(module_id)
@@ -1558,7 +1557,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIsNotNone(outcome.repair_resolution)
         self.assertTrue(any(record.get("document_kind") == "case" for record in l3_plugin.records))
         self.assertTrue(any(entry.kind == "case" for entry in memory_service.l2_store.items.values()))
-        request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "astream"})
+        request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate"})
         tool_names = [tool.name for tool in request.tools]
         self.assertNotIn("refresh_memory_provider_indexes", tool_names)
         self.assertIn("read_tool", tool_names)
@@ -1566,7 +1565,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("shell", tool_names)
 
     def test_channel_failure_surface_prefers_endpoint_restart_over_provider_reload(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_channel_with_core(core.context, ChannelRuntime())
@@ -1596,7 +1595,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("op_channel_mgmt_detach", canonical_paths)
 
     def test_failure_flow_llm_blocker_fails_without_work_order(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_failure_with_core(core, FailureRuntime())
 
         outcome = asyncio.run(
@@ -1624,7 +1623,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_plugin_failure_generates_work_order_only_for_known_first_party_domain(self) -> None:
         runtime_root = Path(tempfile.mkdtemp(prefix="pal_failure_plugins_"))
         try:
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             register_execution_with_core(core.context)
             register_failure_with_core(core, FailureRuntime())
@@ -1663,7 +1662,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             self.assertEqual(outcome.verification.status, "degraded")
             self.assertIsNotNone(outcome.repair_work_order)
-            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "astream"})
+            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate"})
             tool_names = [tool.name for tool in request.tools]
             self.assertIn("read_tool", tool_names)
             self.assertNotIn("rescan_plugins", tool_names)
@@ -1680,11 +1679,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             identity_service = IdentityService(repository=IdentityRepository())
             identity_service.ensure_defaults()
 
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             proactive_manager = ProactiveManager()
             proactive_manager.register(ProactiveDefinition(proactive_id="digest", goal="Summarize updates"))
-            memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+            memory_service = MemoryService()
             memory_service.l1_store.append(
                 [
                     L1TranscriptMessage(role="user", content="What timezone should you use?"),
@@ -1883,12 +1882,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_pal_core_builds_proactive_trigger_prompt_as_single_user_input(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             identity_service = IdentityService(repository=IdentityRepository())
             identity_service.ensure_defaults()
             register_identity_with_core(core.context, identity_service)
-            memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+            memory_service = MemoryService()
             register_memory_with_core(core.context, memory_service)
             memory_service.l1_store.append(
                 [
@@ -1957,13 +1956,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_proactive_trigger_executes_turn_and_commits_transcript_to_l1(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             register_execution_with_core(core.context)
             identity_service = IdentityService(repository=IdentityRepository())
             identity_service.ensure_defaults()
             register_identity_with_core(core.context, identity_service)
-            memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+            memory_service = MemoryService()
             register_memory_with_core(core.context, memory_service)
             proactive_manager = ProactiveManager()
             register_proactive_with_core(core.context, proactive_manager, None)
@@ -2018,7 +2017,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_proactive_trigger_delivers_reply_to_persisted_output_target(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             register_execution_with_core(core.context)
             identity_service = IdentityService(repository=IdentityRepository())
@@ -2028,7 +2027,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_channel_with_core(core.context, channel_runtime)
             endpoint = StubEndpoint(EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:12345"))
             channel_runtime.register_endpoint(endpoint)
-            memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+            memory_service = MemoryService()
             register_memory_with_core(core.context, memory_service)
             proactive_manager = ProactiveManager()
             register_proactive_with_core(core.context, proactive_manager, None)
@@ -2061,7 +2060,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
     def test_cancelled_proactive_turn_still_broadcasts_turn_end(self) -> None:
         async def exercise() -> tuple[list[tuple[str, dict[str, object]]], PalCore, str]:
-            core = PalCore()
+            core = build_core()
             definition = ProactiveDefinition(
                 proactive_id="daily_digest",
                 goal="Summarize repository updates",
@@ -2127,7 +2126,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             repository = IdentityRepository()
             service = IdentityService(repository=repository)
             service.ensure_defaults()
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             handle = register_identity_with_core(core.context, service)
 
@@ -2185,7 +2184,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_proactive_trigger_delivers_and_settles_all_turn_replies(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             register_core_with_core(core)
             register_execution_with_core(core.context)
             register_test_tool(core.context.execution_runtime, EchoTool())
@@ -2196,7 +2195,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_channel_with_core(core.context, channel_runtime)
             endpoint = StubEndpoint(EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:12345"))
             channel_runtime.register_endpoint(endpoint)
-            memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+            memory_service = MemoryService()
             register_memory_with_core(core.context, memory_service)
             proactive_repository = ProactiveRepository()
             proactive_manager = ProactiveManager(repository=proactive_repository)
@@ -2285,10 +2284,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIsNotNone(next_due)
 
     def test_main_loop_type_is_available(self) -> None:
-        self.assertIs(MainLoop, importlib.import_module("pal.core").MainLoop)
+        self.assertIs(MainLoop, importlib.import_module("pal.core.runtime").MainLoop)
 
     def test_main_loop_drains_channel_proactive_and_bunshin_sources(self) -> None:
-        core = PalCore()
+        core = build_core()
         channel_runtime = ChannelRuntime()
         proactive_manager = ProactiveManager()
 
@@ -2323,7 +2322,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("control.action", processed_kinds)
 
     def test_foundation_modules_do_not_publish_lifecycle_capabilities(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_channel_with_core(core.context, ChannelRuntime())
 
         published = core.publish_module_capabilities("channel")
@@ -2345,7 +2344,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_identity_is_resident_and_query_only(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             service = IdentityService(repository=IdentityRepository())
             service.ensure_defaults()
             register_identity_with_core(core.context, service)
@@ -2364,7 +2363,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             shutil.rmtree(runtime_root, ignore_errors=True)
 
     def test_managed_essential_module_detach_degrades_without_withdrawing_capabilities(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_control_with_core(core.context, ControlPlane())
         core.publish_module_capabilities("control")
 
@@ -2377,7 +2376,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
     def test_detachable_module_detach_withdraws_capabilities_and_reattach_restores_them(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_bunshin_lifecycle_test_") as tmp:
-            core = PalCore()
+            core = build_core()
             register_bunshin_with_core(core.context, runtime_root=Path(tmp))
             core.publish_module_capabilities("bunshin")
             try:
@@ -2403,12 +2402,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     core.detach_module("bunshin")
 
     def test_memory_can_switch_active_l3_provider_via_cli_owner(self) -> None:
-        core = PalCore()
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        core = build_core()
+        memory_service = MemoryService()
         mock_l3 = MockL3Plugin(records=[{"document_id": "fact:1", "title": "Redis"}])
 
         register_memory_with_core(core.context, memory_service)
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
 
@@ -2418,19 +2417,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(configured.status, "ok")
         self.assertEqual(recall_result.hits, [{"document_id": "fact:1", "title": "Redis"}])
 
-    def test_execution_runtime_bootstraps_default_l3_stub(self) -> None:
-        core = PalCore()
-
-        self.assertIsNotNone(core.context.execution_runtime.l3_plugin_registry.get("null_l3"))
-        self.assertIn("null_l3", core.context.execution_runtime.provider_registry)
+    def test_memory_bootstraps_its_default_l3_provider(self) -> None:
+        memory = MemoryService()
+        self.assertIsNotNone(memory.providers.get("null_l3"))
+        core = build_core()
+        self.assertNotIn("null_l3", core.context.execution_runtime.provider_registry)
 
     def test_memory_can_fallback_to_stub_provider(self) -> None:
-        core = PalCore()
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        core = build_core()
+        memory_service = MemoryService()
         mock_l3 = MockL3Plugin(records=[{"document_id": "fact:1", "title": "Redis"}])
 
         register_memory_with_core(core.context, memory_service)
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
 
@@ -2441,25 +2440,25 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(memory_service.l3_selector.active_provider_id, "null_l3")
 
     def test_detachable_l3_provider_can_detach_and_reattach(self) -> None:
-        core = PalCore()
+        core = build_core()
         mock_l3 = MockL3Plugin(records=[{"document_id": "fact:1", "title": "Redis"}])
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         core.publish_module_capabilities(mock_l3.module_id)
 
         detached = core.detach_module(mock_l3.module_id)
 
         self.assertEqual(detached, RuntimeStatus.FORBIDDEN)
-        self.assertIsNotNone(core.context.execution_runtime.l3_plugin_registry.get("mock_l3"))
+        self.assertIsNotNone(core.context.require_port("memory:memory").providers.get("mock_l3"))
         self.assertNotIn("inspect_memory_provider_inventory", core.context.capability_registry.descriptors)
 
         reattached = core.reattach_module(mock_l3.module_id)
 
         self.assertEqual(reattached, RuntimeStatus.FORBIDDEN)
-        self.assertIsNotNone(core.context.execution_runtime.l3_plugin_registry.get("mock_l3"))
+        self.assertIsNotNone(core.context.require_port("memory:memory").providers.get("mock_l3"))
 
     def test_l3_recall_query_supports_summary_and_origin_views(self) -> None:
-        core = PalCore()
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        core = build_core()
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         mock_l3 = MockL3Plugin(
             records=[
@@ -2476,7 +2475,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 }
             ]
         )
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         memory_service.l3_selector.active_provider_id = mock_l3.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
@@ -2518,8 +2517,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("inspect_memory_provider_inventory", core.context.capability_registry.descriptors)
 
     def test_active_memory_update_and_delete_use_mem_ref_without_target_id(self) -> None:
-        core = PalCore()
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        core = build_core()
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         mock_l3 = MockL3Plugin(
             records=[
@@ -2532,7 +2531,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 }
             ]
         )
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         memory_service.l3_selector.active_provider_id = mock_l3.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
@@ -2561,12 +2560,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(mock_l3.records, [])
 
     def test_active_memory_provider_is_discoverable_but_not_resident(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         mock_l3 = MockL3Plugin()
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         memory_service.l3_selector.active_provider_id = mock_l3.provider_id
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("memory")
@@ -2582,12 +2581,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("inspect_memory_state", tool_names)
 
     def test_llm_tool_contracts_come_from_direct_descriptors_and_native_opt_ins(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         mock_l3 = MockL3Plugin()
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         memory_service.l3_selector.active_provider_id = mock_l3.provider_id
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("memory")
@@ -2607,7 +2606,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                              native_input_contract(generation.indirect_aliases[name].input_schema))
 
     def test_retired_pager_is_not_a_tool(self):
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         names = {item["function"]["name"] for item in core.tool_surface.build_llm_tool_contracts()}
@@ -2615,7 +2614,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("read_file", names)
 
     def test_llm_tool_aliases_route_to_internal_canonical_capabilities(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -2646,7 +2645,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(compat.status, "unknown_tool")
 
     def test_detachable_proactive_module_round_trips_through_core_registry(self) -> None:
-        core = PalCore()
+        core = build_core()
         manager = ProactiveManager()
         register_proactive_with_core(core.context, manager)
         core.publish_module_capabilities("proactive")
@@ -2670,7 +2669,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_proactive_management_capabilities_create_update_and_delete(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             channels = ChannelRuntime()
             for endpoint_id, default_target in (("socket_default", {}), ("telegram_main", {"chat_id": "12345"})):
                 channels.endpoint_registry.register(SimpleNamespace(
@@ -2774,7 +2773,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             shutil.rmtree(runtime_root, ignore_errors=True)
 
     def test_proactive_delete_is_found_and_legacy_destroy_alias_is_rejected(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         register_proactive_with_core(core.context, ProactiveManager())
         core.publish_module_capabilities("execution")
@@ -2807,7 +2806,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_proactive_task_introspection_exposes_show_and_run_history(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             manager = ProactiveManager(repository=importlib.import_module("pal.proactive").ProactiveRepository())
             runner = importlib.import_module("pal.proactive").ProactiveRunner(repository=manager.repository)
             register_proactive_with_core(core.context, manager, runner)
@@ -2862,7 +2861,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_instance_level_capability_uses_one_name_parameterized_tool(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             channel_runtime = ChannelRuntime()
             repository = importlib.import_module("pal.channel.repository").ChannelEndpointRepository()
             repository.upsert(
@@ -2908,14 +2907,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             shutil.rmtree(runtime_root, ignore_errors=True)
 
     def test_wizard_is_not_registered_or_governed_by_pal_core(self) -> None:
-        core = PalCore()
+        core = build_core()
 
         self.assertIsNone(core.context.module_registry.get("wizard"))
         with self.assertRaises(KeyError):
             core.detach_module("wizard")
 
     def test_channel_outbox_emits_delivery_events_without_blocking_turn(self) -> None:
-        core = PalCore()
+        core = build_core()
         adapter = RecordingAdapter()
         channel_runtime = ChannelRuntime()
         channel_runtime.adapter_registry.register(adapter)
@@ -3128,7 +3127,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_channel_endpoint_capabilities_cover_auth_health_and_backlog_without_attach(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             channel_runtime = ChannelRuntime()
             repository = importlib.import_module("pal.channel.repository").ChannelEndpointRepository()
             repository.upsert(
@@ -3199,7 +3198,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_only_channel_management_can_change_endpoint_attach_state(self) -> None:
         runtime_root, database = self._create_database()
         try:
-            core = PalCore()
+            core = build_core()
             channel_runtime = ChannelRuntime()
             repository = importlib.import_module("pal.channel.repository").ChannelEndpointRepository()
             repository.upsert(
@@ -3237,11 +3236,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             shutil.rmtree(runtime_root, ignore_errors=True)
 
     def test_turn_runtime_queues_reply_and_commits_l1(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
             [generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")]
@@ -3271,11 +3270,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
     def test_turn_runtime_keeps_reasoning_out_of_final_reply_and_l1(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
             [generation_result_from_values(text="final answer", reasoning_text="thinking here", tool_calls=[], finish_reason="stop")]
@@ -3305,7 +3304,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
     def test_turn_runtime_streams_events_through_stdio_endpoint_while_core_executes_tools(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         endpoint = StubEndpoint(
@@ -3313,7 +3312,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
         channel_runtime.register_endpoint(endpoint)
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         register_test_tool(core.context.execution_runtime, EchoTool())
         core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
@@ -3344,7 +3343,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("final answer", outcome.final_reply)
 
     def test_streaming_channel_synthesizes_empty_model_terminal_on_same_stream(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         endpoint = StubEndpoint(
@@ -3353,9 +3352,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         channel_runtime.register_endpoint(endpoint)
         register_channel_with_core(core.context, channel_runtime)
         memory_service = MemoryService(
-            l3_selector=L3ProviderSelector(
-                resolver=core.context.execution_runtime.l3_plugin_registry.require
-            )
+
         )
         register_memory_with_core(core.context, memory_service)
         core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
@@ -3384,11 +3381,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(endpoint.sent)
 
     def test_turn_runtime_uses_response_mode_to_coarsely_tune_temperature(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
@@ -3412,16 +3409,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate"}]
         self.assertEqual(generate_requests[0].policy.temperature, 0.7)
         self.assertEqual(generate_requests[1].policy.temperature, 0.2)
 
     def test_tool_results_are_returned_via_standard_assistant_and_tool_messages(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
@@ -3445,7 +3442,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate"}]
         self.assertGreaterEqual(len(generate_requests), 2)
         followup_messages = generate_requests[1].messages
         assistant_tool_message = next(
@@ -3465,14 +3462,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("Tool Observation", system_message.text)
 
     def test_closed_turn_tool_history_retains_reasoning_on_next_turn(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
         memory_service = MemoryService(
-            l3_selector=L3ProviderSelector(
-                resolver=core.context.execution_runtime.l3_plugin_registry.require
-            )
+
         )
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
@@ -3524,7 +3519,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         first_followup = [
             request
             for kind, request in scripted_llm.requests
-            if kind in {"generate", "astream"}
+            if kind in {"generate", "generate"}
         ][1]
         active_tool_call = next(
             message
@@ -3539,7 +3534,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         second_request = [
             request
             for kind, request in scripted_llm.requests
-            if kind in {"generate", "astream"}
+            if kind in {"generate", "generate"}
         ][2]
         closed_call = next(
             message
@@ -3568,11 +3563,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
     def test_tool_protocol_prefers_llm_text_over_summary_text(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
@@ -3595,7 +3590,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate"}]
         self.assertGreaterEqual(len(generate_requests), 2)
         followup_messages = generate_requests[1].messages
         tool_message = next(message for message in followup_messages if message.role.value == "tool")
@@ -3620,12 +3615,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(json.loads(rendered), result.structured)
 
     def test_l3_recall_tool_protocol_uses_minimal_observation_text(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         mock_l3 = MockL3Plugin(
             records=[
@@ -3640,7 +3635,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 }
             ]
         )
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities(mock_l3.module_id)
         core.publish_module_capabilities("memory")
@@ -3670,7 +3665,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate"}]
         self.assertGreaterEqual(len(generate_requests), 2)
         tool_message = next(message for message in generate_requests[1].messages if message.role.value == "tool")
         self.assertIn('<recalled_memories view="summary">', tool_message.text)
@@ -3680,11 +3675,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("The test user built Pal and wants it to act directly.", tool_message.text)
 
     def test_malformed_tool_result_does_not_crash_turn_runtime(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
@@ -3708,7 +3703,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         self.assertTrue(str(outcome.final_reply or "").strip())
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate"}]
         self.assertGreaterEqual(len(generate_requests), 2)
         tool_message = next(
             message
@@ -3721,11 +3716,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("memory recall", tool_message.parts[0].content)
 
     def test_stagnation_guard_preserves_tool_prefix_and_revokes_execution(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
@@ -3753,7 +3748,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate"}]
         self.assertEqual(len(executions), 3)
         self.assertTrue(generate_requests[0].tools)
         for request in generate_requests[1:]:
@@ -3795,7 +3790,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.requests = []
                 self.generate_count = 0
 
-            def preflight(self, request) -> LLMPreflightAdvice:
+            def _preflight_response(self, request) -> LLMPreflightAdvice:
                 self.requests.append(("preflight", request))
                 return LLMPreflightAdvice(
                     status="ready",
@@ -3805,7 +3800,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
-            def resolve_endpoint_facts(self, *, preferred_endpoint_id: str | None = None, preferred_endpoint_source: str | None = None) -> dict[str, object]:
+            def _endpoint_facts(self, *, preferred_endpoint_id: str | None = None, preferred_endpoint_source: str | None = None) -> dict[str, object]:
                 _ = preferred_endpoint_id
                 return {
                     "endpoint_id": "tiny-endpoint",
@@ -3818,7 +3813,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 _ = preferred_endpoint_id
                 return 128
 
-            def generate(self, request, **options):
+            def _generate_response(self, request, **options):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
@@ -3829,12 +3824,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
-            async def agenerate(self, request, **options):
-                self.requests.append(("agenerate", request))
+            async def respond(self, request, **options):
+                self.requests.append(("complete", request))
                 if "compaction" not in str(
                     request.metadata.get("purpose") or ""
                 ):
-                    return self.generate(request)
+                    return self._generate_response(request)
                 return generation_result_from_values(
                     text=json.dumps(
                         {
@@ -3858,11 +3853,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     finish_reason="stop",
                 )
 
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         scripted_llm = TinyBudgetLLMRuntime()
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -3891,7 +3886,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.requests = []
                 self.generate_count = 0
 
-            def preflight(self, request) -> LLMPreflightAdvice:
+            def _preflight_response(self, request) -> LLMPreflightAdvice:
                 self.requests.append(("preflight", request))
                 return LLMPreflightAdvice(
                     status="ready",
@@ -3901,7 +3896,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
-            def generate(self, request, **options):
+            def _generate_response(self, request, **options):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
@@ -3918,14 +3913,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
-        core = PalCore(config=RuntimeConfig(
+        core = build_core(config=RuntimeConfig(
             default_max_result_size_chars=120_000,
             active_tool_result_preview=400,
         ))
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
         scripted_llm = MultiToolLLMRuntime()
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -3950,7 +3945,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(tool_messages[1].parts[0].content, "X" * 12_000)
 
     def test_large_result_is_an_exact_file_copy(self):
-        core = PalCore()
+        core = build_core()
         register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
         result = core.context.execution_runtime.execute_tool(
             new_tool_call(name="huge", args={"value": "spill"}, call_id="spill"),
@@ -3962,7 +3957,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("read_tool_result", result.llm_text)
 
     def test_snapshot_without_runtime_root_uses_private_directory(self):
-        core = PalCore()
+        core = build_core()
         register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
         result = core.context.execution_runtime.execute_tool(new_tool_call(name="huge", args={"value": "x"}),
             budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
@@ -3970,7 +3965,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(Path(result.snapshot_refs[0].path).is_file())
 
     def test_shell_snapshot_keeps_head_middle_and_tail(self):
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         result = core.context.execution_runtime.execute_tool(new_tool_call(name="run_shell", args={
@@ -3983,7 +3978,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("\0" * 20000, text)
 
     def test_snapshot_can_be_read_through_file_tool(self):
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         register_test_tool(core.context.execution_runtime, HeadTailHugeTool())
@@ -3999,7 +3994,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIsNone(read.invocation_result.context_delivery)
 
     def test_snapshot_preview_includes_both_ends(self):
-        core = PalCore()
+        core = build_core()
         register_test_tool(core.context.execution_runtime, HeadTailHugeTool())
         result = core.context.execution_runtime.execute_tool(new_tool_call(name="head_tail_huge", args={}),
             budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
@@ -4007,7 +4002,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("TAIL-SIGNAL", result.llm_text)
 
     def test_snapshot_lifetime_does_not_expire_by_turn_count(self):
-        core = PalCore()
+        core = build_core()
         runtime = core.context.execution_runtime
         register_test_tool(runtime, HugeTool(size=60_000))
         result = runtime.execute_tool(new_tool_call(name="huge", args={"value": "x"}),
@@ -4017,7 +4012,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(Path(result.snapshot_refs[0].path).exists())
 
     def test_missing_snapshot_never_reexecutes_source(self):
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
@@ -4033,7 +4028,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.requests = []
                 self.generate_count = 0
 
-            def preflight(self, request) -> LLMPreflightAdvice:
+            def _preflight_response(self, request) -> LLMPreflightAdvice:
                 self.requests.append(("preflight", request))
                 return LLMPreflightAdvice(
                     status="ready",
@@ -4043,7 +4038,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
-            def generate(self, request, **options):
+            def _generate_response(self, request, **options):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
@@ -4058,12 +4053,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
-            async def agenerate(self, request, **options):
-                self.requests.append(("agenerate", request))
+            async def respond(self, request, **options):
+                self.requests.append(("complete", request))
                 if "compaction" not in str(
                     request.metadata.get("purpose") or ""
                 ):
-                    return self.generate(request)
+                    return self._generate_response(request)
                 return generation_result_from_values(
                     text=json.dumps(
                         {
@@ -4087,11 +4082,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     finish_reason="stop",
                 )
 
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
-        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service = MemoryService()
         memory_service.l1_store.append(
             [L1TranscriptMessage(role="user", content="Older context that must be compacted before retry.")]
         )
@@ -4243,7 +4238,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("inspect the probe", l1_fragments[0].content)
 
     def test_prompt_compiler_neutralizes_closed_l1_tool_protocol(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = MemoryService()
         service.l1_store.append(
@@ -4460,10 +4455,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(MemoryQuery().view, L3RecallView.SUMMARY)
 
     def test_l3_recall_tool_result_stays_under_budget_with_preview_shape(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
-        register_memory_with_core(core.context, MemoryService(l3_selector=L3ProviderSelector(
-            resolver=core.context.execution_runtime.l3_plugin_registry.require)))
+        register_memory_with_core(core.context, MemoryService())
         mock_l3 = MockL3Plugin(
             records=[
                 {
@@ -4478,7 +4472,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 for index in range(10)
             ]
         )
-        register_l3_with_core(core.context, mock_l3)
+        mount_l3_provider(core.context, mock_l3)
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities(mock_l3.module_id)
         core.publish_module_capabilities("memory")

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_context
 
 import asyncio
 import unittest
@@ -79,14 +80,14 @@ class _FakeLLMPort(NonStreamingLLM):
         self.generation_index = 0
         self.requests = []
 
-    async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+    async def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         self.requests.append(request.request)
         return LLMPreflightAdvice(
             status=LLMPreflightStatus.READY.value,
             breakdown={},
         )
 
-    async def agenerate(self, request, *, on_submitted=None, **options) -> LLMGenerationResult:
+    async def respond(self, request, *, on_submitted=None, **options) -> LLMGenerationResult:
         self.requests.append(request)
         self.generation_index += 1
         if self.generation_index == 1:
@@ -136,7 +137,7 @@ class InterjectionInjectionTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.context = MainContext()
+        self.context = build_context()
         self.context.port_registry["memory:memory"] = MemoryService()
         self.fake_llm = _FakeLLMPort()
         self.context.port_registry["llm:llm"] = self.fake_llm
@@ -271,12 +272,12 @@ class InterjectionInjectionTests(unittest.TestCase):
         self.state.pending_channel_turns.extend([first, second])
         state = self.state
 
-        class Memory:
-            async def append_l1_user(inner_self, turn_id, message):
+        class Memory(MemoryService):
+            async def append_interjection(inner_self, turn_id, message):
                 state.pending_channel_turns.append(late)
                 return backing.append_l1_user(turn_id, message)
 
-        self.context.port_registry["memory:memory"] = Memory()
+        self.context.port_registry["memory:memory"] = Memory(l1_store=backing.l1_store)
         asyncio.run(inject_pending_interjection_async(
             context=self.context, state=self.state, continuation=continuation,
         ))
@@ -294,7 +295,7 @@ class InterjectionInjectionTests(unittest.TestCase):
         batch = [_make_envelope(turn_id=str(i), text=f"message {i}") for i in range(3)]
         self.state.pending_channel_turns.extend(batch)
 
-        class Memory:
+        class Memory(MemoryService):
             fail = True
 
             def append_l1_user(inner_self, turn_id, message):
@@ -306,7 +307,7 @@ class InterjectionInjectionTests(unittest.TestCase):
             def contains_l1_message(inner_self, turn_id, message_id):
                 return backing.contains_l1_message(turn_id, message_id)
 
-        memory = Memory()
+        memory = Memory(l1_store=backing.l1_store)
         self.context.port_registry["memory:memory"] = memory
 
         async def scenario():
@@ -364,10 +365,12 @@ class InterjectionInjectionTests(unittest.TestCase):
         self.assertEqual(len(self.state.pending_channel_turns), 1)
         self.assertIs(self.state.pending_channel_turns[0], queued)
 
-    def test_injection_restores_envelope_when_l1_user_api_unavailable(self) -> None:
-        # Memory port present but append_l1_user missing/not callable: the
-        # envelope must be restored, not dropped.
-        self.context.port_registry["memory:memory"] = object()
+    def test_invalid_memory_cannot_replace_published_service(self) -> None:
+        from pal.shared.ports import PortContractError
+        memory = self.context.port_registry["memory:memory"]
+        with self.assertRaises(PortContractError):
+            self.context.port_registry["memory:memory"] = object()
+        self.assertIs(self.context.port_registry["memory:memory"], memory)
         envelope = _make_envelope(turn_id="turn-main", text="run the batch")
         continuation = self.turn_manager.start(envelope)
         queued = _make_envelope(turn_id="interjection-1", text="wait, hold on")
@@ -473,13 +476,13 @@ class InterjectionInjectionTests(unittest.TestCase):
         started = asyncio.Event()
         release = asyncio.Event()
 
-        class AsyncMemory:
-            async def append_l1_user(inner_self, turn_id, message):
+        class AsyncMemory(MemoryService):
+            async def append_interjection(inner_self, turn_id, message):
                 started.set()
                 await release.wait()
                 return backing.append_l1_user(turn_id, message)
 
-        self.context.port_registry["memory:memory"] = AsyncMemory()
+        self.context.port_registry["memory:memory"] = AsyncMemory(l1_store=backing.l1_store)
 
         async def scenario() -> None:
             task = asyncio.create_task(
@@ -518,8 +521,8 @@ class InterjectionInjectionTests(unittest.TestCase):
         committed = asyncio.Event()
         release = asyncio.Event()
 
-        class AsyncMemory:
-            async def append_l1_user(inner_self, turn_id, message):
+        class AsyncMemory(MemoryService):
+            async def append_interjection(inner_self, turn_id, message):
                 result = backing.append_l1_user(turn_id, message)
                 committed.set()
                 await release.wait()
@@ -528,7 +531,7 @@ class InterjectionInjectionTests(unittest.TestCase):
             def contains_l1_message(inner_self, turn_id, message_id):
                 return backing.contains_l1_message(turn_id, message_id)
 
-        self.context.port_registry["memory:memory"] = AsyncMemory()
+        self.context.port_registry["memory:memory"] = AsyncMemory(l1_store=backing.l1_store)
 
         async def dequeue_next_turn():
             async with self.state.channel_turn_transition_lock:
@@ -579,7 +582,7 @@ class InterjectionInjectionTests(unittest.TestCase):
         )
         self.state.pending_channel_turns.append(queued)
 
-        class CommitThenErrorMemory:
+        class CommitThenErrorMemory(MemoryService):
             def append_l1_user(inner_self, turn_id, message):
                 backing.append_l1_user(turn_id, message)
                 raise RuntimeError("adapter failed after durable commit")
@@ -587,7 +590,7 @@ class InterjectionInjectionTests(unittest.TestCase):
             def contains_l1_message(inner_self, turn_id, message_id):
                 return backing.contains_l1_message(turn_id, message_id)
 
-        self.context.port_registry["memory:memory"] = CommitThenErrorMemory()
+        self.context.port_registry["memory:memory"] = CommitThenErrorMemory(l1_store=backing.l1_store)
 
         asyncio.run(
             inject_pending_interjection_async(

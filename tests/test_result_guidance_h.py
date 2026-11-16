@@ -7,10 +7,11 @@ two results carry no guidance; the last two carry recovery bound to the
 failing workspace; the descriptor never changes.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from pathlib import Path
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import CapabilityCall, ToolCallBudget
 from pal.lsp import build_lsp_plugin
@@ -221,7 +222,7 @@ class TestEndToEndSequence:
     """H01-H03/H10/H13: the full exit path and the descriptor invariants."""
 
     def _core(self, tmp_path):
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         handle = build_lsp_plugin(runtime_root=tmp_path).register_with_core(core.context)
         core.publish_module_capabilities("execution")

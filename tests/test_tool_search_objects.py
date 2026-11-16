@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import ast
 import json
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput, ToolGuidance
@@ -20,7 +21,7 @@ from tests.capability_fixture import mount_test_capability
 
 @pytest.fixture
 def runtime(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     build_lsp_plugin(runtime_root=tmp_path).register_with_core(core.context)
     register_plugins(core.context, SimpleNamespace())

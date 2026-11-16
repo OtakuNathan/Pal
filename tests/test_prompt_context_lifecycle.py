@@ -1,7 +1,7 @@
 from dataclasses import replace
 import pytest
 
-from pal.core.prompt_context import prepare_context, applicable_context, STATE_KEY
+from pal.memory.prompt_context import prepare_context, applicable_context, STATE_KEY
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR, WireShape
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
@@ -125,7 +125,7 @@ def test_default_snapshot_does_not_freeze_changed_guidance():
 
 
 def test_compaction_keeps_only_current_state_without_making_new_revision():
-    from pal.core.prompt_context import projected_context
+    from pal.memory.prompt_context import projected_context
     turn = L1TurnIR.begin('t')
     event = candidate('temporary advice', key='advice', kind='event', event_id='advice-1')
     for value in ['A', 'B', 'A']:
@@ -143,7 +143,7 @@ def test_compaction_keeps_only_current_state_without_making_new_revision():
 
 def test_completed_sidecars_survive_partial_batch_interruption():
     from types import SimpleNamespace
-    from pal.core.prompt_context import completed_tool_contexts
+    from pal.memory.prompt_context import completed_tool_contexts
     from pal.shared.tool_protocol import ToolResultIR, ToolContextMessageIR
     service = MemoryService()
     turn = service.begin_l1_turn('t')
@@ -193,7 +193,7 @@ def test_explicit_source_revision_survives_rendering_and_recovery():
 
 
 def test_distinct_events_from_same_source_and_new_event_at_rebuild():
-    from pal.core.prompt_context import projected_context
+    from pal.memory.prompt_context import projected_context
     first = candidate('first', kind='event', event_id='one')
     second = candidate('second', kind='event', event_id='two')
     turn, added = advance(L1TurnIR.begin('t'), [first, second])
@@ -208,8 +208,8 @@ def test_distinct_events_from_same_source_and_new_event_at_rebuild():
 
 
 def test_compaction_drops_expired_control_and_does_not_reuse_its_anchor():
-    from pal.core.compaction import CompactionEngine, CompactionSnapshot, CompactionClockKind, _scope_safe_snapshot
-    from pal.core.pal_compaction import PalCompactionPolicy
+    from pal.llm.compaction_engine import CompactionEngine, CompactionSnapshot, CompactionClockKind, _scope_safe_snapshot
+    from pal.llm.resident_compaction import PalCompactionPolicy
     from pal.memory.contracts import L1TranscriptMessage
     turn, _ = advance(L1TurnIR.begin('A'), [candidate('expired finalization')])
     replay = LLMRequestIR(messages=turn.messages, tools=(), policy=GenerationPolicyIR(max_output_tokens=20))

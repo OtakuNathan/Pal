@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from pal.plugins.lifecycle import WriterPreferredRWGate
+from pal.foundation.lifecycle_gate import WriterPreferredRWGate
 
 
 @pytest.mark.parametrize("mode", ["read", "write"])
@@ -58,22 +58,23 @@ def test_repeated_cancel_before_acquisition_drains_and_balances(mode, monkeypatc
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
-@pytest.mark.parametrize("name", [
-    "manage_channel_endpoint", "op_channel_mgmt_manage_endpoint",
-    "reload_channel_provider", "rescan_channel_providers",
-    "op_channel_mgmt_reload_provider", "op_channel_provider_rescan",
-])
+@pytest.mark.parametrize("name", ["renamed_lifecycle_action", "another_alias"])
 def test_channel_mutation_waits_for_admitted_execution_before_entering(name, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import contextmanager
-    from types import SimpleNamespace
     from pal.execution.runtime import ExecutionRuntime
     runtime = ExecutionRuntime()
+    from pal.execution.tool_semantics import INDIRECT_LIFECYCLE
     attempted, entered = threading.Event(), threading.Event()
-    def body(self, call):
+    def body(call):
         entered.set()
         return "done"
-    monkeypatch.setattr(ExecutionRuntime, "_call_registered_unlocked", body)
+    from pal.execution.contracts import CapabilityCall
+    from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput
+    from tests.capability_fixture import mount_test_capability
+    mount_test_capability(runtime, alias=name, canonical_path="op_test_lifecycle",
+        InputModel=EmptyToolInput, OutputModel=EmptyToolOutput, handler=body,
+        execution=INDIRECT_LIFECYCLE)
     for mode in ("read", "write"):
         original = getattr(runtime.lifecycle_gate, mode)
         @contextmanager
@@ -85,8 +86,46 @@ def test_channel_mutation_waits_for_admitted_execution_before_entering(name, mon
     with ThreadPoolExecutor(max_workers=1) as executor:
         with runtime.lifecycle_gate.read():
             attempted.clear()
-            future = executor.submit(runtime.call_registered, SimpleNamespace(name=name))
+            future = executor.submit(runtime.call_registered, CapabilityCall(name="op_test_lifecycle", args={}))
             assert attempted.wait(2)
             entered_while_reader_active = entered.wait(0.02)
         assert future.result(timeout=2) == "done"
     assert not entered_while_reader_active, "channel teardown ran concurrently with an admitted execution"
+
+
+def test_queued_registered_call_cannot_adopt_a_replacements_lock_policy(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from pal.execution.contracts import CapabilityCall
+    from pal.execution.runtime import ExecutionRuntime
+    from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput
+    from pal.execution.tool_semantics import INDIRECT_NONE, INDIRECT_LIFECYCLE
+    from tests.capability_fixture import mount_test_capability
+
+    runtime = ExecutionRuntime()
+    invoked = []
+    waiting = threading.Event()
+    options = dict(alias="replaceable", canonical_path="op_test_replaceable",
+                   InputModel=EmptyToolInput, OutputModel=EmptyToolOutput)
+    old = mount_test_capability(runtime, **options, execution=INDIRECT_NONE,
+                               handler=lambda _: invoked.append("old"))
+    original = runtime.lifecycle_gate.read
+    @contextmanager
+    def read():
+        waiting.set()
+        with original():
+            yield
+    monkeypatch.setattr(runtime.lifecycle_gate, "read", read)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with runtime.lifecycle_gate.write():
+                future = executor.submit(runtime.call_registered,
+                    CapabilityCall(name="op_test_replaceable", args={}))
+                assert waiting.wait(2)
+                runtime.unmount_subtree(old)
+                mount_test_capability(runtime, **options, execution=INDIRECT_LIFECYCLE,
+                                      handler=lambda _: invoked.append("replacement"))
+            assert future.result(timeout=2).status == "error"
+        assert invoked == []
+    finally:
+        runtime.shutdown()

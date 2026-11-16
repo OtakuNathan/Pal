@@ -139,7 +139,7 @@ the current turn to `finalization_only`.
 
 Effects:
 
-1. The next LLM request has tools physically removed.
+1. The next LLM request retains its tool schemas and tool choice; execution authority is revoked.
 2. Prompt assembly adds a finalization directive.
 3. Execution rejects new tool calls for that finalization attempt.
 4. The model gets one text-only chance to conclude.

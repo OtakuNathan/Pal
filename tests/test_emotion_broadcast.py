@@ -1,8 +1,9 @@
+from tests.core_factory import build_core
 from dataclasses import dataclass, field
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.emotion import EmotionReceiver, build_emotion_handle
 from pal.execution import register_with_core
 from pal.shared.tool_protocol import new_tool_call
@@ -25,7 +26,7 @@ class Scope:
 
 @pytest.fixture
 def emotions():
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     handle = build_emotion_handle(core.context)
     core.publish_module_capabilities("execution")
@@ -112,7 +113,7 @@ def test_single_value_schema_and_registration_cleanup(emotions):
 def test_real_plugin_reload_and_detach_replace_renderer_generation(tmp_path, monkeypatch):
     import shutil
     from pathlib import Path
-    from pal.plugins import PluginHost
+    from pal.plugins.host import PluginHost
     builtin = tmp_path / "builtin"
     builtin.mkdir()
     shutil.copytree(Path(__file__).parents[1] / "src/pal/plugins_builtin/emotion", builtin / "emotion")
@@ -144,7 +145,7 @@ def build_plugin(context): return Plugin(context.services["ledger"])
 ''')
     monkeypatch.syspath_prepend(str(builtin))
     ledger = []
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities("execution")
     host = PluginHost(context=core.context, runtime_root=tmp_path, builtin_root=builtin, services={"ledger": ledger})

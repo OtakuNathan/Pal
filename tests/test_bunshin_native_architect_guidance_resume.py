@@ -22,9 +22,9 @@ class CapturingModel(SyntheticModel):
         super().__init__()
         self.requests = []
 
-    def generate(self, request, **options):
+    def _generate_response(self, request, **options):
         self.requests.append(request)
-        return super().generate(request, **options)
+        return super()._generate_response(request, **options)
 
 
 def runner(root, value):

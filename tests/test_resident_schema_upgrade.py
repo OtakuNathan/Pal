@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pytest
 
 from pal.checklist import ChecklistService, register_with_core
-from pal.core.compaction import CompactionEngine
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionEngine
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.memory.persistence.journal import ResidentJournalStore
 from tests.test_resident_history import app, begin, answer
 from tests.test_runtime_compaction import _valid_pal_payload
@@ -32,7 +32,7 @@ def _app(root, checklist):
 
 def _executor(instance):
     executor = instance.handle.core.turn_executor
-    executor._compaction_engine = CompactionEngine(PalCompactionPolicy(), max_attempts=1)
+    executor.compaction.engine = CompactionEngine(PalCompactionPolicy(), max_attempts=1)
     transport = _Transport(_ScriptedLLM(_valid_pal_payload("migrated continuity")))
     transport.projection_port = None
     executor.context.port_registry["llm:llm"] = transport
@@ -66,7 +66,7 @@ def test_readable_checkpoint_and_journal_restore_then_compact(tmp_path, old_sche
         assert saved["modules"]["memory"]["schema_version"] == "5"
         assert saved["runtime_spec_hash"] == target._runtime_spec_hash()
 
-        result = await _executor(target).compact_memory_async(
+        result = await _executor(target).compaction.run(
             target.handle.memory_service, target_input_budget=100000, reserved_output_tokens=4096)
         assert result.success, result.failures
         assert target.history.archives.pending_count() == 0
@@ -109,7 +109,7 @@ def test_incompatible_snapshot_is_preserved_and_compact_explains_recovery_failur
         assert target.history.inspect()["restore_failed"]
         assert target.handle.memory_service.history.turns == ()
         assert target.history.archives.pending_count() == 0
-        result = await _executor(target).compact_memory_async(
+        result = await _executor(target).compaction.run(
             target.handle.memory_service, target_input_budget=100000, reserved_output_tokens=4096)
         assert result.status == "commit_failed"
         assert "resident history recovery failed" in result.failures[0]
@@ -133,7 +133,7 @@ def test_failed_upgrade_rebase_keeps_old_checkpoint_and_blocks_compact(tmp_path)
         assert target.last_checkpoint_status == "restore_failed"
         assert target.history.restore_failed
         assert source.history.store.base.path.read_bytes() == before
-        result = await _executor(target).compact_memory_async(
+        result = await _executor(target).compaction.run(
             target.handle.memory_service, target_input_budget=100000, reserved_output_tokens=4096)
         assert result.status == "commit_failed"
         assert "resident history recovery failed" in result.failures[0]

@@ -1,11 +1,12 @@
 """Repeated discovery warns before the existing stagnation stop boundary."""
+from tests.core_factory import build_core
 import asyncio
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.turns import ToolCallEffect
 from pal.execution import register_with_core
 from pal.shared.tool_protocol import ToolExecutionResult, new_tool_call
@@ -15,7 +16,7 @@ from tests.turn_fakes import continuation
 @pytest.mark.parametrize('tool_name', ['search_tools', 'inspect_execution_state'])
 def test_second_unchanged_search_warns_and_third_still_stops(tool_name):
     async def run():
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
         core.publish_module_capabilities('execution')
         executor = core.turn_executor
@@ -54,7 +55,7 @@ def test_second_unchanged_search_warns_and_third_still_stops(tool_name):
 
 def test_changed_result_arguments_intervening_tool_and_new_turn_do_not_warn():
     async def run():
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
         core.publish_module_capabilities('execution')
         executor = core.turn_executor

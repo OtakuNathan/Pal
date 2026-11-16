@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from pal.control.contracts import ControlCommandSpec, ControlCommandLease
     from pal.core.runtime_state import RuntimeStatePort
     from pal.shared import MountedSubtreeHandle
+    from pal.memory.contracts import L3ProviderPort
 
 
 MODULE_TIER_CORE_FOUNDATION = "core-foundation"
@@ -32,6 +33,7 @@ class ModuleHandle:
     control_commands: tuple[ControlCommandSpec, ...] = ()
     control_command_lease: ControlCommandLease | None = field(default=None, init=False, repr=False)
     provider_refs: list[str] = field(default_factory=list)
+    l3_provider: L3ProviderPort | None = None
     ports: dict[str, Any] = field(default_factory=dict)
     port_contracts: tuple[PortKey[object], ...] = ()
     published_capabilities: list[str] = field(default_factory=list)

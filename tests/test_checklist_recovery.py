@@ -117,7 +117,7 @@ def test_compact_leaves_checklist_and_its_current_projection_unchanged(tmp_path)
     fragments = provider.build_prompt_fragments(PromptAssemblyContext())
     app.handle.core.context.port_registry["llm:llm"] = _ScriptedLLM([
         generation_result_from_values(text=_valid_pal_payload())])
-    result = asyncio.run(app.handle.core.turn_executor.compact_memory_async(
+    result = asyncio.run(app.handle.core.turn_executor.compaction.run(
         memory, target_input_budget=8192, reserved_output_tokens=1024))
     assert result.success, result.failures
     assert checklist.show() == before

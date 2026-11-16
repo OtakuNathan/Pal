@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -8,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.profiles import BunshinProfileRegistry, resolve_pinned_bunshin_pack
@@ -661,7 +662,7 @@ workspace_policy: {}
         self.assertEqual(software.workspace.get("workspace_policy", {}).get("mode"), "writable_git_branch")
 
     def test_scoped_tool_execution_rejects_missing_logical_lifetime(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         scoped = BunshinScopedExecutionRuntime(
@@ -686,7 +687,7 @@ workspace_policy: {}
         bound = self.root / "workflow-request.json"
         bound.write_text('{"goal":"bounded"}\n', encoding="utf-8")
 
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         generic_reader = BunshinScopedExecutionRuntime(
@@ -724,7 +725,7 @@ workspace_policy: {}
         verifier_case.parent.mkdir(parents=True)
         product.write_text("old\n", encoding="utf-8")
         verifier_case.write_text("assert False\n", encoding="utf-8")
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         scoped = BunshinScopedExecutionRuntime(
@@ -776,7 +777,7 @@ workspace_policy: {}
         repo = self.root / "architecture-worktree"
         repo.mkdir()
         outside = self.root / "include" / "escaped.hpp"
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         scoped = BunshinScopedExecutionRuntime(
@@ -825,7 +826,7 @@ workspace_policy: {}
         )
 
     def test_workspace_tool_replaces_inherited_descriptor_once(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
@@ -843,7 +844,7 @@ workspace_policy: {}
         )
 
     def test_verifier_keeps_the_truthful_shell_input_schema(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         base_description = str(
@@ -923,7 +924,7 @@ workspace_policy: {}
             )
 
     def test_workflow_tool_guidance_override_is_compiled_into_provider_surface(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         scoped = BunshinScopedExecutionRuntime(

@@ -1,3 +1,4 @@
+from tests.core_factory import build_core
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -76,7 +77,7 @@ def test_claim_rechecks_lifetime_and_does_not_consume_invalid_notice(invalid):
 
 
 def hot_executor(llm):
-    core = PalCore()
+    core = build_core()
     service = _memory_with_turns(2)
     live = _attach_hot_cache(llm, service)
     core.context.port_registry['llm:llm'] = llm
@@ -84,7 +85,7 @@ def hot_executor(llm):
 
 
 def compact(executor, service):
-    return asyncio.run(executor.compact_memory_async(
+    return asyncio.run(executor.compaction.run(
         service, target_input_budget=8192, reserved_output_tokens=2048,
         cache_epoch='epoch-a', max_attempts=3,
     ))
@@ -124,11 +125,11 @@ def test_expired_hot_compact_never_generates_a_cold_request():
 def test_hot_compact_rechecks_ttl_between_attempts():
     llm = _ScriptedLLM([RuntimeError('offline')])
     executor, service, live = hot_executor(llm)
-    generate = llm.agenerate
+    generate = llm.respond
     async def expires(request):
         live['anchor_remaining_ttl_seconds'] = 0
         return await generate(request)
-    llm.agenerate = expires
+    llm.respond = expires
     result = compact(executor, service)
     assert result.status == 'hot_cache_unavailable'
     assert result.attempts == 1
@@ -167,7 +168,7 @@ def test_busy_core_does_not_claim_compact_reminder():
     from unittest.mock import AsyncMock, Mock
     from pal.control.contracts import ControlAction
 
-    core = PalCore()
+    core = build_core()
     core.turn_manager.latest_active_turn_id = Mock(return_value='busy')
     core.cache_warm_deadline.claim_compaction = Mock()
     core._complete_compact_reply_async = AsyncMock()

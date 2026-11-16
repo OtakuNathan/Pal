@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.shared.ports import PortRegistry
 
 import unittest
 from types import SimpleNamespace
@@ -67,7 +68,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider = _Provider()
         core = _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry={"core:core": core})
+        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_ARCHITECTURE_REVIEW_RESOLVED,
             source_kind=SourceKind.BUNSHIN,
@@ -99,7 +100,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider = _Provider()
         core = _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry={"core:core": core})
+        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_TERMINAL,
             source_kind=SourceKind.BUNSHIN,
@@ -143,7 +144,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider = _Provider()
         core = _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry={"core:core": core})
+        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_TERMINAL,
             source_kind=SourceKind.BUNSHIN,
@@ -177,7 +178,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider = _Provider()
         core = _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry={"core:core": core})
+        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_CLARIFICATION_RESOLVED,
             source_kind=SourceKind.BUNSHIN,
@@ -204,7 +205,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_retry_skips_parts_already_accepted_by_channel(self) -> None:
         provider = _Provider()
         core = _Core()
-        context = SimpleNamespace(port_registry={"core:core": core})
+        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING,
             source_kind=SourceKind.BUNSHIN,
@@ -255,7 +256,7 @@ class BunshinMemoryProposalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         memory = MemoryService()
         provider, core = _Provider(), _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry={"core:core": core, "memory:memory": memory})
+        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core, "memory:memory": memory}))
         payload = {"delivery_id": "d", "task_id": "t", "workflow_id": "w", "invocation_id": "i",
             "status": "completed", "summary": "done",
             "route": {"endpoint_id": "socket", "channel_kind": "socket", "reply_target": {"session_id": "task"}},

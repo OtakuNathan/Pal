@@ -1,7 +1,8 @@
 """CLI-only configuration aliases cannot leak through another model surface."""
+from tests.core_factory import build_core
 import json
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.capabilities import register_with_core as register_core
 from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
 from pal.execution import register_with_core as register_execution
@@ -29,7 +30,7 @@ REMOVED = {
 def test_configuration_writes_are_absent_and_live_observations_remain(runtime_root):
     from pal.web_search.repository import WebSearchProviderRepository
     from pal.llm.repository import RuntimeSettingRepository
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
     try:
         register_execution(core.context)

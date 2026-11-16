@@ -1,4 +1,5 @@
 """Object inspections preserve diagnosis, boundaries and owner-only maintenance."""
+from tests.core_factory import build_core
 import asyncio
 from types import SimpleNamespace
 
@@ -73,8 +74,8 @@ def test_plugin_directory_and_hub_do_not_expand_plugin_state(tmp_path, monkeypat
     from pal.plugins.host import PluginHost
     from pal.plugins.contracts import PluginRecord, PLUGIN_SOURCE_FIRST_PARTY
     from pal.packages.service import PackageService
-    from pal.core import PalCore
-    core = PalCore()
+    from pal.core.runtime import PalCore
+    core = build_core()
     host = PluginHost(core.context, tmp_path, third_party_repository=SimpleNamespace(list_all=lambda: [], get=lambda name: None))
     host.first_party_records["example"] = PluginRecord(
         plugin_id="example", source=PLUGIN_SOURCE_FIRST_PARTY, entrypoint="example:build",

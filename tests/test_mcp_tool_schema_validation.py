@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution.tool_facade import (
     CompleteResult,
     EffectKind,
@@ -74,7 +75,7 @@ def _runtime_with_mcp():
         tools=(McpToolSpec(name="validate", input_schema=MCP_SCHEMA),),
     ).with_hash()
     projection = McpCompiler().compile(module_id="mcp_schema", snapshots=(snapshot,), invoker=invoker)
-    runtime = PalCore().context.execution_runtime
+    runtime = build_core().context.execution_runtime
     runtime.mount_subtree(
         SimpleNamespace(mounted_subtree=projection.mounted_subtree)
     )
@@ -143,7 +144,7 @@ def test_mcp_defaults_indirect_but_can_declare_direct() -> None:
         ),
     ).with_hash()
     projection = McpCompiler().compile(module_id="mcp_mode", snapshots=(snapshot,), invoker=invoker)
-    runtime = PalCore().context.execution_runtime
+    runtime = build_core().context.execution_runtime
     runtime.mount_subtree(SimpleNamespace(mounted_subtree=projection.mounted_subtree))
 
     assert "call_mcp_mode_direct" in runtime.registry_generation.provider_specs
@@ -180,7 +181,7 @@ def test_mcp_declared_output_schema_is_validated(structured_content, expected_ty
         ),
     ).with_hash()
     projection = McpCompiler().compile(module_id="mcp_output", snapshots=(snapshot,), invoker=invoker)
-    runtime = PalCore().context.execution_runtime
+    runtime = build_core().context.execution_runtime
     runtime.mount_subtree(SimpleNamespace(mounted_subtree=projection.mounted_subtree))
 
     result = runtime.invoke_indirect_tool(new_tool_call(name="call_mcp_output_typed", args={}))

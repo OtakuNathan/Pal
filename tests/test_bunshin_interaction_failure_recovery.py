@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore  # Initialize runtime modules before worker imports.
+from pal.core.runtime import PalCore
 from pal.bunshin import ask_question, candidate_builder
 from pal.bunshin.submission_errors import SubmissionValidationError
 from pal.shared.tool_protocol import new_tool_call

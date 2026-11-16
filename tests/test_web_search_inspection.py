@@ -1,9 +1,10 @@
 """Pending batch: one parameterless snapshot covers every search backend."""
+from tests.core_factory import build_core
 from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution
 from pal.llm.repository import RuntimeSettingRepository
 from pal.shared import IntrospectionCall
@@ -91,7 +92,7 @@ def test_one_unavailable_health_section_preserves_other_providers(service, monke
 
 
 def test_tool_surface_is_two_entries_and_inspection_rejects_any_parameters(service, monkeypatch):
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
     try:
         register_execution(core.context)

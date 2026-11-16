@@ -1,5 +1,6 @@
 """Cancellation cannot let lifecycle cleanup overtake a synchronous handler."""
 from __future__ import annotations
+from pal.execution.tool_facade import LifecycleAccess
 
 import asyncio
 import inspect
@@ -64,7 +65,7 @@ def test_cancelled_worker_finishes_before_plugin_cleanup(runtime, caplog, entryp
 
     mount(runtime, "cancelled_worker", "op_test_cancelled_worker", worker,
           indirect=entrypoint == "indirect")
-    mount(runtime, "manage_plugin", "op_plugin_mgmt_manage", cleanup, execution=DIRECT_LOCAL_WRITE)
+    mount(runtime, "manage_plugin", "op_plugin_mgmt_manage", cleanup, execution=DIRECT_LOCAL_WRITE.model_copy(update={"lifecycle_access": LifecycleAccess.EXCLUSIVE}))
 
     async def scenario():
         task = asyncio.create_task(invoke(runtime, entrypoint))

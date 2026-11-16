@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_context, build_core
 
 import asyncio
 from collections import deque
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.main_context import MainContext
 from pal.execution import register_with_core
 from pal.execution.activity import ExecutionActivityDecorator, capture_activity_output, display_arguments
@@ -60,7 +61,7 @@ class ActivityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_file_calls_diff_before_paging_and_indirect_dedup(self):
         runtime = ExecutionRuntime()
-        core = PalCore(context=MainContext(execution_runtime=runtime))
+        core = build_core(context=build_context(execution_runtime=runtime))
         register_with_core(core.context)
         core.publish_module_capabilities('execution')
         events = []

@@ -81,3 +81,29 @@ def test_moved_contracts_keep_compatibility_exports():
     assert role_gateway.role_gateway_client_from_env is role_gateway_client.role_gateway_client_from_env
     assert role_gateway.RoleGatewayArtifactStore is role_gateway_client.RoleGatewayArtifactStore
     assert role_gateway.decode_remote_draft_snapshot is submission_drafts.decode_remote_draft_snapshot
+
+
+def test_low_level_imports_work_in_fresh_interpreters():
+    import subprocess
+    import sys
+
+    orders = (
+        ("pal.llm.ir", "pal.memory.contracts", "pal.execution.contracts", "pal.core.main_context"),
+        ("pal.core.main_context", "pal.plugins.host", "pal.memory.service", "pal.llm.runtime"),
+        ("pal.foundation.lifecycle_gate", "pal.memory.providers", "pal.execution.runtime", "pal.core.runtime"),
+    )
+    for modules in orders:
+        subprocess.run([sys.executable, "-c", "import importlib; " +
+            "; ".join(f"importlib.import_module({name!r})" for name in modules)],
+            check=True, capture_output=True, text=True, timeout=60)
+
+
+def test_low_level_import_does_not_construct_runtime():
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", "import sys; import pal.llm.ir; import pal.shared.ports; "
+        "assert 'pal.core.runtime' not in sys.modules; "
+        "assert 'pal.plugins.host' not in sys.modules; "
+        "assert 'pal.execution.runtime' not in sys.modules"],
+        check=True, capture_output=True, text=True, timeout=30)

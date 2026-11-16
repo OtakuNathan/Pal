@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pal.execution.tool_facade import LifecycleAccess
 from typing import cast
 from pal.execution.turn_io_contracts import TURN_IO, TurnIOPort
 
@@ -74,9 +75,7 @@ from pal.execution.result_guidance import (
     resolve_failure_guidance,
 )
 from pal.shared import ToolExecutionResult
-from pal.plugins.l3.registry import L3PluginRegistry
-from pal.plugins.l3.stubs import NullL3Plugin
-from pal.plugins.lifecycle import WriterPreferredRWGate
+from pal.foundation.lifecycle_gate import WriterPreferredRWGate
 from pal.execution.logical_sessions import LogicalExecutionSessions
 from pal.execution.session_state import DEFAULT_RESULT_RETENTION_USER_TURNS
 from pal.execution.session_state import (
@@ -123,46 +122,6 @@ def _leading_fact_block(text: str) -> str | None:
     return stripped[:end]
 
 
-def _is_plugin_lifecycle_tool(name: object) -> bool:
-    normalized = str(name or "").strip()
-    aliases = {
-        "manage_plugin",
-        "rescan_plugins",
-    }
-    if normalized in aliases:
-        return True
-    return normalized in {
-        f"op_plugin_mgmt_{action}" for action in (
-            "manage", "rescan"
-        )
-    }
-
-
-def _is_lifecycle_mutation_tool(name: object) -> bool:
-    normalized = str(name or "").strip()
-    if _is_plugin_lifecycle_tool(normalized):
-        return True
-    return normalized in {
-        "manage_channel_endpoint", "reload_channel_provider",
-        "rescan_channel_providers",
-    } | {
-        f"op_channel_mgmt_{action}" for action in (
-            "manage_endpoint", "reload_provider"
-        )
-    } | {"op_channel_provider_rescan"}
-
-
-def _is_package_job_tool(name: object) -> bool:
-    # These resident handlers only queue/wait/read jobs. The background package
-    # owner holds the write fence for activation; a waiting read fence would
-    # prevent that worker from completing.
-    return str(name or "").strip() in {
-        "install_package", "prepare_package", "inspect_package_status", "uninstall_plugin",
-        "op_plugin_package_install", "op_plugin_package_prepare",
-        "intro_module_plugins_status", "op_plugin_mgmt_uninstall",
-    }
-
-
 def _invocation_args(
     validated: BaseModel | dict[str, Any],
 ) -> dict[str, Any]:
@@ -186,7 +145,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
     transient: bool = field(default=False, init=False)
     activity_decorator: Any | None = field(default=None, kw_only=True)
     provider_registry: dict[str, Any] = field(default_factory=dict)
-    l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
     runtime_root: Path | None = None
     logical_state: LogicalExecutionStateBackend = field(
         default_factory=InMemoryLogicalExecutionState
@@ -215,7 +173,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
         """
         self.activity_decorator = previous.activity_decorator
         self.provider_registry = previous.provider_registry
-        self.l3_plugin_registry = previous.l3_plugin_registry
         self.runtime_root = previous.runtime_root
         self.logical_state = previous.logical_state
         self.execution_sessions = previous.execution_sessions
@@ -234,10 +191,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
         self.execution_sessions.state_backend = self.logical_state
         if self.result_snapshots is None:
             self.result_snapshots = ResultSnapshotStore(self.runtime_root)
-        default_l3 = NullL3Plugin()
-        self.provider_registry.setdefault(default_l3.provider_id, default_l3)
-        if self.l3_plugin_registry.get(default_l3.provider_id) is None:
-            self.l3_plugin_registry.register(default_l3)
         if self.sync_executor is None:
             self.sync_executor = ThreadPoolExecutor(
                 max_workers=self.sync_executor_max_workers,
@@ -263,6 +216,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def create_role_session_driver(self):
         return None
+
+    def prepare_prompt_context(self, memory, continuation, *, context_view=None, include_live: bool = True) -> None:
+        """Apply request visibility, optionally including owner-produced live updates."""
+        if include_live:
+            self.prepare_model_context(memory, continuation, context_view=context_view)
+        else:
+            ExecutionRuntime.prepare_model_context(self, memory, continuation, context_view=context_view)
 
     def prepare_model_context(self, memory, continuation, *, context_view=None):
         """Record file-result visibility for this request, not the whole lifetime."""
@@ -779,7 +739,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if isinstance(binding, RejectedResult):
             return binding
         try:
-            gate = self._invocation_gate(call.name)
+            gate = self._invocation_gate(record.execution)
             with gate:
                 unavailable = self._admit_record_binding(record, binding)
                 if unavailable is not None:
@@ -860,7 +820,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if isinstance(binding, RejectedResult):
             return binding
         try:
-            gate = self._invocation_gate(call.name, asynchronous=True)
+            gate = self._invocation_gate(record.execution, asynchronous=True)
             async with gate:
                 unavailable = self._admit_record_binding(record, binding)
                 if unavailable is not None:
@@ -2214,55 +2174,54 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return None
         return min(candidates)
 
-    def _invocation_gate(self, name: object, *, asynchronous: bool = False):
-        if _is_package_job_tool(name):
+    def _invocation_gate(self, semantics, *, asynchronous: bool = False):
+        access = semantics.lifecycle_access
+        if access is LifecycleAccess.OWNER_MANAGED:
             return contextlib.nullcontext()
-        if _is_lifecycle_mutation_tool(name):
+        if access is LifecycleAccess.EXCLUSIVE:
             return self.lifecycle_gate.write_async() if asynchronous else self.lifecycle_gate.write()
         return self.lifecycle_gate.read_async() if asynchronous else self.lifecycle_gate.read()
 
-    def call_registered(self, call: CapabilityCall) -> CapabilityResult:
-        gate = self._invocation_gate(call.name)
-        with gate:
-            return self._call_registered_unlocked(call)
-
-    def _call_registered_unlocked(self, call: CapabilityCall) -> CapabilityResult:
+    def _registered_invocation(self, call: CapabilityCall) -> tuple[CapabilityCall, BoundCapabilityAction | CapabilityResult]:
         with self._registry_lock:
             generation = self._registry_generation
-            canonical_path = generation.capability_index.canonical_path_for(call.name)
-            call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
-            bound = self._resolve_binding(call, generation=generation)
-            if isinstance(bound, CapabilityResult):
-                return bound
+            canonical = generation.capability_index.canonical_path_for(call.name)
+            captured = CapabilityCall(name=canonical, args=dict(call.args), meta=dict(call.meta))
+            return captured, self._resolve_binding(captured, generation=generation)
+
+    def _registered_admission_error(self, call: CapabilityCall, bound: BoundCapabilityAction) -> CapabilityResult | None:
+        with self._registry_lock:
             if not bound.admission.live:
                 return CapabilityResult(status=RuntimeStatus.ERROR, text=f"unknown capability: {call.name}",
                                         llm_text=f"unknown capability: {call.name}")
-        result = bound.callable(call)
-        if inspect.isawaitable(result):
-            raise RuntimeError(f"capability requires async execution: {canonical_path}")
-        return result
+        return None
+
+    def call_registered(self, call: CapabilityCall) -> CapabilityResult:
+        call, bound = self._registered_invocation(call)
+        if isinstance(bound, CapabilityResult):
+            return bound
+        with self._invocation_gate(bound.descriptor.execution):
+            error = self._registered_admission_error(call, bound)
+            if error is not None:
+                return error
+            result = bound.callable(call)
+            if inspect.isawaitable(result):
+                raise RuntimeError(f"capability requires async execution: {call.name}")
+            return result
 
     async def call_registered_async(self, call: CapabilityCall) -> CapabilityResult:
-        gate = self._invocation_gate(call.name, asynchronous=True)
-        async with gate:
-            return await self._call_registered_async_unlocked(call)
-
-    async def _call_registered_async_unlocked(self, call: CapabilityCall) -> CapabilityResult:
-        with self._registry_lock:
-            generation = self._registry_generation
-            canonical_path = generation.capability_index.canonical_path_for(call.name)
-            call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
-            bound = self._resolve_binding(call, generation=generation)
-            if isinstance(bound, CapabilityResult):
-                return bound
-            if not bound.admission.live:
-                return CapabilityResult(status=RuntimeStatus.ERROR, text=f"unknown capability: {call.name}",
-                                        llm_text=f"unknown capability: {call.name}")
-        if bound.async_callable is not None:
-            result = bound.async_callable(call)
+        call, bound = self._registered_invocation(call)
+        if isinstance(bound, CapabilityResult):
+            return bound
+        async with self._invocation_gate(bound.descriptor.execution, asynchronous=True):
+            error = self._registered_admission_error(call, bound)
+            if error is not None:
+                return error
+            if bound.async_callable is not None:
+                result = bound.async_callable(call)
+                return await result if inspect.isawaitable(result) else result
+            result = await self._call_sync_handler_async(bound, call)
             return await result if inspect.isawaitable(result) else result
-        result = await self._call_sync_handler_async(bound, call)
-        return await result if inspect.isawaitable(result) else result
 
     def _resolve_binding(
         self,

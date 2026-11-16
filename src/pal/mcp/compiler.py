@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.execution.tool_facade import LifecycleAccess
+
 import hashlib
 import json
 
@@ -211,6 +213,7 @@ class McpCompiler:
                 external_name=prompt.name, server_id=snapshot.server_id,
             ),
             execution=ToolExecutionSemantics(
+                lifecycle_access=LifecycleAccess.SHARED,
                 invocation_mode=InvocationMode.INDIRECT,
                 effect_kind=EffectKind.EXTERNAL_READ,
                 idempotency=Idempotency.IDEMPOTENT,
@@ -369,6 +372,7 @@ def _mcp_tool_execution(annotations: dict[str, Any] | None) -> ToolExecutionSema
     values = dict(annotations or {})
     direct = str(values.get("invocation_mode") or "").strip() == InvocationMode.DIRECT.value
     return ToolExecutionSemantics(
+        lifecycle_access=LifecycleAccess.SHARED,
         invocation_mode=InvocationMode.DIRECT if direct else InvocationMode.INDIRECT,
         # MCP annotations are untrusted hints, not execution guarantees. Until
         # Pal has an explicit trusted-server contract, dynamic tools remain an

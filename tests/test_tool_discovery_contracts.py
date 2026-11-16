@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import json
 from typing import Literal
@@ -7,7 +8,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import Field
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput, StrictToolModel, ToolGuidance
 from pal.execution.tool_presentation import compact_input_contract
@@ -17,7 +18,7 @@ from tests.capability_fixture import mount_test_capability
 
 @pytest.fixture
 def runtime():
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities("execution")
     yield core.context.execution_runtime
@@ -121,7 +122,7 @@ def test_discovery_exposes_plugin_reattach_and_provider_install():
         calls.append(name)
         return {"status": "ok", "plugin_id": name, "enabled": True, "attached": True}
 
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     register_plugins(core.context, SimpleNamespace(reattach=reattach))
     for module in ("execution", "plugins"):
@@ -236,7 +237,7 @@ def test_exact_search_does_not_report_weaker_matches_as_truncation(runtime):
 def test_lsp_symbol_search_requires_action_and_object(tmp_path):
     from pal.lsp import build_lsp_plugin
 
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     build_lsp_plugin(runtime_root=tmp_path).register_with_core(core.context)
     for module in ("execution", "lsp"):
@@ -299,7 +300,7 @@ def test_alias_words_converge_without_description_contamination(runtime):
 
 def test_domain_partial_alias_and_declared_object_form(tmp_path):
     from pal.lsp import build_lsp_plugin
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     build_lsp_plugin(runtime_root=tmp_path).register_with_core(core.context)
     for module in ('execution', 'lsp'):

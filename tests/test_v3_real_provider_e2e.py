@@ -25,6 +25,7 @@ import sqlite3
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from pal.shared.ports import PortRegistry
 
 from pal.core.turns import LLMRequestEffect
 from pal.llm.credentials import LLMCredentialResolver
@@ -45,14 +46,14 @@ from tests.test_v3_n1_root_lifecycle import user
 def _e2e_executor(memory, runtime):
     """Vertical-trace executor shape, but with a REAL-provider compaction
     budget (the trace fixture's 2s deadline only fits faked frames)."""
-    from pal.core.compaction import CompactionEngine
-    from pal.core.pal_compaction import PalCompactionPolicy
+    from pal.llm.compaction_engine import CompactionEngine
+    from pal.llm.resident_compaction import PalCompactionPolicy
     from pal.core.turn_executor import TurnExecutor
 
     async def call_port(port, async_name, _sync_name, *args):
         return await getattr(port, async_name)(*args)
 
-    ports = {"memory:memory": memory, "llm:llm": runtime}
+    ports = PortRegistry({"memory:memory": memory, "llm:llm": runtime})
     return TurnExecutor(
         SimpleNamespace(port_registry=ports, require_port=ports.__getitem__,
                         execution_runtime=None),
@@ -326,7 +327,7 @@ class RealProviderE2ETests(unittest.TestCase):
             )
         except Exception:
             anchor_peek = {}
-        result = asyncio.run(ex.compact_memory_async(
+        result = asyncio.run(ex.compaction.run(
             memory, target_input_budget=100_000, reserved_output_tokens=1024,
             continuation=SimpleNamespace(turn_id="T"),
         ))

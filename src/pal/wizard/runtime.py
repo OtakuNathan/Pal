@@ -14,7 +14,7 @@ from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.llm.schema import assert_llm_endpoint_schema_current
 from pal.memory import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVecModel, MemoryFactModel, MemoryTopicModel
-from pal.plugins import PluginBundleModel
+from pal.plugins.models import PluginBundleModel
 from pal.proactive import ProactiveDefinitionModel, ProactiveRunModel
 from pal.skill import SkillModel
 from pal.web_search import WebSearchProviderModel, WebSearchProviderRepository

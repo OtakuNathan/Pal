@@ -141,13 +141,14 @@ class RebaseKeeperTests(unittest.TestCase):
         add_round(s, 'L', 1)
         right = add_round(s, 'R', 2, native_text='SYNTHETIC_R_NATIVE')
         memory = MemoryService()
-        ex = make_executor(memory, SimpleNamespace())
+        from tests.llm_fakes import NonStreamingLLM
+        ex = make_executor(memory, NonStreamingLLM())
         history = SimpleNamespace(
             left_messages=lambda: (assistant('NEW SEED', 'seed'),),
             right_messages=lambda: right, left_generation=4)
         hosted = SimpleNamespace(projection_port=SimpleNamespace(
             endpoint_projection_session=lambda scope, *, rebind: s))
-        ex._rebase_projection_after_left_install(hosted, 'review:resident', history)
+        ex.projection.rebase(hosted, 'review:resident', history)
         self.assertIn('R', s.native_by_attempt,
                       'real executor helper treated all old chunks as replaced L')
         self.assertIn('SYNTHETIC_R_NATIVE', repr(s._prefix_items))

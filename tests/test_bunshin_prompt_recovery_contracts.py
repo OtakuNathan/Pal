@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.bunshin.prompt_adapter import render_bunshin_task_prompt
 from pal.bunshin.runner_components.agent_runtime import AgentRuntime
 from pal.bunshin.runner_components.llm_rounds import LlmRounds

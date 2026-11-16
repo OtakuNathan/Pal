@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.bunshin.authoring_errors import AuthoringProgress, authoring_error_result
 from pal.bunshin.ipc import BunshinManagerRpcError
 from pal.bunshin.role_gateway import RoleAssignmentGateway

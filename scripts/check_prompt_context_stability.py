@@ -3,11 +3,13 @@
 Run with PYTHONPATH=src. Use a baseline checkout's src for a paired comparison.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import argparse
 import json
 
-from pal.core import PalCore, register_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core
 from pal.core.turns import TurnContinuation
 from pal.llm.ir import LLMMessageIR, MessageRole
 from pal.memory import MemoryService, register_with_core as register_memory
@@ -35,7 +37,7 @@ class FixtureContext:
 def measure(rounds: int = 50) -> dict[str, int]:
     if rounds < 2:
         raise ValueError("at least two rounds are required")
-    core = PalCore()
+    core = build_core()
     try:
         register_with_core(core)
         memory = MemoryService()

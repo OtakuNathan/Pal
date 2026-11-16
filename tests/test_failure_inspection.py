@@ -1,4 +1,5 @@
 """Pending batch: bounded failure inspection keeps complete evidence in owned files."""
+from tests.core_factory import build_core
 import asyncio
 import json
 from pathlib import Path
@@ -6,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution
 from pal.failure.capabilities import register_with_core
 from pal.failure.contracts import FailureReport
@@ -17,7 +18,7 @@ from pal.shared.tool_protocol import new_tool_call
 
 @pytest.fixture
 def env(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_execution(core.context)
     failure = FailureRuntime()
     handle = register_with_core(core, failure)

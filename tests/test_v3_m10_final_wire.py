@@ -84,7 +84,7 @@ def _seeded_memory() -> MemoryService:
 def _final_wire_payload(ex, runtime, memory) -> str:
     """Materialize the next real request and return its wire payload."""
     request = _model_view_request(memory)
-    pack = ex._prepare_turn_projection(runtime, request)
+    pack = ex.projection.prepare(runtime, request)
     if pack is None:
         # Honest cold fallback is legal; use the codec path directly.
         from pal.llm.shapes.base import ShapeContext
@@ -133,7 +133,7 @@ class M10ThreePathFinalWireTests(unittest.TestCase):
             transport = CapturingTransport([_SUMMARY_JSON])
             runtime, ex, executions = self._armed_executor(memory, transport)
             # Preflight compacts L before this still-unsent R enters a request.
-            result = await ex.compact_memory_async(
+            result = await ex.compaction.run(
                 memory, target_input_budget=8192, reserved_output_tokens=1024,
                 continuation=_continuation())
             self.assertTrue(result.success,
@@ -155,7 +155,7 @@ class M10ThreePathFinalWireTests(unittest.TestCase):
             transport = CapturingTransport(["NOT_JSON"])
             runtime, ex, executions = self._armed_executor(memory, transport)
             # Preflight compacts L before this still-unsent R enters a request.
-            result = await ex.compact_memory_async(
+            result = await ex.compaction.run(
                 memory, target_input_budget=8192, reserved_output_tokens=1024,
                 continuation=_continuation())
             self.assertFalse(result.success)
@@ -179,14 +179,15 @@ class M10ThreePathFinalWireTests(unittest.TestCase):
             runtime, ex, executions = self._armed_executor(memory, transport)
             # Preflight compacts L before this still-unsent R enters a request.
             entered = asyncio.Event()
-            real_agenerate = runtime.agenerate
+            real_generate = runtime.generate
 
             async def hanging(*a, **k):
                 entered.set()
                 await asyncio.Event().wait()
+                yield
 
-            runtime.agenerate = hanging
-            task = asyncio.create_task(ex.compact_memory_async(
+            runtime.generate = hanging
+            task = asyncio.create_task(ex.compaction.run(
                 memory, target_input_budget=8192, reserved_output_tokens=1024,
                 continuation=_continuation()))
             try:
@@ -194,7 +195,7 @@ class M10ThreePathFinalWireTests(unittest.TestCase):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             finally:
-                runtime.agenerate = real_agenerate
+                runtime.generate = real_generate
             self.assertIsNone(memory.history_root.active_run,
                               "a cancelled run must not stay open")
             return memory, runtime, ex, executions

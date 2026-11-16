@@ -29,6 +29,23 @@ it does not define or privately wrap tool protocol values.
 Pre-semantic response blocks carry undecoded wire values, are not executable
 tool protocol objects, and remain inside the LLM boundary.
 
+## Service interface
+
+`LLMService` exposes typed metadata, preflight, compaction planning and one
+asynchronous `generate` stream. Complete HTTP responses produce one terminal
+`LLMResponseUpdate`; streamed responses carry semantic deltas and a terminal
+update. LLM chooses the endpoint transport mode. Core consumes the same stream
+for both and never handles SSE envelopes.
+
+The terminal update carries its `LLMGenerationResult`, including the endpoint,
+model and projection send receipt for that call. Shared inspection telemetry is
+not a source of call results. Concurrent resident and BTW calls use the same
+service while retaining separate request facts and projection scopes.
+
+LLM owns compaction prompts, schema validation, native operations and bounded
+retries. It returns a validated candidate. Memory owns the frozen source,
+archive staging and atomic installation; Core coordinates those steps.
+
 ## L1 and turn settlement
 
 L1 stores `LLMMessageIR`, not provider dictionaries. During the active logical

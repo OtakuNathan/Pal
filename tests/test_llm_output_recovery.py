@@ -141,7 +141,7 @@ class LLMOutputRecoveryTests(unittest.TestCase):
         )
         invoker = _ScriptedInvoker([response])
 
-        outcome = _runtime(invoker).generate(
+        outcome = _runtime(invoker)._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "work"}],
                 max_output_tokens=64_000,
@@ -174,7 +174,7 @@ class LLMOutputRecoveryTests(unittest.TestCase):
         ]
         invoker = _ScriptedInvoker(responses)
 
-        outcome = _runtime(invoker, _endpoint(max_output_tokens=32_000)).generate(
+        outcome = _runtime(invoker, _endpoint(max_output_tokens=32_000))._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "work"}],
                 max_output_tokens=32_000,
@@ -200,7 +200,7 @@ class LLMOutputRecoveryTests(unittest.TestCase):
             ]
         )
 
-        _runtime(invoker, _endpoint(max_output_tokens=8_192)).generate(
+        _runtime(invoker, _endpoint(max_output_tokens=8_192))._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "work"}],
                 max_output_tokens=64_000,
@@ -251,7 +251,7 @@ class LLMOutputRecoveryTests(unittest.TestCase):
             ]
         )
 
-        outcome = _runtime(invoker).generate(
+        outcome = _runtime(invoker)._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "work"}],
                 max_output_tokens=64_000,
@@ -286,7 +286,7 @@ class LLMOutputRecoveryTests(unittest.TestCase):
             max_output_tokens_upper_limit=64_000,
         )
 
-        outcome = _runtime(invoker, endpoint).generate(
+        outcome = _runtime(invoker, endpoint)._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "work"}],
                 max_output_tokens=64_000,
@@ -310,7 +310,7 @@ class LLMOutputRecoveryTests(unittest.TestCase):
         )
         endpoint = _endpoint(max_output_tokens=1_024, context_window=2_200)
 
-        outcome = _runtime(invoker, endpoint).generate(
+        outcome = _runtime(invoker, endpoint)._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "x" * 2_000}],
                 max_output_tokens=1_024,

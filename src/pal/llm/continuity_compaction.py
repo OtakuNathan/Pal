@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from pal.core.compaction import CompactionClockKind, CompactionSnapshot, CompactionUnit, extract_json_object
+from pal.llm.compaction_engine import CompactionClockKind, CompactionSnapshot, CompactionUnit, extract_json_object
 from pal.foundation import utc_now
 from pal.memory.compact import SUMMARY_ENTRY_ID, SUMMARY_TITLE
 from pal.memory.contracts import L2Entry
@@ -131,7 +131,7 @@ class ContinuityCompactionPolicy:
         if not isinstance(retained, list) or any(not isinstance(ref, str) for ref in retained):
             raise ValueError("retained_result_refs must be an array of snapshot IDs")
         available = {}
-        for transcript in getattr(snapshot, "memory_items", ()):
+        for transcript in (snapshot.memory_items if snapshot is not None else ()):
             for message in transcript:
                 meta = dict(message.payload or {})
                 for ref in (*meta.get("result_snapshots", ()), *dict(meta.get("_pal_result_state") or {}).get("snapshot_refs", ())):

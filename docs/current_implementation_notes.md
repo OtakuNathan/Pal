@@ -15,8 +15,9 @@ state. It does not append to resident conversation history. See
 Domain-owned protocols describe service calls; `PortKey[T]` identifies them at
 assembly without erasing their type. `PortRegistry` validates declared methods
 and call signatures before publication. A rejected candidate cannot replace a
-published service. `PortRef.current` resolves the current generation rather
-than retaining an implementation after detach or reattach.
+published service. Consumers subscribe once with `PortRegistry.observe(key)`.
+Publication pushes the new owner into `ServiceRef.current`; reads do not look up
+the registry or compare generations. An operation retains its captured owner until it ends.
 
 Required capabilities must be declared, not inferred by callers using
 `getattr`, signature inspection or retrying a different signature after

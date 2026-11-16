@@ -17,7 +17,6 @@ class IndependentInvoker:
         self.delegate = delegate
         self.prepared = []
         self.subscriptions = []
-        self.forks = 0
 
     @property
     def response_hooks(self):
@@ -35,10 +34,6 @@ class IndependentInvoker:
 
     def resume_subscription(self, endpoint):
         self.subscriptions.append(endpoint.endpoint_id)
-
-    def fork_transient(self):
-        self.forks += 1
-        return IndependentInvoker(self.delegate.fork_transient())
 
     def invoke(self, endpoint, request, **kwargs):
         return self.delegate.invoke(endpoint, request, **kwargs)
@@ -81,10 +76,10 @@ def test_independent_invoker_owns_adaptation_accounting_and_receipts(tmp_path, s
     submissions = []
     if streaming:
         async def consume():
-            return [update async for update in runtime.astream(_request(), on_submitted=submissions.append)][-1].response
+            return [update async for update in runtime.generate(_request(), on_submitted=submissions.append)][-1].response
         response = asyncio.run(consume())
     else:
-        response = runtime.generate(_request(), on_submitted=submissions.append).response
+        response = runtime._generate_response(_request(), on_submitted=submissions.append).response
     assert response.text == "first second"
     assert admissions == [ep.endpoint_id, ep.endpoint_id]
     assert runtime.usage_snapshot()["provider_request_count"] == 2
@@ -92,9 +87,8 @@ def test_independent_invoker_owns_adaptation_accounting_and_receipts(tmp_path, s
     assert submissions[0].endpoint_id == ep.endpoint_id
     runtime.resume_subscription(ep.endpoint_id)
     assert invoker.subscriptions == [ep.endpoint_id]
-    child = runtime.fork_transient()
-    assert invoker.forks == 1
-    assert child.endpoint_invoker is not invoker
+    runtime.release_context("btw:closed")
+    assert runtime.endpoint_invoker is invoker
     runtime.refresh_llm_endpoints()
     assert invoker.response_hooks is runtime.provider_response_hooks
 
@@ -113,7 +107,7 @@ def test_semantic_invoker_output_is_not_reinterpreted_after_recovery(tmp_path):
     ep.capabilities_blob = {"max_output_recovery": {"enabled": True, "upper_limit": 100, "max_continuations": 1}}
     runtime = LLMRuntime(EndpointResolver(endpoints=(ep,)), _Settings(), endpoint_invoker=invoker,
                          config=RuntimeConfig(runtime_root=tmp_path))
-    result = runtime.generate(_request())
+    result = runtime._generate_response(_request())
     assert result.text == example
     assert result.tool_calls == ()
     assert invoker.attempts == 2

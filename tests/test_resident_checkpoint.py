@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -7,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.memory.persistence.checkpoint import ResidentCheckpointStore
 from pal.core.runtime_config import RuntimeConfig
 from pal.execution import register_with_core as register_execution_with_core
@@ -19,7 +20,7 @@ from pal.runtime_app import PalRuntimeApp
 
 
 def _build_app(root: Path) -> PalRuntimeApp:
-    core = PalCore(config=RuntimeConfig(runtime_root=root))
+    core = build_core(config=RuntimeConfig(runtime_root=root))
     core.context.execution_runtime.runtime_root = root
     memory_service = MemoryService()
     register_execution_with_core(core.context)
@@ -131,7 +132,7 @@ class ResidentCheckpointTests(unittest.TestCase):
                 _ = args, kwargs
                 self.fail("shutdown must not call the LLM compaction path")
 
-            app.handle.core.turn_executor.compact_memory_async = forbidden_compaction
+            app.handle.core.turn_executor.compaction.run = forbidden_compaction
             asyncio.run(app._checkpoint_for_shutdown_async())
 
             self.assertEqual(app.last_checkpoint_status, "l1_saved")

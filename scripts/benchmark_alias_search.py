@@ -6,6 +6,7 @@ first-call contracts, not successful business execution or end-to-end agents.
 Run the same script against pre/post source snapshots with --base/--candidate.
 """
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
 
 import argparse
 import asyncio
@@ -83,12 +84,8 @@ async def run_case(llm, values, fx, case, repetition):
         + TOOL_ROUTING_DEVELOPER_GUIDANCE}),
         message_ir_from_dict({'role': 'user', 'content': prompt})]
 
-    async def generate(tools):
-        outcome = await asyncio.wait_for(llm.agenerate(LLMRequestIR(
-            messages=tuple(messages), tools=tuple(tool_definition_ir_from_dict(tool) for tool in tools),
-            model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=4096, temperature=0),
-            metadata={'preferred_endpoint_id': values['endpoint_id'], 'preferred_endpoint_source': 'alias_search_eval',
-                      'endpoint_fallback_policy': 'none', 'think_level': 'medium', 'case_id': case_id})), timeout=150)
+    async def _generate_response(tools):
+        outcome = await asyncio.wait_for(collect_generation(llm.generate(LLMRequestIR(messages=tuple(messages), tools=tuple((tool_definition_ir_from_dict(tool) for tool in tools)), model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=4096, temperature=0), metadata={'preferred_endpoint_id': values['endpoint_id'], 'preferred_endpoint_source': 'alias_search_eval', 'endpoint_fallback_policy': 'none', 'think_level': 'medium', 'case_id': case_id}))), timeout=150)
         if outcome.preferred_model_id != values['model_id'] or outcome.preferred_endpoint_id != values['endpoint_id']:
             raise RuntimeError('Endpoint or model drift')
         from pal.llm.serde import message_to_payload
@@ -98,7 +95,7 @@ async def run_case(llm, values, fx, case, repetition):
         messages.append(outcome.response.message)
         return list(outcome.tool_calls or ())
 
-    calls = await generate([specs['search_tools']])
+    calls = await _generate_response([specs['search_tools']])
     if len(calls) != 1 or calls[0].name != 'search_tools':
         return {**row, 'error': 'expected_one_search'}
     row['search_args'] = dict(calls[0].args)
@@ -112,7 +109,7 @@ async def run_case(llm, values, fx, case, repetition):
     messages.append(_eval_tool_result_message(calls[0], result))
     # A direct hit remains directly callable; indirect calls use call_tool.
     available = [specs['call_tool']] + [specs[name] for name in aliases if name in specs and name != 'call_tool']
-    calls = await generate(available)
+    calls = await _generate_response(available)
     if len(calls) != 1:
         return {**row, 'error': 'expected_one_selection'}
     call = calls[0]

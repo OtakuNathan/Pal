@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.bunshin import work_items, verification_builder as verifier
 from pal.bunshin.authoring_errors import AuthoringProgress, authoring_error_result
 from pal.bunshin.semantic_evidence import scratch_fingerprint, scratch_probe_fingerprint

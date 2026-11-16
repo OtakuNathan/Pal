@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
 
 import asyncio
 from pathlib import Path
@@ -44,8 +45,8 @@ def test_fixture_read_cannot_escape_and_page_contains_exact_tail(tmp_path):
 
 
 def test_eval_does_not_accept_failed_target_and_requires_complete_chain(tmp_path):
-    class LLM:
-        async def agenerate(self, _request):
+    class LLM(NonStreamingLLM):
+        async def respond(self, _request):
             result = generation_result_from_values(tool_calls=[new_tool_call(name='call_tool',args={'name':'read_lsp_diagnostics','args':{'file':'sample.py'}})])
             return SimpleNamespace(response=result.response,tool_calls=result.tool_calls,preferred_endpoint_id='test',preferred_model_id='test')
     fixture = FixtureExecution(tmp_path,'lsp-ready')
@@ -123,8 +124,8 @@ def test_fixture_allows_real_read_file_contract(tmp_path, monkeypatch):
 
 
 def test_forbidden_navigation_cannot_pass_by_later_checking_status(tmp_path):
-    class LLM:
-        async def agenerate(self, _request):
+    class LLM(NonStreamingLLM):
+        async def respond(self, _request):
             result = generation_result_from_values(tool_calls=[
                 new_tool_call(name='call_tool',args={'name':'read_lsp_diagnostics','args':{'file':'sample.py'}}),
                 new_tool_call(name='call_tool',args={'name':'inspect_lsp_status','args':{}}),

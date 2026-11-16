@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -14,7 +15,8 @@ from pal.channel import (
 )
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.shared import ChannelStreamUpdateKind
 from tests.runtime_channel_providers import telegram_endpoint_module
@@ -82,7 +84,7 @@ class _TelegramBot:
 
 class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
     def _build_core(self):
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         runtime = ChannelRuntime()

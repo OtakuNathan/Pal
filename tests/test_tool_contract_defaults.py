@@ -1,11 +1,12 @@
 """Advertised defaults and conditional inputs must be executable contracts."""
+from pal.shared.ports import PortRegistry
 import inspect
 
 import jsonschema
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import generated_tool_models
 from pal.execution.runtime import _invocation_args
 from pal.web_fetch import tool_models
@@ -86,7 +87,7 @@ def test_error_paths_preserve_original_cause_and_diagnostic_action(tmp_path):
     from pal.shared import IntrospectionCall
     from pal.memory.capabilities import MemoryIntrospectionProvider
     from pal.mcp.normalize import normalize_protocol_error, normalize_tool_result
-    context = SimpleNamespace(port_registry={})
+    context = SimpleNamespace(port_registry=PortRegistry({}))
     memory = MemoryIntrospectionProvider(service=SimpleNamespace(_resolve_l3_provider=lambda: None), context=context)
     assert 'main Pal runtime' in memory.dreaming(IntrospectionCall(name='manage_memory_dreaming')).llm_text
     assert 'No memory archive' in memory.history(IntrospectionCall(name='read_memory_history')).llm_text

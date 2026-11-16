@@ -1,4 +1,5 @@
 """Provider cleanup keeps the exact owner until all teardown work completes."""
+from pal.shared.ports import PortRegistry
 import asyncio
 from types import SimpleNamespace
 
@@ -320,7 +321,7 @@ def test_runtime_shutdown_keeps_database_until_children_finish(failure):
             configuration_service=None,
             plugin_host=plugin, channel_provider_manager=manager,
             database=SimpleNamespace(close=lambda: events.append("database")),
-            core=SimpleNamespace(context=SimpleNamespace(port_registry={},
+            core=SimpleNamespace(context=SimpleNamespace(port_registry=PortRegistry({}),
                 module_registry=SimpleNamespace(modules={"resident": resident}))),
         )
         with pytest.raises(RuntimeError):

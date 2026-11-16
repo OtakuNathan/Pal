@@ -1,4 +1,6 @@
+from tests.turn_fakes import continuation as make_continuation
 """An interrupted response draft is not an accepted native continuation."""
+from tests.core_factory import build_core
 from dataclasses import replace
 
 import pytest
@@ -152,7 +154,7 @@ def test_real_anthropic_stream_interrupt_then_next_request_is_replayable(signed_
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, patch
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.llm.ir import GenerationPolicyIR, LLMRequestIR
     from pal.llm.response_blocks import decode_response_blocks
     from pal.llm.shapes import codec_for_shape
@@ -174,11 +176,11 @@ def test_real_anthropic_stream_interrupt_then_next_request_is_replayable(signed_
                 {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
                 {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "unfinished body"}},
             ]
-        core = PalCore()
+        core = build_core()
         service = MemoryService()
         register_with_core(core.context, service)
         service.begin_l1_turn("turn", user_text="work")
-        continuation = SimpleNamespace(turn_id="turn", interrupted=False)
+        continuation = make_continuation(turn_id="turn", interrupted=False)
         try:
             with patch.object(core.turn_executor, "execute_turn_effect_async", AsyncMock()):
                 for index, payload in enumerate(frames):

@@ -7,6 +7,7 @@ role unions are separate. They do not reconstruct live availability or a single
 role's permissions. Dynamic MCP/external plugins and business success are excluded.
 """
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
 import argparse
 import ast
 import asyncio
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.benchmark_full_discovery import build_catalog
 from scripts.benchmark_discovery_flow import prompt_messages
 from scripts.replay_purpose_discovery import load_matcher
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import InvocationMode, RejectedResult
 from pal.execution.tool_presentation import compact_input_contract
@@ -212,11 +213,7 @@ async def run_case(llm,values,case,generation,search,schema,prompt,*,max_output_
     messages.append(message_ir_from_dict({'role':'user','content':case['task']}))
     validators={name:Draft202012Validator(spec['function']['parameters']) for name,spec in definitions.items()}
     for _ in range(6):
-        outcome=await asyncio.wait_for(llm.agenerate(LLMRequestIR(messages=tuple(messages),
-            tools=tuple(tool_definition_ir_from_dict(s) for s in definitions.values()),model_hint=values['model_id'],
-            policy=GenerationPolicyIR(max_output_tokens=max_output_tokens,temperature=0),
-            metadata={'preferred_endpoint_id':values['endpoint_id'],'endpoint_fallback_policy':'none',
-                      'think_level':'medium','case_id':case.get('case_id',case['alias'])})),timeout=150)
+        outcome=await asyncio.wait_for(collect_generation(llm.generate(LLMRequestIR(messages=tuple(messages), tools=tuple((tool_definition_ir_from_dict(s) for s in definitions.values())), model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=max_output_tokens, temperature=0), metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none', 'think_level': 'medium', 'case_id': case.get('case_id', case['alias'])}))),timeout=150)
         row['usage'].append({k:getattr(outcome.response.usage,k,0) for k in ('input_tokens','output_tokens','reported')})
         if outcome.finish_reason.value=='error':
             metadata=outcome.response.message.metadata

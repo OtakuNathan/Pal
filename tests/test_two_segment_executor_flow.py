@@ -9,13 +9,15 @@ and history root under test are real.
 """
 
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
+from tests.compaction_composition import execute_compaction
 
 import asyncio
 import unittest
 from types import SimpleNamespace
 
-from pal.core.compaction import CompactionClockKind, CompactionEngine, CompactionSnapshot
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionClockKind, CompactionEngine, CompactionSnapshot
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.llm import generation_result_from_values
 from pal.memory import MemoryService
 from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
@@ -81,15 +83,14 @@ class TwoSegmentExecutorFlowTests(unittest.TestCase):
             root.promote()
             left_snapshot = service.begin_left_compaction(
                 "run-exec", reason="auto", parent_turn_id="task-R")
-            snapshot = CompactionSnapshot.capture_left(
-                service, left_snapshot,
+            snapshot = service.capture_compaction( left_snapshot,
                 target_input_budget=1_000_000,
                 reserved_output_tokens=1024,
                 clock_kind=CompactionClockKind.USER_TURN,
                 clock_value=1,
                 metadata={"compaction_op_id": "run-exec"},
             )
-            return await engine.run(
+            return await execute_compaction(engine,
                 snapshot, llm_runtime=_Transport(llm),
                 memory_service=service,
             )
@@ -132,8 +133,7 @@ class TwoSegmentExecutorFlowTests(unittest.TestCase):
         root = service.history_root
         root.promote()
         left_snapshot = service.begin_left_compaction("run-x", reason="auto")
-        snapshot = CompactionSnapshot.capture_left(
-            service, left_snapshot,
+        snapshot = service.capture_compaction( left_snapshot,
             target_input_budget=1_000_000, reserved_output_tokens=1024,
             clock_kind=CompactionClockKind.USER_TURN, clock_value=1,
             metadata={"compaction_op_id": "run-x"},
@@ -159,13 +159,13 @@ def _entry(text: str):
     )
 
 
-class _Transport:
-    """Engine-facing runtime shim: routes agenerate to the scripted LLM."""
+class _Transport(NonStreamingLLM):
+    """Engine-facing runtime shim: routes complete to the scripted LLM."""
 
     def __init__(self, llm: _ScriptedLLM) -> None:
         self._llm = llm
 
-    async def agenerate(self, request, *args, **kwargs):
+    async def respond(self, request, *args, **kwargs):
         return await self._llm(request, **kwargs)
 
 

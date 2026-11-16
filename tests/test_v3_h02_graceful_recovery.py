@@ -19,6 +19,8 @@ a network-side fake only (H01 pattern).
 """
 
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
+from tests.compaction_composition import execute_compaction
 
 import asyncio
 import tempfile
@@ -147,32 +149,31 @@ class H02GracefulRecoveryTests(unittest.TestCase):
         root = service.history_root
         service.begin_l1_turn("task-R", user_text="RIGHT_SENTINEL work")
 
-        from pal.core.compaction import (
+        from pal.llm.compaction_engine import (
             CompactionClockKind,
             CompactionEngine,
             CompactionSnapshot,
         )
-        from pal.core.pal_compaction import PalCompactionPolicy
+        from pal.llm.resident_compaction import PalCompactionPolicy
         from pal.llm import generation_result_from_values
         from tests.test_runtime_compaction import _valid_pal_payload
 
-        class _Network:
-            async def agenerate(self, request, *a, **kw):
+        class _Network(NonStreamingLLM):
+            async def respond(self, request, *a, **kw):
                 return generation_result_from_values(
                     text=_valid_pal_payload("H02 new root summary"))
 
         async def scenario():
             root.promote()
             left_snapshot = service.begin_left_compaction("run-h02", reason="auto")
-            snapshot = CompactionSnapshot.capture_left(
-                service, left_snapshot,
+            snapshot = service.capture_compaction( left_snapshot,
                 target_input_budget=1_000_000, reserved_output_tokens=1024,
                 clock_kind=CompactionClockKind.USER_TURN, clock_value=1,
                 metadata={"compaction_op_id": "run-h02"},
             )
             engine = CompactionEngine(policy=PalCompactionPolicy(),
                                       max_attempts=1, timeout_seconds=10.0)
-            return await engine.run(snapshot, llm_runtime=_Network(),
+            return await execute_compaction(engine, snapshot, llm_runtime=_Network(),
                                     memory_service=service)
 
         result = asyncio.run(scenario())

@@ -1,4 +1,7 @@
 from __future__ import annotations
+from tests.llm_fakes import scripted_llm
+from pal.shared.ports import PortRegistry
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -23,7 +26,8 @@ from pal.artifact import (
 )
 from pal.artifact.tools import ArtifactContentSearchTool, ArtifactImportTool, ArtifactReadTool
 from pal.artifact.prompt import ArtifactPromptFragmentProvider
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.core.prompt_compiler import PromptCompiler
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import ArtifactIngestor, EventEnvelope, PalV2Database
@@ -93,7 +97,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(screenshot.status, RuntimeStatus.OK)
         self.assertIn("import_artifact", screenshot.structured["next_step"])
         path = Path(screenshot.structured["artifact"]["local_cached_path"])
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
@@ -109,9 +113,10 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path.read_bytes(), original)
 
         captured = []
-        core.context.port_registry["memory:memory"] = SimpleNamespace(
-            append_l1_user_contexts=lambda turn_id, messages: captured.extend(messages)
-        )
+        from pal.memory.service import MemoryService
+        memory = MemoryService()
+        memory.append_l1_user_contexts = lambda turn_id, messages, **options: captured.extend(messages)
+        core.context.port_registry["memory:memory"] = memory
         await core.turn_executor._append_l1_tool_context_messages_async(
             SimpleNamespace(turn_id=self.turn_id), (call,), (result,),
         )
@@ -175,7 +180,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             execute=execute, browser_manager=SimpleNamespace(runtime_root=self.root),
             health=lambda: {}, shutdown_sync=lambda: None, shutdown_async=lambda: None,
         )
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
@@ -196,8 +201,10 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.context_messages[0].artifact_ids, (artifact_id,))
             self.assertNotIn("base64", result.llm_text)
             captured = []
-            core.context.port_registry["memory:memory"] = SimpleNamespace(
-                append_l1_user_contexts=lambda turn_id, messages: captured.extend(messages))
+            from pal.memory.service import MemoryService
+            memory = MemoryService()
+            memory.append_l1_user_contexts = lambda turn_id, messages, **options: captured.extend(messages)
+            core.context.port_registry["memory:memory"] = memory
             await core.turn_executor._append_l1_tool_context_messages_async(
                 SimpleNamespace(turn_id=self.turn_id), (call,), (result,))
             for capabilities, expected in (({"supports_vision": True}, 1), ({"supports_vision": False}, 0), ({}, 0)):
@@ -239,14 +246,14 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
     def test_core_turn_io_resolves_the_turn_endpoint_capabilities(self) -> None:
         from pal.core.runtime import CoreTurnIOPort
 
-        core = PalCore()
+        core = build_core()
         requested = []
 
-        def resolve_endpoint_facts(*, preferred_endpoint_id):
+        def _endpoint_facts(*, preferred_endpoint_id, preferred_endpoint_source=None):
             requested.append(preferred_endpoint_id)
             return {"endpoint_id": preferred_endpoint_id, "supports_vision": preferred_endpoint_id == "vision"}
 
-        core.context.port_registry["llm:llm"] = SimpleNamespace(resolve_endpoint_facts=resolve_endpoint_facts)
+        core.context.port_registry["llm:llm"] = scripted_llm(_endpoint_facts=_endpoint_facts)
         port = CoreTurnIOPort(core)
         self.assertEqual(port.llm_capabilities_for_turn("unknown"), {})
         for endpoint in ("vision", "text"):
@@ -553,7 +560,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             self.scope_key,
             "runtime-turn",
             "",
-            runtime.resolve_endpoint_facts(),
+            runtime._endpoint_facts(),
             artifact_ids=(ref.artifact_id,),
         )
 
@@ -999,7 +1006,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not transcribed", result.text)
         self.assertIn("search_tools", " ".join(result.next_actions))
         from pal.llm.ir import ArtifactRefPartIR, LLMMessageIR, MessageRole
-        core = PalCore()
+        core = build_core()
         register_artifact_with_core(core.context, self.manager)
         try:
             projected = core.turn_executor._project_messages_for_prompt(
@@ -1013,7 +1020,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             core.context.execution_runtime.shutdown()
 
     def test_transcribe_tool_is_not_registered(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         register_artifact_with_core(core.context, self.manager)
         try:
@@ -1145,7 +1152,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("text", kinds)
 
     async def test_artifact_tools_are_discoverable_and_callable_when_not_resident(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_artifact_with_core(core.context, self.manager)
@@ -1250,7 +1257,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         from pal.mcp.artifact_inputs import resolve_artifact_input
         from pal.execution.contracts import CapabilityCall
         context = SimpleNamespace(
-            port_registry={"artifact:artifact": self.manager},
+            port_registry=PortRegistry({"artifact:artifact": self.manager}),
             execution_runtime=_ToolRuntime(self.scope_key),
         )
         prepared = resolve_artifact_input(context, ref.artifact_id, "url",

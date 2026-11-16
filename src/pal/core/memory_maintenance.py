@@ -24,14 +24,11 @@ class MemoryMaintenanceMixin:
                     or self.turn_manager.latest_active_turn_id() is not None
                     or any(not task.done() for task in self.state.turn_tasks.values()))
 
-    async def try_enter_memory_maintenance_async(self, provider) -> bool:
+    async def try_enter_memory_maintenance_async(self) -> bool:
         async with self.state.channel_turn_transition_lock:
             self.state.memory_maintenance_changed.clear()
             if self.memory_maintenance_busy():
                 return False
-            # No await between admission and the writer fence. Repository
-            # mutations share this fence, including statistics and indexing.
-            provider.repository.freeze()
             self.state.memory_maintenance = True
             return True
 

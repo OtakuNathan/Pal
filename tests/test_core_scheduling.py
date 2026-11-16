@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from hypothesis import given, strategies as st
 
-from pal.core import register_with_core
+from pal.core.capabilities import register_with_core
 from pal.core.scheduling import (
     CoreScheduler, CoreTurnPhase, ResidentTurnKind, SchedulingEvent,
 )

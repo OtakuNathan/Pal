@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 from dataclasses import dataclass
@@ -7,7 +8,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from pal.control import ControlEvent, ControlPlane
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.llm.capabilities import (
     LLMIntrospectionProvider,
     register_with_core as register_llm_with_core,
@@ -239,7 +240,7 @@ class LLMUsageLedgerTests(unittest.TestCase):
             endpoint_retry_attempts=1,
         )
 
-        result = runtime.generate(
+        result = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hello"}],
                 max_output_tokens=128,
@@ -304,7 +305,7 @@ class LLMUsageLedgerTests(unittest.TestCase):
             endpoint_retry_attempts=1,
         )
 
-        outcome = runtime.generate(
+        outcome = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hello"}],
                 max_output_tokens=128,
@@ -365,7 +366,7 @@ class LLMUsageLedgerTests(unittest.TestCase):
             ),
             endpoint_retry_attempts=1,
         )
-        runtime.generate(
+        runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hello"}],
                 max_output_tokens=128,
@@ -386,7 +387,7 @@ class LLMUsageLedgerTests(unittest.TestCase):
             endpoint_invoker=_UsageInvoker(generation_result_from_values(text="ok")),
             endpoint_retry_attempts=1,
         )
-        core = PalCore()
+        core = build_core()
         register_llm_with_core(core.context, runtime)
         action = ControlPlane().parse_event(
             ControlEvent(

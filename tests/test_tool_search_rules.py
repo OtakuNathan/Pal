@@ -1,11 +1,12 @@
 """Conditional vocabulary, scope ranking and conservative recovery contracts."""
+from tests.core_factory import build_core
 import json
 from typing import Literal
 
 import pytest
 from pydantic import ValidationError
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput, StrictToolModel, ToolGuidance
 from pal.shared.tool_protocol import new_tool_call
@@ -14,7 +15,7 @@ from tests.capability_fixture import mount_test_capability
 
 @pytest.fixture
 def runtime():
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     yield core.context.execution_runtime

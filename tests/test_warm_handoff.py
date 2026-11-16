@@ -12,15 +12,17 @@ prefix), W23 (no eager cache-write). W10/W11 remain covered by the hot-cache
 suite; W19 by the P1 round-safe gate.
 """
 from __future__ import annotations
+from tests.compaction_composition import execute_compaction
+from tests.core_factory import build_core
 
 import asyncio
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
-from pal.core.compaction import CompactionEngine, CompactionSnapshot, CompactionClockKind
-from pal.core.pal_compaction import PalCompactionPolicy
-from pal.core.prompt_context import CONTEXT_KIND
+from pal.llm.compaction_engine import CompactionEngine, CompactionSnapshot, CompactionClockKind
+from pal.llm.resident_compaction import PalCompactionPolicy
+from pal.memory.prompt_context import CONTEXT_KIND
 from pal.core.runtime import PalCore
 from pal.llm import generation_result_from_values
 from pal.llm.ir import (
@@ -128,9 +130,9 @@ def _anchor_llm(
 
 
 def _build_replay(service, llm, executor=None, **kwargs):
-    core = PalCore() if executor is None else None
+    core = build_core() if executor is None else None
     ex = executor or (core.turn_executor)
-    return ex._resident_compaction_replay_request(
+    return ex.projection.compaction_replay(
         service,
         llm_runtime=llm,
         logical_scope_id="pal:resident",
@@ -245,7 +247,7 @@ class WarmBuilderTests(unittest.TestCase):
 class WarmEngineTests(unittest.TestCase):
     def _run(self, snapshot, llm, service):
         return asyncio.run(
-            CompactionEngine(PalCompactionPolicy()).run(
+            execute_compaction(CompactionEngine(PalCompactionPolicy()),
                 snapshot, llm_runtime=llm, memory_service=service
             )
         )
@@ -269,4 +271,3 @@ class WarmUsageAccountingTests(unittest.TestCase):
     """W11/B10: a warm handoff the provider reports as a cache miss is
     billed exactly as reported — no invented savings, no retry chasing a
     hit — and the valid content still installs normally."""
-

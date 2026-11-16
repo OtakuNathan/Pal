@@ -1,10 +1,11 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.channel import ChannelRuntime
 from pal.channel.contracts import EndpointConfig
 from pal.execution import register_with_core as register_execution
@@ -19,7 +20,7 @@ from pal.shared.tool_protocol import new_tool_call
 def env(tmp_path):
     db = PalV2Database(tmp_path / "proactive.sqlite3")
     db.initialize([ProactiveDefinitionModel, ProactiveRunModel])
-    core = PalCore()
+    core = build_core()
     register_execution(core.context)
     core.publish_module_capabilities("execution")
     channel = ChannelRuntime()

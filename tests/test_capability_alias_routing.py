@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pal.execution.tool_facade import LifecycleAccess
+
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
 import unittest
 from types import SimpleNamespace
 
-from pal.core import PalCore as _PalCoreBootstrap
+from pal.core.runtime import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.runtime import ExecutionRuntime
@@ -65,6 +67,7 @@ def echo_capability(
             failure_next_steps="correct the alias or input",
         ),
         execution=ToolExecutionSemantics(
+            lifecycle_access=LifecycleAccess.SHARED,
             invocation_mode=InvocationMode.INDIRECT,
             effect_kind=EffectKind.NONE,
             idempotency=Idempotency.IDEMPOTENT,

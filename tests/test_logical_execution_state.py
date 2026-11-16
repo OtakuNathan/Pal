@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import (
     ToolCallIR,
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.turn_executor import TurnExecutor
 from pal.core.turns import ToolCallEffect
 from pal.execution import register_with_core as register_execution_with_core
@@ -69,7 +70,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
 
     def test_turn_context_mapping_survives_turn_clock_advancement(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         runtime = core.context.execution_runtime
         for index in range(1, 7):
@@ -83,7 +84,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertIn("turn-2", runtime.execution_sessions._turn_contexts)
 
     def test_retiring_an_unknown_explicit_lifetime_does_not_create_it(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         runtime = core.context.execution_runtime
 
@@ -100,7 +101,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
         )
 
     def test_turn_settlement_does_not_invoke_result_retirement(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         service = MemoryService()
         register_memory_with_core(core.context, service)
@@ -219,7 +220,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
         )
 
     def test_large_file_preview_authorizes_only_delivered_source_lines(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
@@ -641,7 +642,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
     def test_file_mutation_is_authorized_only_after_result_delivery(
         self,
     ) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
@@ -695,7 +696,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
     def test_partial_l1_delivery_authorizes_only_the_delivered_edit_range(
         self,
     ) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
@@ -748,7 +749,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
 
     def test_turn_executor_commits_delivery_after_l1_tool_result_append(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         memory = MemoryService()
@@ -783,7 +784,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
 
             executor = TurnExecutor(
                 core.context,
-                SimpleNamespace(),
+                SimpleNamespace(diagnostics=[]),
                 SimpleNamespace(),
                 build_canonical_prompt=lambda *args, **kwargs: None,
                 debug_log_prompt=lambda *args, **kwargs: None,
@@ -833,7 +834,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "omega\nbeta\n")
 
     def test_tool_rpc_timeout_is_returned_and_closes_the_pending_call(self) -> None:
-        core = PalCore()
+        core = build_core()
         memory = MemoryService()
         register_memory_with_core(core.context, memory)
         turn_id = "turn-tool-timeout"
@@ -897,7 +898,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertEqual(continuation.pending_tool_call_batch, [])
 
     def test_tool_context_sidecars_follow_the_complete_tool_result_batch(self) -> None:
-        core = PalCore()
+        core = build_core()
         memory = MemoryService()
         register_memory_with_core(core.context, memory)
         turn_id = "turn-tool-context-batch"
@@ -983,7 +984,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertEqual(continuation.pending_tool_call_batch, [])
 
     def test_failed_cross_module_delivery_rolls_back_l1_and_retires_snapshot(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         memory = MemoryService()
@@ -1021,7 +1022,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertFalse(read.snapshot_refs)
             executor = TurnExecutor(
                 core.context,
-                SimpleNamespace(),
+                SimpleNamespace(diagnostics=[]),
                 SimpleNamespace(),
                 build_canonical_prompt=lambda *args, **kwargs: None,
                 debug_log_prompt=lambda *args, **kwargs: None,
@@ -1060,7 +1061,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
     def test_historical_read_delivery_cannot_roll_back_self_mutation_snapshot(
         self,
     ) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
@@ -1118,7 +1119,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
     def test_prompt_projection_preserves_tool_result_and_file_authority(
         self,
     ) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
@@ -1185,7 +1186,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
     def test_snapshot_retirement_does_not_retire_delivered_file_authority(
         self,
     ) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
@@ -1234,7 +1235,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertTrue(bool((reread.structured or {}).get("unchanged")))
 
     def test_result_retirement_forces_unchanged_file_to_be_read_again(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime

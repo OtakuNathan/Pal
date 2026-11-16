@@ -1,5 +1,6 @@
 """Offline provider-boundary regressions and a complete same-turn Pal fixture."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.capabilities import register_with_core
 from pal.core.turns import LLMRequestEffect, TurnContinuation
 from pal.llm.endpoint import ShapeEndpointInvoker
@@ -152,7 +153,9 @@ def test_failed_attempt_keeps_partial_usage_without_double_accounting(kind):
     ledger = LLMUsageLedger()
     invoker = ShapeEndpointInvoker(transport=Transport(), attempt_sink=ledger.record_attempt)
     if kind == "close":
-        iterator = invoker.invoke_updates(endpoint(), _request())
+        streaming_endpoint = endpoint()
+        streaming_endpoint.supports_streaming = True
+        iterator = invoker.invoke_updates(streaming_endpoint, _request())
         assert next(iterator).response.text == "partial"
         iterator.close()
     elif kind == "error":
@@ -192,7 +195,7 @@ def test_retry_charges_failed_attempt_and_success_once(tmp_path):
             yield _JSONFrame(0, response_payload())
     llm = runtime(endpoint(), Transport(), tmp_path)
     llm.endpoint_retry_attempts = 2
-    result = llm.generate(_request())
+    result = llm._generate_response(_request())
     assert result.response.text == "done"
     snapshot = llm.usage_ledger.snapshot()
     assert snapshot["cost"] == pytest.approx(0.21)
@@ -269,7 +272,7 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
         llm = runtime(endpoint(profile), transport, tmp_path)
         llm.model_hooks = ModelHookRegistry({"openai/gpt-6-astra": ModelHook(
             "openai/gpt-6-astra", developer_instructions=("Stable fixture hook.",))})
-        core = PalCore()
+        core = build_core()
         register_with_core(core)
         memory = MemoryService()
         register_memory(core.context, memory)
@@ -296,7 +299,7 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
                     # (left run + cut + install + rebase) instead of the legacy
                     # memory.compact shortcut, so this chain exercises the
                     # supported flow.
-                    await core.turn_executor.compact_memory_async(
+                    await core.turn_executor.compaction.run(
                         memory,
                         target_input_budget=8192,
                         reserved_output_tokens=1024,
@@ -391,7 +394,7 @@ def test_bad_profile_does_not_fallback_or_count_a_provider_attempt(tmp_path):
             raise AssertionError("invalid configuration must not call any provider")
     ep = endpoint("typo")
     llm = runtime(ep, Transport(), tmp_path)
-    result = llm.generate(_request())
+    result = llm._generate_response(_request())
     assert "unknown cache_profile" in result.response.text
     assert llm.usage_ledger.snapshot()["provider_request_count"] == 0
 
@@ -442,7 +445,7 @@ def test_output_recovery_costs_are_not_added_again_at_logical_completion(tmp_pat
     ep.capabilities_blob["max_output_recovery"] = {"enabled": True, "upper_limit": 4096, "max_continuations": 1}
     transport = Transport()
     llm = runtime(ep, transport, tmp_path)
-    result = llm.generate(replace(_request(), metadata={"max_output_recovery_enabled": True}))
+    result = llm._generate_response(replace(_request(), metadata={"max_output_recovery_enabled": True}))
     assert transport.calls == 2
     assert len(result.response.attempt_ids) == 2
     assert llm.usage_ledger.snapshot()["provider_request_count"] == 2

@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
+from pal.shared.ports import PortRegistry
 
 import asyncio
 import json
@@ -202,7 +204,7 @@ def _capture_turn_failure_signal(response: LLMResponseIR, *, final_replies=None)
         def supports_streaming(self, request=None):
             return False
 
-        async def agenerate(self, _request, *, on_submitted=None):
+        async def respond(self, _request, *, on_submitted=None):
             return LLMGenerationResult(response=response)
 
     runtime = _FailingRuntime()
@@ -218,7 +220,7 @@ def _capture_turn_failure_signal(response: LLMResponseIR, *, final_replies=None)
             next_step="Restore the endpoint before retrying."))
 
     executor = TurnExecutor(
-        SimpleNamespace(require_port=lambda _name: runtime, port_registry={}),
+        SimpleNamespace(require_port=lambda _name: runtime, port_registry=PortRegistry({"llm:llm": runtime})),
         AgentTurnRuntimeState(),
         SimpleNamespace(),
         build_canonical_prompt=lambda *args, **kwargs: None,
@@ -301,10 +303,10 @@ class LLMRuntimeIRTests(unittest.TestCase):
                 with patch.dict(os.environ, {"PAL_LOG_ROOT": log_root.name}), self.assertLogs("pal.llm.endpoint", level="WARNING") as captured:
                     if streaming:
                         async def consume():
-                            return [update async for update in runtime.astream(_request())]
+                            return [update async for update in runtime.generate(_request())]
                         response = asyncio.run(consume())[-1].response
                     else:
-                        response = runtime.generate(_request()).response
+                        response = runtime._generate_response(_request()).response
                 self.assertEqual(transport.attempts, 2)
                 self.assertEqual(response.finish_reason, LLMFinishReason.ERROR)
                 self.assertEqual(response.message.metadata["failure_kind"], "decode_error")
@@ -461,7 +463,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             ),
         )
 
-        result = runtime.generate(_request())
+        result = runtime._generate_response(_request())
 
         self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
         self.assertEqual(
@@ -486,7 +488,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             "_enabled_endpoints",
             side_effect=sqlite3.DatabaseError("file is not a database"),
         ):
-            generated = runtime.generate(_request())
+            generated = runtime._generate_response(_request())
             streamed = list(runtime._iter_stream_updates(_request()))
 
         self.assertEqual(
@@ -507,7 +509,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
         )
 
-        result = runtime.generate(_request())
+        result = runtime._generate_response(_request())
 
         self.assertEqual(result.text, "fresh")
         self.assertEqual(invoker.attempts, 2)
@@ -546,7 +548,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             ),
         )
 
-        result = runtime.generate(_request())
+        result = runtime._generate_response(_request())
 
         self.assertEqual(result.response.finish_reason, LLMFinishReason.ERROR)
         self.assertEqual(invoker.attempts, 1)
@@ -607,8 +609,8 @@ class LLMRuntimeIRTests(unittest.TestCase):
         request = replace(_request(), policy=GenerationPolicyIR(
             max_output_tokens=6144, thinking_selection="lowest_supported",
         ))
-        advice = runtime.preflight(LLMPreflightRequest(request=request))
-        result = runtime.generate(request)
+        advice = runtime._preflight_response(LLMPreflightRequest(request=request))
+        result = runtime._generate_response(request)
         self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
         self.assertEqual([r.policy.thinking_level.value for r in invoker.requests], ["low"])
         self.assertEqual(advice.reserved_output_tokens, invoker.requests[0].policy.max_output_tokens)
@@ -642,7 +644,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             endpoint_invoker=invoker,
             config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
         )
-        result = runtime.generate(_request())
+        result = runtime._generate_response(_request())
         self.assertEqual(result.text, "ok")
         self.assertEqual(invoker.requests[0].policy.thinking_level.value, "low")
 
@@ -706,7 +708,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         )
 
         async def collect():
-            return [update async for update in runtime.astream(_request())]
+            return [update async for update in runtime.generate(_request())]
 
         updates = asyncio.run(collect())
 
@@ -729,7 +731,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
         )
 
         async def cancel_pending_stream() -> float:
-            iterator = runtime.astream(_request()).__aiter__()
+            iterator = runtime.generate(_request()).__aiter__()
             pending = asyncio.create_task(anext(iterator))
             deadline = asyncio.get_running_loop().time() + 1.0
             while invoker.control is None:
@@ -757,7 +759,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             last_endpoint_id = "ep"
             last_model_id = "test-model"
 
-            async def astream(self, request, *, on_submitted=None):
+            async def generate(self, request, *, on_submitted=None):
                 _ = request
                 await asyncio.sleep(0.04)
                 yield LLMResponseUpdate(
@@ -781,7 +783,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             llm_wait_status_seconds=(0.01, 0.02),
         )
         executor.context = SimpleNamespace(
-            port_registry={"agent_io:output": output},
+            port_registry=PortRegistry({"agent_io:output": output}),
         )
 
         async def record_update(_continuation, _update):
@@ -812,7 +814,7 @@ class LLMRuntimeIRTests(unittest.TestCase):
             endpoint_invoker=_Invoker(),
             config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
         )
-        advice = runtime.preflight(LLMPreflightRequest(request=_request("x" * 50_000)))
+        advice = runtime._preflight_response(LLMPreflightRequest(request=_request("x" * 50_000)))
         self.assertEqual(str(advice.status), "compact_required")
 
     def test_preflight_measures_the_fully_hooked_request(self) -> None:
@@ -835,7 +837,7 @@ def adjust_messages(messages):
             config=RuntimeConfig(runtime_root=runtime_root),
         )
 
-        advice = runtime.preflight(LLMPreflightRequest(request=_request("small")))
+        advice = runtime._preflight_response(LLMPreflightRequest(request=_request("small")))
 
         self.assertEqual(str(advice.status), "compact_required")
         self.assertGreater(advice.breakdown["estimated_input_tokens"], 9_000)
@@ -852,7 +854,7 @@ def adjust_messages(messages):
             ),
         )
 
-        result = runtime.generate(_request())
+        result = runtime._generate_response(_request())
 
         self.assertEqual(invoker.attempts, 2)
         self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
@@ -907,7 +909,7 @@ def adjust_messages(messages):
             policy=GenerationPolicyIR(max_output_tokens=1_000),
         )
 
-        result = runtime.generate(request)
+        result = runtime._generate_response(request)
 
         self.assertEqual(transport.attempts, 2)
         self.assertEqual(result.finish_reason, LLMFinishReason.TOOL_CALLS)
@@ -929,7 +931,7 @@ def test_concurrent_generation_progress_is_scoped_to_each_call():
     shared_events = []
     runtime.event_sink = shared_events.append
 
-    def generate(request, **options):
+    def _generate_response(request, **options):
         barrier.wait(timeout=5)
         runtime._emit("test_progress", endpoint=endpoint, scope=request.logical_scope_id)
         return LLMGenerationResult(response=LLMResponseIR(
@@ -937,13 +939,17 @@ def test_concurrent_generation_progress_is_scoped_to_each_call():
             finish_reason=LLMFinishReason.STOP,
         ))
 
-    runtime.generate = generate
+    def updates(request, **options):
+        result = _generate_response(request, **options)
+        from pal.llm.ir import LLMResponseUpdate, LLMResponseDeltaKind
+        yield LLMResponseUpdate(result.response, delta_kind=LLMResponseDeltaKind.STATE)
+    runtime._iter_stream_updates = updates
     first, second = [], []
 
     async def scenario():
         await asyncio.gather(
-            runtime.agenerate(replace(_request(), logical_scope_id="first"), on_event=first.append),
-            runtime.agenerate(replace(_request(), logical_scope_id="second"), on_event=second.append),
+            collect_generation(runtime.generate(replace(_request(), logical_scope_id="first"), on_event=first.append)),
+            collect_generation(runtime.generate(replace(_request(), logical_scope_id="second"), on_event=second.append)),
         )
         await asyncio.sleep(0)
 
@@ -967,7 +973,7 @@ def test_cancelled_generation_stops_progress_delivery():
         started = asyncio.Event()
         loop = asyncio.get_running_loop()
 
-        def generate(request, **options):
+        def _generate_response(request, **options):
             loop.call_soon_threadsafe(started.set)
             assert release.wait(timeout=5)
             runtime._emit("late_progress", endpoint=endpoint)
@@ -976,10 +982,15 @@ def test_cancelled_generation_stops_progress_delivery():
                 finish_reason=LLMFinishReason.STOP,
             ))
 
-        runtime.generate = generate
-        task = asyncio.create_task(runtime.agenerate(_request(), on_event=events.append))
+        def updates(request, **options):
+            result = _generate_response(request, **options)
+            from pal.llm.ir import LLMResponseUpdate, LLMResponseDeltaKind
+            yield LLMResponseUpdate(result.response, delta_kind=LLMResponseDeltaKind.STATE)
+        runtime._iter_stream_updates = updates
+        task = asyncio.create_task(collect_generation(runtime.generate(_request(), on_event=events.append)))
         await asyncio.wait_for(started.wait(), timeout=5)
         task.cancel()
+        release.set()
         try:
             await task
         except asyncio.CancelledError:

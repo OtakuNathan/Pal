@@ -1,5 +1,6 @@
 """Generation and memory maintenance preserve the cause and the committed state."""
 from __future__ import annotations
+from tests.compaction_composition import execute_compaction
 
 import asyncio
 import json
@@ -10,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.core.compaction import CompactionEngine, CompactionSnapshot
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionEngine, CompactionSnapshot
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.llm import LLMRuntime, EndpointResolver, generation_result_from_values
 from pal.llm.ir import LLMResponseUpdate, LLMResponseDeltaKind
 from pal.memory import MemoryService
@@ -58,7 +59,7 @@ def test_llm_exception_body_is_not_prepended_to_public_root(streaming):
     runtime = runtime_for(Invoker())
     runtime.endpoint_retry_attempts = 1
     response = (list(runtime._iter_stream_updates(_request()))[-1].response
-                if streaming else runtime.generate(_request()).response)
+                if streaming else runtime._generate_response(_request()).response)
     assert "upstream disconnected" in response.text
     assert "Traceback" not in response.text
     assert "private_transport.py" not in response.text
@@ -91,7 +92,7 @@ def test_llm_provider_error_keeps_private_metadata_out_of_reply(streaming, envel
     runtime = runtime_for(Invoker())
     runtime.endpoint_retry_attempts = 1
     final = (list(runtime._iter_stream_updates(_request()))[-1].response
-             if streaming else runtime.generate(_request()).response)
+             if streaming else runtime._generate_response(_request()).response)
     assert "upstream disconnected" in final.text
     assert "backend_unavailable" in final.text
     for private in ("Traceback", "private_backend.py", "PRIVATE_RESPONSE_CONTEXT", "PRIVATE_METADATA"):
@@ -161,7 +162,7 @@ def test_sdk_error_body_stack_is_private(source, streaming):
     runtime = runtime_for(Invoker())
     runtime.endpoint_retry_attempts = 1
     final = (list(runtime._iter_stream_updates(_request()))[-1].response
-             if streaming else runtime.generate(_request()).response)
+             if streaming else runtime._generate_response(_request()).response)
     assert "upstream unavailable" in final.text
     assert "PRIVATE_STACK_FRAME" not in final.text
     assert "hidden-secret" not in final.text
@@ -176,7 +177,7 @@ def test_generation_failure_preserves_every_attempt_and_redacts_secrets(monkeypa
             raise chained_error(f"attempt diagnostic {self.calls}")
     monkeypatch.setattr("pal.llm.runtime._retry_delay", lambda _: 0)
     invoker = Invoker()
-    result = runtime_for(invoker).generate(_request())
+    result = runtime_for(invoker)._generate_response(_request())
     visible = result.text + json.dumps(thaw_json(result.response.message.metadata))
     assert "backend diagnostic: upstream disconnected" in visible
     assert "attempt diagnostic 1" in visible and "attempt diagnostic 2" in visible
@@ -213,7 +214,7 @@ def test_wall_timeout_targets_the_partial_message_for_discard(monkeypatch):
             time.sleep(0.001)
     monkeypatch.setattr(runtime, "_iter_stream_updates", updates)
     async def collect():
-        return [item async for item in runtime.astream(_request())]
+        return [item async for item in runtime.generate(_request())]
     final = asyncio.run(collect())[-1].response
     assert final.finish_reason == "error"
     assert final.message.message_id == partial.message.message_id
@@ -232,7 +233,7 @@ def dreaming(setup_review):
 
 def test_dreaming_provider_error_retains_response_and_metadata(dreaming):
     class LLM(ReviewingLLM):
-        async def agenerate(self, request):
+        async def respond(self, request):
             response = generation_result_from_values(text="provider diagnostic: account unavailable", finish_reason="error").response
             return SimpleNamespace(response=replace(response, message=replace(response.message,
                 metadata={"backend_error": "original provider error body"})))
@@ -323,11 +324,13 @@ def test_compaction_keeps_actual_error_in_result(mode, monkeypatch, caplog):
     outcome = (chained_error() if mode == "exception" else generation_result_from_values(
         text="compaction provider diagnostic" if mode == "error_response" else _valid_pal_payload(),
         finish_reason="error" if mode == "error_response" else "stop"))
-    async def commit(*args, **kwargs):
-        return chained_error("checkpoint persistence failed")
+    memory = MemoryService()
     if mode == "commit":
-        monkeypatch.setattr(engine, "_commit", commit)
-    result = asyncio.run(engine.run(snapshot, llm_runtime=_ScriptedLLM([outcome]), memory_service=MemoryService()))
+        snapshot = replace(snapshot, metadata={"two_segment_run_id": "audit"})
+        def commit(*args, **kwargs):
+            raise chained_error("checkpoint persistence failed")
+        monkeypatch.setattr(memory, "compact_left", commit)
+    result = asyncio.run(execute_compaction(engine, snapshot, llm_runtime=_ScriptedLLM([outcome]), memory_service=memory))
     assert not result.success
     details = str(result)
     assert ("compaction provider diagnostic" if mode == "error_response" else "backend diagnostic: upstream disconnected") in details
@@ -364,7 +367,7 @@ def test_responses_decoder_delivers_provider_error_body(event):
             return response, ()
     runtime = runtime_for(Invoker())
     runtime.endpoint_retry_attempts = 1
-    final = runtime.generate(_request())
+    final = runtime._generate_response(_request())
     assert "original Responses diagnostic" in final.text
     assert "hidden-secret" not in final.text
     assert "PRIVATE_PROVIDER_FRAME" not in final.text
@@ -393,7 +396,7 @@ def test_completion_tool_filter_is_reported_as_provider_failure(streaming):
     if streaming:
         response = list(runtime._iter_stream_updates(_request()))[-1].response
     else:
-        response = runtime.generate(_request()).response
+        response = runtime._generate_response(_request()).response
     assert transport.calls == 1
     assert response.finish_reason == "error"
     assert response.tool_calls == ()
@@ -441,7 +444,7 @@ def test_compaction_cleanup_error_keeps_committed_receipt():
         clock_kind=policy.clock_kind, clock_value=1, metadata={"two_segment_run_id": "audit"})
     def cleanup():
         raise chained_error("cleanup after checkpoint failed")
-    result = asyncio.run(CompactionEngine(policy)._commit(snapshot, memory_service=memory,
+    result = asyncio.run(memory.install_compaction(snapshot,
         summary_entry=_entry("Committed summary"), after_commit=cleanup))
     assert result.metadata["status"] == "committed"
     assert "backend diagnostic: upstream disconnected" in result.metadata["post_commit_detail"]
@@ -471,7 +474,7 @@ def test_terminal_decode_failure_is_logged_as_error(streaming, monkeypatch, capl
     if streaming:
         response = list(runtime._iter_stream_updates(_request()))[-1].response
     else:
-        response = runtime.generate(_request()).response
+        response = runtime._generate_response(_request()).response
     assert response.finish_reason == "error"
     errors = [r for r in caplog.records if r.levelname == "ERROR"]
     assert len(errors) == 1
@@ -496,7 +499,7 @@ def test_recovered_decode_failure_does_not_log_terminal_error(monkeypatch, caplo
 
     monkeypatch.setattr("pal.llm.runtime._retry_delay", lambda _: 0)
     invoker = Invoker()
-    result = runtime_for(invoker).generate(_request())
+    result = runtime_for(invoker)._generate_response(_request())
     assert result.text == "recovered"
     assert invoker.calls == 2
     assert not [r for r in caplog.records if r.levelname == "ERROR"]

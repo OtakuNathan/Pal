@@ -11,7 +11,8 @@ from pal.channel import (
 from pal.channel.provider_manager import ChannelEndpointProviderManager
 from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.control.configuration import CoreConfigurationService
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.core.runtime_config import RuntimeConfig
 from pal.execution import register_with_core as register_execution_with_core
 from pal.failure import FailureRuntime, register_with_core as register_failure_with_core
@@ -29,7 +30,7 @@ from pal.llm import (
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
 from pal.bunshin.harnesses import BunshinHarnessRegistry
-from pal.plugins import PluginHost
+from pal.plugins.host import PluginHost
 from pal.shared.text_search import warmup_jieba
 from pal.wizard import PalRegistration, WizardService
 
@@ -139,7 +140,7 @@ def compose_runtime(
     )
     memory_service = MemoryService(
         review_storage=memory_storage,
-        l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require)
+
     )
     bunshin_harness_registry = BunshinHarnessRegistry()
     runtime_settings_repository.ensure_defaults()

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 from pal.control.contracts import ControlAction, ControlCommandInvocation
 from pal.control import interactions
-from pal.core.compaction import CompactionRunResult
+from pal.llm.compaction_engine import CompactionRunResult
 from pal.llm import EndpointResolver, LLMRuntime
 from pal.llm.contracts import generation_result_from_values
 from pal.llm.ir import (GenerationPolicyIR, LLMMessageIR, LLMRequestIR, MessageRole,
@@ -142,7 +142,7 @@ class ReplayCompatibilityTests(unittest.TestCase):
     def test_missing_selection_or_legacy_fallback_never_routes_to_another_endpoint(self):
         for active in (None, "deleted"):
             runtime = LLMRuntime(EndpointResolver(endpoints=(endpoint(), endpoint("b"))), Settings(active))
-            result = runtime.generate(LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(max_output_tokens=100), metadata={"endpoint_fallback_policy": "enabled"}))
+            result = runtime._generate_response(LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(max_output_tokens=100), metadata={"endpoint_fallback_policy": "enabled"}))
             self.assertIsNone(runtime.active_endpoint())
             self.assertIn("unavailable", result.text)
         runtime = LLMRuntime(EndpointResolver(endpoints=(endpoint(), endpoint("b"))), Settings())
@@ -231,7 +231,7 @@ class ReplayCompatibilityTests(unittest.TestCase):
                 if stream:
                     response = list(runtime._iter_stream_updates(request))[-1].response
                 else:
-                    response = runtime.generate(request).response
+                    response = runtime._generate_response(request).response
                 self.assertEqual(response.text, "ok")
                 self.assertEqual(calls, ["a", "a"])
                 self.assertEqual(runtime.active_endpoint_id, "b")
@@ -254,7 +254,7 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
         self.compact_release.set()
         self.compact_success = True
         self.compact_calls = []
-        self.real_compact = self.core.turn_executor.compact_memory_async
+        self.real_compact = self.core.turn_executor.compaction.run
 
         async def compact(memory, **kwargs):
             self.compact_calls.append((self.llm.active_endpoint_id, kwargs))
@@ -264,7 +264,7 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
                 return CompactionRunResult(status="error")
             memory.soft_reset()
             return CompactionRunResult(status="compacted", memory_result=MemoryCompactResult(summary="summary"))
-        self.core.turn_executor.compact_memory_async = compact
+        self.core.turn_executor.compaction.run = compact
 
     async def select(self):
         await self.core.handle_control_action_async(ControlAction(
@@ -698,8 +698,13 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
             def invoke(inner, endpoint, request, **kwargs):
                 calls.append((endpoint.endpoint_id, request))
                 return generation_result_from_values(text=_valid_pal_payload("Keep the task constraints.")).response, ()
+
+            def invoke_updates(inner, endpoint, request, **kwargs):
+                from pal.llm.ir import LLMResponseUpdate, LLMResponseDeltaKind
+                response, _ = inner.invoke(endpoint, request, **kwargs)
+                yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
         self.llm.endpoint_invoker = Invoker()
-        self.core.turn_executor.compact_memory_async = self.real_compact
+        self.core.turn_executor.compaction.run = self.real_compact
         request = await self.select()
         await self.step(request, "confirm")
         await self.step(request, "think", think_level="high")

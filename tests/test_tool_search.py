@@ -1,4 +1,7 @@
 from __future__ import annotations
+from tests.core_factory import build_core
+
+from pal.execution.tool_facade import LifecycleAccess
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -41,6 +44,7 @@ def search_fixture_tool(
             failure_next_steps="search again with a narrower filter",
         ),
         execution=ToolExecutionSemantics(
+            lifecycle_access=LifecycleAccess.SHARED,
             invocation_mode=mode,
             effect_kind=EffectKind.NONE,
             idempotency=Idempotency.IDEMPOTENT,
@@ -56,7 +60,7 @@ def search_fixture_tool(
 
 class ToolSearchTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.core = PalCore()
+        self.core = build_core()
         register_execution_with_core(self.core.context)
         self.core.publish_module_capabilities("execution")
         runtime = self.core.context.execution_runtime

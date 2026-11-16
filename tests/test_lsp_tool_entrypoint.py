@@ -1,11 +1,13 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import CapabilityCall
 from pal.lsp import build_lsp_plugin
@@ -82,7 +84,7 @@ def test_partial_prepare_offers_bound_doctor_not_a_menu() -> None:
 
 
 def test_lsp_tools_are_discoverable_without_resident_schemas() -> None:
-    core = PalCore()
+    core = build_core()
     register_core_with_core(core)
     register_execution_with_core(core.context)
     handle = build_lsp_plugin(runtime_root=Path(tempfile.mkdtemp())).register_with_core(core.context)

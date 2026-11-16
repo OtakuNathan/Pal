@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.foundation.diagnostics import exception_reason
 
 from pal.execution.tool_semantics import (
+    INDIRECT_LIFECYCLE,
     INDIRECT_CONTROL,
     INDIRECT_LOCAL_WRITE,
 )
@@ -454,7 +455,7 @@ class ChannelIntrospectionProvider:
         ),
         aliases=("manage_channel_endpoint",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderManageEndpointInput,
-        execution=INDIRECT_CONTROL,
+        execution=INDIRECT_LIFECYCLE,
         examples=({"name": "telegram-main", "operation": "restart"},),
     )
     def manage_endpoint(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:

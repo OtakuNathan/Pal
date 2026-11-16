@@ -621,18 +621,18 @@ def test_runtime_quota_never_executes_partial_tool_or_falls_back(stream):
     if stream:
         final = list(runtime._iter_stream_updates(request()))[-1].response
     else:
-        final = runtime.generate(request()).response
+        final = runtime._generate_response(request()).response
     assert final.finish_reason == LLMFinishReason.ERROR
     assert not final.message.tool_calls
     assert final.message.metadata["chatgpt_failure"]["code"] == QUOTA_CODE
     assert requests == ["chatgpt"]
-    runtime.generate(request())
+    runtime._generate_response(request())
     assert requests == ["chatgpt"]
     runtime.set_active_endpoint("chatgpt")  # internal activation is not consent to retry
-    runtime.generate(request())
+    runtime._generate_response(request())
     assert requests == ["chatgpt"]
     runtime.resume_subscription("chatgpt")
-    runtime.generate(request())
+    runtime._generate_response(request())
     assert requests == ["chatgpt", "chatgpt"]
 
 

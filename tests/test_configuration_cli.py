@@ -1,4 +1,6 @@
 """Configuration CLIs preserve ownership, persistence and recovery boundaries."""
+from tests.llm_fakes import scripted_llm
+from tests.core_factory import build_core
 import asyncio
 from contextlib import redirect_stdout
 import io
@@ -10,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.main import _build_parser
 from pal.cli_config import open_config_database
 from pal.core.cli import run_core_cli_async
@@ -133,8 +135,8 @@ def test_core_cli_reaches_busy_owner_and_shutdown_closes_idle_clients(runtime_ro
 
     async def run():
         from tests.test_cache_warm_deadline import _route, _snapshot
-        core = PalCore()
-        core.context.port_registry['llm:llm'] = SimpleNamespace(settings_repository=RuntimeSettingRepository(),
+        core = build_core()
+        core.context.port_registry['llm:llm'] = scripted_llm(settings_repository=RuntimeSettingRepository(),
             prompt_cache_warm_deadline_snapshot=_snapshot)
         core.state.active_turn_id = 'waiting-for-cli'
         owner = core.cache_warm_deadline
@@ -273,8 +275,8 @@ def test_core_configuration_normalizes_relative_long_runtime_roots(runtime_root,
 
 def test_core_timeout_reports_unknown_and_does_not_repeat_or_fall_back(runtime_root):
     async def run():
-        core = PalCore()
-        core.context.port_registry['llm:llm'] = SimpleNamespace(settings_repository=RuntimeSettingRepository())
+        core = build_core()
+        core.context.port_registry['llm:llm'] = scripted_llm(settings_repository=RuntimeSettingRepository())
         service = CoreConfigurationService(runtime_root, core.cache_warm_deadline)
         call_method = service._call_method
         calls = []

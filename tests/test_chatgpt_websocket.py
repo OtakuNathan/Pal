@@ -330,7 +330,7 @@ def test_ambiguous_failure_is_not_automatically_replayed_by_runtime(phase, strea
         if streaming:
             result = list(runtime._iter_stream_updates(request()))[-1].response
         else:
-            result = runtime.generate(request()).response
+            result = runtime._generate_response(request()).response
         assert result.message.metadata["chatgpt_failure"]["code"] == "request_outcome_unknown"
         assert len(socket.sent) == len(connector.requests) == 1
     finally:

@@ -1,4 +1,6 @@
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -7,7 +9,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.core.turns import _render_failure_primary_input
 from pal.execution import CapabilityResult
 from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
@@ -31,11 +34,11 @@ from pal.shared.json_values import thaw_json
 from tests.capability_fixture import mount_test_capability
 
 
-class _RecordingFailureLLM:
+class _RecordingFailureLLM(NonStreamingLLM):
     def __init__(self) -> None:
         self.requests = []
 
-    async def agenerate(self, request):
+    async def respond(self, request):
         self.requests.append(request)
         return generation_result_from_values(
             text=json.dumps(
@@ -50,11 +53,11 @@ class _RecordingFailureLLM:
         )
 
 
-class _ToolLoopFailureLLM:
+class _ToolLoopFailureLLM(NonStreamingLLM):
     def __init__(self) -> None:
         self.requests = []
 
-    async def agenerate(self, request):
+    async def respond(self, request):
         self.requests.append(request)
         if len(self.requests) == 1:
             return generation_result_from_values(
@@ -75,11 +78,11 @@ class _ToolLoopFailureLLM:
         )
 
 
-class _ExplodingFailureLLM:
+class _ExplodingFailureLLM(NonStreamingLLM):
     def __init__(self) -> None:
         self.requests = []
 
-    async def agenerate(self, request):
+    async def respond(self, request):
         self.requests.append(request)
         raise RuntimeError("safe-mode llm down")
 
@@ -104,7 +107,7 @@ def _unknown_effect_failure_program(draft, *, allowed_tools):
 
 
 def _core_with_failure_runtime() -> PalCore:
-    core = PalCore()
+    core = build_core()
     register_core_with_core(core)
     register_failure_with_core(core, FailureRuntime())
     return core

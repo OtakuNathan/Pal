@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -13,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.shell_exec import (
     MAX_SHELL_TIMEOUT_MS,
@@ -131,7 +132,7 @@ class ShellExecToolTests(unittest.TestCase):
 
 class ShellExecAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_compiled_capability_uses_async_handler(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         record = core.context.execution_runtime.registry_generation.direct_aliases["run_shell"]
@@ -151,7 +152,7 @@ class ShellExecAsyncTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(prefix="pal_shell_test_") as tmp:
             root = Path(tmp)
             pid_path = root / "child.pid"
-            core = PalCore()
+            core = build_core()
             register_execution_with_core(core.context)
             core.publish_module_capabilities("execution")
             source = (
@@ -192,7 +193,7 @@ class ShellExecAsyncTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(prefix="pal_shell_test_") as tmp:
             root = Path(tmp)
             pid_path = root / "child.pid"
-            core = PalCore()
+            core = build_core()
             register_execution_with_core(core.context)
             core.publish_module_capabilities("execution")
             source = (

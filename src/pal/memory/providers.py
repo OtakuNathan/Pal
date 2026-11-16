@@ -12,6 +12,10 @@ class L3PluginRegistry:
     def register(self, plugin: L3ProviderPort) -> None:
         self.plugins[plugin.provider_id] = plugin
 
+    def unregister(self, plugin: L3ProviderPort) -> None:
+        if self.plugins.get(plugin.provider_id) is plugin:
+            self.plugins.pop(plugin.provider_id)
+
     def get(self, provider_id: str) -> L3ProviderPort | None:
         return self.plugins.get(provider_id)
 

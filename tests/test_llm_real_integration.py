@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
+from tests.core_factory import build_core
 from pal.skill.models import SkillModel
 
 from pal.shared.tool_protocol import new_tool_call
@@ -22,14 +24,10 @@ from pal.bootstrap import compose_runtime
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.core.runtime_config import RuntimeConfig
-from pal.core import (
-    CompactionClockKind,
-    CompactionEngine,
-    CompactionSnapshot,
-    PalCore,
-    register_with_core as register_core_with_core,
-)
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionClockKind, CompactionEngine, CompactionSnapshot
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import EventEnvelope, PalV2Database
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
@@ -311,7 +309,7 @@ async def _run_real_skill_tool_dialog(
     max_rounds: int = 6,
     required_tool_names: list[str] | None = None,
 ) -> SimpleNamespace:
-    core = PalCore()
+    core = build_core()
     register_core_with_core(core)
     register_execution_with_core(core.context)
     register_skill_with_core(core.context, service)
@@ -330,7 +328,7 @@ async def _run_real_skill_tool_dialog(
     final_text = ""
     required = [str(name) for name in list(required_tool_names or [])]
     for _ in range(max_rounds):
-        outcome = await runtime.agenerate(
+        outcome = await collect_generation(runtime.generate(
             request_ir_from_prompt(
                 messages=list(messages),
                 max_output_tokens=2048,
@@ -338,7 +336,7 @@ async def _run_real_skill_tool_dialog(
                 tools=selected,
                 metadata={"purpose": "real_skill_behavior_test", "response_mode_hint": "operational"},
             )
-        )
+        ))
         final_text = str(outcome.text or outcome.reasoning_text or "").strip()
         calls = list(outcome.tool_calls or [])
         if not calls:
@@ -510,7 +508,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
     def test_real_llm_runtime_generate_returns_assistant_signal(self) -> None:
         runtime = _real_runtime(max_output_tokens=2048)
 
-        outcome = runtime.generate(
+        outcome = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "Reply with one short sentence confirming you are online."}],
                 max_output_tokens=2048,
@@ -526,7 +524,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
     def test_real_openai_completion_reaches_configured_model(self) -> None:
         runtime = _real_openai_completion_runtime(max_output_tokens=1024)
 
-        outcome = runtime.generate(
+        outcome = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "Reply exactly: PAL_ONLINE"}],
                 max_output_tokens=1024,

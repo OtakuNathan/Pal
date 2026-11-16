@@ -1,3 +1,4 @@
+from tests.core_factory import build_core
 import asyncio
 import json
 from pathlib import Path
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from pal.bunshin.web_broker import web_result_from_payload, web_result_to_payload
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.shared import IntrospectionCall
 from pal.shared.tool_protocol import new_tool_call
@@ -17,7 +18,7 @@ from pal.web_fetch.browser_service import _PlaywrightCliWorker
 
 @pytest.fixture
 def runtime():
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime
@@ -83,7 +84,7 @@ def test_navigate_retains_snapshot_through_runtime_normalization():
     text = 'page text\n' * 1000
     manager = SimpleNamespace(execute=lambda **kwargs: {
         'document': {'text': text[:100], 'text_truncated': True, '_full_text': text}})
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     register_web(core.context, WebFetchService(browser_manager=manager))

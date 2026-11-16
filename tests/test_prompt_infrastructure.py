@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.shared.ports import PortRegistry
 
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -31,7 +32,7 @@ def _compiler(*providers: _Provider) -> PromptCompiler:
         SimpleNamespace(
             prompt_fragment_registry=registry,
             execution_runtime=None,
-            port_registry={},
+            port_registry=PortRegistry({}),
             require_port=lambda _key: (_ for _ in ()).throw(KeyError(_key)),
         )
     )

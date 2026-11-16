@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.execution.tool_facade import LifecycleAccess
+
 from dataclasses import dataclass, replace
 import inspect
 import re
@@ -360,6 +362,7 @@ def _default_execution(action_blueprint: CapabilityActionBlueprint) -> ToolExecu
             f"{action_blueprint.handler_name!r} requires explicit execution semantics"
         )
     return ToolExecutionSemantics(
+        lifecycle_access=LifecycleAccess.SHARED,
         invocation_mode=InvocationMode.INDIRECT,
         effect_kind=EffectKind.LOCAL_READ,
         idempotency=Idempotency.IDEMPOTENT,

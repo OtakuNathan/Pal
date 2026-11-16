@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pal.core import PalCore  # Initialize runtime dependencies before importing runtime.
+from pal.core.runtime import PalCore
 from pal.execution import runtime
 from scripts.evaluate_tool_discovery import evaluate
 

@@ -11,9 +11,7 @@ Owns:
 - prompt fragment registry and prompt assembly seam
 - the shared `AgentTurnRuntime` prompt/turn-execution kernel used by Pal and
   Bunshin hosts
-- shared compaction orchestration: immutable snapshots, atomic history units,
-  budget preflight, an independently configured model-attempt budget,
-  validation, transactional commit ordering, and no mutation on failure
+- compaction coordination: LLM produces a validated candidate; Memory owns capture, atomic installation and recovery
 - stagnation guard orchestration; unchanged consecutive `search_tools` results
   receive a second-call reminder, without changing the guard's observation or
   termination threshold. Finalization retains tool schemas and tool choice;
@@ -38,8 +36,6 @@ Exposes:
 - event and handler registries
 - `PromptFragmentRegistry`
 - `AgentTurnRuntime`
-- `CompactionEngine`, `CompactionPolicy`, `CompactionSnapshot`, and
-  `CompactionRunResult`
 - mailbox and turn-effect contracts
 
 Interaction rule:

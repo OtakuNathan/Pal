@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 from unittest.mock import AsyncMock
@@ -8,9 +9,9 @@ import pytest
 from pal.control import ControlPlane, ControlCommandSpec, register_with_core as register_control
 from pal.control.catalog import ControlCatalogSource
 from pal.control.interactions import build_control_catalog_payload
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution
-from pal.plugins import PluginHost
+from pal.plugins.host import PluginHost
 from pal.plugins.models import PluginBundleModel
 from pal.foundation.persistence import PalV2Database
 
@@ -49,7 +50,7 @@ def test_invalid_declarations_never_publish(spec):
 def runtime(tmp_path):
     database = PalV2Database(tmp_path / "pal.sqlite3")
     database.initialize([PluginBundleModel])
-    core = PalCore()
+    core = build_core()
     register_execution(core.context)
     control = ControlPlane()
     register_control(core.context, control)

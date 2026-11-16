@@ -1,4 +1,5 @@
 """Both hosts preserve accepted checkpoint content and replay the same prefix."""
+from tests.core_factory import build_core
 import asyncio
 import json
 from dataclasses import replace
@@ -8,9 +9,9 @@ import pytest
 
 from pal.bunshin.compact import BunshinCompactionPolicy
 from pal.bunshin.runner_components.adapters import _BunshinLLMRuntimeAdapter
-from pal.core.compaction import CompactionClockKind, CompactionEngine, CompactionSnapshot
-from pal.core.continuity_compaction import COMPACTION_SCHEMA_CONTINUITY_V1, CONTINUITY_FIELDS
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionClockKind, CompactionEngine, CompactionSnapshot
+from pal.llm.continuity_compaction import COMPACTION_SCHEMA_CONTINUITY_V1, CONTINUITY_FIELDS
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.llm.ir import GenerationPolicyIR, LLMMessageIR, LLMRequestIR, MessageRole, TextPartIR
 from pal.llm.prompt_cache import PromptCacheCoordinator
 from pal.llm.shapes.openai_response import OpenAIResponseCodec
@@ -167,7 +168,7 @@ def test_eager_plan_material_reaches_real_compact_without_cache_ack():
     from pal.llm.ir import PromptRegionIR
     from pal.memory import MemoryService
 
-    core = PalCore()
+    core = build_core()
     service = MemoryService()
     service.begin_l1_turn("warm", user_text="original user input " * 900)
     user = service.active_l1_turn("warm").messages[0]
@@ -189,7 +190,7 @@ def test_eager_plan_material_reaches_real_compact_without_cache_ack():
     llm = _ScriptedLLM([generation_result_from_values(text=_valid_pal_payload())])
     llm.prompt_cache_eligible_anchor_request = coordinator.eligible_anchor_request
     core.context.port_registry["llm:llm"] = llm
-    result = asyncio.run(core.turn_executor.compact_memory_async(
+    result = asyncio.run(core.turn_executor.compaction.run(
         service, target_input_budget=16384, reserved_output_tokens=1024))
     assert result.success, result.failures
     sent = llm.generate_requests[0]
@@ -204,7 +205,7 @@ def test_incompatible_manual_thinking_budget_falls_back_or_stops(hot):
     from pal.llm import generation_result_from_values
     from tests.test_runtime_compaction import _attach_hot_cache
     from pal.core.runtime import PalCore
-    core = PalCore()
+    core = build_core()
     service = _memory_with_turns(2)
     llm = _ScriptedLLM([generation_result_from_values(text=_valid_pal_payload())])
     _attach_hot_cache(llm, service)
@@ -215,7 +216,7 @@ def test_incompatible_manual_thinking_budget_falls_back_or_stops(hot):
     llm.prompt_cache_eligible_anchor_request = lambda **kwargs: anchor
     core.context.port_registry["llm:llm"] = llm
     before = list(service.l1_store.items)
-    result = asyncio.run(core.turn_executor.compact_memory_async(service, target_input_budget=8192,
+    result = asyncio.run(core.turn_executor.compaction.run(service, target_input_budget=8192,
         reserved_output_tokens=2048, cache_epoch="epoch-a" if hot else ""))
     if hot:
         assert result.status == "hot_cache_unavailable"

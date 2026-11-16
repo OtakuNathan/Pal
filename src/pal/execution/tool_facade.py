@@ -4,7 +4,11 @@ import json
 import re
 from enum import Enum
 from functools import lru_cache
-from typing import Any
+from typing import Any, Iterable
+
+from pydantic import GetJsonSchemaHandler
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter, ValidationError, field_validator, model_validator
@@ -26,7 +30,7 @@ class StrictToolModel(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     @classmethod
-    def __get_pydantic_json_schema__(cls, core_schema, handler):
+    def __get_pydantic_json_schema__(cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
         schema = handler(core_schema)
         # Legacy omit-only fields use None internally, but reject explicit null.
         # Do not advertise that sentinel as a callable default. Nullable fields
@@ -226,6 +230,12 @@ class ToolGuidance(StrictToolModel):
         return self
 
 
+class LifecycleAccess(str, Enum):
+    SHARED = "shared"
+    EXCLUSIVE = "exclusive"
+    OWNER_MANAGED = "owner_managed"
+
+
 class ToolExecutionSemantics(StrictToolModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
@@ -234,6 +244,7 @@ class ToolExecutionSemantics(StrictToolModel):
     idempotency: Idempotency
     retry_policy: RetryPolicy
     paging: PagingMode
+    lifecycle_access: LifecycleAccess
 
     @model_validator(mode="after")
     def validate_retry_safety(self) -> "ToolExecutionSemantics":
@@ -333,13 +344,14 @@ def _unset_null_exclusions(value: Any) -> dict[Any, Any]:
     if isinstance(value, RootModel):
         return _unset_null_exclusions(value.root)
     if isinstance(value, BaseModel):
-        exclusions = {}
+        exclusions: dict[str, Any] = {}
         for name, item in value:
             if item is None and name not in value.model_fields_set:
                 exclusions[name] = True
             elif nested := _unset_null_exclusions(item):
                 exclusions[name] = nested
         return exclusions
+    items: Iterable[tuple[Any, Any]]
     if isinstance(value, dict):
         items = value.items()
     elif isinstance(value, (list, tuple)):

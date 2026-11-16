@@ -154,6 +154,9 @@ class ExecutionProjectionPort(Protocol):
 
 
 class ExecutionRuntimePort(ExecutionProjectionPort, Protocol):
+    def prepare_prompt_context(self, memory: Any, continuation: Any, *,
+        context_view: Any = None, include_live: bool = True) -> None: ...
+
     def tool_call_failed_result(self, call: Any, exc: Exception) -> Any:
         ...
 

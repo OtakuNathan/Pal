@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from pal.execution.tool_facade import LifecycleAccess
 from pal.bunshin.workspace_paths import path_scope_matches
 from pal.bunshin.review_receipts import _review_tool_evidence_ref
 
@@ -348,6 +350,7 @@ def _workflow_capability(
         OutputModel=_WorkflowToolOutput,
         guidance=guidance,
         execution=ToolExecutionSemantics(
+            lifecycle_access=LifecycleAccess.SHARED,
             invocation_mode=InvocationMode.DIRECT,
             effect_kind=effect_kind,
             idempotency=idempotency,
@@ -851,6 +854,10 @@ class BunshinScopedExecutionRuntime:
 
     def begin_tool_result_turn(self, **kwargs: Any) -> None:
         self.base_runtime.begin_tool_result_turn(**kwargs)
+
+    def prepare_prompt_context(self, memory, continuation, *, context_view=None, include_live=True):
+        self._original_runtime.prepare_prompt_context(memory, continuation,
+            context_view=context_view, include_live=include_live)
 
     def prepare_model_context(self, memory, continuation, *, context_view=None):
         hook = getattr(self._original_runtime, "prepare_model_context", None)

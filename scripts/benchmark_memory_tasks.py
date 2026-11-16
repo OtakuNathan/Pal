@@ -9,6 +9,8 @@ Development and held-out cases are fixed before model runs. This small curated
 suite is not a measurement of real traffic or recall across every subsystem.
 """
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
+from tests.core_factory import build_core
 
 import argparse
 import asyncio
@@ -25,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from jsonschema import Draft202012Validator
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.eval_tools import _eval_tool_result_message
 from pal.execution.capabilities import register_with_core as register_execution
 from pal.execution.runtime import ExecutionRuntime
@@ -93,10 +95,10 @@ def corrected_drink_text(text: str) -> bool:
 
 class MemoryFixture:
     def __init__(self, root: Path, case: Case):
-        self.core = PalCore()
+        self.core = build_core()
         self.runtime = self.core.context.execution_runtime
         register_execution(self.core.context)
-        self.memory = MemoryService(l3_selector=L3ProviderSelector(resolver=self.runtime.l3_plugin_registry.require))
+        self.memory = MemoryService()
         register_memory(self.core.context, self.memory)
         storage = MemoryStorage(root)
         storage.create_initial()
@@ -125,7 +127,7 @@ class MemoryFixture:
         self.other = MockL3Plugin(provider_id='other_l3', records=[{
             'document_id': self.refs['preference'], 'document_kind': 'fact',
             'summary': '另一个库的同名记录：用户喜欢汽水。'}])
-        self.runtime.l3_plugin_registry.register(self.other)
+        self.memory.register_l3_provider(self.other)
         if case.goal == 'reconcile':
             self.memory.l3_selector.active_provider_id = self.other.provider_id
         self.initial = self.snapshot()
@@ -245,11 +247,7 @@ async def run_case(llm, values, case, repetition, catalog, max_rounds):
                    'fixture_refs': fx.refs, 'registry_generation': fx.runtime.registry_generation.generation_hash}
             for _ in range(max_rounds):
                 row['tool_window_hashes'].append(hashlib.sha256(json.dumps(available, sort_keys=True).encode()).hexdigest())
-                outcome = await asyncio.wait_for(llm.agenerate(LLMRequestIR(
-                    messages=tuple(messages), tools=tuple(tool_definition_ir_from_dict(available[a]) for a in sorted(available)),
-                    model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=8192, temperature=0),
-                    metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none',
-                              'think_level': 'medium', 'case_id': case.case_id})), 150)
+                outcome = await asyncio.wait_for(collect_generation(llm.generate(LLMRequestIR(messages=tuple(messages), tools=tuple((tool_definition_ir_from_dict(available[a]) for a in sorted(available))), model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=8192, temperature=0), metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none', 'think_level': 'medium', 'case_id': case.case_id}))), 150)
                 row['usage'].append({k: getattr(outcome.response.usage, k, 0) for k in ('input_tokens', 'output_tokens', 'cached_input_tokens', 'uncached_input_tokens', 'cache_write_input_tokens', 'cache_partition_reported', 'reported_fields')})
                 if outcome.finish_reason.value == 'error':
                     metadata = outcome.response.message.metadata

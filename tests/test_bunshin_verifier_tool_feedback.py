@@ -1,5 +1,6 @@
 """Verifier feedback is checked at the real scoped facade/provider boundary."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -286,9 +287,9 @@ def test_runner_records_bound_ordinary_execution_and_edit_invalidates_it(verifie
     fixture, workspace, probe, _, runtime, _ = verifier
     async def noop(*args, **kwargs):
         pass
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     real_runtime = core.context.execution_runtime
@@ -397,10 +398,10 @@ def test_snapshot_refuses_symlink_swap_during_file_open(verifier, tmp_path):
 
 @pytest.mark.parametrize('exit_code,expected,status_name', [(0, [0], 'PASS'), (1, [0], 'FAIL'), (1, [1], 'PASS')])
 def test_real_published_shell_result_preserves_execution_status(verifier, exit_code, expected, status_name):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
     _, workspace, _, _, scoped, _ = verifier
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     real_runtime = core.context.execution_runtime

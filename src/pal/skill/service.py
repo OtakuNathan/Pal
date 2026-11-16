@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
 
 import hashlib
 import json
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 
 from pal.foundation.diagnostics import diagnostic_text
 from pal.foundation.persistence import utc_now
-from pal.llm.contracts import LLMRuntimePort
+from pal.llm.contracts import LLMService
 from pal.execution.contracts import ExecutionProjectionPort
 from pal.llm.conversions import request_ir_from_prompt
 from pal.shared import LLMFinishReason
@@ -39,7 +40,7 @@ class SkillInputError(ValueError):
 @dataclass
 class SkillService:
     repository: SkillRepository = field(default_factory=SkillRepository)
-    llm_runtime: LLMRuntimePort | None = None
+    llm_runtime: LLMService | None = None
     execution_runtime: ExecutionProjectionPort | None = None
     runtime_root: Path | None = None
     inject_manual_char_budget: int = SKILL_INJECT_MANUAL_CHAR_BUDGET
@@ -224,7 +225,7 @@ class SkillService:
             tools=[],
             metadata={"purpose": "skill_assimilation_sanitizer", "response_mode_hint": "operational"},
         )
-        outcome = await self.llm_runtime.agenerate(request)
+        outcome = await collect_generation(self.llm_runtime.generate(request))
         if outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
             raise RuntimeError("sanitizer_context_too_large: " + diagnostic_text(outcome.text, limit=None))
         raw = str(outcome.text or "").strip()

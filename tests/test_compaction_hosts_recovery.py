@@ -13,6 +13,7 @@ Honest boundaries (recorded for acceptance_status):
   receipts suppress redelivery, so that window needs the P4 outbox work.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from tests.llm_fakes import NonStreamingLLM
 
@@ -27,7 +28,7 @@ from types import SimpleNamespace
 
 from pal.core.compaction_coordinator import CompactionGate
 from pal.core.contracts import CoreRuntimeState
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.runtime import PalCore
 from pal.core.turns import MemoryCompactEffect
 from tests.test_compaction_fixtures import _service_with_active
@@ -56,7 +57,7 @@ class _BarrierEngine:
             metadata={"projected_entry_count": 0, "compact_summary_count": 1,
                       "retired_count": 0},
         )
-        from pal.core.compaction import CompactionRunResult
+        from pal.llm.compaction_engine import CompactionRunResult
         return CompactionRunResult(
             status=self.status, attempts=self.calls,
             memory_result=memory_result if self.status == "compacted" else None,
@@ -68,12 +69,12 @@ class BunshinScopeGateTests(unittest.TestCase):
         """I17/Q15: a Bunshin executor (no resident lock fields on its loop
         state) claims under its own carrier; the resident scope is untouched."""
         async def scenario():
-            core = PalCore()
+            core = build_core()
             service, turn_id, _ = _service_with_active()
             engine = _BarrierEngine()
             core.context.port_registry["memory:memory"] = service
             core.context.port_registry["llm:llm"] = NonStreamingLLM()
-            core.turn_executor._compaction_engine = engine
+            core.turn_executor.compaction.engine = engine
             # Bunshin shape: plain loop state without transition locks,
             # exactly as the worker runtime builds it.  v3 admission is
             # owner-side (history root); the executor claims no tickets.
@@ -162,12 +163,12 @@ class BunshinCheckpointRecoveryTests(unittest.TestCase):
             # A Bunshin-shaped scoped compaction runs to completion; the
             # checkpoint store keeps its own durability, untouched by L1.
             async def scoped_compact():
-                core = PalCore()
+                core = build_core()
                 service, turn_id, _ = _service_with_active()
                 engine = _BarrierEngine()
                 core.context.port_registry["memory:memory"] = service
                 core.context.port_registry["llm:llm"] = NonStreamingLLM()
-                core.turn_executor._compaction_engine = engine
+                core.turn_executor.compaction.engine = engine
                 core.turn_executor.state = AgentTurnRuntimeState()
                 carrier = CoreRuntimeState()
                 core.turn_executor._compaction_gate = CompactionGate(
@@ -233,12 +234,12 @@ class BunshinCheckpointRecoveryTests(unittest.TestCase):
 class CancellationTests(unittest.TestCase):
     def test_x01_cancel_during_generate_releases_and_installs_nothing(self) -> None:
         async def scenario():
-            core = PalCore()
+            core = build_core()
             service, turn_id, _ = _service_with_active()
             engine = _BarrierEngine(status="compacted")
             core.context.port_registry["memory:memory"] = service
             core.context.port_registry["llm:llm"] = NonStreamingLLM()
-            core.turn_executor._compaction_engine = engine
+            core.turn_executor.compaction.engine = engine
             stamp_before = service.l1_source_stamp()
             effect = MemoryCompactEffect(
                 target_input_budget=8_192,

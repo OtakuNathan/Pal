@@ -248,8 +248,8 @@ class MemoryIntrospectionProvider:
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         items = []
-        for provider_id in sorted(self.context.execution_runtime.l3_plugin_registry.plugins):
-            provider = self.context.execution_runtime.l3_plugin_registry.get(provider_id)
+        for provider_id in sorted(self.service.providers.plugins):
+            provider = self.service.providers.get(provider_id)
             items.append(
                 {
                     "name": provider_id,
@@ -269,7 +269,7 @@ class MemoryIntrospectionProvider:
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         provider_id = self.service.l3_selector.active_provider_id
-        provider = self.context.execution_runtime.l3_plugin_registry.get(provider_id)
+        provider = self.service.providers.get(provider_id)
         payload = {
             "provider_id": provider_id,
             "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
@@ -571,7 +571,7 @@ class MemoryIntrospectionProvider:
                 text="name is required",
                 llm_text="name is required",
             )
-        if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is None:
+        if self.service.providers.get(provider_id) is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="unknown l3 provider",
@@ -593,7 +593,7 @@ def inspect_memory(provider: MemoryIntrospectionProvider) -> MemorySnapshot:
         l1_count=len(service.l1_store.items),
         l2_count=len(service.l2_store.items),
         active_l3_provider=service.l3_selector.active_provider_id,
-        available_l3_providers=sorted(provider.context.execution_runtime.l3_plugin_registry.plugins),
+        available_l3_providers=sorted(provider.service.providers.plugins),
     )
 
 

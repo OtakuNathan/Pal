@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from pal.execution.tool_facade import LifecycleAccess
+
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
 import asyncio
 import time
 import unittest
 
-from pal.core import PalCore as _PalCoreBootstrap
+from pal.core.runtime import PalCore as _PalCoreBootstrap
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import (
     EffectKind,
@@ -41,6 +43,7 @@ def mount_slow_sync_tool(runtime: ExecutionRuntime) -> None:
             failure_next_steps="inspect the test failure",
         ),
         execution=ToolExecutionSemantics(
+            lifecycle_access=LifecycleAccess.SHARED,
             invocation_mode=InvocationMode.DIRECT,
             effect_kind=EffectKind.NONE,
             idempotency=Idempotency.IDEMPOTENT,

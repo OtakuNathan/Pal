@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.llm.models import LLMEndpointModel
-from pal.llm.contracts import LLM_RUNTIME, LLM_QUERY, LLM_SIDE_TURNS
+from pal.llm.contracts import LLM_RUNTIME
 from pal.llm.runtime import LLMRuntime
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -575,7 +575,6 @@ def render_llm_status(payload: dict[str, Any]) -> str:
 
 
 def register_with_core(context: MainContext, runtime: LLMRuntime) -> ModuleHandle:
-    from pal.llm.side_turns import LLMSideTurnService
 
     provider = LLMIntrospectionProvider(runtime=runtime)
     handle = ModuleHandle(
@@ -586,8 +585,8 @@ def register_with_core(context: MainContext, runtime: LLMRuntime) -> ModuleHandl
         control_action_handlers={
             "show_llm_status": provider.handle_status_control_action,
         },
-        ports={"llm": runtime, "query": runtime, "side_turns": LLMSideTurnService(runtime)},
-        port_contracts=(LLM_RUNTIME, LLM_QUERY, LLM_SIDE_TURNS),
+        ports={"llm": runtime, },
+        port_contracts=(LLM_RUNTIME,),
         shutdown_sync=runtime.close,
     )
     context.register_module(handle)

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 from pal.skill.models import SkillModel
 
 import asyncio
@@ -11,7 +12,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.execution.tool_facade import EffectKind, Idempotency, RetryPolicy
 from pal.foundation import PalV2Database, SidecarEndpoint, SidecarRpcClient, SidecarRpcError
@@ -386,7 +388,7 @@ class McpPluginSidecarTests(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _core_with_services(self):
-        core = PalCore()
+        core = build_core()
         core.context.execution_runtime.runtime_root = self.root
         register_core_with_core(core)
         register_execution_with_core(core.context)

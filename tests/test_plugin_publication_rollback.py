@@ -1,12 +1,13 @@
 """Regressions for the staged publication/rollback contract in the core model."""
+from tests.core_factory import build_core
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from pal.core import PalCore
-from pal.plugins import PluginHost
+from pal.core.runtime import PalCore
+from pal.plugins.host import PluginHost
 from pal.plugins.lifecycle import PluginScope
 from pal.shared import RuntimeStatus
 from pal.skill.repository import ReadOnlySkillRepository
@@ -50,7 +51,7 @@ def staged_plugin(tmp_path, monkeypatch, request):
     source.write_text(source.read_text().replace(
         "        return handle", "        scope.subscribe_core_events()\n        return handle"))
     monkeypatch.syspath_prepend(str(root))
-    core = PalCore()
+    core = build_core()
     host = PluginHost(context=core.context, runtime_root=tmp_path,
                       builtin_root=tmp_path / "builtin", services={"ledger": []},
                       third_party_repository=MemoryPluginRepository())
@@ -378,7 +379,7 @@ def test_pending_rollback_blocks_dependents_and_disable_until_reload_cleans(stag
 
 def test_pending_plugin_task_keeps_its_resource_alive_until_joined():
     async def scenario():
-        scope = PluginScope(PalCore().context, "task-owner")
+        scope = PluginScope(build_core().context, "task-owner")
         events = []
         ready, finishing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
         scope.defer(lambda: events.append("resource_closed"))
@@ -430,7 +431,7 @@ def test_shutdown_retains_dependencies_when_dependent_cleanup_fails(staged_plugi
 @pytest.mark.parametrize("fail_first", [False, True])
 def test_scope_retains_scheduled_cleanup_and_its_dependencies(fail_first):
     async def scenario():
-        core = PalCore()
+        core = build_core()
         scope = PluginScope(core.context, "scheduled_cleanup")
         release = asyncio.Event()
         tasks = []

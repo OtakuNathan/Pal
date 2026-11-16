@@ -444,7 +444,7 @@ class LLMErrorSemanticsTests(unittest.TestCase):
         invoker = _Invoker()
         runtime = self._runtime(invoker, [_endpoint("bad"), _endpoint("good")])
 
-        result = runtime.generate(
+        result = runtime._generate_response(
             request_ir_from_prompt(messages=[{"role": "user", "content": "work"}], max_output_tokens=100)
         )
 
@@ -480,7 +480,7 @@ class LLMErrorSemanticsTests(unittest.TestCase):
         invoker = _Invoker()
         runtime = self._runtime(invoker, [bad, _endpoint("good")], attempts=1)
 
-        result = runtime.generate(
+        result = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "work"}],
                 max_output_tokens=100,
@@ -509,7 +509,7 @@ class LLMErrorSemanticsTests(unittest.TestCase):
         invoker = _Invoker()
         runtime = self._runtime(invoker, [_endpoint("bad-key"), _endpoint("good")], attempts=3)
 
-        result = runtime.generate(
+        result = runtime._generate_response(
             request_ir_from_prompt(messages=[{"role": "user", "content": "work"}], max_output_tokens=100)
         )
 

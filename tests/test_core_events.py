@@ -1,4 +1,6 @@
 """System observations are independent of delivery and plugin execution."""
+from tests.llm_fakes import scripted_llm
+from tests.core_factory import build_context, build_core
 
 from tests.turn_fakes import continuation as make_continuation
 import asyncio
@@ -40,7 +42,7 @@ def test_snapshot_loss_resync_isolation_and_unsubscribe():
 
 
 def test_candidate_plugin_receives_nothing_until_published_and_close_discards():
-    context = MainContext()
+    context = build_context()
     assert context.core_event_bus is context.turn_event_bus
     scope = PluginScope(context, "display")
     sub = scope.subscribe_core_events({MEMORY_SLEEP})
@@ -58,7 +60,7 @@ def test_candidate_plugin_receives_nothing_until_published_and_close_discards():
 
 def test_dreaming_state_is_visible_without_any_channel():
     async def run():
-        core = PalCore()
+        core = build_core()
         core.state.memory_maintenance = True
         sub = core.context.core_event_bus.open_subscription({MEMORY_SLEEP})
         sub.get(timeout=0)
@@ -93,10 +95,10 @@ def test_interrupted_safe_mode_clears_only_its_own_failure():
     async def run():
         core = _core_with_failure_runtime()
         entered = asyncio.Event()
-        async def generate(request):
+        async def _generate_response(request):
             entered.set()
             await asyncio.Event().wait()
-        core.context.port_registry["llm:llm"] = SimpleNamespace(agenerate=generate)
+        core.context.port_registry["llm:llm"] = scripted_llm(complete=_generate_response)
         bus = core.context.core_event_bus
         bus.emit(FAILURE_STARTED, {"failure_id": "other"})
         task = asyncio.create_task(core.handle_failure_async(FailureSignal(
@@ -120,7 +122,7 @@ def test_tool_failure_is_observed_before_escalation():
     from pal.shared.tool_protocol import new_tool_call
 
     async def run():
-        core = PalCore()
+        core = build_core()
         executor = core.turn_executor
         executor._build_tool_call_budget = lambda *args, **kwargs: None
         executor._log_tool_call_start = lambda *args: None

@@ -1,5 +1,6 @@
 """Worker and control results retain failures alongside committed effects."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -21,8 +22,8 @@ from pal.bunshin.semantic_orchestration.worker_results import _worker_terminal_f
 from pal.bunshin.worker_events import WorkerEventWriter, WorkerEventDeliveryError
 from pal.bunshin.worker_events import run_worker_with_events
 from pal.control.contracts import ControlAction, ControlRoute
-from pal.core import PalCore
-from pal.core.compaction import CompactionRunResult
+from pal.core.runtime import PalCore
+from pal.llm.compaction_engine import CompactionRunResult
 from pal.core.turns import EffectResult
 from pal.execution.contracts import CapabilityResult
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt
@@ -292,7 +293,7 @@ def test_cancelled_workflow_retains_failed_effect_evidence(monkeypatch):
 
 @pytest.fixture
 def control(monkeypatch):
-    core = PalCore()
+    core = build_core()
     monkeypatch.setattr(core, "_deliver_control_delivery_async", AsyncMock(return_value=True))
     route = ControlRoute("test", "socket", control_scope_key="scope")
     return core, route

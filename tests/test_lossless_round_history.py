@@ -1,4 +1,5 @@
 """Lossless continuation and request-admission regressions. No provider calls."""
+from pal.llm.contracts import collect_generation
 import asyncio
 import json
 import threading
@@ -127,10 +128,10 @@ def test_submission_is_delivered_on_owner_before_output(stream):
     async def run():
         request = _request_for(memory, ())
         if stream:
-            async for _ in runtime.astream(request, on_submitted=admitted):
+            async for _ in runtime.generate(request, on_submitted=admitted):
                 pass
         else:
-            await runtime.agenerate(request, on_submitted=admitted)
+            await collect_generation(runtime.generate(request, on_submitted=admitted))
     asyncio.run(run())
     assert observed == [owner]
     assert [m.message_id for m in root.left_messages()] == ["q"]
@@ -181,7 +182,7 @@ def test_100_tool_rounds_survive_settle_restore_and_projection_rebuild():
     after = tuple(m for t in restored.l1_store.turns.turns for m in t.messages)
     assert after == before
     rebuilt_runtime = _runtime(NativeTransport())
-    pack = _executor(restored, rebuilt_runtime)._prepare_turn_projection(rebuilt_runtime, _request_for(restored, ()))
+    pack = _executor(restored, rebuilt_runtime).projection.prepare(rebuilt_runtime, _request_for(restored, ()))
     assert pack is not None
     body = thaw_json(pack[0].payload)["messages"]
     assert body[:len(prior)] == prior
@@ -319,10 +320,10 @@ def test_compact_rebases_admitted_input_without_losing_unsent_native_output():
         root.mark_ready("compact", Candidate())
         root.commit("compact")
         assert root.right_messages() == right
-        executor._rebase_projection_after_left_install(
+        executor.projection.rebase(
             runtime, "pal:resident", root, memory_service=memory)
         assert not executor.state.diagnostics
-        warm = executor._prepare_turn_projection(runtime, _model_view_request(memory))
+        warm = executor.projection.prepare(runtime, _model_view_request(memory))
         assert warm is not None
         warm_wire = thaw_json(warm[0].payload)["messages"]
         assert native_message() in warm_wire
@@ -333,7 +334,7 @@ def test_compact_rebases_admitted_input_without_losing_unsent_native_output():
             MemoryRuntimeStatePort(memory).snapshot_state()))
         cold_runtime = _runtime(NativeTransport())
         try:
-            cold = _executor(restored, cold_runtime)._prepare_turn_projection(
+            cold = _executor(restored, cold_runtime).projection.prepare(
                 cold_runtime, _model_view_request(restored))
             assert cold is not None
             assert thaw_json(cold[0].payload)["messages"] == warm_wire

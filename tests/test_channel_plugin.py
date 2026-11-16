@@ -1,15 +1,16 @@
 """Plugin-owned channel code must not own the lifetime of delivery hubs."""
+from tests.core_factory import build_core
 import shutil
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution
 from pal.channel import ChannelRuntime, register_with_core as register_channel
 from pal.channel.repository import ChannelEndpointRepository
-from pal.plugins import PluginHost
+from pal.plugins.host import PluginHost
 from pal.shared import RuntimeStatus
 from pal.wizard import WizardService
 
@@ -20,7 +21,7 @@ def setup(tmp_path):
     registration = wizard.provision_runtime(display_name='Channel plugin test', runtime_root=tmp_path,
         db_filename='test.sqlite3', pal_entrypoint='pal.runtime.test')
     db = wizard.create_database(registration)
-    core = PalCore()
+    core = build_core()
     register_execution(core.context)
     runtime = ChannelRuntime()
     register_channel(core.context, runtime, runtime_root=tmp_path)

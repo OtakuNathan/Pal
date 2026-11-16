@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.execution.tool_facade import LifecycleAccess
+
 from pal.execution.tool_facade import (
     EffectKind,
     Idempotency,
@@ -17,6 +19,7 @@ def execution_semantics(
     idempotency: Idempotency | None = None,
     retry_policy: RetryPolicy | None = None,
     paging: PagingMode = PagingMode.SUPPORTED,
+    lifecycle_access: LifecycleAccess = LifecycleAccess.SHARED,
 ) -> ToolExecutionSemantics:
     non_idempotent = effect_kind in {EffectKind.EXTERNAL_WRITE, EffectKind.CONTROL}
     resolved_idempotency = idempotency or (
@@ -28,6 +31,7 @@ def execution_semantics(
         else RetryPolicy.AUTOMATIC
     )
     return ToolExecutionSemantics(
+        lifecycle_access=lifecycle_access,
         invocation_mode=invocation_mode,
         effect_kind=effect_kind,
         idempotency=resolved_idempotency,
@@ -96,3 +100,8 @@ INDIRECT_CONTROL = execution_semantics(
     invocation_mode=InvocationMode.INDIRECT,
     effect_kind=EffectKind.CONTROL,
 )
+
+
+INDIRECT_LIFECYCLE = INDIRECT_CONTROL.model_copy(update={"lifecycle_access": LifecycleAccess.EXCLUSIVE})
+INDIRECT_PACKAGE_WRITE = INDIRECT_UNSAFE_LOCAL_WRITE.model_copy(update={"lifecycle_access": LifecycleAccess.OWNER_MANAGED})
+INDIRECT_PACKAGE_READ = INDIRECT_LOCAL_READ.model_copy(update={"lifecycle_access": LifecycleAccess.OWNER_MANAGED})

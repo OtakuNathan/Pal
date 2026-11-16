@@ -6,6 +6,7 @@ Provider duplicate declarations are preserved in the manifest but one version pe
 alias is searched. Dynamic MCP and runtime-installed external plugins are excluded.
 """
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
 import argparse
 import asyncio
 import hashlib
@@ -180,11 +181,7 @@ async def main(args):
                 'a static catalog for this case. At most two attempts are allowed.'}))
             try:
                 for attempt in range(2):
-                    outcome = await asyncio.wait_for(llm.agenerate(LLMRequestIR(
-                        messages=tuple(messages), tools=(definition,), model_hint=values['model_id'],
-                        policy=GenerationPolicyIR(max_output_tokens=args.max_output_tokens, temperature=0),
-                        metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none',
-                                  'think_level': 'medium', 'case_id': alias})), timeout=150)
+                    outcome = await asyncio.wait_for(collect_generation(llm.generate(LLMRequestIR(messages=tuple(messages), tools=(definition,), model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=args.max_output_tokens, temperature=0), metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none', 'think_level': 'medium', 'case_id': alias}))), timeout=150)
                     if outcome.finish_reason.value == 'error':
                         metadata = outcome.response.message.metadata
                         row['error'] = 'endpoint_failure'

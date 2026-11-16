@@ -1,7 +1,7 @@
 """Domain purpose recall preserves visibility and marks partial evidence."""
 from types import SimpleNamespace
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput, ToolGuidance
 from tests.capability_fixture import mount_test_capability

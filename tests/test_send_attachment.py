@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -12,7 +13,8 @@ from unittest.mock import patch
 from pal.channel import ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
@@ -63,7 +65,7 @@ class _FakeTelegramBot:
 
 class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
     def _build_core_with_channel(self):
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         channel_runtime = ChannelRuntime()

@@ -172,7 +172,7 @@ class CrossCutSeamRetirementTests(unittest.TestCase):
             # The L1-level compact helper bypasses the executor, so drive the
             # post-install rebase exactly like the post-commit path does
             # (same owner interface; c9cb2d2 review node pins this call).
-            executor._rebase_projection_after_left_install(
+            executor.projection.rebase(
                 runtime, "pal:resident", service.history_root,
                 memory_service=service)
 

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from tests.llm_fakes import NonStreamingLLM
 
@@ -39,7 +40,9 @@ from tests.runtime_channel_providers import telegram_endpoint_module
 
 TelegramChannelEndpoint = telegram_endpoint_module().TelegramChannelEndpoint
 from pal.control import interactions as control_interactions
-from pal.core import L1CommitPayload, PalCore, TurnContinuation, TurnOutcome, register_with_core as register_core_with_core
+from pal.core.turns import L1CommitPayload, TurnContinuation, TurnOutcome
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.core.contracts import PendingControlRequest
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.turns import ToolObservation, channel_turn_program
@@ -696,7 +699,7 @@ class ControlPlaneTests(unittest.TestCase):
 
 class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.core = PalCore()
+        self.core = build_core()
         register_core_with_core(self.core)
 
         self.channel_runtime = ChannelRuntime()

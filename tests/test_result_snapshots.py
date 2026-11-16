@@ -1,4 +1,5 @@
 """Immutable output copies follow explicit L1 ownership, not elapsed turns."""
+from tests.core_factory import build_core
 import asyncio
 import json
 from dataclasses import replace
@@ -6,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from pal.core.continuity_compaction import ContinuityCompactionPolicy, CONTINUITY_FIELDS
-from pal.core.compaction import CompactionSnapshot, CompactionClockKind
+from pal.llm.continuity_compaction import ContinuityCompactionPolicy, CONTINUITY_FIELDS
+from pal.llm.compaction_engine import CompactionSnapshot, CompactionClockKind
 from pal.execution.result_snapshots import ResultSnapshotStore, capture_stream_files
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.contracts import ToolCallBudget
@@ -259,9 +260,9 @@ def test_builtin_shell_streams_snapshot_and_reports_save_failure_honestly(tmp_pa
 
 
 def test_snapshot_read_is_not_source_edit_authority_and_copy_is_not_editable(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
     runtime.configure_runtime_root(tmp_path / 'runtime')
     register_with_core(core.context)
@@ -320,10 +321,10 @@ def test_coordinator_restore_rebuilds_l1_owners_then_reset_retires_files(tmp_pat
 
 
 def test_source_read_grants_only_exact_head_tail_preview_offsets(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
     from pal.execution.session_state import FileDeliveryManifest
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
     runtime.configure_runtime_root(tmp_path / 'runtime')
     register_with_core(core.context)
@@ -347,12 +348,12 @@ def test_source_read_grants_only_exact_head_tail_preview_offsets(tmp_path):
 
 
 def test_complete_result_and_builtin_definition_obey_output_budget(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
     from pal.execution.tool_facade import CompleteResult, EffectOutcome
     from pydantic import create_model, Field
     from tests.test_immutable_tool_facade import EchoInput
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime
@@ -410,9 +411,9 @@ def test_save_failure_keeps_host_control_and_context_messages(tmp_path, monkeypa
 
 
 def test_long_source_line_has_conditional_shell_edit_guidance(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime
@@ -433,9 +434,9 @@ def test_long_source_line_has_conditional_shell_edit_guidance(tmp_path):
 
 @pytest.mark.parametrize('disk_full', [False, True])
 def test_only_delivered_source_lines_grant_edits(tmp_path, monkeypatch, disk_full):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime

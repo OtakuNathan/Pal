@@ -17,6 +17,7 @@ eligibility boundary that the P6 work added to the gate/engine/executor:
   gate nor blocks teardown of a finished compaction.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
 
 from tests.llm_fakes import NonStreamingLLM
 
@@ -52,12 +53,12 @@ def _action(kind: str = "compact_memory") -> ControlAction:
 
 
 def _build_core(tmp_path: Path):
-    core = PalCore()
+    core = build_core()
     service = _memory_with_turns(2)
     engine = _BarrierEngine()
     core.context.port_registry["memory:memory"] = service
     core.context.port_registry["llm:llm"] = NonStreamingLLM()
-    core.turn_executor._compaction_engine = engine
+    core.turn_executor.compaction.engine = engine
     replies: list[str] = []
 
     async def record_reply(action, text):
@@ -233,5 +234,3 @@ def _auto_effect():
         target_input_budget=8_192,
         reserved_output_tokens=2_048,
     )
-
-

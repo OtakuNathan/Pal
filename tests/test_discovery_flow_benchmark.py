@@ -1,4 +1,5 @@
 """Verify evaluation mechanics without spending model calls or invoking business tools."""
+from tests.llm_fakes import NonStreamingLLM
 import asyncio
 
 import pytest
@@ -33,8 +34,8 @@ def test_fuzzy_contract_review_then_validated_selection_never_executes_business(
         executed.append(call.name)
         return await original(call, **kwargs)
     fx.runtime.execute_tool_async = discovery_only
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[calls.pop(0)],
                 preferred_endpoint_id='fixture', preferred_model_id='fixture', usage_reported=True)
     try:
@@ -89,8 +90,8 @@ def test_directory_contract_review_and_selection_are_intercepted(tmp_path):
         executed.append(call.name)
         return await original(call, **kwargs)
     fx.runtime.execute_tool_async = discovery_only
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[calls.pop(0)],
                 preferred_endpoint_id='fixture', preferred_model_id='fixture', usage_reported=True)
     try:
@@ -131,8 +132,8 @@ def test_synthetic_preflight_allows_continuation_without_executing_handler(tmp_p
         executed.append(call.name)
         return await original(call, **kwargs)
     fx.runtime.execute_tool_async = discovery_only
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[calls.pop(0)],
                 preferred_endpoint_id='fixture', preferred_model_id='fixture', usage_reported=True)
     try:
@@ -158,8 +159,8 @@ def test_real_wrong_mode_affordance_recovers_without_running_business(tmp_path):
         executed.append(call.name)
         return await original(call, **kwargs)
     fx.runtime.execute_tool_async = rejection_only
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             if len(calls) == 2:
                 assert request.messages[-1].parts[0].structured['error_code'] == 'wrong_invocation_mode'
                 assert 'call_tool' in [t.name for t in request.tools]
@@ -187,8 +188,8 @@ def test_noop_attach_feedback_recovers_to_restart_without_running_handlers(tmp_p
     async def forbidden(*args, **kwargs):
         raise AssertionError('No business handler should execute')
     fx.runtime.execute_tool_async = forbidden
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             if len(calls) == 1:
                 result = request.messages[-1].parts[0]
                 assert result.structured['transport_restarted'] is False
@@ -209,8 +210,8 @@ def test_noop_attach_feedback_recovers_to_restart_without_running_handlers(tmp_p
 @pytest.mark.parametrize('operation,valid', [('reload', True), ('attach', False)])
 def test_merged_plugin_selection_checks_action_not_just_alias(tmp_path, operation, valid):
     fx = benchmark.make_fixture(tmp_path)
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[new_tool_call(name='call_tool', args={
                 'name': 'manage_plugin', 'args': {'name': 'demo', 'operation': operation}})],
                 preferred_endpoint_id='fixture', preferred_model_id='fixture', usage_reported=True)
@@ -227,8 +228,8 @@ def test_merged_plugin_selection_checks_action_not_just_alias(tmp_path, operatio
 @pytest.mark.parametrize('operation,valid', [('disable', True), ('enable', False), ('delete', False)])
 def test_merged_proactive_selection_checks_action_not_just_alias(tmp_path, operation, valid):
     fx = benchmark.make_fixture(tmp_path)
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[new_tool_call(name='call_tool', args={
                 'name': 'manage_proactive_task', 'args': {'name': 'morning-report', 'operation': operation}})],
                 preferred_endpoint_id='fixture', preferred_model_id='fixture', usage_reported=True)
@@ -250,8 +251,8 @@ def test_merged_mcp_selection_checks_action_not_just_alias(tmp_path, operation, 
     provider = McpManagerPluginProvider(runtime_root=tmp_path, core_context=fx.core.context)
     fx.core.context.register_module(ModuleHandle(module_id='mcp', tier='detachable', introspection_provider=provider))
     fx.core.publish_module_capabilities('mcp')
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[new_tool_call(name='call_tool', args={
                 'name': 'manage_mcp_server', 'args': {'name': 'demo', 'operation': operation}})],
                 preferred_endpoint_id='fixture', preferred_model_id='fixture', usage_reported=True)
@@ -268,8 +269,8 @@ def test_merged_mcp_selection_checks_action_not_just_alias(tmp_path, operation, 
 @pytest.mark.parametrize('operation,valid', [('archive', True), ('cancel', False)])
 def test_merged_bunshin_selection_checks_action_not_just_alias(tmp_path, operation, valid):
     fx = benchmark.make_fixture(tmp_path)
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[new_tool_call(name='call_tool', args={
                 'name': 'control_bunshin_workflow', 'args': {'task': 'demo', 'operation': operation}})],
                 preferred_endpoint_id='fixture', preferred_model_id='fixture', usage_reported=True)

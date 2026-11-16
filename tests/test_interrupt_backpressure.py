@@ -1,4 +1,5 @@
 """Backpressure must not turn interruption into a host failure."""
+from pal.shared.ports import PortRegistry
 import asyncio
 from collections import deque
 from types import SimpleNamespace
@@ -70,7 +71,7 @@ def test_interrupt_cancels_execution_despite_sync_or_async_output_failure(async_
         failure = ChannelDeliveryError("blocked", reason="transport_backpressure")
         abort = AsyncMock(side_effect=failure) if async_abort else Mock(side_effect=failure)
         execution = SimpleNamespace(interrupt_turn=AsyncMock())
-        context = SimpleNamespace(port_registry={"agent_io:output": SimpleNamespace(abort_stream=abort)}, execution_runtime=execution)
+        context = SimpleNamespace(port_registry=PortRegistry({"agent_io:output": SimpleNamespace(abort_stream=abort)}), execution_runtime=execution)
         state = CoreRuntimeState()
         continuation = TurnContinuation("turn", iter(()), "request", delivery_binding=TurnDeliveryBinding(endpoint.endpoint, handle, "scope"))
         state.active_turns["turn"] = continuation

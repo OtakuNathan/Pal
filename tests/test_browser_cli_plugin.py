@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import json
 import sqlite3
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.tool_semantics import EffectKind, InvocationMode, RetryPolicy
 from pal.shared.tool_protocol import new_tool_call
@@ -41,7 +42,7 @@ class _FakeManager:
 
 
 def test_public_browser_surface_is_single_backend_and_discovery_first() -> None:
-    core = PalCore()
+    core = build_core()
     register_execution_with_core(core.context)
     core.publish_module_capabilities("execution")
     register_with_core(core.context, WebFetchService(browser_manager=_FakeManager()))  # type: ignore[arg-type]

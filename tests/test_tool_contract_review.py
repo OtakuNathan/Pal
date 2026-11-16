@@ -1,5 +1,6 @@
 """Contract-review regressions assert the final model-facing result."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import errno
 from pathlib import Path
@@ -8,7 +9,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import Field
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.execution.contracts import CapabilityResult
 from pal.execution.generated_tool_models import ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput
@@ -21,7 +22,7 @@ from tests.capability_fixture import mount_test_capability, mount_internal_path_
 
 @pytest.fixture
 def runtime():
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities("execution")
     core.context.execution_runtime.begin_tool_result_turn(turn_id="review", scope_key="contract-review")

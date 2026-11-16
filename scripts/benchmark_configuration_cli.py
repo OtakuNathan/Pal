@@ -7,6 +7,8 @@ Only one validated pal configuration command and optional fixture stdin redirect
 are executable per run_shell call. Arbitrary shell execution is rejected.
 """
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
+from tests.core_factory import build_core
 
 import argparse
 import asyncio
@@ -21,7 +23,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.main import _build_parser
 from pal.control.configuration import CoreConfigurationService
 from pal.bunshin.catalog import BunshinCatalogService
@@ -123,7 +125,7 @@ async def one(llm, values, case_id, root, records, generation):
         'family-reset': 'Reset the software_engineering family override to its builtin definition.',
         'unavailable-owner': 'Disable the compact cache reminder. If its running owner is unavailable, report the block without bypassing it or restarting the host.',
     }
-    core = PalCore()
+    core = build_core()
     core.state.active_turn_id = 'waiting-for-cli'
     snapshot = {'eligible': True, 'anchor_epoch': 'fixture', 'anchor_ttl_seconds': 3600,
                 'anchor_remaining_ttl_seconds': 3500, 'prefix_tokens': 65536}
@@ -170,9 +172,7 @@ async def one(llm, values, case_id, root, records, generation):
             await config.start_async()
         try:
             for _ in range(10):
-                outcome = await asyncio.wait_for(llm.agenerate(LLMRequestIR(messages=tuple(messages), tools=tools,
-                    model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=8192, temperature=0),
-                    metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none', 'think_level': 'medium'})), 150)
+                outcome = await asyncio.wait_for(collect_generation(llm.generate(LLMRequestIR(messages=tuple(messages), tools=tools, model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=8192, temperature=0), metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none', 'think_level': 'medium'}))), 150)
                 if outcome.preferred_endpoint_id != values['endpoint_id'] or outcome.preferred_model_id != values['model_id']:
                     raise RuntimeError('Endpoint/model drift')
                 row['responses'].append(message_to_payload(outcome.response.message))

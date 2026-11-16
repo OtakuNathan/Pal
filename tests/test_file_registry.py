@@ -1,4 +1,5 @@
 """The same authorization engine is exported to standalone remote workers."""
+from tests.core_factory import build_core
 import copy
 import os
 import pytest
@@ -155,12 +156,12 @@ def test_request_projection_suspends_grants_without_retiring_results(tmp_path):
 
 def test_local_file_tools_use_the_current_request_projection(tmp_path):
     from types import SimpleNamespace
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
     from pal.shared.tool_protocol import new_tool_call
     path = tmp_path / 'source.txt'
     path.write_text('first\nsecond\n')
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime

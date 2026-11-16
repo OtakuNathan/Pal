@@ -1,5 +1,5 @@
 """Static assignments check implementations against domain-owned protocols."""
-from pal.llm.contracts import LLMRuntimePort, LLMProjectionPort
+from pal.llm.contracts import LLMService, LLMProjectionPort
 from pal.llm.runtime import LLMRuntime
 from pal.memory.contracts import MemoryServicePort
 from pal.memory.service import MemoryService
@@ -16,7 +16,7 @@ def proactive_conformance(manager: ProactiveManager) -> None:
     scheduler: SilentOnceSchedulerPort = manager
 
 def conformance(llm: LLMRuntime, memory: MemoryService, root: HistoryRoot, history: L1TurnStore, projection: EndpointProjectionSession) -> None:
-    a: LLMRuntimePort = llm
+    a: LLMService = llm
     b: LLMProjectionPort = llm
     c: MemoryServicePort = memory
     d: HistoryRootPort = root
@@ -46,3 +46,11 @@ from pal.bunshin.storage.transaction_session import TransactionSession
 def bunshin_storage_conformance(database: BunshinDatabase, transaction: TransactionSession) -> None:
     standalone: DatabasePort = database
     bound: DatabasePort = transaction
+
+
+from pal.llm.compaction_contracts import CompactionService
+from pal.llm.compaction_engine import CompactionEngine
+
+
+def compaction_conformance(engine: CompactionEngine) -> None:
+    service: CompactionService = engine

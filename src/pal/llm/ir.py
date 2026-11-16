@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, Literal, Mapping, TypeAlias
+from typing import Any, Literal, Mapping, TypeAlias, TYPE_CHECKING
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from pal.llm.contracts import LLMGenerationResult
 
 from pal.shared.enums import LLMFinishReason
 from pal.shared.json_values import freeze_json_mapping
@@ -321,12 +324,14 @@ class LLMResponseIR:
 
 @dataclass(frozen=True)
 class LLMResponseUpdate:
+    # A terminal update owns request-local execution facts.
     response: LLMResponseIR
     delta_kind: LLMResponseDeltaKind
     text_delta: str = ""
     tool_call: _ToolCallIR | None = None
     item_id: str = ""
     item_kind: LLMResponseItemKind | None = None
+    completion: LLMGenerationResult | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(

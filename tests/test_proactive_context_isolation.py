@@ -1,8 +1,10 @@
 """Proactive model isolation and lossless one-way L1 handoff; no network."""
+from tests.core_factory import build_core
 import asyncio
 from unittest.mock import AsyncMock
 
-from pal.core import PalCore, register_with_core as register_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core
 from pal.core.turns import TurnContinuation, MemoryCompactEffect, LLMPreflightEffect
 from pal.execution import register_with_core as register_execution
 from pal.execution.file_capabilities import _session_file_tools
@@ -16,7 +18,7 @@ from tests.test_projection_two_segment import _receipt, _cursor
 
 
 def setup_core(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_core(core)
     register_execution(core.context)
     core.context.execution_runtime.configure_runtime_root(tmp_path)
@@ -44,7 +46,7 @@ def test_warm_chat_cannot_leak_into_proactive_and_completed_work_is_visible_to_c
     chat = begin(core, memory, 'chat', 'LAST_USER_SENTINEL')
     memory.upsert_l1_assistant('chat', LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR('OLD_REPLY'),)))
     old = prompt(core, chat)
-    packed = core.turn_executor._prepare_turn_projection(runtime, old)
+    packed = core.turn_executor.projection.prepare(runtime, old)
     assert packed is not None
     session = packed[2]['session']
     session.observe_commit(_receipt(packed[2]['attempt'], session.frontier, _cursor(1, 'c' * 64)),
@@ -55,7 +57,7 @@ def test_warm_chat_cannot_leak_into_proactive_and_completed_work_is_visible_to_c
     assert 'LAST_USER_SENTINEL' not in repr(request.messages)
     assert request.logical_scope_id != old.logical_scope_id
     assert request.metadata["artifact_scope_key"] == old.metadata["artifact_scope_key"]
-    assert core.turn_executor._prepare_turn_projection(runtime, request) is None
+    assert core.turn_executor.projection.prepare(runtime, request) is None
     # The cold codec receives exactly the isolated model request, not root history.
     from pal.llm.shapes import codec_for_shape
     from pal.llm.shapes.base import ShapeContext
@@ -132,7 +134,7 @@ def test_proactive_does_not_consume_pending_user_interjections(tmp_path):
     job.llm_round_index = 1
     core.state.pending_channel_turns.append(object())
     core.turn_executor._inject_pending = AsyncMock(return_value=True)
-    runtime.apreflight = AsyncMock(return_value=LLMPreflightAdvice(status='ready'))
+    runtime.preflight = AsyncMock(return_value=LLMPreflightAdvice(status='ready'))
     asyncio.run(core.turn_executor._handle_llm_preflight(LLMPreflightEffect(
         assembly_context=PromptAssemblyContext(turn_kind='proactive_trigger')), job))
     core.turn_executor._inject_pending.assert_not_awaited()
@@ -142,11 +144,11 @@ def test_proactive_does_not_consume_pending_user_interjections(tmp_path):
 def test_proactive_compaction_does_not_touch_resident_history(tmp_path):
     core, memory, _ = setup_core(tmp_path)
     job = begin(core, memory, 'job', 'task')
-    core.turn_executor.compact_memory_async = AsyncMock()
+    core.turn_executor.compaction.run = AsyncMock()
     result = asyncio.run(core.turn_executor._handle_memory_compact(MemoryCompactEffect(
         assembly_context=PromptAssemblyContext(turn_kind='proactive_trigger')), job))
     assert str(result.status) == 'error'
-    core.turn_executor.compact_memory_async.assert_not_awaited()
+    core.turn_executor.compaction.run.assert_not_awaited()
 
 
 def test_turn_exit_clears_only_its_visibility(tmp_path):

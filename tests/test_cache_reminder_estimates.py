@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 from dataclasses import replace
@@ -121,7 +122,7 @@ def test_runtime_reads_only_current_endpoint_and_honors_disabled_policy():
     assert not runtime.prompt_cache_reminder_snapshot()["eligible"]
     coordinator.record_success(plan, LLMUsageIR(input_tokens=50_000, reported_fields=("input_tokens",)))
     assert runtime.prompt_cache_reminder_snapshot()["eligible"]
-    core = PalCore()
+    core = build_core()
     core.context.port_registry["llm:llm"] = runtime
     assert core._prompt_cache_warm_deadline_snapshot()["estimated"]
     assert not runtime.prompt_cache_warm_deadline_snapshot()["eligible"]
@@ -173,7 +174,7 @@ def test_estimated_click_uses_manual_compaction_without_hot_authorization():
     from unittest.mock import AsyncMock
 
     async def scenario():
-        core = PalCore()
+        core = build_core()
         register_memory(core.context, _memory_with_turns(2))
         sleep = _ControlledSleep()
         snapshot = {"eligible": True, "estimated": True, "anchor_epoch": "estimate",
@@ -227,19 +228,19 @@ def test_offline_response_adapter_updates_reminder_only_after_success(outcome, t
     llm = runtime(endpoint(), Transport(), tmp_path)
     assert not llm.prompt_cache_reminder_snapshot()["eligible"]
     if outcome == "success":
-        llm.generate(_request())
+        llm._generate_response(_request())
         snapshot = llm.prompt_cache_reminder_snapshot()
         assert snapshot["eligible"]
         assert snapshot["anchor_remaining_ttl_seconds"] == 1800
         assert snapshot["context_tokens"] == 100_000
-        core = PalCore()
+        core = build_core()
         core.context.port_registry["llm:llm"] = llm
         assert core._prompt_cache_warm_deadline_snapshot()["anchor_epoch"] == snapshot["anchor_epoch"]
     elif outcome == "cancelled":
         with pytest.raises(asyncio.CancelledError):
-            llm.generate(_request())
+            llm._generate_response(_request())
         assert not llm.prompt_cache_reminder_snapshot()["eligible"]
     else:
-        result = llm.generate(_request())
+        result = llm._generate_response(_request())
         assert result.response.finish_reason.value == "error"
         assert not llm.prompt_cache_reminder_snapshot()["eligible"]

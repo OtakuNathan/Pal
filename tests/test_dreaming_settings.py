@@ -1,3 +1,4 @@
+from tests.core_factory import build_core
 import asyncio
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -81,10 +82,10 @@ def test_readonly_migration_does_not_write_source(tmp_path, storage):
 def test_sleep_control_preserves_raw_json_and_avoids_llm(tmp_path, storage):
     import json
     import shlex
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.control import ControlCommandInvocation
     from pal.memory.dreaming.runtime import register_dreaming
-    core = PalCore()
+    core = build_core()
     commands = {}
     core.context.port_registry['control:control'] = SimpleNamespace(register_command=lambda spec: commands.update({spec.name: spec}))
     service = register_dreaming(core, SimpleNamespace(repository=SimpleNamespace(catalog=storage)), None, tmp_path)

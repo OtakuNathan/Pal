@@ -1,4 +1,5 @@
 """Failure identity uses execution bytes, independently of result presentation."""
+from tests.core_factory import build_core
 import hashlib
 import shlex
 import sys
@@ -7,7 +8,7 @@ import pytest
 
 from pal.bunshin.review_receipts import _review_tool_evidence_ref
 from pal.bunshin.semantic_orchestration.verification_settlement import _repair_failure_fingerprint
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.execution.contracts import ToolCallBudget
 from pal.shared.tool_protocol import new_tool_call
@@ -15,7 +16,7 @@ from pal.shared.tool_protocol import new_tool_call
 
 @pytest.fixture
 def runtime(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities("execution")
     runtime = core.context.execution_runtime

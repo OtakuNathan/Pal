@@ -41,8 +41,8 @@ enabled status and actual mount status must be checked at runtime.
 | `wizard` / `supervisor` | First-time configuration, database preparation, migrations, and service registration | [Bootstrap contract](pal_bootstrap_and_process.md) |
 | `bootstrap` | Builds an in-process runtime from an already-prepared database; not responsible for ongoing domain behavior or first-time configuration | [README](../src/pal/bootstrap/README.md) |
 
-`PortKey[T]` declares the assembly key, and `PortRegistry` checks methods and signatures; consumers obtain the current generation via
-`PortRef.current`. Do not guess another module's capabilities via reflection, private fields, or catching `TypeError`.
+`PortKey[T]` declares the assembly key, and `PortRegistry` checks methods and signatures; consumers subscribe once with `PortRegistry.observe(key)` and read the cached
+`ServiceRef.current`. Publication updates that reference; admitted operations retain their captured owner. Do not guess another module's capabilities via reflection, private fields, or catching `TypeError`.
 
 ## core
 

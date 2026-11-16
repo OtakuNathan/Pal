@@ -187,12 +187,12 @@ def test_hook_repairs_are_the_same_in_l1_projection_and_next_request(tmp_path, s
         target.install_prepared_state(target.prepare_restore_state(MemoryRuntimeStatePort(memory).snapshot_state()))
         runtime.retire_projection_sessions()
         rebuilt_executor = _executor(restored, runtime)
-        pack = rebuilt_executor._prepare_turn_projection(runtime, _request_for(restored, ()))
+        pack = rebuilt_executor.projection.prepare(runtime, _request_for(restored, ()))
         assert pack is not None
         rebuilt = thaw_json(pack[0].payload)
         assert wire_calls(shape, rebuilt) == expected
         assert OPAQUE in json.dumps(rebuilt)
-        rebuilt_executor._abandon_turn_projection_round(pack)
+        rebuilt_executor.projection.abandon(pack)
     finally:
         runtime.close()
 

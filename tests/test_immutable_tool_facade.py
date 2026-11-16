@@ -1,4 +1,7 @@
 from __future__ import annotations
+from tests.core_factory import build_core
+
+from pal.execution.tool_facade import LifecycleAccess
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -9,7 +12,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from pal.core import PalCore as _PalCoreBootstrap
+from pal.core.runtime import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityResult, ToolCallBudget
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import (
@@ -80,6 +83,7 @@ def _execution(
     paging: PagingMode = PagingMode.NEVER,
 ) -> ToolExecutionSemantics:
     return ToolExecutionSemantics(
+        lifecycle_access=LifecycleAccess.SHARED,
         invocation_mode=mode,
         effect_kind=effect,
         idempotency=idempotency,
@@ -394,10 +398,10 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.affordances, [])
         self.assertNotIn("recall_memory", result.llm_text)
 
-        from pal.core import PalCore
+        from pal.core.runtime import PalCore
         from pal.execution import register_with_core
 
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
         core.publish_module_capabilities("execution")
         try:

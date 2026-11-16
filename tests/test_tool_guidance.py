@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pal.execution.tool_facade import LifecycleAccess
+
 import ast
 import unittest
 from dataclasses import fields
 from pathlib import Path
 
-from pal.core import PalCore as _PalCoreBootstrap
+from pal.core.runtime import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityDescriptor
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import (
@@ -36,6 +38,7 @@ def _guidance(*, purpose: str, hints: tuple[NextToolHint, ...] = ()) -> ToolGuid
 
 def _execution(mode: InvocationMode) -> ToolExecutionSemantics:
     return ToolExecutionSemantics(
+        lifecycle_access=LifecycleAccess.SHARED,
         invocation_mode=mode,
         effect_kind=EffectKind.NONE,
         idempotency=Idempotency.IDEMPOTENT,

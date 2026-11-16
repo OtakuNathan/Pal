@@ -24,3 +24,5 @@ Only Pal-originated calls may allocate one through `new_tool_call()`.
 Failed delivery may retain an owner's reported operation result and effect
 receipt independently of its validation diagnostic. Execution renders those
 fields as guidance metadata outside the normal-output budget.
+
+Service consumers subscribe with `PortRegistry.observe(key)`. `ServiceRef` caches the published value; publication pushes replacements and withdrawal clears the slot. Consumers capture an instance for one operation; owners drain its work before closing resources.

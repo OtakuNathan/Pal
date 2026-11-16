@@ -1,8 +1,9 @@
+from tests.core_factory import build_context
 from typing import Protocol
 
 import pytest
 
-from pal.shared.ports import PortContractError, PortKey, PortRef, PortRegistry
+from pal.shared.ports import PortContractError, PortKey, ServiceRef, PortRegistry
 
 
 class EchoPort(Protocol):
@@ -19,7 +20,7 @@ class Echo:
 
 def test_optional_registration_replacement_and_retirement():
     registry = PortRegistry()
-    ref = PortRef(registry, ECHO)
+    ref = registry.observe(ECHO)
     assert registry.optional(ECHO) is None
     first, second = Echo(), Echo()
     registry.register(ECHO, first)
@@ -82,7 +83,7 @@ def test_invalid_module_does_not_publish_any_ports():
     from pal.core.main_context import MainContext
     from pal.core.module_registry import ModuleHandle
 
-    context = MainContext()
+    context = build_context()
     handle = ModuleHandle("test", "detachable", ports={"other": object(), "echo": object()},
                           port_contracts=(ECHO,))
     with pytest.raises(PortContractError, match="test:echo"):
@@ -95,7 +96,7 @@ def test_retired_handle_cannot_remove_replacement():
     from pal.core.main_context import MainContext
     from pal.core.module_registry import ModuleHandle
 
-    context = MainContext()
+    context = build_context()
     old = ModuleHandle("test", "detachable", ports={"echo": Echo()}, port_contracts=(ECHO,))
     new = ModuleHandle("test", "detachable", ports={"echo": Echo()}, port_contracts=(ECHO,))
     context.register_module(old)

@@ -23,15 +23,13 @@ sessions requiring later management. Shell queries must finish in this request;
 there is no session handoff to the main conversation. Read-only tools may still
 require multiple model requests to produce this one answer.
 
-The request retains the resident cache identity and public prefix. A detached
-projection preserves the captured prefix's native wire material while owning
-its own generation state. Additional instructions live in the new user message,
+The request retains the resident cache identity and public prefix. Memory
+borrows an immutable L1 prefix with a private tail, and both calls use the same
+LLM service and transport. The side projection has its own transient scope. Additional instructions live in the new user message,
 not in system instructions or a reduced tool schema. Usage is accounted normally;
 side turns do not replace resident continuation state or cache-warming anchors.
 Provider cache hits still depend on the matching prefix and provider policy.
-LLM implementations expose this lifecycle through the optional
-`llm:side_turns` port; ordinary providers without that port keep their existing
-contract and return an unavailable-feature explanation for `/btw`.
+
 
 Input, reasoning, tool results and replies live only in the side turn's temporary
 context. They are not appended to resident L1, searchable conversation history,

@@ -24,7 +24,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "LLMGenerationResult": ("pal.llm.contracts", "LLMGenerationResult"),
     "LLMPreflightAdvice": ("pal.llm.contracts", "LLMPreflightAdvice"),
     "LLMPreflightRequest": ("pal.llm.contracts", "LLMPreflightRequest"),
-    "LLMRuntimePort": ("pal.llm.contracts", "LLMRuntimePort"),
+    "LLMService": ("pal.llm.contracts", "LLMService"),
     "ThinkingChoice": ("pal.llm.contracts", "ThinkingChoice"),
     "ThinkingContract": ("pal.llm.contracts", "ThinkingContract"),
     "generation_result_from_values": ("pal.llm.contracts", "generation_result_from_values"),

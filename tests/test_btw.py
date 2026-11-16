@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_context, build_core
 
 import asyncio
 from copy import copy
@@ -6,11 +7,12 @@ from dataclasses import replace
 
 import pytest
 
-from pal.core import MainContext, PalCore
+from pal.core.main_context import MainContext
+from pal.core.runtime import PalCore
 from pal.control.contracts import ControlAction, ControlEvent, ControlRoute
 from pal.control.service import ControlPlane
 from pal.core.btw import BTW_INSTRUCTION, cancel_btw, start_btw
-from pal.llm.contracts import LLMGenerationResult, LLMPreflightAdvice, LLMSideTurn, LLM_SIDE_TURNS
+from pal.llm.contracts import LLMGenerationResult, LLMPreflightAdvice
 from pal.llm.runtime import LLMRuntime
 from pal.llm.capabilities import register_with_core as register_llm
 from pal.llm.ir import LLMFinishReason, LLMMessageIR, LLMResponseIR, MessageRole, TextPartIR
@@ -52,20 +54,14 @@ class Model(NonStreamingLLM):
         self.overflow = overflow
         self.error = error
 
-    def preflight(self, request):
+    def _preflight_response(self, request):
         return LLMPreflightAdvice(status="compact_required" if self.overflow else "ready")
 
     def active_endpoint(self):
         return None
 
-    def create_side_turn(self, *, scope_id, branch_id, message_ids):
-        child = copy(self)
-        endpoint = child.active_endpoint()
-        return LLMSideTurn(child, lambda: None,
-            endpoint.endpoint_id if endpoint is not None else None,
-            endpoint.model_id if endpoint is not None else None)
 
-    async def agenerate(self, request, **options):
+    async def respond(self, request, **options):
         self.requests.append(request)
         self.entered.set()
         await self.release.wait()
@@ -80,15 +76,14 @@ class Model(NonStreamingLLM):
 
 
 def make_core(model):
-    context = MainContext()
+    context = build_context()
     context.port_registry["memory:memory"] = MemoryService()
     if isinstance(model, LLMRuntime):
         register_llm(context, model)
     else:
         context.port_registry["llm:llm"] = model
-        context.port_registry[LLM_SIDE_TURNS.name] = model
     context.port_registry["channel:channel"] = Output()
-    core = PalCore(context=context)
+    core = build_core(context=context)
     events = []
     context.core_event_bus.subscribe("turn.start", lambda topic, payload: events.append((topic, payload)))
     context.core_event_bus.subscribe("turn.end", lambda topic, payload: events.append((topic, payload)))
@@ -185,7 +180,11 @@ def test_side_turn_uses_only_left_and_never_writes_resident_history():
         assert requests, core.state.diagnostics
         body = "\n".join(m.text for m in requests[0].messages)
         assert "old answer" in body and "main request in R" not in body
-        assert BTW_INSTRUCTION in body
+        question = next(message for message in requests[0].messages if "User question:" in message.text)
+        assert question.role is MessageRole.USER
+        assert question.text == BTW_INSTRUCTION + "\n\nUser question:\nside question"
+        assert all(BTW_INSTRUCTION not in message.text for message in requests[0].messages
+                   if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER})
         assert requests[0].logical_scope_id == "pal:resident"
         assert requests[0].metadata["transient_history"]
         assert core.state.btw_turn_id is None
@@ -214,7 +213,7 @@ def test_native_side_read_leaves_main_completion_for_resident(tmp_path):
         side_rounds = 0
         sid = None
 
-        async def agenerate(self, request, **options):
+        async def respond(self, request, **options):
             self.requests.append(request)
             call = None
             if request.metadata.get("transient_history"):
@@ -236,13 +235,12 @@ def test_native_side_read_leaves_main_completion_for_resident(tmp_path):
     async def scenario():
         model = ReadingModel()
         execution = native.NativeExecutionRuntime()
-        context = MainContext(execution_runtime=execution)
+        context = build_context(execution_runtime=execution)
         memory = MemoryService()
         context.port_registry["memory:memory"] = memory
         context.port_registry["llm:llm"] = model
-        context.port_registry[LLM_SIDE_TURNS.name] = model
         context.port_registry["channel:channel"] = Output()
-        core = PalCore(context=context)
+        core = build_core(context=context)
         register_execution(context)
         core.publish_module_capabilities("execution")
         attach_completion_source(core, execution)
@@ -423,6 +421,8 @@ def test_tool_round_is_local_and_keeps_main_tool_schemas():
         seed_left(memory)
         before = memory.history.turns
         schemas = [{"type": "function", "function": {"name": "read_fixture", "description": "Read a fixture.",
+                    "parameters": {"type": "object", "properties": {}}}},
+                   {"type": "function", "function": {"name": "write_fixture", "description": "Write a fixture.",
                     "parameters": {"type": "object", "properties": {}}}}]
         core.turn_executor._build_llm_tool_contracts = lambda: schemas
         await start_btw(core, action())
@@ -433,7 +433,7 @@ def test_tool_round_is_local_and_keeps_main_tool_schemas():
         await branch.task
         assert len(model.requests) == 2, core.state.diagnostics
         assert "fixture content" in "\n".join(m.text for m in model.requests[-1].messages)
-        assert [t.name for t in model.requests[0].tools] == ["read_fixture"]
+        assert [t.name for t in model.requests[0].tools] == ["read_fixture", "write_fixture"]
         assert model.requests[0].tools == model.requests[1].tools
         assert memory.history.turns == before
         core.close()
@@ -447,7 +447,7 @@ def test_streamed_side_reply_uses_original_route_and_leaves_no_history():
         def supports_streaming(self, request=None):
             return True
 
-        async def astream(self, request, **options):
+        async def generate(self, request, **options):
             self.requests.append(request)
             response = LLMResponseIR(LLMMessageIR(role=MessageRole.ASSISTANT,
                 parts=(TextPartIR("streamed answer"),)), LLMFinishReason.STOP)
@@ -513,9 +513,9 @@ def test_snapshot_lease_survives_main_history_retirement():
 
 def test_main_and_side_model_requests_progress_independently():
     class ConcurrentModel(Model):
-        async def agenerate(self, request, **options):
+        async def respond(self, request, **options):
             if request.metadata.get("transient_history"):
-                return await super().agenerate(request, **options)
+                return await super().respond(request, **options)
             self.requests.append(request)
             return LLMGenerationResult(response=LLMResponseIR(
                 message=LLMMessageIR(role=MessageRole.ASSISTANT, parts=(TextPartIR("main answer"),)),
@@ -564,10 +564,10 @@ def test_interrupt_still_targets_main_while_side_is_running():
             super().__init__(blocked=True)
             self.main_entered = asyncio.Event()
 
-        async def agenerate(self, request, **options):
+        async def respond(self, request, **options):
             if not request.metadata.get("transient_history"):
                 self.main_entered.set()
-            return await super().agenerate(request, **options)
+            return await super().respond(request, **options)
 
     async def scenario():
         model = BlockBoth()
@@ -603,6 +603,11 @@ def test_idle_side_turn_refreshes_model_selection_before_forking():
         def active_endpoint(self):
             return SimpleNamespace(endpoint_id=self.selected, model_id=self.selected)
 
+        def metadata(self, **options):
+            from pal.llm.contracts import LLMMetadata
+            self.refresh_runtime_settings()
+            return LLMMetadata(endpoint_id=self.selected, model_id=self.selected)
+
     async def scenario():
         model = SelectedModel()
         core, _ = make_core(model)
@@ -619,12 +624,12 @@ def test_provider_without_side_turn_port_returns_unavailable_without_starting_tu
     async def scenario():
         model = Model()
         core, events = make_core(model)
-        core.context.port_registry.pop(LLM_SIDE_TURNS.name)
+        core.context.port_registry.pop("llm:llm")
         await start_btw(core, action())
         assert not model.requests
         assert not events
         assert core.state.btw_turn_id is None
-        assert "does not support side questions" in core.context.require_port("channel:channel").replies[-1][1]
+        assert "llm:llm" in core.context.require_port("channel:channel").replies[-1][1]
         core.close()
     asyncio.run(scenario())
 
@@ -693,7 +698,7 @@ def test_native_shell_side_result_is_not_written_to_main_history():
     from pal_shell_native.events import attach_completion_source
 
     class NativeModel(Model):
-        async def agenerate(self, request, **options):
+        async def respond(self, request, **options):
             self.requests.append(request)
             call = len(self.requests) == 1
             parts = ((new_tool_call(name="run_shell", args={"cmd": "printf btw-native", "wait_ms": 5000}, call_id="native-read"),)
@@ -705,12 +710,11 @@ def test_native_shell_side_result_is_not_written_to_main_history():
     async def scenario():
         model = NativeModel()
         execution = native.NativeExecutionRuntime()
-        context = MainContext(execution_runtime=execution)
+        context = build_context(execution_runtime=execution)
         context.port_registry["memory:memory"] = MemoryService()
         context.port_registry["llm:llm"] = model
-        context.port_registry[LLM_SIDE_TURNS.name] = model
         context.port_registry["channel:channel"] = Output()
-        core = PalCore(context=context)
+        core = build_core(context=context)
         register_execution(context)
         core.publish_module_capabilities("execution")
         attach_completion_source(core, execution)
@@ -742,7 +746,7 @@ def test_native_side_sessions_do_not_notify_main_and_are_retired(finished, cance
         side_rounds = 0
         main_rounds = 0
 
-        async def agenerate(self, request, **options):
+        async def respond(self, request, **options):
             self.requests.append(request)
             side = request.metadata.get("transient_history")
             if side:
@@ -767,12 +771,11 @@ def test_native_side_sessions_do_not_notify_main_and_are_retired(finished, cance
     async def scenario():
         model = SessionModel(blocked=True)
         execution = native.NativeExecutionRuntime()
-        context = MainContext(execution_runtime=execution)
+        context = build_context(execution_runtime=execution)
         context.port_registry["memory:memory"] = MemoryService()
         context.port_registry["llm:llm"] = model
-        context.port_registry[LLM_SIDE_TURNS.name] = model
         context.port_registry["channel:channel"] = Output()
-        core = PalCore(context=context)
+        core = build_core(context=context)
         register_execution(context)
         core.publish_module_capabilities("execution")
         attach_completion_source(core, execution)

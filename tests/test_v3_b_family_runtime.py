@@ -21,6 +21,7 @@ is a network-side fake only (H01 harness pattern).
 """
 
 from __future__ import annotations
+from tests.compaction_composition import execute_compaction
 
 from pal.shared.ports import PortKey
 from tests.turn_fakes import continuation as make_continuation
@@ -30,13 +31,14 @@ import inspect
 import time
 import unittest
 from types import SimpleNamespace
+from pal.shared.ports import PortRegistry
 
-from pal.core.compaction import (
+from pal.llm.compaction_engine import (
     CompactionClockKind,
     CompactionEngine,
     CompactionSnapshot,
 )
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.turn_executor import TurnExecutor
 from pal.core.turns import LLMPreflightEffect, MemoryCompactEffect
 from pal.llm import generation_result_from_values
@@ -75,20 +77,14 @@ def _service_with_history() -> MemoryService:
     return service
 
 
-class _Ports:
+class _Ports(PortRegistry):
     def __init__(self, memory_service, llm, execution_runtime=None):
-        self._ports = {"memory:memory": memory_service, "llm:llm": llm}
-        self.execution_runtime = execution_runtime
-
-    def get(self, name):
-        return self._ports.get(name)
+        super().__init__({"memory:memory": memory_service, "llm:llm": llm})
+        from pal.execution.runtime import ExecutionRuntime
+        self.execution_runtime = execution_runtime if execution_runtime is not None else ExecutionRuntime()
 
     def require_port(self, name):
-        name = name.name if isinstance(name, PortKey) else name
-        value = self._ports.get(name)
-        if value is None:
-            raise KeyError(name)
-        return value
+        return self.require(name) if isinstance(name, PortKey) else self[name]
 
 
 async def _call_port_async(port, async_name, sync_name, request):
@@ -151,7 +147,7 @@ class _ResidentNetwork(NonStreamingLLM):
         self.preflight_sleep = preflight_sleep
         self._preflight_advice = preflight_advice
 
-    async def apreflight(self, request):
+    async def preflight(self, request):
         if self.preflight_sleep:
             await asyncio.sleep(self.preflight_sleep)
         self.preflights.append(request)
@@ -160,7 +156,7 @@ class _ResidentNetwork(NonStreamingLLM):
         return LLMPreflightAdvice(status=LLMPreflightStatus.READY.value,
                                   breakdown={})
 
-    async def agenerate(self, request, *args, **kwargs):
+    async def respond(self, request, *args, **kwargs):
         self.requests.append(request)
         if self.generate_sleep:
             await asyncio.sleep(self.generate_sleep)
@@ -190,7 +186,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
             work_order_id="", core_mode="",
         )
 
-        result = asyncio.run(executor.compact_memory_async(
+        result = asyncio.run(executor.compaction.run(
             service, target_input_budget=1_000_000, reserved_output_tokens=1024,
             assembly_context=assembly,
             continuation=_continuation("task-R"),
@@ -227,6 +223,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
                 messages=[{"role": "user", "content": view}],
                 max_output_tokens=max_output_tokens,
                 model_hint=model_hint,
+                metadata={"context_candidates": []},
             )
 
         executor._build_canonical_prompt = canonical_prompt
@@ -236,7 +233,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
                 breakdown={"hard_overflow": True, "estimated": 99999},
             ),
         )
-        ports._ports["llm:llm"] = hard_llm
+        ports["llm:llm"] = hard_llm
         effect = LLMPreflightEffect(
             assembly_context=PromptAssemblyContext(
                 metadata={"prompt_cache_scope_id": "pal:resident"}),
@@ -271,8 +268,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
         service.begin_l1_turn("task-R", user_text="RIGHT_SENTINEL work")
         root.promote()
         left_snapshot = service.begin_left_compaction("run-b05", reason="auto")
-        snapshot = CompactionSnapshot.capture_left(
-            service, left_snapshot,
+        snapshot = service.capture_compaction( left_snapshot,
             target_input_budget=64, reserved_output_tokens=32,
             clock_kind=CompactionClockKind.USER_TURN, clock_value=1,
             metadata={"compaction_op_id": "run-b05"},
@@ -286,21 +282,21 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
             breakdown={"hard_overflow": True},
         )
 
-        class _AlwaysOverBudget:
+        class _AlwaysOverBudget(NonStreamingLLM):
             def __init__(self) -> None:
                 self.preflights: list = []
 
-            async def apreflight(self, request):
+            async def preflight(self, request):
                 self.preflights.append(request)
                 return compact_required
 
-            async def agenerate(self, request, *a, **kw):  # pragma: no cover
+            async def respond(self, request, *a, **kw):  # pragma: no cover
                 raise AssertionError("base overflow must refuse before any send")
 
         llm = _AlwaysOverBudget()
         engine = CompactionEngine(policy=PalCompactionPolicy(),
                                   max_attempts=3, timeout_seconds=10.0)
-        result = asyncio.run(engine.run(
+        result = asyncio.run(execute_compaction(engine,
             snapshot, llm_runtime=llm, memory_service=service))
         # Distinct terminal verdict, not a generic failure.
         self.assertEqual(result.status, "base_over_budget")
@@ -381,7 +377,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
         network = _ResidentNetwork()
         ports = _Ports(service, network, execution_runtime=_ExecRuntime())
         executor = _executor(ports)
-        result = asyncio.run(executor.compact_memory_async(
+        result = asyncio.run(executor.compaction.run(
             service, target_input_budget=1_000_000, reserved_output_tokens=1024,
             assembly_context=SimpleNamespace(
                 metadata={"prompt_cache_scope_id": "pal:resident"},
@@ -430,7 +426,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
         ports = _Ports(service, network)
         executor = _executor(ports, engine=engine)
         started = time.monotonic()
-        result = asyncio.run(executor.compact_memory_async(
+        result = asyncio.run(executor.compaction.run(
             service, target_input_budget=1_000_000, reserved_output_tokens=1024,
             assembly_context=SimpleNamespace(
                 metadata={"prompt_cache_scope_id": "pal:resident"},

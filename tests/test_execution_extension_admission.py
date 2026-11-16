@@ -1,5 +1,6 @@
 """Execution implementation swaps retire captured entries without retargeting."""
 from __future__ import annotations
+from tests.core_factory import build_context
 
 import asyncio
 import threading
@@ -72,7 +73,7 @@ class ProbeExtension:
 
 @pytest.fixture
 def execution():
-    context = MainContext()
+    context = build_context()
     slot = context.execution_runtime
     provider = ProbeProvider("original")
     handle = ModuleHandle("execution", MODULE_TIER_CORE_FOUNDATION, introspection_provider=provider)

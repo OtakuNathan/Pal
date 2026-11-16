@@ -28,13 +28,13 @@ def test_expired_guidance_must_not_reappear_in_projection():
                     for message in projected_messages(turn, settled=turn.turn_id != 'T2'))
     request = replace(request, messages=(request.messages[0], *visible))
     assert all(message.message_id != 'ctx1' for message in request.messages)
-    pack = executor._prepare_turn_projection(runtime, request)
+    pack = executor.projection.prepare(runtime, request)
     assert pack is not None
     assert 'EXPIRED_FINALIZATION_SENTINEL' not in repr(pack[0].payload)
     session = pack[2]['session']
     generation = session.identity.projection_generation
     session.reject_commit(pack[2]['attempt'].attempt_id, reason='test_retry')
-    retry = executor._prepare_turn_projection(runtime, request)
+    retry = executor.projection.prepare(runtime, request)
     assert retry is not None
     assert session.identity.projection_generation == generation
     assert 'EXPIRED_FINALIZATION_SENTINEL' not in repr(retry[0].payload)
@@ -52,7 +52,7 @@ def test_hybrid_keeps_fixed_turn_anchor_after_freezing_round():
                        prompt_region=PromptRegionIR.STABLE_SYSTEM), *result.messages[1:]))
     _drive(executor, request())
     current = request()
-    pack = executor._prepare_turn_projection(runtime, current)
+    pack = executor.projection.prepare(runtime, current)
     assert pack is not None
     assert 'QUESTION_ONE' in repr(pack[0].payload)
     coordinator = PromptCacheCoordinator()
@@ -182,7 +182,7 @@ def test_bootstrap_left_view_does_not_reintroduce_expired_context():
     memory.settle_l1_turn('T')
     memory.history_root.promote()
     executor = _executor(memory, _runtime(CapturingTransport([])))
-    seed, coverage = executor._left_view_seed(memory, memory.history_root)
+    seed, coverage = executor.projection.left_view(memory, memory.history_root)
     assert 'guidance' not in coverage
     assert 'OLD_GUIDANCE' not in repr(seed)
     assert {'q', 'a'} <= set(coverage)

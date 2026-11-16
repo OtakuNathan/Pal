@@ -6,6 +6,7 @@ guessing which methods an already published service happens to implement.
 from __future__ import annotations
 
 import inspect
+from threading import RLock
 from collections.abc import Iterator, Mapping, MutableMapping
 from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
@@ -86,6 +87,39 @@ class PortRegistry(MutableMapping[str, object]):
     def __init__(self, initial: Mapping[str, object] | None = None) -> None:
         self._values: dict[str, object] = dict(initial or {})
         self._contracts: dict[str, PortKey[object]] = {}
+        self._references: dict[str, ServiceRef[object]] = {}
+        self._lock = RLock()
+
+    def observe(self, key: PortKey[T]) -> ServiceRef[T]:
+        """Subscribe once; publication pushes values into this typed reference."""
+        with self._lock:
+            self.declare(key)
+            ref = self._references.get(key.name)
+            if ref is None:
+                ref = ServiceRef(key.name, self._values.get(key.name))
+                self._references[key.name] = ref
+            return cast(ServiceRef[T], ref)
+
+    def publish(self, values: Mapping[str, object]) -> None:
+        """Validate the complete candidate before changing any visible value."""
+        with self._lock:
+            for name, value in values.items():
+                self.validate(name, value)
+            self._values.update(values)
+            for name, value in values.items():
+                ref = self._references.get(name)
+                if ref is not None:
+                    ref._value = value
+
+    def withdraw(self, values: Mapping[str, object]) -> None:
+        """A retired owner cannot withdraw its replacement's publication."""
+        with self._lock:
+            for name, expected in values.items():
+                if name in self._values and self._values[name] is expected:
+                    del self._values[name]
+                    ref = self._references.get(name)
+                    if ref is not None:
+                        ref._value = None
 
     def declare(self, key: PortKey[object]) -> None:
         previous = self._contracts.get(key.name)
@@ -121,11 +155,14 @@ class PortRegistry(MutableMapping[str, object]):
         return self._values[name]
 
     def __setitem__(self, name: str, value: object) -> None:
-        self.validate(name, value)
-        self._values[name] = value
+        self.publish({name: value})
 
     def __delitem__(self, name: str) -> None:
-        del self._values[name]
+        with self._lock:
+            del self._values[name]
+            ref = self._references.get(name)
+            if ref is not None:
+                ref._value = None
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._values)
@@ -134,13 +171,20 @@ class PortRegistry(MutableMapping[str, object]):
         return len(self._values)
 
 
-@dataclass(frozen=True)
-class PortRef(Generic[T_co]):
-    """Resolve the published generation on use; never retain a retired service."""
+@dataclass
+class ServiceRef(Generic[T]):
+    """Publication-owned slot. Reading it does not query the registry."""
 
-    registry: PortRegistry
-    key: PortKey[T_co]
+    name: str
+    _value: T | None = None
 
     @property
-    def current(self) -> T_co:
-        return self.registry.require(self.key)
+    def current(self) -> T:
+        value = self._value
+        if value is None:
+            raise KeyError(self.name)
+        return value
+
+    @property
+    def optional(self) -> T | None:
+        return self._value

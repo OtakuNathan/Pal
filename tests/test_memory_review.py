@@ -1,3 +1,5 @@
+from tests.compaction_composition import execute_compaction
+from tests.core_factory import build_context
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -233,13 +235,12 @@ def test_candidate_normalization_never_invents_case_or_changes_strings():
 
 def _left_snapshot(service, metadata=None):
     """v3 capture: a real begin_left_compaction run over the current left."""
-    from pal.core.compaction import CompactionClockKind, CompactionSnapshot
+    from pal.llm.compaction_engine import CompactionClockKind, CompactionSnapshot
     root = service.history_root
     if not root.left_messages():
         root.promote()
     run = service.begin_left_compaction("review-run", reason="review")
-    return CompactionSnapshot.capture_left(
-        service, run,
+    return service.capture_compaction( run,
         target_input_budget=8_192, reserved_output_tokens=2_048,
         clock_kind=CompactionClockKind.USER_TURN, clock_value=7,
         metadata=metadata,
@@ -249,15 +250,15 @@ def _left_snapshot(service, metadata=None):
 def test_compact_tolerates_wrappers_and_bad_optional_candidates():
     import asyncio
     import json
-    from pal.core.compaction import CompactionEngine, extract_json_object
-    from pal.core.pal_compaction import PalCompactionPolicy
+    from pal.llm.compaction_engine import CompactionEngine, extract_json_object
+    from pal.llm.resident_compaction import PalCompactionPolicy
     from pal.llm import generation_result_from_values
     from tests.test_runtime_compaction import _ScriptedLLM, _memory_with_turns, _valid_pal_payload
     payload = json.loads(_valid_pal_payload())
     payload["memory_candidates"] = [FACT, {**FACT, "kind": "case"}]
     raw = "Here is the JSON:\n```json\n" + json.dumps(payload)[:-1] + ",}\n```"
     service = _memory_with_turns()
-    result = asyncio.run(CompactionEngine(PalCompactionPolicy()).run(
+    result = asyncio.run(execute_compaction(CompactionEngine(PalCompactionPolicy()),
         _left_snapshot(service), llm_runtime=_ScriptedLLM([generation_result_from_values(text=raw)]),
         memory_service=service))
     assert result.success
@@ -273,10 +274,10 @@ def test_compact_tolerates_wrappers_and_bad_optional_candidates():
 def test_registered_commit_capability_is_reached_only_after_final_action(setup_review):
     import asyncio
     from pal.control.contracts import ControlAction
-    from pal.core import MainContext
+    from pal.core.main_context import MainContext
     from pal.memory.capabilities import register_with_core
     reviews, provider, _ = setup_review
-    context = MainContext()
+    context = build_context()
     handle = register_with_core(context, reviews.memory)
     context.execution_runtime.hydrate_module_handle(handle)
     context.execution_runtime.mount_subtree(handle)
@@ -299,10 +300,10 @@ def test_registered_commit_capability_is_reached_only_after_final_action(setup_r
 def test_sequential_handler_edits_only_current_candidate_then_returns_to_it(setup_review):
     import asyncio
     from pal.control.contracts import ControlAction
-    from pal.core import MainContext
+    from pal.core.main_context import MainContext
     from pal.memory.capabilities import register_with_core
     reviews, provider, _ = setup_review
-    context = MainContext()
+    context = build_context()
     handle = register_with_core(context, service=reviews.memory)
     context.execution_runtime.mount_subtree(handle)
     handler = handle.control_action_handlers["memory_candidate_decision"]
@@ -375,8 +376,8 @@ def test_manager_rejects_stale_or_superseded_proposal_sources():
 
 def test_compact_repairs_latest_visible_output_and_prioritizes_source():
     import asyncio
-    from pal.core.compaction import CompactionEngine
-    from pal.core.pal_compaction import PalCompactionPolicy
+    from pal.llm.compaction_engine import CompactionEngine
+    from pal.llm.resident_compaction import PalCompactionPolicy
     from pal.llm import generation_result_from_values, LLMPreflightAdvice
     from pal.shared import LLMPreflightStatus
     from tests.test_runtime_compaction import _ScriptedLLM, _memory_with_turns, _valid_pal_payload
@@ -384,18 +385,18 @@ def test_compact_repairs_latest_visible_output_and_prioritizes_source():
     llm = _ScriptedLLM([generation_result_from_values(text="FIRST_INVALID"),
         generation_result_from_values(text="SECOND_INVALID"),
         generation_result_from_values(text=_valid_pal_payload())])
-    result = asyncio.run(CompactionEngine(PalCompactionPolicy()).run(_left_snapshot(service),
+    result = asyncio.run(execute_compaction(CompactionEngine(PalCompactionPolicy()), _left_snapshot(service),
         llm_runtime=llm, memory_service=service))
     assert result.success
     assert [m.text for m in llm.generate_requests[2].messages if m.semantic_kind == "compaction_failed_output"] == ["SECOND_INVALID"]
     assert "FIRST_INVALID" not in "\n".join(m.text for m in llm.generate_requests[2].messages)
-    def preflight(request):
+    def _preflight_response(request):
         has_failed_output = any(m.semantic_kind == "compaction_failed_output" for m in request.request.messages)
         return LLMPreflightAdvice(status=LLMPreflightStatus.COMPACT_REQUIRED if has_failed_output else LLMPreflightStatus.READY)
     service = _memory_with_turns()
     llm = _ScriptedLLM([generation_result_from_values(text="INVALID"),
-        generation_result_from_values(text=_valid_pal_payload())], preflight=preflight)
-    result = asyncio.run(CompactionEngine(PalCompactionPolicy()).run(_left_snapshot(service),
+        generation_result_from_values(text=_valid_pal_payload())], preflight=_preflight_response)
+    result = asyncio.run(execute_compaction(CompactionEngine(PalCompactionPolicy()), _left_snapshot(service),
         llm_runtime=llm, memory_service=service))
     assert result.success
     assert not any(m.semantic_kind == "compaction_failed_output" for m in llm.generate_requests[1].messages)

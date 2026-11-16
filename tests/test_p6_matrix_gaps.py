@@ -14,6 +14,7 @@
   is not re-emitted, and routing stays with the opening turn.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -23,9 +24,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pal.channel import ChannelRuntime, register_with_core as register_channel_with_core
-from pal.core import register_with_core as register_core_with_core
-from pal.core.compaction import CompactionEngine
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.core.capabilities import register_with_core as register_core_with_core
+from pal.llm.compaction_engine import CompactionEngine
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.runtime import PalCore
 from pal.foundation.io import EventEnvelope
 from pal.llm import generation_result_from_values
@@ -125,7 +126,7 @@ class _CountingCompactEngine:
     async def run(self, snapshot, *, llm_runtime=None, memory_service=None,
                   after_commit=None, replay_guard=None, commit_guard=None, commit_hooks=None):
         self.calls += 1
-        from pal.core.compaction import CompactionRunResult
+        from pal.llm.compaction_engine import CompactionRunResult
 
         return CompactionRunResult(
             status="compacted",
@@ -152,14 +153,12 @@ def _turn_envelope(text: str = "hello") -> ChannelEnvelope:
 
 
 def _core_with_llm(llm, engine) -> tuple[PalCore, MemoryService]:
-    core = PalCore()
+    core = build_core()
     register_core_with_core(core)
     channel_runtime = ChannelRuntime()
     register_channel_with_core(core.context, channel_runtime)
     memory_service = MemoryService(
-        l3_selector=L3ProviderSelector(
-            resolver=core.context.execution_runtime.l3_plugin_registry.require
-        )
+
     )
     memory_service.l1_store.append([
         L1TranscriptMessage(
@@ -170,7 +169,7 @@ def _core_with_llm(llm, engine) -> tuple[PalCore, MemoryService]:
     memory_service.history_root.promote()  # Imported closed history was already submitted.
     register_memory_with_core(core.context, memory_service)
     core.context.port_registry["llm:llm"] = llm
-    core.turn_executor._compaction_engine = engine
+    core.turn_executor.compaction.engine = engine
     return core, memory_service
 
 
@@ -179,7 +178,7 @@ from pal.core.turns import TurnContinuation
 
 
 class _FinalAnswerLLM(NonStreamingLLM):
-    def preflight(self, request) -> LLMPreflightAdvice:
+    def _preflight_response(self, request) -> LLMPreflightAdvice:
         return LLMPreflightAdvice(
             status="ready",
             active_model=request.request.model_hint or "stub-model",
@@ -188,13 +187,13 @@ class _FinalAnswerLLM(NonStreamingLLM):
             reserved_output_tokens=request.request.policy.max_output_tokens,
         )
 
-    def generate(self, request, **options):
+    def _generate_response(self, request, **options):
         return generation_result_from_values(
             text="the final answer", tool_calls=[], finish_reason="stop",
         )
 
-    async def agenerate(self, request, **options):
-        return self.generate(request)
+    async def respond(self, request, **options):
+        return self._generate_response(request)
 
 
 def test_a12_final_answer_turn_never_compacts():
@@ -213,7 +212,7 @@ class _CompactThenFinalLLM(NonStreamingLLM):
     def __init__(self) -> None:
         self.generate_count = 0
 
-    def preflight(self, request) -> LLMPreflightAdvice:
+    def _preflight_response(self, request) -> LLMPreflightAdvice:
         return LLMPreflightAdvice(
             status="ready",
             active_model=request.request.model_hint or "stub-model",
@@ -222,7 +221,7 @@ class _CompactThenFinalLLM(NonStreamingLLM):
             reserved_output_tokens=request.request.policy.max_output_tokens,
         )
 
-    def generate(self, request, **options):
+    def _generate_response(self, request, **options):
         self.generate_count += 1
         if self.generate_count == 1:
             return generation_result_from_values(
@@ -233,7 +232,7 @@ class _CompactThenFinalLLM(NonStreamingLLM):
             text="final after compaction", tool_calls=[], finish_reason="stop",
         )
 
-    async def agenerate(self, request, **options):
+    async def respond(self, request, **options):
         purpose = str(request.metadata.get("purpose") or "")
         if "compaction" in purpose:
             return generation_result_from_values(
@@ -255,7 +254,7 @@ class _CompactThenFinalLLM(NonStreamingLLM):
                 }),
                 tool_calls=[], finish_reason="stop",
             )
-        return self.generate(request)
+        return self._generate_response(request)
 
 
 def test_i11_final_reply_is_real_answer_not_handoff_json():
@@ -376,7 +375,7 @@ def test_a04_unknown_mutation_rejected_as_reconcile_required():
         )
         from pal.shared.tool_protocol import new_tool_call
 
-        core = PalCore()
+        core = build_core()
         service = _memory_with_turns(1)
         core.context.port_registry["memory:memory"] = service
         core.context.port_registry["llm:llm"] = NonStreamingLLM()

@@ -1,4 +1,5 @@
 """Entry withdrawal composes with package jobs and main-turn serial dispatch."""
+from tests.core_factory import build_core
 import asyncio
 import sys
 import threading
@@ -6,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.turns import ToolCallEffect
 from pal.execution import register_with_core
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput, RejectedResult
@@ -54,7 +55,7 @@ def live_plugin(tmp_path):
     _write_plugin(community, 'demo')
     (community / 'demo_runtime.py').write_text(PLUGIN)
     sys.path.insert(0, str(community))
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     events = []

@@ -47,7 +47,7 @@ from pal.llm import (
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3ProviderSelector, MemoryPackRequest, MemoryQuery, MemoryService
 from pal.plugins.l3 import SQLiteVecL3Plugin
-from pal.plugins import PluginBundleRepository
+from pal.plugins.repository import PluginBundleRepository
 from pal.plugins.capabilities import PluginsIntrospectionProvider
 from pal.proactive import ProactiveDefinition, ProactiveRepository
 from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, IntrospectionCall, LLMFinishReason, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET
@@ -594,7 +594,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(sqlite_record["source"], "first_party")
         self.assertTrue(sqlite_record["attached"])
         self.assertEqual(handle.memory_service.l3_selector.active_provider_id, "sqlite_vec_l3")
-        self.assertIn("sqlite_vec_l3", handle.core.context.execution_runtime.l3_plugin_registry.plugins)
+        self.assertIn("sqlite_vec_l3", handle.core.context.require_port("memory:memory").providers.plugins)
 
     def test_resident_foundation_is_not_owned_by_plugin_host(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -1017,7 +1017,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 if capability_name is not None:
                     self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
                 else:
-                    self.assertIsNotNone(runtime.l3_plugin_registry.get(plugin_id))
+                    self.assertIsNotNone(handle.memory_service.providers.get(plugin_id))
                 if plugin_id == "web_fetch":
                     skill_service = handle.core.context.require_port("skill:skill")
                     self.assertIsNotNone(skill_service.repository.get_skill("pal.web.browser"))
@@ -1028,7 +1028,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 if capability_name is not None:
                     self.assertNotIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
                 else:
-                    self.assertIsNone(runtime.l3_plugin_registry.get(plugin_id))
+                    self.assertIsNone(handle.memory_service.providers.get(plugin_id))
                 if plugin_id == "web_fetch":
                     self.assertIsNone(skill_service.repository.get_skill("pal.web.browser"))
 
@@ -1041,7 +1041,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 if capability_name is not None:
                     self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
                 else:
-                    self.assertIsNotNone(runtime.l3_plugin_registry.get(plugin_id))
+                    self.assertIsNotNone(handle.memory_service.providers.get(plugin_id))
                 if plugin_id == "web_fetch":
                     self.assertIsNotNone(skill_service.repository.get_skill("pal.web.browser"))
                 record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == plugin_id)
@@ -1272,7 +1272,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(initial_module.mounted)
         daily_tools = {"recall_memory", "remember_memory", "update_memory", "forget_memory"}
         self.assertTrue(daily_tools <= handle.core.context.capability_registry.descriptors.keys())
-        self.assertIsNotNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
+        self.assertIsNotNone(handle.memory_service.providers.get("sqlite_vec_l3"))
 
         # DETACH
         detached = runtime.execute(
@@ -1285,7 +1285,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(daily_tools <= handle.core.context.capability_registry.descriptors.keys())
 
         # Provider ref removed
-        self.assertIsNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
+        self.assertIsNone(handle.memory_service.providers.get("sqlite_vec_l3"))
 
         # Record shows detached
         records = plugin_host.list_plugins()
@@ -1310,7 +1310,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(daily_tools <= handle.core.context.capability_registry.descriptors.keys())
 
         # Provider ref restored
-        self.assertIsNotNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
+        self.assertIsNotNone(handle.memory_service.providers.get("sqlite_vec_l3"))
 
         # Record shows attached
         records2 = plugin_host.list_plugins()

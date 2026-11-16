@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 from importlib import resources
@@ -10,10 +11,11 @@ from pal.channel import ChannelRuntime, register_with_core as register_channel
 from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, EndpointConfig
 from pal.channel.repository import ChannelEndpointRepository
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec
-from pal.core import PalCore, register_with_core as register_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core
 from pal.execution import register_with_core as register_execution
 from pal.foundation.attachment import AttachmentSpec
-from pal.plugins import PluginHost
+from pal.plugins.host import PluginHost
 from pal.plugins_builtin.null_channel.endpoint import NullChannelEndpoint
 from pal.shared import ChannelStreamUpdateKind, EventKind
 from pal.wizard import WizardService
@@ -67,7 +69,7 @@ def env(tmp_path):
         db_filename="test.sqlite3", pal_entrypoint="pal.runtime.test",
     )
     db = wizard.create_database(registration)
-    core = PalCore()
+    core = build_core()
     register_execution(core.context)
     channel = ChannelRuntime()
     register_channel(core.context, channel, runtime_root=tmp_path)

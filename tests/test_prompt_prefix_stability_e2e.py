@@ -8,12 +8,15 @@ not just the codec in isolation.
 """
 
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import json
 
 import pytest
 
-from pal.core import PalCore, TurnContinuation, register_with_core
+from pal.core.runtime import PalCore
+from pal.core.turns import TurnContinuation
+from pal.core.capabilities import register_with_core
 from pal.foundation import EventEnvelope
 from pal.llm.ir import (
     LLMMessageIR,
@@ -37,7 +40,7 @@ REPLY = "inspected the file"
 
 
 def _setup():
-    core, service = PalCore(), MemoryService()
+    core, service = build_core(), MemoryService()
     register_with_core(core)
     register_memory(core.context, service)
     return core, service

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import unittest
@@ -15,7 +16,7 @@ from pal.shared import EventKind
 
 class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.core = PalCore()
+        self.core = build_core()
         self.channel = ChannelRuntime()
         self.core.context.port_registry["channel:channel"] = self.channel
         self.provider = SimpleNamespace(repository=SimpleNamespace(freeze=Mock()))
@@ -29,7 +30,7 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.channel.endpoint_registry.endpoints.update(first=first, broken=broken)
         with self.assertRaises(RuntimeError):
             self.core.begin_memory_sleep()
-        self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
+        self.assertTrue(await self.core.try_enter_memory_maintenance_async())
         first.on_runtime_state.assert_not_called()
         with self.assertLogs("pal.channel.runtime", level="ERROR"):
             self.core.begin_memory_sleep()
@@ -42,18 +43,18 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
         first.on_runtime_state.assert_called_with({"sleeping": False, "failures": [], "safe_modes": [], "turns": []})
         self.assertEqual(self.channel.runtime_state, {"sleeping": False, "failures": [], "safe_modes": [], "turns": []})
 
-    async def test_admission_waits_for_preparing_ingress_and_fences_before_return(self):
+    async def test_admission_waits_for_ingress_and_leaves_storage_fencing_to_memory(self):
         self.core.state.memory_ingress_reservations = 1
-        self.assertFalse(await self.core.try_enter_memory_maintenance_async(self.provider))
+        self.assertFalse(await self.core.try_enter_memory_maintenance_async())
         self.provider.repository.freeze.assert_not_called()
         self.core.state.memory_ingress_reservations = 0
-        self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
-        self.provider.repository.freeze.assert_called_once()
+        self.assertTrue(await self.core.try_enter_memory_maintenance_async())
+        self.provider.repository.freeze.assert_not_called()
         self.assertTrue(self.core.state.memory_maintenance)
 
     async def test_direct_turn_holds_admission_across_await_and_releases_on_failure(self):
         async def admitted(envelope):
-            self.assertFalse(await self.core.try_enter_memory_maintenance_async(self.provider))
+            self.assertFalse(await self.core.try_enter_memory_maintenance_async())
             raise RuntimeError("turn failed")
         self.core._process_admitted_channel_turn_async = admitted
         with self.assertRaisesRegex(RuntimeError, "turn failed"):
@@ -61,7 +62,7 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
                 event=SimpleNamespace(event_id="failed-direct-turn"),
             ))
         self.assertEqual(self.core.state.memory_ingress_reservations, 0)
-        self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
+        self.assertTrue(await self.core.try_enter_memory_maintenance_async())
 
     async def test_sleep_refuses_before_preparation_without_changing_route(self):
         self.core.state.memory_maintenance = True
@@ -83,11 +84,11 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
                     await self.core.schedule_channel_turn_async(SimpleNamespace())
                 self.assertEqual(self.core.state.memory_ingress_reservations, 0)
                 self.assertTrue(self.core.state.memory_maintenance_changed.is_set())
-        self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
+        self.assertTrue(await self.core.try_enter_memory_maintenance_async())
 
     async def test_admission_does_not_wait_for_bunshin_processes(self):
         self.core.context.port_registry["bunshin:bunshin"] = SimpleNamespace(active_runs=["long-running-worker"])
-        self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
+        self.assertTrue(await self.core.try_enter_memory_maintenance_async())
         await self.core.leave_memory_maintenance_async()
         self.assertFalse(self.core.state.memory_maintenance)
 
@@ -101,12 +102,12 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_busy_turn_completion_wakes_waiting_admission(self):
         task = asyncio.create_task(asyncio.sleep(0))
         self.core.state.turn_tasks["turn"] = task
-        self.assertFalse(await self.core.try_enter_memory_maintenance_async(self.provider))
+        self.assertFalse(await self.core.try_enter_memory_maintenance_async())
         waiter = asyncio.create_task(self.core.wait_for_memory_maintenance_async())
         await task
         self.core._on_turn_task_done("turn", task)
         await asyncio.wait_for(waiter, timeout=1)
-        self.assertTrue(await self.core.try_enter_memory_maintenance_async(self.provider))
+        self.assertTrue(await self.core.try_enter_memory_maintenance_async())
 
     async def test_notification_waits_for_delivery_and_reports_failure(self):
         for event_kind, expected in ((EventKind.REPLY_DELIVERED, True), (EventKind.REPLY_FAILED, False)):

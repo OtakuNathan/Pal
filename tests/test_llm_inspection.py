@@ -1,10 +1,11 @@
 """Pending batch: one passive, parameterless LLM snapshot and an active label."""
+from tests.core_factory import build_core
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.tool_surface import ToolSurface
 from pal.execution import register_with_core as register_execution
 from pal.llm.capabilities import LLMIntrospectionProvider, register_with_core
@@ -120,7 +121,7 @@ def test_unavailable_section_keeps_other_diagnostics_and_the_complete_cause(runt
 
 
 def test_only_new_parameterless_tool_is_exposed_and_old_aliases_are_withdrawn(runtime, monkeypatch):
-    core = PalCore()
+    core = build_core()
     execution = core.context.execution_runtime
     try:
         register_execution(core.context)

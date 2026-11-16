@@ -1,7 +1,7 @@
 """Discovery misses navigate only the caller's selected visible tool bucket."""
 from types import SimpleNamespace
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.generated_tool_models import ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput as SearchOutput
 from tests.test_tool_search_rules import runtime, mount, search

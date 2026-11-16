@@ -1,3 +1,4 @@
+from tests.core_factory import build_core
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -111,7 +112,7 @@ def test_builtin_and_provider_cannot_be_uninstalled(tmp_path):
 
 def test_live_uninstall_suspends_dependents_and_restores_preferences(tmp_path):
     import sys
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.foundation.persistence import PalV2Database
     from pal.plugins.host import PluginHost
     from pal.plugins.models import PluginBundleModel
@@ -123,7 +124,7 @@ def test_live_uninstall_suspends_dependents_and_restores_preferences(tmp_path):
     community = tmp_path / 'plugins/community'
     _write_plugin(community, 'demo')
     _write_plugin(community, 'dependent', requires=('demo',))
-    host = PluginHost(PalCore().context, tmp_path, services={'ledger': []})
+    host = PluginHost(build_core().context, tmp_path, services={'ledger': []})
     sys.path.insert(0, str(community))
     try:
         host.bootstrap()
@@ -158,25 +159,25 @@ def test_live_uninstall_suspends_dependents_and_restores_preferences(tmp_path):
 
 
 def test_builtin_disable_survives_host_restart(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.plugins.host import PluginHost
     from tests.test_plugin_raii import _write_plugin
     builtin = tmp_path / 'builtin'
     _write_plugin(builtin, 'demo')
-    first = PluginHost(PalCore().context, tmp_path, builtin_root=builtin)
+    first = PluginHost(build_core().context, tmp_path, builtin_root=builtin)
     first.rescan()
     assert first.disable('demo')['status'] == 'ok'
-    second = PluginHost(PalCore().context, tmp_path, builtin_root=builtin)
+    second = PluginHost(build_core().context, tmp_path, builtin_root=builtin)
     second.rescan()
     assert not second.first_party_records['demo'].enabled
 
 
 def test_task_cleanup_is_not_complete_until_cancelled_task_exits():
     import asyncio
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.plugins.lifecycle import PluginScope
     async def check():
-        scope = PluginScope(PalCore().context, 'demo')
+        scope = PluginScope(build_core().context, 'demo')
         task = scope.track_task(asyncio.create_task(asyncio.sleep(60)))
         await asyncio.sleep(0)
         assert scope.close()  # Cannot join the current loop synchronously.
@@ -190,7 +191,7 @@ def test_task_cleanup_is_not_complete_until_cancelled_task_exits():
 
 def test_package_worker_joins_task_finally_before_removing_resources():
     import asyncio
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.plugins.lifecycle import PluginScope
     async def check():
         finished = []
@@ -200,7 +201,7 @@ def test_package_worker_joins_task_finally_before_removing_resources():
             finally:
                 await asyncio.sleep(0.01)
                 finished.append(True)
-        scope = PluginScope(PalCore().context, 'demo')
+        scope = PluginScope(build_core().context, 'demo')
         scope.track_task(asyncio.create_task(worker()))
         await asyncio.sleep(0)
         assert await asyncio.to_thread(scope.close) == []
@@ -245,7 +246,7 @@ def test_purge_only_removes_unreferenced_private_environment(tmp_path, reference
 
 
 def test_bad_removal_record_does_not_abort_unrelated_plugin_discovery(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.foundation.persistence import PalV2Database
     from pal.plugins.host import PluginHost
     from pal.plugins.models import PluginBundleModel
@@ -258,7 +259,7 @@ def test_bad_removal_record_does_not_abort_unrelated_plugin_discovery(tmp_path):
     records = tmp_path / 'packages/records'
     records.mkdir(parents=True)
     (records / 'plugin-broken.json').write_text('{incomplete')
-    host = PluginHost(PalCore().context, tmp_path)
+    host = PluginHost(build_core().context, tmp_path)
     try:
         result = host.rescan()
         assert result['scan_errors']

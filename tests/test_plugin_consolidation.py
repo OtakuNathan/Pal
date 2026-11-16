@@ -1,9 +1,10 @@
+from tests.core_factory import build_core
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.plugins.capabilities import register_with_core as register_plugins
 from pal.shared.tool_protocol import new_tool_call
@@ -11,7 +12,7 @@ from pal.shared.tool_protocol import new_tool_call
 
 @pytest.fixture
 def plugin_runtime():
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     host = SimpleNamespace(**{name: Mock(return_value={"status": "ok", "plugin_id": "demo"})
                              for name in ("attach", "detach", "reattach", "enable", "disable")})

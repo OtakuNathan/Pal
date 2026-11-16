@@ -84,7 +84,7 @@ def _memory_with_left_and_right():
 
 
 def _compact(ex, memory, *, continuation_turn="T"):
-    return asyncio.run(ex.compact_memory_async(
+    return asyncio.run(ex.compaction.run(
         memory, target_input_budget=100_000, reserved_output_tokens=1024,
         continuation=make_continuation(turn_id=continuation_turn),
     ))
@@ -205,7 +205,7 @@ class LeftBoundaryReplayBuilderTests(unittest.TestCase):
         left_ids = tuple(
             m.message_id for m in memory.history_root.left_messages()
         )
-        replay, dialect, wire = ex._resident_compaction_replay_request(
+        replay, dialect, wire = ex.projection.compaction_replay(
             memory,
             llm_runtime=runtime,
             logical_scope_id="pal:resident",
@@ -252,7 +252,7 @@ class LeftBoundaryReplayBuilderTests(unittest.TestCase):
         left_ids = tuple(
             m.message_id for m in memory.history_root.left_messages()
         )
-        replay, _, _ = ex._resident_compaction_replay_request(
+        replay, _, _ = ex.projection.compaction_replay(
             memory,
             llm_runtime=runtime,
             logical_scope_id="pal:resident",
@@ -289,7 +289,7 @@ class LeftBoundaryReplayBuilderTests(unittest.TestCase):
             anchor, ids["a1"])
         ex = self._executor(memory, runtime)
 
-        replay, _, _ = ex._resident_compaction_replay_request(
+        replay, _, _ = ex.projection.compaction_replay(
             memory,
             llm_runtime=runtime,
             logical_scope_id="pal:resident",

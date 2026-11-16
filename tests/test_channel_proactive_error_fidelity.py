@@ -1,5 +1,6 @@
 """Channel and proactive failures retain causes and execution facts for the LLM."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 from types import SimpleNamespace
@@ -179,13 +180,13 @@ def test_unresolved_proactive_output_is_recorded_as_failure(destination):
 def test_history_inspection_exposes_failure_when_begin_run_cannot_be_saved(env, monkeypatch, alias, history_read_fails, caplog):
     runtime, manager, _ = env
     manager.create_task(proactive_id="job", goal="check")
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core as register_execution
     from pal.proactive import register_with_core as register_proactive
     handler, core, trigger, continuation = make_handler(manager.repository)
     monkeypatch.setattr(manager.repository, "begin_run", lambda *a: fail_with_cause("begin run storage unavailable"))
     assert asyncio.run(handler._run_trigger_guarded_async(core, trigger, continuation)) == "failed"
-    model_core = PalCore()
+    model_core = build_core()
     register_execution(model_core.context)
     register_proactive(model_core.context, manager, handler.runner)
     model_core.publish_module_capabilities("execution")

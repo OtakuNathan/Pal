@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pal.shared.ports import PortRegistry
+from tests.core_factory import build_core
 
 import asyncio
 from types import SimpleNamespace
@@ -11,7 +13,7 @@ from pal.checklist.capabilities import (
 )
 from pal.checklist.prompt import ChecklistPromptFragmentProvider
 from pal.checklist.service import ChecklistService
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.core.turn_executor import TurnExecutor
 from pal.core.turns import MailboxReplyEffect, MailboxReplyStreamUpdateEffect, TurnContinuation, channel_turn_program
@@ -336,7 +338,7 @@ class TestChecklistPrompt:
         assert "close_checklist" not in reminder.content
 
     def test_clear_retires_checklist_from_next_prompt_tail(self):
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         service = ChecklistService()
         handle = register_checklist_with_core(core.context, service)
@@ -361,7 +363,7 @@ class TestChecklistPrompt:
         assert retired_prompt.metadata["runtime_reminder_text"] == ""
 
     def test_progress_and_retirement_tools_are_direct_but_show_stays_indirect(self):
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         register_checklist_with_core(core.context, ChecklistService())
         core.publish_module_capabilities("execution")
@@ -384,7 +386,7 @@ class TestChecklistPrompt:
     def test_control_event_survives_tool_result_budget_without_reaching_llm_text(self):
         from pal.execution.contracts import ToolCallBudget
         from pal.shared.tool_protocol import new_tool_call
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         register_checklist_with_core(core.context, ChecklistService())
         core.publish_module_capabilities("execution")
@@ -471,7 +473,7 @@ class TestToolEchoFanOut:
 
         executor = object.__new__(TurnExecutor)
         executor.context = SimpleNamespace(
-            port_registry={"agent_io:output": _OutputPort()}
+            port_registry=PortRegistry({"agent_io:output": _OutputPort()})
         )
         executor._debug_log_reply = lambda *_args: None
         continuation = _continuation()
@@ -568,7 +570,7 @@ def test_duplicate_steps_rejected_without_replacing_current_plan():
 def test_inspection_search_and_invocation_preserve_unfinished_steps(query):
     from pal.shared.tool_protocol import new_tool_call
 
-    core = PalCore()
+    core = build_core()
     register_execution_with_core(core.context)
     service = ChecklistService()
     register_checklist_with_core(core.context, service)
@@ -595,7 +597,7 @@ def test_unknown_step_large_plan_remains_visible_outside_output_budget():
     import json
     from pal.execution.contracts import ToolCallBudget
     from pal.shared.tool_protocol import new_tool_call
-    core = PalCore()
+    core = build_core()
     register_execution_with_core(core.context)
     service = ChecklistService()
     register_checklist_with_core(core.context, service)

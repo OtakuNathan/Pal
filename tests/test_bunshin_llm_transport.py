@@ -11,6 +11,7 @@ from unittest.mock import patch
 from pal.foundation import PalV2Database
 from pal.llm.endpoint import ShapeEndpointInvoker
 from pal.llm.endpoint_spec import endpoint_spec_fingerprint
+from pal.llm.contracts import collect_generation
 from pal.llm.ir import (
     GenerationPolicyIR,
     LLMMessageIR,
@@ -220,10 +221,10 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 )
                 try:
                     self.assertEqual(_resolve_bunshin_max_output_tokens(runtime, pack), 65_535)
-                    await asyncio.to_thread(runtime.generate, request)
+                    await collect_generation(runtime.generate(request))
                     self.assertEqual(capture.requests[-1].payload["max_tokens"], 65_535)
                     runtime.refresh_llm_endpoints()
-                    await asyncio.to_thread(runtime.generate, request)
+                    await collect_generation(runtime.generate(request))
                     self.assertEqual(capture.requests[-1].payload["max_tokens"], 65_535)
                     self.assertEqual(LLMEndpointRepository().get(endpoint.endpoint_id).max_output_tokens, 12_288)
 
@@ -238,7 +239,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                         config=RuntimeConfig.load(root),
                     )
                     try:
-                        await asyncio.to_thread(default_runtime.generate, request)
+                        await collect_generation(default_runtime.generate(request))
                         self.assertEqual(capture.requests[-1].payload["max_tokens"], 12_288)
                     finally:
                         default_runtime.close()

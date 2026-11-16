@@ -15,7 +15,10 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
+
+if TYPE_CHECKING:
+    from pal.llm.compaction_engine import CompactionSnapshot, CompactionClockKind, CompactionCommitHooks
 
 from pal.foundation import HeatPolicy, HeatStateMachine, utc_now
 from pal.memory.contracts import (
@@ -33,10 +36,12 @@ from pal.memory.contracts import (
     L3DeleteRequest,
     L3MutationResult,
     L3RecallResult,
+    L3ProviderPort,
     L3RetireResult,
     MAX_RENEWAL_COUNT,
     MemoryCommitRequest,
     MemoryCommitResult,
+    MemoryCompactResult,
     MemoryPack,
     MemoryPackRequest,
     MemoryServicePort,
@@ -44,13 +49,15 @@ from pal.memory.contracts import (
 )
 from pal.memory.compact import (
     SUMMARY_ENTRY_ID,
+    SUMMARY_TITLE,
     flatten_l1_context,
     normalize_l1_transcript,
 )
+from pal.memory.providers import L3PluginRegistry
 from pal.memory.repository import L3ProviderSelector
 from pal.memory.tool_protocol import l1_tool_protocol_validation_error
 from pal.memory.context_view import L1ContextView
-from pal.memory.history_contracts import HistoryReadPort, HistoryRootPort
+from pal.memory.history_contracts import HistoryReadPort, HistoryRootPort, LeftSnapshot, CompactPhase
 from pal.shared.json_values import thaw_json
 from pal.memory.turn_ir import (
     L1TurnIR,
@@ -62,6 +69,7 @@ from pal.memory.turn_ir import (
 from pal.llm.ir import (
     ArtifactRefPartIR,
     LLMMessageIR,
+    LLMRequestIR,
     MessageRole,
     TextPartIR,
 )
@@ -227,6 +235,7 @@ class InMemoryL2Store(L2Store):
                 transition.state.renewal_count if transition.state else 0,
             )
 
+
     def tick_heat(self) -> list[str]:
         expired: list[str] = []
         for entry_id in list(self.heat_registry):
@@ -294,6 +303,7 @@ class InMemoryL2Store(L2Store):
 class MemoryService:
     l1_store: InMemoryL1Store = field(default_factory=InMemoryL1Store)
     l2_store: InMemoryL2Store = field(default_factory=InMemoryL2Store)
+    providers: L3PluginRegistry = field(default_factory=L3PluginRegistry)
     l3_selector: L3ProviderSelector | None = None
     failed_commits: list[MemoryCommitRequest] = field(default_factory=list)
     failed_retirements: list[L2Entry] = field(default_factory=list)
@@ -318,14 +328,32 @@ class MemoryService:
         return self.reviews.delivery(state, route, opening=True)
 
     def __post_init__(self) -> None:
+        if self.providers.get("null_l3") is None:
+            self.providers.register(DetachedL3Provider())
         if self.l3_selector is None:
-            self.l3_selector = L3ProviderSelector(resolver=lambda provider_id: DetachedL3Provider(provider_id=provider_id))
+            self.l3_selector = L3ProviderSelector(resolver=self.providers.require)
         self._history_root: Any = None
 
     @property
     def history(self) -> HistoryReadPort:
         """Read and change-notification interface to the currently owned history."""
         return self.l1_store.turns
+
+    def borrow_context(self) -> MemoryService:
+        """Share immutable closed L messages; keep all new history in a private tail."""
+        from dataclasses import replace
+        turns = tuple(replace(t, state=L1TurnState.SETTLED)
+                      for t in self.history_root.left_turns())
+        context = MemoryService(l1_store=InMemoryL1Store(L1TurnStore(turns)), providers=self.providers)
+        context.history_root.promote()
+        return context
+
+
+    def register_l3_provider(self, provider: L3ProviderPort) -> None:
+        self.providers.register(provider)
+
+    def unregister_l3_provider(self, provider: L3ProviderPort) -> None:
+        self.providers.unregister(provider)
 
     def tick_heat(self) -> None:
         self.l2_store.tick_heat()
@@ -379,7 +407,7 @@ class MemoryService:
         deadline_at: float | None = None,
         include_completed_tail: bool = False,
         allow_summary: bool = False,
-    ) -> Any:
+    ) -> LeftSnapshot:
         """Open a v3 compact run over the current left segment."""
 
         return self.history_root.begin_compact(
@@ -477,6 +505,152 @@ class MemoryService:
                 outcome = replace(outcome, detail="\n".join(filter(None, (
                     outcome.detail, "Post-commit cleanup failed:\n" + exception_report(exc)))))
         return outcome
+
+    def capture_compaction(
+        self,
+        left_snapshot: LeftSnapshot,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int,
+        clock_kind: CompactionClockKind,
+        clock_value: int,
+        metadata: dict[str, Any] | None = None,
+        replay_request: LLMRequestIR | None = None,
+        next_request: LLMRequestIR | None = None,
+        replay_dialect: str = "",
+        replay_wire_shape: str = "",
+    ) -> CompactionSnapshot:
+        """v3 two-segment capture: the LEFT segment only (I10).
+
+        The run has already been opened by the history owner
+        (``begin_left_compaction``); this snapshot carries its stamp so the
+        install path can verify the left side never moved, while the right
+        side stays out of the summary source entirely.  A warm
+        ``replay_request`` (provider-confirmed anchor inside L + accepted
+        suffix + instruction tail, see the executor's warm split) replaces
+        the cold source builder for the model attempt; oversized replays
+        fall back to the bounded frozen-L1 source inside the engine.
+        """
+
+        from pal.llm.compaction_engine import CompactionSnapshot
+        from copy import deepcopy
+        captured = self.snapshot_transcripts(left_snapshot)
+        memory_items = tuple(
+            tuple(deepcopy(item) for item in transcript)
+            for transcript in captured
+        )
+        merged = dict(metadata or {})
+        merged["two_segment_run_id"] = str(left_snapshot.run_id)
+        return CompactionSnapshot(
+            target_input_budget=max(0, int(target_input_budget or 0)),
+            reserved_output_tokens=max(0, int(reserved_output_tokens or 0)),
+            clock_kind=clock_kind,
+            clock_value=max(0, int(clock_value or 0)),
+            memory_items=memory_items,
+            replay_request=replay_request,
+            next_request=next_request,
+            replay_dialect=str(replay_dialect or "").strip(),
+            replay_wire_shape=str(replay_wire_shape or "").strip(),
+            metadata=deepcopy(merged),
+            source_stamp=str(left_snapshot.stamp or ""),
+            source_epoch=0,
+            active_turn_ids=(),
+        )
+
+
+    async def install_compaction(
+        self,
+        snapshot: CompactionSnapshot,
+        *,
+        summary_entry: L2Entry,
+        after_commit: Callable[[], None] | None = None,
+        commit_guard: Callable[[], bool] | None = None,
+        commit_hooks: CompactionCommitHooks | None = None,
+    ) -> MemoryCompactResult | Exception:
+        if commit_guard is not None and not commit_guard():
+            return RuntimeError("compaction ticket cancelled")
+        if commit_hooks is not None:
+            import asyncio
+            staged = asyncio.create_task(asyncio.to_thread(commit_hooks.stage))
+            try:
+                await asyncio.shield(staged)
+            except asyncio.CancelledError:
+                await staged
+                raise
+            except Exception as exc:
+                LOGGER.error("compact archive_failed run=%s\n%s",
+                    snapshot.metadata.get("two_segment_run_id", ""), exception_report(exc))
+                return exc
+        if commit_guard is not None and not commit_guard():
+            return RuntimeError("compaction ticket cancelled")
+        two_segment_run_id = str(
+            snapshot.metadata.get("two_segment_run_id") or ""
+        ).strip()
+        if two_segment_run_id:
+            # v3 install: replace the LEFT segment only.  Root arbitration
+            # (StaleRun / TerminalClosed / CandidateConflict / stamp drift)
+            # surfaces as a normal engine failure — never a silent retry.
+            try:
+                outcome = self.compact_left(
+                    two_segment_run_id,
+                    summary_entry,
+                    candidate_id=str(
+                        snapshot.metadata.get("compaction_op_id")
+                        or two_segment_run_id
+                    ),
+                    after_commit=after_commit,
+                )
+            except Exception as exc:
+                from datetime import datetime, timezone
+                LOGGER.error("compact install_failed run=%s failed_at=%s\n%s",
+                    two_segment_run_id, datetime.now(timezone.utc).isoformat(), exception_report(exc))
+                return exc
+            LOGGER.info("compact finished run=%s status=compacted", two_segment_run_id)
+            return MemoryCompactResult(
+                summary=summary_entry.summary,
+                projected_entries=[summary_entry],
+                metadata={
+                    "two_segment": True,
+                    "run_id": two_segment_run_id,
+                    "status": (outcome.status if outcome is not None else ''),
+                    "left_revision": (outcome.left_revision if outcome is not None else 0),
+                    "replayed": bool((outcome.replayed if outcome is not None else False)),
+                    **({"post_commit_detail": outcome.detail} if (outcome.detail if outcome is not None else '') else {}),
+                },
+            )
+        # capture_left is the only producer of snapshots; a missing
+        # two-segment run id means a hand-built snapshot, which has no
+        # supported install path (v2 whole-source was physically removed).
+        raise RuntimeError(
+            "compaction snapshot carries no two_segment_run_id; "
+            "whole-source install was removed with v2"
+        )
+
+
+    def close_compaction(self, run_id: str, *, cancelled: bool, reason: str) -> None:
+        self.history_root.close_run(run_id, cancelled=cancelled, reason=reason)
+
+    def compaction_result(self, run_id: str) -> MemoryCompactResult | None:
+        """Report the committed owner fact even after result packaging failed."""
+        record = self.history_root.run_record(run_id)
+        if record is None or record.phase is not CompactPhase.COMMITTED:
+            return None
+        left = self.history_root.left_turns()
+        summary = "".join(message.text for message in left[0].messages) if left else ""
+        return MemoryCompactResult(summary=summary, projected_entries=[], metadata={
+            "two_segment": True, "run_id": run_id, "status": "committed",
+            "left_revision": record.committed_left_revision, "replayed": True,
+            "reconstructed": "post_commit_packaging_fault"})
+
+    def prepare_l1_prompt_context(self, turn_id: str, stable: list[LLMMessageIR],
+        candidates: list[dict[str, Any]], *, boundary: str) -> tuple[tuple[LLMMessageIR, ...], L1TurnIR]:
+        from pal.memory.prompt_context import prepare_context
+        active = self.active_l1_turn(turn_id)
+        if active is None:
+            raise L1TurnProtocolError(f"L1 turn is not active: {turn_id}")
+        frozen, additions, state = prepare_context(active, stable, candidates, boundary=boundary)
+        updated = self.append_l1_prompt_contexts(turn_id, additions, state, expected_revision=active.revision)
+        return frozen, updated
 
     def clear_generation_projection(self) -> None:
         """Drop this runtime's L2 after reconnecting, preserving its L1."""
@@ -610,6 +784,9 @@ class MemoryService:
             return current
         self.l1_store.replace(updated)
         return updated
+
+    async def append_interjection(self, turn_id: str, message: LLMMessageIR) -> L1TurnIR:
+        return self.append_l1_user(turn_id, message)
 
     def append_l1_user_contexts(
         self,

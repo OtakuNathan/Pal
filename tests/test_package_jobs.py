@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import threading
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.execution.contracts import CapabilityCall
 from pal.packages.jobs import PackageJobs
@@ -115,7 +116,7 @@ def test_completion_wakes_pal_once_when_idle_with_original_binding(failed, model
     from pal.shared import EndpointConfig, ResponseHandle, TurnDeliveryBinding
     from unittest.mock import AsyncMock
     async def run():
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
         core.context.port_registry['core:core'] = core
         messages = []
@@ -178,7 +179,7 @@ def test_completion_wakes_pal_once_when_idle_with_original_binding(failed, model
 
 
 def test_closed_completion_source_does_not_enqueue_or_register_again():
-    core = PalCore()
+    core = build_core()
     source = PackageCompletionSource(core.context)
     source.close()
     assert source.notifier('missing') is None
@@ -188,7 +189,7 @@ def test_closed_completion_source_does_not_enqueue_or_register_again():
 @pytest.mark.parametrize('asynchronous', [False, True])
 @pytest.mark.parametrize('canonical', [False, True])
 def test_package_wait_allows_worker_activation_through_real_dispatch(tmp_path, asynchronous, canonical):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     host = SimpleNamespace(runtime_root=tmp_path, context=core.context)
     register_plugins(core.context, host)

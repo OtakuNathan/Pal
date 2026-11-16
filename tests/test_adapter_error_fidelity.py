@@ -1,5 +1,6 @@
 """Plugin, LSP and worker adapters deliver failure causes and execution facts."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import sys
@@ -10,7 +11,7 @@ import pytest
 
 from pal.bunshin.scoped_execution import _WORKSPACE_TOOL_SPECS, _workflow_capability
 from pal.bunshin.submission_errors import SubmissionValidationError, submission_error_result
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution.contracts import CapabilityCall
 from pal.execution.capability_compiler import _attach_effect_receipt
 from pal.execution.tool_semantics import DIRECT_LOCAL_READ
@@ -18,7 +19,7 @@ from pal.lsp.config import LspServerConfig, LspServerFileConfig
 from pal.lsp.connector import LspProtocolError
 from pal.lsp.manager import LspManager, LspServerState, _attach_error_detail
 from pal.lsp.plugin import LspManagerPluginProvider
-from pal.plugins import PluginHost
+from pal.plugins.host import PluginHost
 from pal.plugins.capabilities import PluginsIntrospectionProvider
 from pal.shared import RuntimeStatus, ToolExecutionResult
 from pal.shared.tool_protocol import ToolContextMessageIR, new_tool_call
@@ -40,7 +41,7 @@ def host(tmp_path, monkeypatch):
     _write_plugin(root, "fidelity_plugin")
     _write_plugin(root, "fidelity_dependent", requires=("fidelity_plugin",))
     monkeypatch.syspath_prepend(str(root))
-    core = PalCore()
+    core = build_core()
     host = PluginHost(core.context, tmp_path, builtin_root=root, services={"ledger": []})
     host.rescan()
     yield host
@@ -167,7 +168,7 @@ def test_lsp_retries_preserve_each_failed_attempt(tmp_path, monkeypatch, eventua
     payload = asyncio.run(manager.run_lsp_operation("workspace_symbols", {"workspace_root": str(tmp_path)}))
     from pal.execution import register_with_core
     from pal.lsp import build_lsp_plugin
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     handle = build_lsp_plugin(runtime_root=tmp_path).register_with_core(core.context)
     monkeypatch.setattr(handle.introspection_provider, "_request_or_error", lambda *args: payload)

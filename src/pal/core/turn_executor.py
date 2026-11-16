@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pal.llm.history_projection import HistoryProjection
+from pal.core.compaction_operation import CompactionOperation
 from pal.llm.contracts import LLM_RUNTIME
 from pal.memory.contracts import MEMORY
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
-from pal.shared.diagnostics import diagnostic_text, exception_summary, exception_report, exception_reason
+from pal.shared.diagnostics import exception_summary, exception_reason
 
 import asyncio
 import inspect
@@ -14,16 +16,10 @@ import logging
 from datetime import datetime, timezone
 from dataclasses import replace
 from functools import singledispatchmethod
-from typing import Any, Awaitable, Callable, Mapping, Sequence
-from uuid import uuid4
+from typing import Any, Awaitable, Callable
 
 from pal.execution.contracts import ToolCallBudget
-from pal.core.compaction import (
-    CompactionClockKind,
-    CompactionEngine,
-    CompactionRunResult,
-    CompactionSnapshot,
-)
+from pal.llm.compaction_contracts import CompactionService
 from pal.core.compaction_coordinator import compaction_gate_active
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.core.runtime_config import RuntimeConfig
@@ -61,12 +57,7 @@ from pal.llm.ir import (
     TextPartIR,
 )
 from pal.memory.compact import memory_candidates_from_compact_result, compact_normalization_diagnostics
-from pal.memory.contracts import (
-    L1MessageKind,
-    L1TranscriptMessage,
-    MemoryCommitRequest,
-    MemoryPackRequest,
-)
+from pal.memory.contracts import L1MessageKind, MemoryPackRequest
 from pal.shared import (
     GuardAction,
     LLMPreflightStatus,
@@ -122,13 +113,17 @@ class TurnExecutor:
         handle_llm_provider_errors: bool = True,
         execute_tool_async: Callable[..., Awaitable[Any]] | None = None,
         config: RuntimeConfig | None = None,
-        compaction_engine: CompactionEngine | None = None,
+        compaction_engine: CompactionService | None = None,
         compaction_clock_provider: Callable[[], int] | None = None,
         after_tool_batch: Callable[[Any], Awaitable[None]] | None = None,
         inject_pending: Callable[[Any], Awaitable[bool]] | None = None,
         after_compaction: Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
         self.context = context
+        self.llm = context.port_registry.observe(LLM_RUNTIME)
+        self.memory = context.port_registry.observe(MEMORY)
+        self.projection = HistoryProjection(self.memory, state.diagnostics,
+            self._project_messages_for_prompt, self._resolve_llm_capabilities_for_endpoint)
         self.state = state
         self.turn_manager = turn_manager
         self._config = config or RuntimeConfig.defaults()
@@ -142,10 +137,11 @@ class TurnExecutor:
         self._should_enter_failure_flow_for_tool_result = should_enter_failure_flow_for_tool_result
         self._handle_llm_provider_errors = handle_llm_provider_errors
         self._execute_tool_async = execute_tool_async
-        self._compaction_engine = compaction_engine
-        self._compaction_clock_provider = (
-            compaction_clock_provider or (lambda: 0)
-        )
+        self.compaction = CompactionOperation(context=context, state=state, llm=self.llm,
+            projection=self.projection, engine=compaction_engine,
+            clock=compaction_clock_provider or (lambda: 0),
+            build_prompt=lambda *args, **kwargs: self._build_canonical_prompt(*args, **kwargs),
+            build_tools=lambda: self._build_llm_tool_contracts(), clear_cursors=self.clear_execution_cursors)
         self._after_tool_batch = after_tool_batch
         self._inject_pending = inject_pending
         self._after_compaction = after_compaction
@@ -188,7 +184,7 @@ class TurnExecutor:
             continuation,
             effect.assembly_context,
         )
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
+        llm_runtime = self.llm.current
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
             continuation,
@@ -196,7 +192,7 @@ class TurnExecutor:
             max_output_tokens=effect.max_output_tokens,
             tools=tools,
         )
-        advice = await llm_runtime.apreflight(LLMPreflightRequest(request=prompt))
+        advice = await llm_runtime.preflight(LLMPreflightRequest(request=prompt))
         continuation.prompt_budget_snapshot = dict(advice.breakdown or {})
         if self._is_hard_budget_overflow(advice):
             failure_result = await self._handle_failure_async(
@@ -248,7 +244,7 @@ class TurnExecutor:
                     max_output_tokens=effect.max_output_tokens,
                     tools=tools,
                 )
-                advice = await llm_runtime.apreflight(LLMPreflightRequest(request=prompt))
+                advice = await llm_runtime.preflight(LLMPreflightRequest(request=prompt))
                 continuation.prompt_budget_snapshot = dict(advice.breakdown or {})
         return EffectResult(status=RuntimeStatus.OK, payload=advice)
 
@@ -277,7 +273,7 @@ class TurnExecutor:
             if reasons is not None:
                 reasons.append(reason)
 
-        memory_service = self.context.port_registry.get("memory:memory")
+        memory_service = self.memory.optional
         if memory_service is None:
             _note("memory_service_unavailable")
             return False
@@ -355,13 +351,13 @@ class TurnExecutor:
                     "stream, tool protocol, or result commit is still open."
                 ),
             )
-        memory_service = self.context.require_port(MEMORY)
+        memory_service = self.memory.current
         # two_segment admission: the history owner IS the arbiter — one live
         # run per session (CompactLaneBusy), owner-side terminal arbitration,
         # and the minimal-seed guard already refuses re-compacting an
         # unchanged left segment (L08).  No tickets, no ledger, no staging.
 
-        run_result = await self.compact_memory_async(
+        run_result = await self.compaction.run(
             memory_service,
             target_input_budget=effect.target_input_budget,
             reserved_output_tokens=effect.reserved_output_tokens,
@@ -376,13 +372,7 @@ class TurnExecutor:
                 payload=run_result,
             )
         compact_result = run_result.memory_result
-        accepts_candidates = bool(
-            getattr(
-                getattr(self._compaction_engine, "policy", None),
-                "accepts_memory_candidates",
-                False,
-            )
-        )
+        accepts_candidates = self.compaction.accepts_memory_candidates
         candidates = (
             memory_candidates_from_compact_result(compact_result)
             if accepts_candidates
@@ -466,7 +456,7 @@ class TurnExecutor:
                 ),
             )
         continuation.llm_round_index = continuation.llm_round_index + 1
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
+        llm_runtime = self.llm.current
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
             continuation,
@@ -491,7 +481,7 @@ class TurnExecutor:
             },
         )
         snapshot_store = getattr(getattr(self.context, "execution_runtime", None), "result_snapshots", None)
-        memory = getattr(self.context, "port_registry", {}).get("memory:memory")
+        memory = self.memory.optional
         history = (memory.history if memory is not None else None)
         if snapshot_store is not None and history is not None:
             snapshot_store.pin_history_request(history, str(continuation.turn_id))
@@ -502,7 +492,7 @@ class TurnExecutor:
         # in metadata — and the accept side closes the loop only after the
         # canonical acceptance boundary, authorized by the send receipt.
         # None everywhere means the honest cold codec path.
-        projection_pack = self._prepare_turn_projection(llm_runtime, request)
+        projection_pack = self.projection.prepare(llm_runtime, request)
         on_submitted = self._history_submission_observer(request)
         # R6 (review 95373ef): the prepared projection draft belongs to THIS
         # attempt.  Any exit between prepare and canonical observation —
@@ -511,52 +501,29 @@ class TurnExecutor:
         # check in the guard keeps it from ever touching a successor round
         # or rolling back an accept that already committed.
         try:
-            if self._llm_runtime_supports_streaming(llm_runtime, request):
-                outcome = await self.stream_llm_request_async(
-                    continuation, llm_runtime, request, projection_pack=projection_pack,
-                    on_submitted=on_submitted)
-            else:
-                if projection_pack is not None:
-                    outcome = await llm_runtime.agenerate(
-                        request,
-                        projection=projection_pack[0],
-                        projection_binding=projection_pack[1],
-                        projection_attempt_id=projection_pack[2]["attempt"].attempt_id,
-                        generation_plan=projection_pack[2]["plan"],
-                        on_submitted=on_submitted,
-                    )
-                else:
-                    outcome = await llm_runtime.agenerate(request, on_submitted=on_submitted)
-                # An endpoint error is transport/recovery state, not an assistant
-                # message.  Persisting it into L1 makes a later retry replay a
-                # synthetic assistant turn and, for strict providers such as
-                # Anthropic thinking mode, can produce an ill-formed protocol.
-                if outcome.response.finish_reason != LLMFinishReason.ERROR:
-                    await self._upsert_l1_assistant_async(continuation, outcome.response.message)
+            outcome = await self.stream_llm_request_async(
+                continuation, llm_runtime, request, projection_pack=projection_pack,
+                on_submitted=on_submitted)
             # F4 (review af51d74): the AcceptedContribution boundary.  Owner-side
             # postprocessing (finalization_only) may still discard the provider's
             # tool-call/empty answer and replace it with fallback text; the
             # projection may only freeze what canonical L1 actually keeps.
             outcome = await self._finalize_accepted_contribution(continuation, outcome)
             # F2: observe only what the transport receipt authorizes.
-            self._observe_turn_projection(projection_pack, continuation, outcome)
+            self.projection.accept(projection_pack, continuation, outcome)
         finally:
             # Normal exits closed the round inside the observation; this only
             # bites for cancelled/failed rounds, and only while the lineage
             # still holds THIS attempt's draft.
-            self._abandon_turn_projection_round(projection_pack)
+            self.projection.abandon(projection_pack)
         self._debug_log_outcome(continuation, outcome)
         refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
         if refresh is not None and self.include_live_execution_context:
             refresh(continuation)
         preferred_endpoint_id = str(outcome.preferred_endpoint_id or "").strip() or None
         preferred_model_id = str(outcome.preferred_model_id or "").strip() or None
-        if preferred_endpoint_id is None:
-            preferred_endpoint_id = str(getattr(llm_runtime, "last_endpoint_id", "") or "").strip() or None
-        if preferred_model_id is None:
-            preferred_model_id = str(getattr(llm_runtime, "last_model_id", "") or "").strip() or None
-        continuation.preferred_llm_endpoint_id = preferred_endpoint_id
-        continuation.preferred_llm_model_id = preferred_model_id
+        continuation.preferred_llm_endpoint_id = preferred_endpoint_id or continuation.preferred_llm_endpoint_id
+        continuation.preferred_llm_model_id = preferred_model_id or continuation.preferred_llm_model_id
         continuation.last_response_mode = self.infer_response_mode(
             outcome,
             used_tools=bool(continuation.tool_observations),
@@ -583,7 +550,6 @@ class TurnExecutor:
                 "runtime_database"
                 if local_state_failure
                 else continuation.preferred_llm_endpoint_id
-                or str(getattr(llm_runtime, "last_endpoint_id", "") or "")
                 or "llm_runtime"
             )
             failure_kind = str(
@@ -1032,7 +998,8 @@ class TurnExecutor:
         on_submitted: Any = None,
     ) -> LLMGenerationResult:
         final_response: LLMResponseIR | None = None
-        stream = llm_runtime.astream
+        completion: LLMGenerationResult | None = None
+        stream = llm_runtime.generate
         continuation.channel_stream_active = self._channel_supports_stream_delivery(
             continuation
         )
@@ -1075,6 +1042,7 @@ class TurnExecutor:
                     if pending.done():
                         pending = None
                 final_response = update.response
+                completion = update.completion
                 semantic_seen = semantic_seen or (
                     update.delta_kind != LLMResponseDeltaKind.STATE
                     and bool(update.response.message.parts)
@@ -1096,18 +1064,7 @@ class TurnExecutor:
                 "LLM stream completed without a response.",
                 finish_reason=LLMFinishReason.ERROR,
             )
-        return LLMGenerationResult(
-            response=final_response,
-            preferred_endpoint_id=llm_runtime.last_endpoint_id,
-            preferred_model_id=llm_runtime.last_model_id,
-            # F2: the stream path reads the runtime's per-generation send
-            # receipt (set by the worker thread at the successful send).
-            projection_receipt=(
-                llm_runtime.last_projection_receipt
-                if projection_pack is not None
-                else None
-            ),
-        )
+        return completion if completion is not None else LLMGenerationResult(response=final_response)
 
     def _llm_wait_status_schedule(self) -> tuple[float, ...]:
         raw = getattr(
@@ -1207,7 +1164,7 @@ class TurnExecutor:
                     text=canonical_text,
                     finish_reason=finish_reason.value,
                 )
-        if channel_update is not None:
+        if channel_update is not None and continuation.channel_stream_active:
             await self.execute_turn_effect_async(
                 continuation,
                 MailboxReplyStreamUpdateEffect(
@@ -1290,12 +1247,11 @@ class TurnExecutor:
             metadata["cache_policy_snapshot"] = continuation.turn_settings_snapshot["cache_policy_snapshot"]
         metadata["prompt_cache_scope_id"] = logical_scope_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
-        memory_service = self.context.port_registry.get("memory:memory")
+        memory_service = self.memory.optional
         active_turn = None
-        active_reader = (memory_service.active_l1_turn if memory_service is not None else None)
-        if callable(active_reader):
+        if memory_service is not None:
             try:
-                active_turn = active_reader(continuation.turn_id)
+                active_turn = memory_service.active_l1_turn(continuation.turn_id)
             except Exception as exc:
                 active_turn = None
                 metadata["memory_context_errors"] = {
@@ -1306,7 +1262,7 @@ class TurnExecutor:
             metadata["active_l1_owns_primary_input"] = True
         if assembly_context.turn_kind != "failure":
             try:
-                memory_service = self.context.require_port(MEMORY)
+                memory_service = self.memory.current
             except KeyError:
                 memory_service = None
             if memory_service is not None and "memory_pack" not in metadata:
@@ -1372,47 +1328,25 @@ class TurnExecutor:
             )
         context_committed = False
         if active_turn is not None:
-            from pal.core.prompt_context import prepare_context, projected_context
-            commit_context = (memory_service.append_l1_prompt_contexts if memory_service is not None else None)
-            if callable(commit_context):
-                candidates = prompt.metadata.get("context_candidates")
-                if candidates is None:
-                    from pal.llm.serde import message_to_payload
-                    candidates = [{"key": f"legacy-context:{index}", "role": m.role.value,
-                                   "ir_message": message_to_payload(m)} for index, m in enumerate(contextual_messages)]
-                    reminder_text = str(prompt.metadata.get("runtime_reminder_text") or "").strip()
-                    if reminder_text:
-                        candidates.append({"key": "legacy-reminder", "role": "developer", "content": reminder_text})
-                frozen, additions, context_state = prepare_context(
-                    active_turn, stable_messages, list(candidates),
-                    boundary=json.dumps([getattr(metadata.get("memory_pack"), "metadata", {}).get("continuity_id", ""),
-                                         continuation.preferred_llm_endpoint_id, continuation.preferred_llm_model_id]))
-                active_turn = commit_context(continuation.turn_id, additions, context_state,
-                                             expected_revision=active_turn.revision)
-                stable_messages = list(frozen)
-                contextual_messages = []
-                context_committed = True
+            frozen, active_turn = memory_service.prepare_l1_prompt_context(
+                continuation.turn_id, stable_messages, list(prompt.metadata["context_candidates"]),
+                boundary=json.dumps([(metadata["memory_pack"].metadata if metadata.get("memory_pack") is not None else {}).get("continuity_id", ""),
+                                     continuation.preferred_llm_endpoint_id, continuation.preferred_llm_model_id]))
+            stable_messages = list(frozen)
+            contextual_messages = []
+            context_committed = True
         settled_messages: list[LLMMessageIR] = []
         memory_pack = metadata.get("memory_pack")
         context_view = None
-        view_builder = (memory_service.l1_context_view if memory_service is not None else None)
-        if callable(view_builder) and "active_turn" not in metadata.get("memory_context_errors", {}):
-            selected_turns = tuple(getattr(memory_pack, "l1_turns", ()) or ())
+        if memory_service is not None and "active_turn" not in metadata.get("memory_context_errors", {}):
+            view_builder = memory_service.l1_context_view
+            selected_turns = tuple(memory_pack.l1_turns) if memory_pack is not None else ()
             context_view = view_builder(continuation.turn_id, selected_turns)
-            prepare = getattr(getattr(self.context, "execution_runtime", None), "prepare_model_context", None)
-            if not self.include_live_execution_context:
-                # Temporary side turns retain local file-result visibility but
-                # must not claim/acknowledge the resident's live observations.
-                from pal.execution.runtime import ExecutionRuntime
-
-                ExecutionRuntime.prepare_model_context(
-                    self.context.execution_runtime, memory_service, continuation, context_view=context_view,
-                )
-            elif prepare is not None:
-                prepare(memory_service, continuation, context_view=context_view)
-                active_turn = memory_service.active_l1_turn(continuation.turn_id)
-                context_view = view_builder(continuation.turn_id, selected_turns)
-        for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
+            self.context.execution_runtime.prepare_prompt_context(memory_service, continuation,
+                context_view=context_view, include_live=self.include_live_execution_context)
+            active_turn = memory_service.active_l1_turn(continuation.turn_id)
+            context_view = view_builder(continuation.turn_id, selected_turns)
+        for settled_turn in (memory_pack.l1_turns if memory_pack is not None else ()):
             from pal.memory.context_view import projected_messages
             if context_view is not None:
                 original = list(context_view.turns[settled_turn.turn_id].messages.values())
@@ -1420,7 +1354,7 @@ class TurnExecutor:
                 original = list(projected_messages(settled_turn, settled=True))
             projected = self._project_messages_for_prompt(
                 original,
-                turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
+                turn_id=settled_turn.turn_id,
                 artifact_scope_key=artifact_scope_key,
                 capabilities=dict(metadata.get("llm_capabilities") or {}),
             )
@@ -1430,7 +1364,7 @@ class TurnExecutor:
             )
         active_messages: list[LLMMessageIR] = []
         if active_turn is not None:
-            from pal.core.prompt_context import projected_context
+            from pal.memory.prompt_context import projected_context
             active_messages = (list(context_view.turns[active_turn.turn_id].messages.values())
                                if context_view is not None else projected_context(active_turn))
             active_messages = self._project_messages_for_prompt(
@@ -1474,10 +1408,9 @@ class TurnExecutor:
             *contextual_messages,
             *tail_messages,
         ]
-        project_continuity = (memory_service.project_continuity if memory_service is not None else None)
-        continuity_id = getattr(memory_pack, "metadata", {}).get("continuity_id", "")
-        if callable(project_continuity) and continuity_id:
-            prompt_messages = project_continuity(prompt_messages)
+        continuity_id = memory_pack.metadata.get("continuity_id", "") if memory_pack is not None else ""
+        if memory_service is not None and continuity_id:
+            prompt_messages = memory_service.project_continuity(prompt_messages)
         metadata = dict(prompt.metadata)
         metadata["continuity_id"] = continuity_id
         metadata["history_visibility"] = "active_turn" if assembly_context.turn_kind == "proactive_trigger" else "resident"
@@ -1522,27 +1455,11 @@ class TurnExecutor:
         self,
         preferred_endpoint_id: str | None,
     ) -> dict[str, Any]:
-        llm_runtime = self.context.port_registry.get("llm:llm")
+        llm_runtime = self.llm.optional
         if llm_runtime is None:
             return {}
-        resolver = getattr(llm_runtime, "resolve_endpoint_facts", None)
-        if not callable(resolver):
-            return {}
-        try:
-            facts = resolver(preferred_endpoint_id=preferred_endpoint_id)
-        except TypeError:
-            facts = resolver()
-        except Exception:
-            return {}
-        if not isinstance(facts, dict):
-            return {}
-        return {
-            "endpoint_id": facts.get("endpoint_id"),
-            "model_id": facts.get("model_id"),
-            "supports_vision": bool(facts.get("supports_vision")),
-            "input_modalities": list(facts.get("input_modalities") or []),
-            "capabilities": dict(facts.get("capabilities") or {}),
-        }
+        facts = llm_runtime.metadata(preferred_endpoint_id=preferred_endpoint_id)
+        return facts.to_payload()
 
     @staticmethod
     def _ensure_not_interrupted(continuation) -> None:
@@ -1745,10 +1662,6 @@ class TurnExecutor:
 
     # ── response / temperature helpers ───────────────────────────────────
 
-    @staticmethod
-    def _llm_runtime_supports_streaming(llm_runtime: LLMRuntimePort, request: LLMRequestIR | None = None) -> bool:
-        return llm_runtime.supports_streaming(request)
-
     def infer_response_mode(self, outcome: LLMGenerationResult | None, *, used_tools: bool) -> str:
         if outcome is not None:
             response_mode = str(outcome.response_mode or "").strip().lower()
@@ -1789,9 +1702,8 @@ class TurnExecutor:
         continuation: Any,
         message: LLMMessageIR,
     ) -> None:
-        memory_service = self.context.port_registry.get("memory:memory")
-        method = (memory_service.stream_l1_assistant if memory_service is not None else None)
-        if not callable(method):
+        memory_service = self.memory.optional
+        if memory_service is None:
             return
         if not message.semantic_kind:
             message = replace(
@@ -1802,31 +1714,25 @@ class TurnExecutor:
                     else L1MessageKind.ASSISTANT_REPLY
                 ),
             )
-        result = method(str(continuation.turn_id), message)
-        if inspect.isawaitable(result):
-            await result
+        memory_service.stream_l1_assistant(str(continuation.turn_id), message)
 
     async def _discard_l1_assistant_async(
         self,
         continuation: Any,
         message_id: str,
     ) -> None:
-        memory_service = self.context.port_registry.get("memory:memory")
-        method = (memory_service.discard_l1_assistant if memory_service is not None else None)
-        if not callable(method):
+        memory_service = self.memory.optional
+        if memory_service is None:
             return
-        active_reader = (memory_service.active_l1_turn if memory_service is not None else None)
-        if callable(active_reader):
-            active = active_reader(str(continuation.turn_id))
+        if memory_service is not None:
+            active = memory_service.active_l1_turn(str(continuation.turn_id))
             if active is None or not any(
                 item.role == MessageRole.ASSISTANT
                 and str(item.message_id or "") == str(message_id)
                 for item in active.messages
             ):
                 return
-        result = method(str(continuation.turn_id), str(message_id))
-        if inspect.isawaitable(result):
-            await result
+        memory_service.discard_l1_assistant(str(continuation.turn_id), str(message_id))
 
     def select_turn_temperature(self, response_mode: str) -> float:
         base_by_mode = {
@@ -1844,7 +1750,7 @@ class TurnExecutor:
         continuation: Any,
         assembly_context: Any,
     ) -> bool:
-        memory_service = self.context.port_registry.get("memory:memory")
+        memory_service = self.memory.optional
         if memory_service is None:
             return False
         bind = getattr(self.context.execution_runtime, "bind_result_history", None)
@@ -1888,9 +1794,8 @@ class TurnExecutor:
         call: ToolCallIR,
         result: ToolExecutionResult,
     ) -> None:
-        memory_service = self.context.port_registry.get("memory:memory")
-        method = (memory_service.append_l1_tool_result if memory_service is not None else None)
-        if not callable(method):
+        memory_service = self.memory.optional
+        if memory_service is None:
             self._discard_uncommitted_tool_delivery(str(continuation.turn_id), call.call_id)
             return
         bind = getattr(self.context.execution_runtime, "bind_result_history", None)
@@ -1917,7 +1822,7 @@ class TurnExecutor:
                 snapshot_refs=result.snapshot_refs,
         )
         try:
-            method(turn_id, tool_result)
+            memory_service.append_l1_tool_result(turn_id, tool_result)
         except Exception:
             self._discard_uncommitted_tool_delivery(
                 turn_id,
@@ -1979,9 +1884,8 @@ class TurnExecutor:
     ) -> None:
         """Append tool-declared user context after the complete tool-result batch."""
 
-        memory_service = self.context.port_registry.get("memory:memory")
-        method = (memory_service.append_l1_user_contexts if memory_service is not None else None)
-        if not callable(method):
+        memory_service = self.memory.optional
+        if memory_service is None:
             return
         messages: list[LLMMessageIR] = []
         for call, result in zip(calls, results, strict=True):
@@ -2003,7 +1907,7 @@ class TurnExecutor:
                     )
                 )
         if messages:
-            method(str(continuation.turn_id), tuple(messages))
+            memory_service.append_l1_user_contexts(str(continuation.turn_id), tuple(messages))
 
     def _discard_uncommitted_tool_delivery(
         self,
@@ -2037,11 +1941,11 @@ class TurnExecutor:
         snapshots = getattr(self.context.execution_runtime, "result_snapshots", None)
         if snapshots is not None:
             snapshots.finish_turn(str(outcome.commit_payload.turn_id))
-        llm = self.context.port_registry.get("llm:llm")
+        llm = self.llm.optional
         close_cache = getattr(llm, "end_prompt_cache_turn", None)
         if callable(close_cache):
             close_cache(str(outcome.commit_payload.turn_id))
-        memory_service = self.context.port_registry.get("memory:memory")
+        memory_service = self.memory.optional
         result = None
         if memory_service is not None:
             try:
@@ -2087,516 +1991,7 @@ class TurnExecutor:
 
     # ── shared compaction engine ─────────────────────────────────────────
 
-    def compaction_deadline_seconds(self, *, max_attempts: int | None = None) -> float:
-        engine = self._compaction_engine
-        if engine is None:
-            return 180.0
-        attempts = engine.max_attempts if max_attempts is None else max_attempts
-        # The admission ticket also spans prompt preparation and model apply.
-        return engine.timeout_seconds * max(1, attempts) + 30.0
 
-    async def compact_memory_async(
-        self,
-        memory_service: Any,
-        *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-        assembly_context: Any | None = None,
-        continuation: Any | None = None,
-        preferred_endpoint_id: str | None = None,
-        preferred_model_id: str | None = None,
-        max_attempts: int | None = None,
-        timeout_seconds: float | None = None,
-        cache_epoch: str = "",
-        commit_guard: Callable[[], bool] | None = None,
-        force_semantic: bool = False,
-    ) -> CompactionRunResult:
-        engine = self._compaction_engine
-        if engine is None:
-            return CompactionRunResult(
-                status="engine_unavailable",
-                clock_kind=CompactionClockKind.USER_TURN,
-            )
-        llm_runtime = self.context.port_registry.get("llm:llm")
-        if llm_runtime is None:
-            return CompactionRunResult(
-                status="engine_unavailable",
-                clock_kind=engine.policy.clock_kind,
-            )
-        if max_attempts is not None or timeout_seconds is not None:
-            engine = replace(
-                engine,
-                max_attempts=(
-                    max(1, int(max_attempts))
-                    if max_attempts is not None
-                    else engine.max_attempts
-                ),
-                timeout_seconds=(
-                    max(0.1, float(timeout_seconds))
-                    if timeout_seconds is not None
-                    else engine.timeout_seconds
-                ),
-            )
-        metadata = dict(
-            getattr(assembly_context, "metadata", {}) or {}
-        )
-        logical_scope_id = str(
-            metadata.get("prompt_cache_scope_id") or ""
-        ).strip()
-        if not logical_scope_id:
-            bunshin_scope_key = (
-                getattr(assembly_context, "work_order_id", "")
-                or (continuation.turn_id if continuation is not None else None)
-            )
-            logical_scope_id = (
-                f"bunshin:{bunshin_scope_key}"
-                if getattr(assembly_context, "core_mode", "") == "bunshin"
-                else "pal:resident"
-            )
-        metadata["prompt_cache_scope_id"] = logical_scope_id
-        preferred_endpoint_id = (
-            preferred_endpoint_id
-            or metadata.get("preferred_endpoint_id")
-            or (continuation.preferred_llm_endpoint_id if continuation is not None else None)
-        )
-        preferred_model_id = (
-            preferred_model_id
-            or metadata.get("preferred_model_id")
-            or (continuation.preferred_llm_model_id if continuation is not None else None)
-        )
-        if preferred_endpoint_id:
-            metadata["preferred_endpoint_id"] = preferred_endpoint_id
-        if preferred_model_id:
-            metadata["preferred_model_id"] = preferred_model_id
-        try:
-            clock_value = max(
-                0,
-                int(self._compaction_clock_provider() or 0),
-            )
-        except Exception:
-            clock_value = 0
-        execution_runtime = getattr(self.context, "execution_runtime", None)
-        bind = getattr(execution_runtime, "bind_result_history", None)
-        if callable(bind):
-            bind(memory_service)
-
-        def current_l1_result_ids() -> tuple[str, ...]:
-            turns = memory_service.history.turns if memory_service is not None else ()
-            ids: list[str] = []
-            for turn in list(turns or ()):
-                for message in turn.messages:
-                    for part in message.parts:
-                        if isinstance(part, ToolResultIR):
-                            ids.append(part.call_id)
-                # Successor segments keep logical references for results the
-                # compaction carried forward: they are not removable (F25).
-                for ref in dict(turn.metadata or {}).get(
-                    "compact_retained_result_refs", ()
-                ) or ():
-                    ids.append(str(ref))
-            return tuple(dict.fromkeys(ids))
-
-        result_ids_before_compact = current_l1_result_ids()
-        from pal.llm.contracts import NativeCompactionRuntimePort
-        strategy = (llm_runtime.compaction_strategy(preferred_endpoint_id)
-                    if isinstance(llm_runtime, NativeCompactionRuntimePort) else "semantic_checkpoint")
-        if force_semantic:
-            strategy = "semantic_checkpoint"
-        metadata["compaction_strategy"] = strategy
-        metadata["retained_result_call_ids"] = result_ids_before_compact
-
-
-        after_compact = None
-        retire_tool_results = getattr(
-            execution_runtime,
-            "retire_tool_results",
-            None,
-        )
-        if callable(retire_tool_results) and result_ids_before_compact:
-            def retire_compacted_l1_results() -> None:
-                remaining_ids = set(current_l1_result_ids())
-                removed = tuple(
-                    result_id
-                    for result_id in result_ids_before_compact
-                    if result_id not in remaining_ids
-                )
-                if removed:
-                    retirement_turn_id = (
-                        str(continuation.turn_id)
-                        if continuation is not None
-                        else None
-                    )
-                    retire_tool_results(
-                        turn_id=retirement_turn_id,
-                        result_ids=removed,
-                        execution_lifetime_id=(
-                            "" if retirement_turn_id else logical_scope_id
-                        ),
-                    )
-
-            after_compact = retire_compacted_l1_results
-
-        run_id = str(metadata.get("compaction_op_id") or "").strip()
-        # v3: compact the LEFT segment only.  Closed history is promoted
-        # at this request boundary, the run is opened on the history
-        # owner (single-writer arbitration), and the right side never
-        # enters the summary source.  Warm replay anchors are a later
-        # increment; the first cut is the honest cold-left path.
-        import time as _time
-
-        root = (memory_service.history_root if memory_service is not None else None)
-        if root is None:
-            return CompactionRunResult(
-                status="engine_unavailable",
-                failures=("memory service has no history_root",),
-                clock_kind=engine.policy.clock_kind,
-            )
-        history = self.context.port_registry.get(RESIDENT_HISTORY.name)
-        if history is not None and not await history.reconcile_async():
-            failure = (
-                "resident history recovery failed; persistence must be repaired before compaction"
-                if history.inspect().get("restore_failed")
-                else "pending dialogue archive could not be reconciled"
-            )
-            return CompactionRunResult(
-                status="commit_failed", failures=(failure,),
-                clock_kind=engine.policy.clock_kind,
-            )
-        try:
-            if continuation is None and strategy != "openai_responses":
-                root.promote()
-        except Exception as exc:
-            LOGGER.warning("compact promote_failed failed_at=%s\n%s",
-                           datetime.now(timezone.utc).isoformat(), exception_report(exc))
-            return CompactionRunResult(
-                status="error",
-                failures=("promote failed: " + exception_report(exc),),
-                clock_kind=engine.policy.clock_kind,
-                clock_value=clock_value,
-            )
-        if not run_id:
-            run_id = uuid4().hex
-            metadata["compaction_op_id"] = run_id
-        # One absolute deadline spans preflight, generation, repair, and
-        # the install gate (F1/N03): the run never resets its clock, and
-        # commit eligibility is checked on the owner, not trusted from
-        # engine internals.
-        deadline_at = (
-            _time.monotonic()
-            + engine.timeout_seconds * max(1, engine.max_attempts)
-        )
-        try:
-            left_snapshot = memory_service.begin_left_compaction(
-                run_id,
-                reason="auto",
-                parent_turn_id=(
-                    str(continuation.turn_id) if continuation is not None else ""
-                ),
-                deadline_at=deadline_at,
-                **({"include_completed_tail": True} if strategy == "openai_responses" else {}),
-                **({"allow_summary": True} if force_semantic else {}),
-            )
-        except Exception as exc:
-            LOGGER.warning("compact begin_failed run=%s failed_at=%s\n%s",
-                           run_id, datetime.now(timezone.utc).isoformat(), exception_report(exc))
-            # NoBeneficialCompaction (minimal seed / empty left) and
-            # CompactLaneBusy are structured outcomes, not failures to
-            # retry: report them without touching L or R.
-            return CompactionRunResult(
-                status="no_benefit"
-                if type(exc).__name__ == "NoBeneficialCompaction"
-                else "error",
-                failures=(exception_report(exc),),
-                clock_kind=engine.policy.clock_kind,
-                clock_value=clock_value,
-            )
-
-        # Warm split (primary item 1): the run has fenced the cut, so the LEFT
-        # ids are final.  When a locally eligible cached anchor lies
-        # entirely inside L, the compact request rides the anchor bytes
-        # verbatim + the LEFT suffix after it + the instruction tail;
-        # anything ineligible keeps the honest cold-left source builder
-        # (W21).  Read confirmation is diagnostics, not a prerequisite
-        # (R3/S1: a hit saves the prefix, a miss costs the cold price).
-        replay_request = None
-        replay_dialect = ""
-        replay_wire_shape = ""
-        try:
-            left_ids = tuple(
-                str(message.message_id)
-                for turn in left_snapshot.turns for message in turn.messages
-            )
-            replay_request, replay_dialect, replay_wire_shape = (
-                self._resident_compaction_replay_request(
-                    memory_service,
-                    llm_runtime=llm_runtime,
-                    logical_scope_id=logical_scope_id,
-                    preferred_endpoint_id=preferred_endpoint_id,
-                    preferred_model_id=preferred_model_id,
-                    include_active=continuation is not None,
-                    active_turn_id=(
-                        str(continuation.turn_id) if continuation is not None else ""
-                    ),
-                    left_message_ids=left_ids,
-                )
-            )
-        except Exception:
-            replay_request, replay_dialect, replay_wire_shape = None, "", ""
-        if replay_request is not None:
-            preferred_endpoint_id = (
-                preferred_endpoint_id
-                or str(
-                    replay_request.metadata.get("preferred_endpoint_id")
-                    or ""
-                ).strip()
-                or None
-            )
-            preferred_model_id = (
-                preferred_model_id
-                or str(
-                    replay_request.metadata.get("preferred_model_id")
-                    or replay_request.model_hint
-                    or ""
-                ).strip()
-                or None
-            )
-            metadata["preferred_endpoint_id"] = preferred_endpoint_id
-            metadata["preferred_model_id"] = preferred_model_id
-            diagnostics = self.state.diagnostics
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_warm_replay_engaged",
-                    "scope": str(logical_scope_id),
-                    "run_id": run_id,
-                    "dialect": replay_dialect,
-                    "wire_shape": replay_wire_shape,
-                })
-
-        from pal.llm.compaction import is_native_window
-        from pal.shared import PromptAssemblyContext
-        from pal.llm.conversions import tool_definition_ir_from_dict
-        from pal.llm.serde import message_from_payload
-        from pal.memory.continuity import Continuity
-        captured_messages = tuple(message for turn in left_snapshot.turns for message in turn.messages)
-        metadata["compact_source_ids"] = tuple(m.message_id for m in captured_messages)
-        native_source = any(is_native_window(m) for m in captured_messages)
-        native_next_request = None
-        if strategy == "openai_responses" or native_source:
-            try:
-                capabilities = self._resolve_llm_capabilities_for_endpoint(preferred_endpoint_id)
-                source_ids = set(left_snapshot.message_ids())
-                messages = []
-                tail = []
-                for turn in root.all_turns():
-                    projected = self._project_messages_for_prompt(list(turn.messages),
-                        turn_id=turn.turn_id, artifact_scope_key=logical_scope_id, capabilities=capabilities)
-                    for message in projected:
-                        if message.message_id in source_ids:
-                            messages.append(Continuity.from_message(message, {}).standalone_message()
-                                if message.semantic_kind == "runtime_context_summary" else message)
-                        else:
-                            tail.append(message)
-                shell = self._build_canonical_prompt(
-                    assembly_context or PromptAssemblyContext(metadata={"typed_l1_projection": True}),
-                    max_output_tokens=max(512, reserved_output_tokens), model_hint=preferred_model_id)
-                stable = tuple(m for m in shell.messages if m.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER})
-                source_stable = stable
-                for turn in reversed(left_snapshot.turns):
-                    frozen = turn.metadata.get("prompt_context_state", {}).get("stable", ())
-                    if frozen:
-                        source_stable = tuple(message_from_payload(m) for m in frozen)
-                        break
-                tools = tuple(tool_definition_ir_from_dict(tool) for tool in self._build_llm_tool_contracts())
-                shell = replace(shell, tools=tools, metadata={**shell.metadata, **metadata,
-                    "preferred_endpoint_id": preferred_endpoint_id})
-                if replay_request is None or native_source:
-                    replay_request = replace(shell, messages=(*source_stable, *messages))
-                native_next_request = replace(shell, messages=(*stable, *tail))
-                replay_wire_shape = "openai_response"
-                replay_dialect = "canonical_history"
-            except Exception as exc:
-                root.close_run(run_id, cancelled=False, reason="native_source_unavailable")
-                return CompactionRunResult(status="source_unavailable", failures=(exception_report(exc),),
-                                           clock_kind=engine.policy.clock_kind, clock_value=clock_value)
-
-        def close_run_terminal(*, cancel: bool, reason: str) -> None:
-            """Idempotent close of OUR run (F1 / review R2-b).
-
-            A run already terminal (e.g. the engine committed), a run
-            retired by reset, or a superseded run is left alone — a
-            vanished run is terminal by construction and late cleanup
-            must never raise StaleRun out of its own finally path.
-            """
-
-            root.close_run(run_id, cancelled=cancel, reason=reason)
-
-        def committed_run_record():
-            record = root.run_record(run_id)
-            if record is not None and record.phase.value == "committed":
-                return record
-            return None
-
-        def post_commit_result(fault: str) -> CompactionRunResult:
-            """Committed outcome with post-fault diagnostics (review R2-a).
-
-            The install already won; the owner's terminal record is the
-            authority.  The caller gets a success carrying the accepted
-            memory result and the packaging fault — never a fabricated
-            empty success, never a `history unchanged` claim, and the
-            required projection rebase still fires.
-            """
-
-            from pal.memory.contracts import MemoryCompactResult
-
-            record = committed_run_record()
-            seed_text = ""
-            left_turns = root.left_turns()
-            if left_turns:
-                seed_text = "".join(
-                    getattr(part, "text", "")
-                    for message in left_turns[0].messages
-                    for part in message.parts
-                )
-            memory_result = MemoryCompactResult(
-                summary=seed_text,
-                projected_entries=[],
-                metadata={
-                    "two_segment": True,
-                    "run_id": run_id,
-                    "status": "committed",
-                    "left_revision": int(
-                        getattr(record, "committed_left_revision", 0) or 0
-                    ),
-                    "replayed": True,
-                    "reconstructed": "post_commit_packaging_fault",
-                },
-            )
-            diagnostics = self.state.diagnostics
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_post_commit_packaging_fault",
-                    "scope": str(logical_scope_id),
-                    "run_id": run_id,
-                    "error": fault,
-                })
-            self._rebase_projection_after_left_install(
-                llm_runtime, logical_scope_id, root,
-                memory_service=memory_service)
-            return CompactionRunResult(
-                status="compacted",
-                summary_entry=None,
-                memory_result=memory_result,
-                failures=(f"post-commit packaging fault: {fault}",),
-                clock_kind=engine.policy.clock_kind,
-                clock_value=clock_value,
-            )
-
-        def replay_guard() -> bool:
-            # Hot-cache compaction (cache_epoch): the still-warm anchor must
-            # remain eligible while the engine retries — an expired or
-            # epoch-shifted anchor aborts instead of falling back to a cold
-            # request the notice never asked for.
-            reader = getattr(llm_runtime, "prompt_cache_warm_deadline_snapshot", None)
-            if not callable(reader):
-                return False
-            try:
-                current = dict(reader() or {})
-                return bool(
-                    current.get("eligible")
-                    and str(current.get("anchor_epoch") or "") == cache_epoch
-                    and int(current.get("anchor_remaining_ttl_seconds") or 0) > 0
-                )
-            except Exception:
-                return False
-
-        try:
-            history = self.context.port_registry.get(RESIDENT_HISTORY.name)
-            history_reference = history.prepare_history_reference(left_snapshot) if history is not None else None
-            snapshot = CompactionSnapshot.capture_left(
-                memory_service,
-                left_snapshot,
-                target_input_budget=target_input_budget,
-                reserved_output_tokens=reserved_output_tokens,
-                clock_kind=engine.policy.clock_kind,
-                clock_value=clock_value,
-                metadata=metadata,
-                replay_request=replay_request,
-                next_request=native_next_request,
-                replay_dialect=replay_dialect,
-                replay_wire_shape=replay_wire_shape,
-            )
-            run_result = await asyncio.wait_for(
-                engine.run(
-                    snapshot,
-                    llm_runtime=llm_runtime,
-                    memory_service=memory_service,
-                    after_commit=after_compact,
-                    replay_guard=replay_guard if cache_epoch else None,
-                    commit_guard=commit_guard,
-                    commit_hooks=history_reference,
-                ),
-                timeout=max(deadline_at - _time.monotonic(), 0.05),
-            )
-        except asyncio.CancelledError:
-            if committed_run_record() is not None:
-                # Post-commit external cancel (review R2-a): keep the
-                # COMMITTED fact, mark derived state, then honor the
-                # stop intent — never swallow the cancellation.
-                self._rebase_projection_after_left_install(
-                    llm_runtime, logical_scope_id, root,
-                    memory_service=memory_service)
-            else:
-                close_run_terminal(cancel=True,
-                                   reason="orchestration_cancelled")
-            raise
-        except TimeoutError:
-            if committed_run_record() is not None:
-                return post_commit_result("deadline exceeded after commit")
-            close_run_terminal(cancel=False, reason="deadline")
-            return CompactionRunResult(
-                status="error",
-                failures=("deadline: compaction run exceeded its absolute "
-                          "time budget",),
-                clock_kind=engine.policy.clock_kind,
-                clock_value=clock_value,
-            )
-        except Exception as exc:
-            fault = exception_report(exc)
-            if committed_run_record() is not None:
-                # The engine installed and then failed while packaging
-                # the result; classification follows the owner's terminal
-                # state, not the await's exception kind.
-                return post_commit_result(fault)
-            close_run_terminal(cancel=False,
-                               reason=f"orchestration_error:{type(exc).__name__}")
-            return CompactionRunResult(
-                status="error",
-                failures=(fault,),
-                clock_kind=engine.policy.clock_kind,
-                clock_value=clock_value,
-            )
-        finally:
-            # A packaging fault or cancellation after install still requires
-            # saving the new work state before publishing its archive.
-            if history is not None and committed_run_record() is not None:
-                await history.checkpoint_async("compact", rebase=True)
-        if not run_result.success:
-            # The engine returns instead of raising on generation
-            # failure; close our run idempotently (reset may already
-            # have retired it — that is a valid terminal outcome).
-            close_run_terminal(cancel=False,
-                               reason=f"engine:{run_result.status}")
-        else:
-            # The install already won: rebasing the hosted projection
-            # session is post-commit work (F13) — a failure here is
-            # recorded, never a rollback of the new left.
-            self._rebase_projection_after_left_install(
-                llm_runtime, logical_scope_id, root,
-                memory_service=memory_service)
-        if not run_result.success or continuation is None:
-            return run_result
-        self.clear_execution_cursors(continuation)
-        return run_result
 
     def _llm_failure_context(self, continuation) -> dict[str, Any]:
         """Freeze diagnostic R before submission advances the live L/R cut.
@@ -2608,7 +2003,7 @@ class TurnExecutor:
             "turn_id": str(continuation.turn_id),
             "llm_round_index": continuation.llm_round_index,
         }
-        memory = self.context.port_registry.get("memory:memory")
+        memory = self.memory.optional
         root = memory.history_root if memory is not None else None
         if root is not None:
             cut = root.cut
@@ -2625,7 +2020,7 @@ class TurnExecutor:
         return context
 
     def _history_submission_observer(self, request: LLMRequestIR):
-        memory = getattr(self.context, "port_registry", {}).get("memory:memory")
+        memory = self.memory.optional
         root = (memory.history_root if memory is not None else None)
         if root is None:
             return None
@@ -2640,817 +2035,3 @@ class TurnExecutor:
                     history.submitted()
 
         return submitted
-
-    def _prepare_turn_projection(
-        self, llm_runtime: Any, request: LLMRequestIR
-    ) -> tuple | None:
-        """Owner-side projection prepare for one ordinary LLM round (N3).
-
-        F1 (review af51d74): the round is prepared from the runtime's
-        immutable prepared-generation plan — the projection encodes the
-        COMPILED effective request for the RESOLVED endpoint with its
-        strong binding (real spec identity, continuation contract version,
-        config fingerprint).  Placeholder-bound sessions are never used.
-
-        Returns ``(EncodedRequest, EndpointBinding, handle)`` or None —
-        None everywhere means the honest cold codec path.  The view is the
-        effective request's non-preamble messages not yet frozen in the
-        session; a message without a durable identity aborts the projection
-        (transient compiler content must never freeze into the prefix).
-        Preparation happens here, on the owner, before any worker thread
-        touches the session (J5).
-        """
-
-        # Proactive requests deliberately exclude resident history. The shared
-        # history root (including its left bootstrap) cannot encode this view.
-        # Use the ordinary codec with the complete, isolated current request.
-        if request.metadata.get("history_visibility") == "active_turn":
-            return None
-        from pal.llm.compaction import is_native_window
-        if any(is_native_window(message) for message in request.messages):
-            return None  # The complete canonical native window is encoded once by the codec.
-        projection = llm_runtime.projection_port
-        if projection is None:
-            return None
-        try:
-            plan = projection.prepare_generation_plan(request)
-        except Exception:
-            return None
-        if plan is None or plan.compact_required:
-            return None
-        scope_id = str(request.metadata.get("prompt_cache_scope_id") or "").strip()
-        if not scope_id:
-            return None
-        try:
-            session = projection.endpoint_projection_session(scope_id, plan=plan)
-        except Exception:
-            return None
-        if session is None:
-            return None
-        binding = session.binding
-        identity = session.identity
-        if binding is None or identity is None:
-            return None
-        if session.active_attempt is not None:
-            # A round is already open (retry/reentry); do not interleave a
-            # second prepare on one lineage.
-            return None
-        # Staleness guard (J7): a committed left replacement this session
-        # never consumed leaves the frozen prefix replaying retired history.
-        # Compare the root's left-replacement generation; mismatch = cold.
-        port_registry = getattr(self.context, "port_registry", None)
-        if port_registry is None:
-            # Stub hosts have no memory owner: prepare stays cold.
-            return None
-        memory_service = port_registry.get("memory:memory")
-        root = (memory_service.history_root if memory_service is not None else None)
-        if root is None:
-            return None
-        root_generation = root.left_generation
-        root_generation = int(root_generation or 0)
-        # Durable storage is not visibility: scoped/excluded control records
-        # remain in L1 after the compiler stops sending them. Rebuild once at
-        # that legal projection boundary; never replay a hidden instruction.
-        visible_ids = {m.message_id for m in plan.effective_request.messages}
-        stored_turns = (memory_service.history if memory_service is not None else None)
-        durable_ids: set[str] = set()
-        hidden_context_ids: set[str] = set()
-        for turn in getattr(stored_turns, "turns", ()):
-            for message in turn.messages:
-                durable_ids.add(str(message.message_id))
-                if message.semantic_kind == "pal_prompt_context" and message.message_id not in visible_ids:
-                    hidden_context_ids.add(message.message_id)
-        continuity = getattr(stored_turns, "continuity", None)
-        if continuity is not None:
-            durable_ids.add(str(continuity.standalone_id))
-        if hidden_context_ids.intersection(session.covered_message_ids()):
-            session.rebind(binding, capabilities=plan.capabilities)
-            identity = session.identity
-        session_generation = int(session.history_left_revision or 0)
-        if root_generation != session_generation:
-            # C3 (review c9cb2d2): a fresh or rebound lineage owns no frozen or
-            # pending wire bytes and cannot be replaying retired history — it
-            # is simply not materialized yet.  The restored/rebound process
-            # gives it ONE cold rebuild from the CURRENT canonical L model
-            # view plus the current R through the same owner interface the
-            # post-commit rebase uses; content and coverage are established
-            # together, and only then does the consumed generation record the
-            # rebuilt view.  A lineage that already holds wire content keeps
-            # the strict stale refusal (explicit rebase required) — no
-            # counter-only permission for a retired prefix.
-            if not session.has_materialized_content():
-                self._bootstrap_projection_from_current_left(
-                    scope_id, root,
-                    memory_service=memory_service, session=session,
-                )
-                session_generation = int(
-                    session.history_left_revision or 0
-                )
-        if root_generation != session_generation:
-            diagnostics = self.state.diagnostics
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_turn_projection_stale_left",
-                    "scope": scope_id,
-                    "root_generation": root_generation,
-                    "session_generation": session_generation,
-                })
-            return None
-        # R3 (review 95373ef): "already in the prefix" covers committed
-        # chunk spans AND the L-owned reference ids a rebase installed —
-        # the next request must not re-append the compiler's identical
-        # continuity injection as fresh tail (that doubled the summary).
-        frozen = set(session.covered_message_ids())
-        # Durable identity = present in the L1 store (or the L-owned
-        # continuity reference).  A request message whose id is NOT durable
-        # is transient compiler content: it must never freeze into the
-        # prefix, so the whole round falls back to the cold codec path.
-        # F6 (review af51d74): a lineage whose frozen chunk spans reference
-        # history that is no longer durable (soft reset, out-of-band clear)
-        # must fall back cold instead of replaying retired history.  Reset
-        # rolls the incarnation and retires hosted sessions; this structural
-        # guard is the seam that stays honest even when retirement was never
-        # wired (direct service-level resets, restored stores).
-        frozen_span_ids = {
-            str(message_id)
-            for chunk in session.chunks or ()
-            for message_id in (chunk.semantic_span or ())
-        }
-        if frozen_span_ids and not frozen_span_ids <= durable_ids:
-            diagnostics = self.state.diagnostics
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_turn_projection_lineage_stale",
-                    "scope": scope_id,
-                    "nondurable_spans": sorted(frozen_span_ids - durable_ids),
-                })
-            return None
-        # R4/M17 (review 95373ef): only the LEADING run of system/developer
-        # messages is shell-owned preamble (the codecs hoist exactly those
-        # heads; mid-conversation developer contexts degrade chronologically).
-        # Every other message — developer contexts included — rides the
-        # conversation: durable-id checked, frozen-skipped, else tail.  The
-        # old role-wide skip let each new pal_context revision jump ahead of
-        # the frozen prefix, reordering wire bytes mid-payload.
-        preamble_roles = {"system", "developer"}
-        request_messages = tuple(plan.effective_request.messages)
-        head_end = 0
-        for message in request_messages:
-            if message.role.value in preamble_roles:
-                head_end += 1
-            else:
-                break
-        tail: list[LLMMessageIR] = []
-        for index, message in enumerate(request_messages):
-            if index < head_end:
-                continue
-            message_id = str(message.message_id or "")
-            if not message_id or message_id not in durable_ids:
-                return None  # transient identity: cold fallback
-            if message_id in frozen:
-                continue
-            tail.append(message)
-        try:
-            import json as _json
-
-            from pal.llm.projection_contracts import AttemptKey, OwnerFence
-            from pal.llm.projection_session import HistoryView
-            from pal.llm.shapes.base import EncodedRequest
-
-            attempt = AttemptKey(
-                identity,
-                OwnerFence(int(session.owner_fence or 0)),
-                f"turn-{uuid4().hex[:12]}",
-            )
-            session.begin_round(attempt, requires_native=False)
-            prepared = session.prepare_normal(
-                HistoryView(cursor=session.frontier, messages=tuple(tail)),
-                request_shell=plan.effective_request,
-            )
-            encoded = EncodedRequest(
-                payload=_json.loads(prepared.payload_json),
-                message_spans=tuple(prepared.message_spans),
-                extra_body=dict(prepared.extra_body),
-                applied_cache_breakpoint_message_ids=tuple(
-                    prepared.applied_cache_breakpoint_message_ids
-                ),
-            )
-        except Exception as exc:
-            diagnostics = self.state.diagnostics
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_turn_projection_prepare_failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
-            try:
-                if session.active_attempt is not None:
-                    session.reject_commit(attempt.attempt_id, reason="prepare_failed")
-            except Exception:
-                pass
-            return None
-        return (encoded, binding, {"session": session, "attempt": attempt,
-                                   "tail_ids": tuple(m.message_id for m in tail),
-                                   "plan": plan})
-
-    def _abandon_turn_projection_round(self, projection_pack: tuple | None) -> None:
-        """R6 (review 95373ef): close an unaccepted draft owned by THIS pack.
-
-        Runs on every exit path of ``_handle_llm_request`` after prepare;
-        a round the observation already closed (commit or reject) is a
-        no-op, and a lineage that has moved on to a successor attempt is
-        left untouched — late cleanup must never release someone else's
-        round or roll back an accept that already committed.
-        """
-
-        if projection_pack is None:
-            return
-        session = projection_pack[2]["session"]
-        attempt = projection_pack[2]["attempt"]
-        active = session.active_attempt
-        if active is None:
-            return
-        if active.attempt_id != attempt.attempt_id:
-            return
-        try:
-            session.reject_commit(attempt.attempt_id, reason="round_abandoned")
-        except Exception:
-            return
-        diagnostics = self.state.diagnostics
-        if diagnostics is not None:
-            diagnostics.append({
-                "kind": "two_segment_turn_projection_abandoned",
-                "reason": "round_abandoned",
-                "attempt": attempt.attempt_id,
-            })
-
-    def _observe_turn_projection(
-        self, projection_pack: tuple | None, continuation: Any, outcome: Any
-    ) -> None:
-        """Close the accept loop for one projected round (N3/W5, F2/F3/F4).
-
-        Only a receipt-authorized, semantically accepted outcome freezes:
-        the typed send receipt must name THIS attempt and confirm the
-        projected payload actually went on the wire (F2); failures,
-        errors, dropped/fallback sends and pre-boundary discards reject
-        the round so the next request re-sends the tail cold instead of
-        freezing an answer that never happened. Native continuation derives
-        only from the accepted message's replay envelope. Its tool names and
-        arguments must match accepted IR, and structural continuation contracts
-        must be preserved. Degraded material refuses the freeze; required
-        thinking/signature content is never silently re-encoded or discarded.
-        Projection bookkeeping never alters the accepted outcome.
-        """
-
-        if projection_pack is None:
-            return
-        session = projection_pack[2]["session"]
-        attempt = projection_pack[2]["attempt"]
-        tail_ids = projection_pack[2]["tail_ids"]
-        diagnostics = self.state.diagnostics
-
-        def _reject(reason: str) -> None:
-            try:
-                session.reject_commit(attempt.attempt_id, reason=reason)
-            except Exception:
-                pass
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_turn_projection_rejected",
-                    "reason": reason,
-                    "attempt": attempt.attempt_id,
-                })
-
-        receipt = outcome.projection_receipt
-        if receipt is None:
-            # No projection was offered, or the runtime never reported one:
-            # without a receipt nothing may freeze (F2).
-            _reject("no_send_receipt")
-            return
-        if str(getattr(receipt, "attempt_id", "")) != str(attempt.attempt_id):
-            _reject("attempt_mismatch")
-            return
-        if not getattr(receipt, "applied", False):
-            _reject(f"projection_not_applied:{getattr(receipt, 'detail', '')}")
-            return
-        accepted = outcome.response.message
-        finish_reason = outcome.response.finish_reason
-        from pal.shared import LLMFinishReason as _FinishReason
-
-        if accepted is None or finish_reason in (
-            _FinishReason.ERROR,
-            _FinishReason.COMPACT_REQUIRED,
-        ):
-            _reject("round_failed")
-            return
-        # L1's accepted contribution is the only replay authority. The send
-        # receipt proves admission, but carries no independent response copy.
-        from pal.llm.replay_acceptance import native_candidate_from_accepted_message
-
-        closed_call_ids: tuple[str, ...] = ()
-        accepted_messages: tuple = ()
-        native_committed = False
-        try:
-            native = native_candidate_from_accepted_message(accepted)
-            if native is not None:
-                session.attach_native(attempt, native)
-                native_committed = True
-                closed_call_ids = tuple(native.call_ids)
-            elif accepted.parts:
-                # This also covers merged Completion replay: the codec uses
-                # its accepted message envelope and preserves every piece.
-                accepted_messages = (accepted,)
-        except Exception as exc:
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_turn_projection_native_degraded",
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
-            _reject("native_degraded")
-            return
-        try:
-            import hashlib as _hashlib
-
-            from pal.llm.projection_contracts import (
-                AppendReceipt, HistoryCommitReceipt, HistoryCursor,
-            )
-
-            before = session.frontier
-            accepted_id = str(getattr(accepted, "message_id", "") or "")
-            span_ids = (*tail_ids, accepted_id) if accepted_id else tail_ids
-            after = HistoryCursor(
-                history_epoch=before.history_epoch,
-                block_sequence=before.block_sequence + 1,
-                prefix_digest=_hashlib.sha256(
-                    "".join(span_ids).encode("utf-8")
-                ).hexdigest(),
-            )
-            session.observe_commit(
-                HistoryCommitReceipt(
-                    attempt=attempt,
-                    append=AppendReceipt(
-                        before=before, after=after, block_count=1),
-                    closed_call_ids=closed_call_ids,
-                    native_committed=native_committed,
-                ),
-                accepted_messages=accepted_messages,
-                span_message_ids=span_ids,
-                native_message_id=accepted_id if native_committed else "",
-            )
-        except Exception as exc:
-            diagnostics = self.state.diagnostics
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_turn_projection_commit_failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
-
-    def _rebase_projection_after_left_install(
-        self, llm_runtime: Any, scope_id: str, root: Any, *,
-        memory_service: Any = None,
-    ) -> None:
-        """Drive on_left_replaced on the runtime-hosted projection session.
-
-        Post-commit only (F13): rebase failures land in diagnostics and never
-        roll back the installed left segment.
-
-        R3/B1 (review 95373ef / 4b14ce4): the reseed uses the MODEL view of L
-        — the standalone continuity reference that normal compiler injection
-        and the handoff carry — and registers the ids of EVERYTHING that view
-        materialized as L-owned coverage, so the next prepare never re-appends
-        L content the rebuilt prefix already carries.
-        """
-
-        projection = llm_runtime.projection_port
-        if projection is None:
-            return
-        try:
-            session = projection.endpoint_projection_session(scope_id, rebind=False)
-            if session is None:
-                return
-            self._install_left_replacement(
-                session, memory_service=memory_service, root=root
-            )
-        except Exception as exc:
-            diagnostics = self.state.diagnostics
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_projection_rebase_failed",
-                    "scope": str(scope_id),
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
-
-    def _bootstrap_projection_from_current_left(
-        self, scope_id: str, root: Any, *,
-        memory_service: Any = None,
-        session: Any,
-    ) -> None:
-        """C3 (review c9cb2d2): one cold rebuild for an unmaterialized lineage.
-
-        A fresh or rebound projection that never consumed a left generation
-        is initialized from the CURRENT canonical L model view + current R
-        with the endpoint plan/profile its binding already carries.  Same
-        seed/coverage rules as the post-commit rebase — this is
-        that same entry, not a third recovery path.  Never called on a
-        materialized lineage and never a per-round fallback: after this one
-        rebuild the consumed generation matches the root and ordinary
-        prepares resume; a later mismatch without an explicit rebase stays
-        refused.
-        """
-
-        try:
-            self._install_left_replacement(
-                session, memory_service=memory_service, root=root
-            )
-        except Exception as exc:
-            diagnostics = self.state.diagnostics
-            if diagnostics is not None:
-                diagnostics.append({
-                    "kind": "two_segment_projection_bootstrap_failed",
-                    "scope": str(scope_id),
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
-
-    def _install_left_replacement(
-        self, session: Any, *, memory_service: Any, root: Any
-    ) -> None:
-        """One left replacement install, shared by rebase and bootstrap (C3).
-
-        Builds the SAME facts for both callers: the model-view seed (with
-        the full L-owned coverage its encode materializes), the surviving
-        frozen right side the session actually holds, and the post-install
-        cursor base at the authority's own left generation.  The
-        native/coverage rules live in ``on_left_replaced`` itself.
-        """
-
-        rebase = session.on_left_replaced
-        import hashlib as _hashlib
-
-        from pal.llm.projection_contracts import HistoryCursor
-        from pal.llm.projection_session import LeftReplacement
-
-        seed_messages: tuple = tuple(root.left_messages())
-        seed_coverage_ids: tuple[str, ...] = ()
-        if memory_service is not None:
-            seed_messages, seed_coverage_ids = self._left_view_seed(
-                memory_service, root
-            )
-        # F4 (review): the keeper is the session's ACTUAL frozen right
-        # side — unfrozen right messages stay in the open tail and must
-        # not claim chunk survival; a session with no committed chunks
-        # keeps nothing.  The cursor epoch comes from the history
-        # authority's own left revision, never a hardcoded constant.
-        frozen_ids = set(session.frozen_message_ids())
-        kept = tuple(
-            message
-            for message in root.right_messages()
-            if message.message_id in frozen_ids
-        )
-        left_revision = root.left_generation
-        left_revision = int(left_revision or 0)
-        digest = _hashlib.sha256(
-            "".join(
-                m.message_id for m in (*seed_messages, *kept)
-            ).encode("utf-8")
-        ).hexdigest()
-        rebase(
-            LeftReplacement(
-                seed_messages=seed_messages,
-                kept_frozen_messages=kept,
-                cursor_after=HistoryCursor(
-                    history_epoch=left_revision,
-                    block_sequence=1,
-                    prefix_digest=digest or "0" * 64,
-                ),
-                left_revision=left_revision,
-                seed_coverage_ids=seed_coverage_ids,
-            )
-        )
-
-    def _left_view_seed(
-        self, memory_service: Any, root: Any
-    ) -> tuple[tuple, tuple[str, ...]]:
-        """R3/B1: the reseed as the MODEL view of L, with its full coverage.
-
-        When the cut owns the compact seed, the model sees the standalone
-        continuity reference — the same message normal compiler injection
-        and the handoff carry — not the raw assistant seed the authority
-        stores.  Encoding the raw form here would put the same summary on
-        the wire twice (raw assistant seed + standalone user reference).
-
-        B1 (review 4b14ce4): the seed is not always "just the summary".  A
-        recovery/rebind bootstrap hands this entry the WHOLE current L model
-        view (summary plus promoted ordinary groups), so the returned
-        coverage is the model-view id of EVERY message the seed encode
-        receives — one encode, one coverage set.  Returns
-        ``(seed_messages, seed_coverage_ids)``; the ids are empty only for
-        an empty seed.
-        """
-
-        def coverage(messages: Sequence[Any]) -> tuple[str, ...]:
-            # Same coordinates as the encode: the standalone substitution
-            # above keeps the canonical source id out of the model view.
-            return tuple(
-                dict.fromkeys(
-                    str(message.message_id)
-                    for message in messages
-                    if str(message.message_id or "")
-                )
-            )
-
-        from pal.memory.context_view import projected_messages
-        from pal.memory.turn_ir import L1TurnState
-
-        # Bootstrap uses the same visibility rules as ordinary compilation.
-        # Raw L1 still retains expired instructions and excluded revisions.
-        selected = []
-        for turn in root.left_turns():
-            visible = {m.message_id for m in projected_messages(
-                turn, settled=turn.state != L1TurnState.ACTIVE)}
-            selected.extend(
-                message for message in turn.messages
-                if message.semantic_kind != "pal_prompt_context" or message.message_id in visible
-            )
-        messages = tuple(selected)
-        turns = (memory_service.history if memory_service is not None else None)
-        continuity = getattr(turns, "continuity", None)
-        if continuity is None or not str(getattr(continuity, "source_id", "") or ""):
-            return messages, coverage(messages)
-        summary_turn_id = getattr(turns, "summary_turn_id", None)
-        if not summary_turn_id or not any(
-            turn.turn_id == summary_turn_id for turn in root.left_turns()
-        ):
-            return messages, coverage(messages)
-        if not any(
-            message.message_id == continuity.source_id for message in messages
-        ):
-            return messages, coverage(messages)
-        standalone = continuity.standalone_message()
-        mapped = tuple(
-            standalone if message.message_id == continuity.source_id else message
-            for message in messages
-        )
-        return mapped, coverage(mapped)
-
-    def _left_model_view_ids(
-        self, memory_service: Any, left_ids: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        """R3: map raw L ids into the model-view coordinates.
-
-        The cut-owned compact seed appears to the model as its standalone
-        continuity reference (``continuity:<source>``), while the history
-        authority stores the raw seed id.  Warm coverage compares like for
-        like through this canonical mapping — shared with the rebase seed
-        view and the normal compiler injection — instead of raw-vs-model
-        equality, which refused every warm attempt on a two-segment
-        history.  No cut-owned seed means no substitution.
-        """
-
-        ids = tuple(str(value) for value in left_ids)
-        turns = (memory_service.history if memory_service is not None else None)
-        continuity = getattr(turns, "continuity", None)
-        if continuity is None or not str(getattr(continuity, "source_id", "") or ""):
-            return ids
-        root = (memory_service.history_root if memory_service is not None else None)
-        summary_turn_id = getattr(turns, "summary_turn_id", None)
-        if root is None or not summary_turn_id:
-            return ids
-        if not any(turn.turn_id == summary_turn_id for turn in root.left_turns()):
-            return ids
-        if continuity.source_id not in ids:
-            return ids
-        return tuple(
-            continuity.standalone_id if value == continuity.source_id else value
-            for value in ids
-        )
-
-    def _resident_compaction_replay_request(
-        self,
-        memory_service: Any,
-        *,
-        llm_runtime: Any,
-        logical_scope_id: str,
-        preferred_endpoint_id: str | None,
-        preferred_model_id: str | None = None,
-        include_active: bool = False,
-        active_turn_id: str = "",
-        left_message_ids: tuple[str, ...] | None = None,
-    ) -> tuple[LLMRequestIR | None, str, str]:
-        """Build a warm handoff request: frozen anchor + accepted suffix.
-
-        Eligibility (PLAN 8.3, conservative by default):
-        - the anchor must carry a known dialect/wire shape (W16);
-        - the anchor's own endpoint/model binding must match the current
-          preferred binding (W09);
-        - no forced tool_choice (W14) and no provider-hosted tools (W13):
-          the handoff must be able to answer plain JSON;
-        - no image representations inside the anchor prefix: their refresh
-          lifetime cannot be proven from the IR, so warm is refused rather
-          than guessed (W18);
-        - coverage proof (W02/W03): every eligible live L1 message must be
-          covered exactly once by the anchor prefix plus the suffix.
-
-        ``left_message_ids`` (v3 two-segment warm split): the ordered LEFT
-        segment message ids from the history authority, captured after the
-        compact run opened and fenced the cut.  When present, the anchor
-        prefix must cover L exactly up to the anchor (prefix equality), the
-        suffix carries only L content after the anchor, and the RIGHT side
-        never enters the summary source (I10) — an anchor reaching past
-        the cut refuses warm instead of leaking R.
-        """
-        # R3/S1 (review 95373ef): a locally eligible anchor is material for
-        # building the same-source handoff — read-observed confirmation is
-        # evidence about the PAST, not a permission for trying (a hit saves
-        # the prefix, a miss costs exactly what the cold alternative would).
-        # The confirmed reader stays available for diagnostics and explicit
-        # hot-only surfaces; ordinary autocompact uses eligibility.
-        reader = getattr(
-            llm_runtime,
-            "prompt_cache_eligible_anchor_request",
-            None,
-        )
-        if not callable(reader):
-            reader = getattr(
-                llm_runtime, "prompt_cache_confirmed_anchor_request", None
-            )
-        if not callable(reader):
-            return None, "", ""
-        try:
-            replay = dict(
-                reader(
-                    logical_scope_id=logical_scope_id,
-                    endpoint_id=str(preferred_endpoint_id or ""),
-                )
-                or {}
-            )
-        except Exception:
-            return None, "", ""
-        anchor_request = replay.get("request")
-        anchor_message_id = str(
-            replay.get("anchor_message_id") or ""
-        ).strip()
-        dialect = str(replay.get("dialect") or "").strip()
-        wire_shape = str(replay.get("wire_shape") or "").strip()
-        if not isinstance(anchor_request, LLMRequestIR) or not anchor_message_id:
-            return None, "", ""
-        if not dialect or not wire_shape:
-            return None, "", ""
-        left_ids: tuple[str, ...] | None = None
-        model_left_ids: tuple[str, ...] | None = None
-        if left_message_ids is not None:
-            left_ids = tuple(str(value) for value in left_message_ids)
-            if not left_ids:
-                return None, "", ""
-            # R3 (review 95373ef): the anchor's ids are the MODEL view of L
-            # (the cut-owned seed appears as its standalone continuity
-            # reference), while left_ids are raw authority coordinates.
-            # Compare through the ONE canonical mapping — shared with the
-            # normal compiler injection and the rebase seed view — instead
-            # of raw-vs-model equality that refuses every two-segment warm.
-            model_left_ids = self._left_model_view_ids(memory_service, left_ids)
-            if anchor_message_id not in model_left_ids:
-                # The anchor is not LEFT content: its cached prefix either
-                # reaches past the cut into R or predates the segment.
-                return None, "", ""
-            anchor_conversation_ids = tuple(
-                str(message.message_id)
-                for message in anchor_request.messages
-                if message.role.value not in {"system", "developer"}
-            )
-            anchor_position = model_left_ids.index(anchor_message_id)
-            if anchor_conversation_ids != model_left_ids[: anchor_position + 1]:
-                # W02/W03 prefix equality: the cached prefix must be L
-                # exactly up to the anchor — no gap, no R, no extras.
-                return None, "", ""
-        anchor_endpoint = str(
-            anchor_request.metadata.get("preferred_endpoint_id") or ""
-        ).strip()
-        if (
-            preferred_endpoint_id
-            and anchor_endpoint
-            and str(preferred_endpoint_id) != anchor_endpoint
-        ):
-            return None, "", ""
-        anchor_model = str(anchor_request.model_hint or "").strip()
-        if (
-            preferred_model_id
-            and anchor_model
-            and str(preferred_model_id) != anchor_model
-        ):
-            return None, "", ""
-        if str(getattr(anchor_request.policy, "tool_choice", "auto") or "auto") != "auto":
-            return None, "", ""
-        for tool in list(anchor_request.tools or ()):
-            if isinstance(tool, Mapping):
-                tool_payload = dict(tool)
-            else:
-                tool_payload = dict(
-                    getattr(tool, "payload", None)
-                    or getattr(tool, "metadata", None)
-                    or {}
-                )
-            if str(tool_payload.get("execute_on") or "").strip().lower() in {
-                "server", "provider", "hosted",
-            }:
-                return None, "", ""
-        for message in anchor_request.messages:
-            for part in message.parts:
-                if isinstance(part, ImagePartIR):
-                    return None, "", ""
-
-        try:
-            memory_pack = memory_service.build_pack(
-                MemoryPackRequest(turn_kind="chat", include_l1_recent_context=False)
-            )
-        except Exception:
-            return None, "", ""
-        if anchor_request.metadata.get("continuity_id", "") != memory_pack.metadata.get("continuity_id", ""):
-            return None, "", ""
-        capabilities = self._resolve_llm_capabilities_for_endpoint(
-            preferred_endpoint_id
-        )
-        from pal.memory.context_view import projected_messages
-
-        suffix: list[LLMMessageIR] = []
-        anchor_found = False
-        live_ids: list[str] = []
-        left_id_set = set(left_ids) if left_ids is not None else None
-        anchor_ids = {
-            str(message.message_id) for message in anchor_request.messages
-        }
-
-        def project_into_suffix(messages: list[LLMMessageIR], *, settled: bool) -> None:
-            nonlocal anchor_found
-            for message in messages:
-                message_id = str(message.message_id)
-                if left_id_set is not None and message_id not in left_id_set:
-                    # v3 I10: anything outside the fenced LEFT segment is
-                    # right-side territory — it never enters the source.
-                    continue
-                live_ids.append(message_id)
-                if anchor_found:
-                    suffix.append(
-                        replace(
-                            message,
-                            prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
-                        )
-                    )
-                elif message.message_id == anchor_message_id:
-                    anchor_found = True
-
-        for settled_turn in list(getattr(memory_pack, "l1_turns", ()) or ()):
-            projected = self._project_messages_for_prompt(
-                list(projected_messages(settled_turn, settled=True)),
-                turn_id=str(getattr(settled_turn, "turn_id", "") or ""),
-                artifact_scope_key=logical_scope_id,
-                capabilities=capabilities,
-            )
-            project_into_suffix(projected, settled=True)
-        if include_active and active_turn_id:
-            active_turn_reader = (memory_service.active_l1_turn if memory_service is not None else None)
-            active_turn = (
-                active_turn_reader(str(active_turn_id))
-                if callable(active_turn_reader)
-                else None
-            )
-            if active_turn is not None:
-                projected_active = self._project_messages_for_prompt(
-                    list(projected_messages(active_turn, settled=False)),
-                    turn_id=str(active_turn_id),
-                    artifact_scope_key=logical_scope_id,
-                    capabilities=capabilities,
-                )
-                project_into_suffix(projected_active, settled=False)
-        if not anchor_found:
-            return None, "", ""
-        if left_ids is not None:
-            # The raw/model substitution is 1:1 positionally, so the anchor
-            # position is identical in both coordinate systems; the suffix
-            # stays raw (live L1 projections carry raw ids).
-            expected_suffix_ids = left_ids[
-                model_left_ids.index(anchor_message_id) + 1 :
-            ]
-            suffix_ids = [str(message.message_id) for message in suffix]
-            if tuple(suffix_ids) != tuple(expected_suffix_ids):
-                # W02/W03 coverage in v3 form: every L id after the anchor
-                # rides the suffix exactly once, in order — anything else
-                # refuses warm instead of guessing.
-                return None, "", ""
-        # Coverage proof (W02/W03): the confirmed-anchor contract covers the
-        # live order up to anchor_message_id; every eligible live message
-        # strictly after the anchor must be carried by the suffix exactly
-        # once (duplicated live ids refuse warm instead of guessing).
-        duplicated = {
-            message_id
-            for message_id in live_ids
-            if live_ids.count(message_id) > 1
-        }
-        if duplicated:
-            return None, "", ""
-        return (
-            replace(
-                anchor_request,
-                messages=(*anchor_request.messages, *suffix),
-            ),
-            dialect,
-            wire_shape,
-        )

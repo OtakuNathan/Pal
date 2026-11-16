@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from pal.foundation.diagnostics import diagnostic_text, exception_report, diagnostic_reason
 
-from pal.llm.contracts import LLMRuntimePort, LLMGenerationResult, LLMPreflightAdvice
+from pal.llm.contracts import LLMService, LLMGenerationResult, LLMPreflightAdvice
 
 import asyncio
-import inspect
 import json
 import logging
 import re
@@ -19,6 +18,7 @@ from uuid import uuid4
 
 from pal.llm.contracts import (
     LLMPreflightRequest,
+    collect_generation,
 )
 from pal.llm.conversions import request_ir_from_prompt
 from pal.llm.compaction import is_native_window
@@ -31,7 +31,6 @@ from pal.llm.ir import (
     TextPartIR,
 )
 from pal.memory.contracts import (
-    CompactionSnapshotSourcePort,
     L1MessageKind,
     L1TranscriptMessage,
     L2Entry,
@@ -95,62 +94,6 @@ class CompactionSnapshot:
     source_epoch: int = 0
     active_turn_ids: tuple[str, ...] = ()
 
-    @classmethod
-    def capture_left(
-        cls,
-        memory_service: Any,
-        left_snapshot: Any,
-        *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-        clock_kind: CompactionClockKind,
-        clock_value: int,
-        metadata: dict[str, Any] | None = None,
-        replay_request: LLMRequestIR | None = None,
-        next_request: LLMRequestIR | None = None,
-        replay_dialect: str = "",
-        replay_wire_shape: str = "",
-    ) -> "CompactionSnapshot":
-        """v3 two-segment capture: the LEFT segment only (I10).
-
-        The run has already been opened by the history owner
-        (``begin_left_compaction``); this snapshot carries its stamp so the
-        install path can verify the left side never moved, while the right
-        side stays out of the summary source entirely.  A warm
-        ``replay_request`` (provider-confirmed anchor inside L + accepted
-        suffix + instruction tail, see the executor's warm split) replaces
-        the cold source builder for the model attempt; oversized replays
-        fall back to the bounded frozen-L1 source inside the engine.
-        """
-
-        transcripts = getattr(memory_service, "left_transcripts", None)
-        if not callable(transcripts):
-            raise RuntimeError(
-                "memory service does not expose left_transcripts for v3 compaction"
-            )
-        captured = (memory_service.snapshot_transcripts(left_snapshot)
-                    if isinstance(memory_service, CompactionSnapshotSourcePort) else transcripts())
-        memory_items = tuple(
-            tuple(_copy_l1_message(item) for item in transcript)
-            for transcript in captured
-        )
-        merged = dict(metadata or {})
-        merged["two_segment_run_id"] = str(left_snapshot.run_id)
-        return cls(
-            target_input_budget=max(0, int(target_input_budget or 0)),
-            reserved_output_tokens=max(0, int(reserved_output_tokens or 0)),
-            clock_kind=clock_kind,
-            clock_value=max(0, int(clock_value or 0)),
-            memory_items=memory_items,
-            replay_request=replay_request,
-            next_request=next_request,
-            replay_dialect=str(replay_dialect or "").strip(),
-            replay_wire_shape=str(replay_wire_shape or "").strip(),
-            metadata=deepcopy(merged),
-            source_stamp=str(left_snapshot.stamp or ""),
-            source_epoch=0,
-            active_turn_ids=(),
-        )
 
     @property
     def previous_summary(self) -> L2Entry | None:
@@ -227,7 +170,7 @@ class CompactionRunResult:
     @property
     def diagnostic_details(self) -> str:
         details = [*self.failures, *self.failure_details]
-        metadata = getattr(self.memory_result, "metadata", None) or {}
+        metadata = (self.memory_result.metadata if self.memory_result is not None else None) or {}
         if metadata.get("post_commit_detail"):
             details.append("Compaction committed; follow-up failed: " + str(metadata["post_commit_detail"]))
         return diagnostic_text("\n".join(details), limit=None)
@@ -235,7 +178,7 @@ class CompactionRunResult:
 
 def _scope_safe_snapshot(snapshot: CompactionSnapshot) -> CompactionSnapshot:
     """Compaction is a new instruction scope, including when using a warm anchor."""
-    from pal.core.prompt_context import CONTEXT_KIND, applicable_context
+    from pal.memory.prompt_context import CONTEXT_KIND, applicable_context
     items = tuple(tuple(message for message in transcript if not (
         message.role == "developer" and message.kind == CONTEXT_KIND
         and message.payload.get("pal_authored")
@@ -259,21 +202,23 @@ class CompactionEngine:
     # checkpoint allowance plus modest reasoning/serialization headroom.
     max_output_tokens: int = 64_000
 
+    def with_limits(self, *, max_attempts: int | None = None,
+                    timeout_seconds: float | None = None) -> CompactionEngine:
+        return replace(self,
+            max_attempts=max(1, int(max_attempts)) if max_attempts is not None else self.max_attempts,
+            timeout_seconds=max(0.1, float(timeout_seconds)) if timeout_seconds is not None else self.timeout_seconds)
+
     async def run(
         self,
         snapshot: CompactionSnapshot,
         *,
         llm_runtime: Any,
-        memory_service: Any,
-        after_commit: Callable[[], None] | None = None,
         replay_guard: Callable[[], bool] | None = None,
-        commit_guard: Callable[[], bool] | None = None,
         commit_hooks: CompactionCommitHooks | None = None,
     ) -> CompactionRunResult:
         if snapshot.metadata.get("compaction_strategy") == "openai_responses":
             return await self._run_native(snapshot, llm_runtime=llm_runtime,
-                memory_service=memory_service, after_commit=after_commit,
-                commit_guard=commit_guard, commit_hooks=commit_hooks)
+                commit_hooks=commit_hooks)
         native_source = snapshot.replay_request is not None and any(
             is_native_window(m) for m in snapshot.replay_request.messages)
         if not native_source:
@@ -287,7 +232,7 @@ class CompactionEngine:
         validation_error = ""
         repair_output = ""
         output_target = None
-        run_id = uuid4().hex[:12]
+        run_id = str(snapshot.metadata.get("two_segment_run_id") or uuid4().hex[:12])
         started_at = time.monotonic()
         attempt_started_at = started_at
         outcome = None
@@ -300,11 +245,10 @@ class CompactionEngine:
 
         def log_failure(reason: str, *, diagnostic: str = "") -> None:
             failures.append(reason)
-            response = getattr(outcome, "response", None)
-            details = getattr(getattr(response, "message", None), "metadata", {}) or {}
+            response = (outcome.response if outcome is not None else None)
+            details = (response.message.metadata if response is not None else {}) or {}
             endpoint = (
-                getattr(outcome, "preferred_endpoint_id", None)
-                or getattr(llm_runtime, "last_endpoint_id", None)
+                (outcome.preferred_endpoint_id if outcome is not None else None)
                 or snapshot.metadata.get("preferred_endpoint_id")
                 or "unresolved"
             )
@@ -317,7 +261,7 @@ class CompactionEngine:
                 time.monotonic() - attempt_started_at,
                 snapshot.replay_request is not None, _log_failure_reason(reason),
                 details.get("failure_kind", ""), details.get("error_type", ""),
-                getattr(outcome, "input_tokens", 0), getattr(outcome, "output_tokens", 0),
+                (outcome.input_tokens if outcome is not None else 0), (outcome.output_tokens if outcome is not None else 0),
                 request.policy.max_output_tokens, self.timeout_seconds,
                 "\n" + diagnostic if diagnostic else "",
             )
@@ -336,11 +280,11 @@ class CompactionEngine:
                     diagnostic_text(metadata["post_commit_detail"], limit=None),
                 )
             _LOGGER.log(
-                logging.INFO if result.success else (
+                logging.INFO if result.status == "candidate" else (
                     logging.ERROR if result.status in {"failed", "commit_failed"} else logging.WARNING
                 ),
-                "compact finished run=%s policy=%s status=%s attempts=%s "
-                "elapsed_seconds=%.3f failure_count=%s",
+                ("compact generated" if result.status == "candidate" else "compact finished") +
+                " run=%s policy=%s status=%s attempts=%s elapsed_seconds=%.3f failure_count=%s",
                 run_id, self.policy.policy_id, result.status, result.attempts,
                 time.monotonic() - started_at, len(result.failures),
             )
@@ -478,7 +422,7 @@ class CompactionEngine:
                 log_failure(f"endpoint:{type(exc).__name__}", diagnostic=failure_details[-1])
                 continue
 
-            finish_reason = str(getattr(outcome, "finish_reason", "") or "")
+            finish_reason = str((outcome.finish_reason if outcome is not None else '') or "")
             if finish_reason == LLMFinishReason.COMPACT_REQUIRED:
                 log_failure("endpoint:compact_required")
                 if snapshot.replay_request is not None:
@@ -520,15 +464,15 @@ class CompactionEngine:
                 continue
             if _is_output_truncation(finish_reason):
                 log_failure(f"output:{finish_reason or 'truncated'}")
-                repair_output = str(getattr(outcome, "text", "") or "")
+                repair_output = str((outcome.text if outcome is not None else '') or "")
                 validation_error = "Previous output was truncated; regenerate a shorter complete JSON object."
                 output_target = max(1, (output_target or compaction_visible_token_limit(snapshot)) // 2)
                 continue
             if finish_reason == LLMFinishReason.ERROR:
-                response = getattr(outcome, "response", None)
-                details = getattr(getattr(response, "message", None), "metadata", {}) or {}
+                response = (outcome.response if outcome is not None else None)
+                details = (response.message.metadata if response is not None else {}) or {}
                 failure_details.append(diagnostic_text(
-                    str(getattr(outcome, "text", "") or "") + "\n"
+                    str((outcome.text if outcome is not None else '') or "") + "\n"
                     + json.dumps(dict(details), ensure_ascii=False, default=str), limit=None))
                 log_failure("endpoint:error", diagnostic=failure_details[-1])
                 continue
@@ -545,7 +489,7 @@ class CompactionEngine:
                 log_failure("output:tool_call_handoff")
                 continue
 
-            raw_text = str(getattr(outcome, "text", "") or "").strip()
+            raw_text = str((outcome.text if outcome is not None else '') or "").strip()
             try:
                 visible_limit = compaction_visible_token_limit(snapshot)
                 summary_entry = self.policy.validate_checkpoint(
@@ -600,60 +544,9 @@ class CompactionEngine:
                     )
                     continue
 
-            if commit_guard is not None and not commit_guard():
-                # Cancel/sweep safety (X03/X06/X07): a ticket that lost
-                # commit eligibility must never install; memory and the
-                # receipt ledger stay exactly as they were.
-                failures.append("ticket_cancelled")
-                return finish(
-                    snapshot,
-                    status="ticket_cancelled",
-                    attempts=attempts,
-                    source_sizes=source_sizes,
-                    failures=failures,
-                )
-            if commit_hooks is not None:
-                try:
-                    staged = asyncio.create_task(asyncio.to_thread(commit_hooks.stage))
-                    try:
-                        await asyncio.shield(staged)
-                    except asyncio.CancelledError:
-                        await staged
-                        raise
-                except Exception as exc:
-                    failure_details.append(exception_report(exc))
-                    log_failure(f"archive:{type(exc).__name__}")
-                    return finish(snapshot, status="commit_failed", attempts=attempts,
-                                  source_sizes=source_sizes, failures=failures)
-                if commit_guard is not None and not commit_guard():
-                    return finish(snapshot, status="ticket_cancelled", attempts=attempts,
-                                  source_sizes=source_sizes, failures=failures)
-            committed = await self._commit(
-                snapshot,
-                memory_service=memory_service,
-                summary_entry=summary_entry,
-                after_commit=after_commit,
-            )
-            if isinstance(committed, Exception):
-                failure_details.append(exception_report(committed))
-                log_failure(f"commit:{type(committed).__name__}", diagnostic=failure_details[-1])
-                return finish(
-                    snapshot,
-                    status="commit_failed",
-                    attempts=attempts,
-                    source_sizes=source_sizes,
-                    failures=failures,
-                )
-            return finish(
-                snapshot,
-                status="compacted",
-                attempts=attempts,
-                summary_entry=summary_entry,
-                memory_result=committed,
-                source_sizes=source_sizes,
-                failures=failures,
-                usage=_usage_snapshot(outcome),
-            )
+            return finish(snapshot, status="candidate", attempts=attempts,
+                summary_entry=summary_entry, source_sizes=source_sizes,
+                failures=failures, usage=_usage_snapshot(outcome))
 
         return finish(
             snapshot,
@@ -664,8 +557,7 @@ class CompactionEngine:
         )
 
     async def _run_native(
-        self, snapshot: CompactionSnapshot, *, llm_runtime: Any, memory_service: Any,
-        after_commit=None, commit_guard=None, commit_hooks=None,
+        self, snapshot: CompactionSnapshot, *, llm_runtime: Any, commit_hooks=None,
     ) -> CompactionRunResult:
         request = snapshot.replay_request
         if request is None:
@@ -699,28 +591,9 @@ class CompactionEngine:
                 failures.append(f"native:{type(exc).__name__}: {exc}")
                 _LOGGER.warning("native compact attempt=%s failed: %s", attempt, type(exc).__name__)
                 continue
-            if commit_guard is not None and not commit_guard():
-                return self._result(snapshot, status="ticket_cancelled", attempts=attempt, failures=failures)
-            if commit_hooks is not None:
-                try:
-                    staged = asyncio.create_task(asyncio.to_thread(commit_hooks.stage))
-                    try:
-                        await asyncio.shield(staged)
-                    except asyncio.CancelledError:
-                        await staged
-                        raise
-                except Exception as exc:
-                    return self._result(snapshot, status="commit_failed", attempts=attempt,
-                                        failures=(*failures, f"archive:{type(exc).__name__}"))
-                if commit_guard is not None and not commit_guard():
-                    return self._result(snapshot, status="ticket_cancelled", attempts=attempt, failures=failures)
-            committed = await self._commit(snapshot, memory_service=memory_service,
-                                           summary_entry=entry, after_commit=after_commit)
-            if isinstance(committed, Exception):
-                return self._result(snapshot, status="commit_failed", attempts=attempt,
-                                    failures=(*failures, f"commit:{type(committed).__name__}"))
-            return replace(self._result(snapshot, status="compacted", attempts=attempt,
-                summary_entry=entry, memory_result=committed, usage=usage, failures=failures), candidate=candidate)
+            return replace(self._result(snapshot, status="candidate", attempts=attempt,
+                summary_entry=entry, usage=usage, failures=failures), candidate=candidate)
+
         return self._result(snapshot, status="failed", attempts=max(1, self.max_attempts), failures=failures)
 
     def _request(
@@ -880,10 +753,10 @@ class CompactionEngine:
         )
 
     async def _generate(
-        self, llm_runtime: LLMRuntimePort, request: LLMRequestIR,
+        self, llm_runtime: LLMService, request: LLMRequestIR,
     ) -> LLMGenerationResult:
         return await asyncio.wait_for(
-            llm_runtime.agenerate(request),
+            collect_generation(llm_runtime.generate(request)),
             timeout=max(0.1, float(self.timeout_seconds or 0.1)),
         )
 
@@ -919,52 +792,6 @@ class CompactionEngine:
             if dropped >= drop_goal and rendered_size < previous_size:
                 return candidate
 
-    async def _commit(
-        self,
-        snapshot: CompactionSnapshot,
-        *,
-        memory_service: Any,
-        summary_entry: L2Entry,
-        after_commit: Callable[[], None] | None = None,
-    ) -> MemoryCompactResult | Exception:
-        two_segment_run_id = str(
-            snapshot.metadata.get("two_segment_run_id") or ""
-        ).strip()
-        if two_segment_run_id:
-            # v3 install: replace the LEFT segment only.  Root arbitration
-            # (StaleRun / TerminalClosed / CandidateConflict / stamp drift)
-            # surfaces as a normal engine failure — never a silent retry.
-            try:
-                outcome = memory_service.compact_left(
-                    two_segment_run_id,
-                    summary_entry,
-                    candidate_id=str(
-                        snapshot.metadata.get("compaction_op_id")
-                        or two_segment_run_id
-                    ),
-                    after_commit=after_commit,
-                )
-            except Exception as exc:
-                return exc
-            return MemoryCompactResult(
-                summary=summary_entry.summary,
-                projected_entries=[summary_entry],
-                metadata={
-                    "two_segment": True,
-                    "run_id": two_segment_run_id,
-                    "status": getattr(outcome, "status", ""),
-                    "left_revision": getattr(outcome, "left_revision", 0),
-                    "replayed": bool(getattr(outcome, "replayed", False)),
-                    **({"post_commit_detail": outcome.detail} if getattr(outcome, "detail", "") else {}),
-                },
-            )
-        # capture_left is the only producer of snapshots; a missing
-        # two-segment run id means a hand-built snapshot, which has no
-        # supported install path (v2 whole-source was physically removed).
-        raise RuntimeError(
-            "compaction snapshot carries no two_segment_run_id; "
-            "whole-source install was removed with v2"
-        )
 
 
     @staticmethod
@@ -1014,8 +841,8 @@ def _usage_snapshot(outcome: Any) -> dict[str, Any] | None:
     )
     values: dict[str, Any] = {
         **{field: int(getattr(outcome, field, 0) or 0) for field in token_fields},
-        "cost": float(getattr(outcome, "cost", 0.0) or 0.0),
-        "usage_reported": bool(getattr(outcome, "usage_reported", False)),
+        "cost": float((outcome.cost if outcome is not None else 0.0) or 0.0),
+        "usage_reported": bool((outcome.usage_reported if outcome is not None else False)),
     }
     if not values["usage_reported"] and not any(
         values[field] for field in token_fields
@@ -1140,10 +967,10 @@ def _estimate_visible_tokens(text: str) -> int:
 
 
 async def _preflight(
-    llm_runtime: LLMRuntimePort, request: LLMRequestIR,
+    llm_runtime: LLMService, request: LLMRequestIR,
 ) -> LLMPreflightAdvice | None:
     try:
-        return await llm_runtime.apreflight(LLMPreflightRequest(request=request))
+        return await llm_runtime.preflight(LLMPreflightRequest(request=request))
     except Exception:
         return None
 
@@ -1151,7 +978,7 @@ async def _preflight(
 def _preflight_requires_compaction(advice: Any | None) -> bool:
     return (
         advice is not None
-        and str(getattr(advice, "status", "") or "")
+        and str((advice.status if advice is not None else '') or "")
         == LLMPreflightStatus.COMPACT_REQUIRED
     )
 
@@ -1162,13 +989,9 @@ def _snapshot_for_budget_advice(
 ) -> CompactionSnapshot:
     return _snapshot_with_endpoint_budget(
         snapshot,
-        target_input_budget=getattr(advice, "target_input_budget", 0),
-        reserved_output_tokens=getattr(
-            advice,
-            "reserved_output_tokens",
-            0,
-        ),
-        preferred_model_id=getattr(advice, "active_model", None),
+        target_input_budget=(advice.target_input_budget if advice is not None else 0),
+        reserved_output_tokens=(advice.reserved_output_tokens if advice is not None else 0),
+        preferred_model_id=(advice.active_model if advice is not None else None),
     )
 
 
@@ -1178,22 +1001,10 @@ def _snapshot_for_outcome(
 ) -> CompactionSnapshot:
     return _snapshot_with_endpoint_budget(
         snapshot,
-        target_input_budget=getattr(outcome, "target_input_budget", 0),
-        reserved_output_tokens=getattr(
-            outcome,
-            "reserved_output_tokens",
-            0,
-        ),
-        preferred_endpoint_id=getattr(
-            outcome,
-            "preferred_endpoint_id",
-            None,
-        ),
-        preferred_model_id=getattr(
-            outcome,
-            "preferred_model_id",
-            None,
-        ),
+        target_input_budget=(outcome.target_input_budget if outcome is not None else 0),
+        reserved_output_tokens=(outcome.reserved_output_tokens if outcome is not None else 0),
+        preferred_endpoint_id=(outcome.preferred_endpoint_id if outcome is not None else None),
+        preferred_model_id=(outcome.preferred_model_id if outcome is not None else None),
     )
 
 
@@ -1241,48 +1052,16 @@ def _handoff_tool_calls(outcome: Any) -> tuple[Any, ...]:
     parts are inspected directly as well.
     """
 
-    calls = tuple(getattr(outcome, "tool_calls", None) or ())
+    calls = tuple((outcome.tool_calls if outcome is not None else None) or ())
     if calls:
         return calls
-    response = getattr(outcome, "response", None)
-    message = getattr(response, "message", None)
+    response = (outcome.response if outcome is not None else None)
+    message = (response.message if response is not None else None)
     return tuple(
         part
-        for part in (getattr(message, "parts", None) or ())
+        for part in ((message.parts if message is not None else None) or ())
         if isinstance(part, ToolCallIR)
     )
-
-
-def _copy_l1_message(value: Any) -> L1TranscriptMessage:
-    if isinstance(value, L1TranscriptMessage):
-        return replace(
-            value,
-            tool_calls=(
-                deepcopy(value.tool_calls)
-                if value.tool_calls is not None
-                else None
-            ),
-            payload=deepcopy(value.payload or {}),
-        )
-    if isinstance(value, dict):
-        return L1TranscriptMessage(
-            role=str(value.get("role") or ""),
-            content=str(value.get("content") or ""),
-            kind=value.get("kind") or "",
-            tool_calls=(
-                deepcopy(
-                    [
-                        item
-                        for item in list(value.get("tool_calls") or ())
-                        if isinstance(item, dict)
-                    ]
-                )
-                or None
-            ),
-            tool_call_id=str(value.get("tool_call_id") or "") or None,
-            payload=deepcopy(value.get("payload") or {}),
-        )
-    return L1TranscriptMessage(role="assistant", content=str(value or ""))
 
 
 def _current_summary(

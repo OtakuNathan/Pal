@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput, ToolGuidance
 from pal.execution.generated_tool_models import ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput as SearchOutput

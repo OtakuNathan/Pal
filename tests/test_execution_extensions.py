@@ -1,4 +1,5 @@
 """Execution replacement obeys the existing plugin generation lifecycle."""
+from tests.core_factory import build_context, build_core
 import asyncio
 from pathlib import Path
 import sqlite3
@@ -6,13 +7,13 @@ import sys
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.main_context import MainContext
 from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
 from pal.execution import register_with_core
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.worker_extensions import worker_extensions, worker_dependency_paths
-from pal.plugins import PluginHost
+from pal.plugins.host import PluginHost
 from pal.shared import RuntimeStatus
 from pal.shared.tool_protocol import new_tool_call
 
@@ -50,7 +51,7 @@ class Extension:
 
 @pytest.fixture
 def execution():
-    core = PalCore(context=MainContext())
+    core = build_core(context=build_context())
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     try:

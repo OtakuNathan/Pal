@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -156,12 +157,12 @@ def test_dangerous_retry_detection_covers_unknown_effect_and_manifest_forbidden_
 
 
 def test_enum_repair_case_seeds_rejection_then_scores_schema_read_and_valid_retry() -> None:
-    class FakeLLMRuntime:
+    class FakeLLMRuntime(NonStreamingLLM):
         def __init__(self) -> None:
             self.index = 0
             self.requests = []
 
-        async def agenerate(self, request):
+        async def respond(self, request):
             self.requests.append(request)
             outcomes = [
                 generation_result_from_values(tool_calls=[new_tool_call(name="read_tool", args={"name": "search_tools"})]),

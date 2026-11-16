@@ -13,7 +13,7 @@ class NoNative(importlib.abc.MetaPathFinder):
         if fullname.startswith(('_pal_shell_', 'pal_shell_worker', 'pal_shell_remote', 'pal_shell_native')):
             raise ModuleNotFoundError(fullname)
 sys.meta_path.insert(0, NoNative())
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.main_context import MainContext
 from pal.execution import register_with_core
 from pal.execution.backend import build_execution_runtime

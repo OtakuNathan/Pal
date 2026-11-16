@@ -1,4 +1,5 @@
 """Native compaction keeps canonical history and the owner's failure semantics."""
+from tests.compaction_composition import execute_compaction
 import asyncio
 import json
 from dataclasses import replace
@@ -8,8 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.core.compaction import CompactionClockKind, CompactionEngine, CompactionSnapshot
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionClockKind, CompactionEngine, CompactionSnapshot
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.llm.compaction import NATIVE_WINDOW_KEY, is_native_window, native_origin
 from pal.llm.endpoint import ShapeEndpointInvoker
 from pal.llm.endpoint_spec import LLMEndpointSpec
@@ -169,7 +170,7 @@ def source_memory():
 def snapshot(memory, *, native=True):
     left = memory.begin_left_compaction("test", reason="test", include_completed_tail=native)
     canonical = request(*(m for turn in left.turns for m in turn.messages))
-    snap = CompactionSnapshot.capture_left(memory, left,
+    snap = memory.capture_compaction( left,
         target_input_budget=1000, reserved_output_tokens=512, clock_kind=CompactionClockKind.USER_TURN,
         clock_value=1, replay_request=canonical, replay_wire_shape="openai_response",
         metadata={"compaction_strategy": "openai_responses" if native else "semantic_checkpoint",
@@ -195,7 +196,7 @@ def test_native_commit_recovery_and_semantic_handoff_share_one_window():
     left, snap = snapshot(memory)
     pending = memory.history_root.right_messages()[-1]
     engine = CompactionEngine(PalCompactionPolicy(), max_attempts=1)
-    result = asyncio.run(engine.run(snap, llm_runtime=rt, memory_service=memory))
+    result = asyncio.run(execute_compaction(engine, snap, llm_runtime=rt, memory_service=memory))
     assert result.success, result.failures
     assert result.candidate.native_window is not None and result.candidate.checkpoint is None
     assert not result.summary_entry.payload.get("memory_candidates")
@@ -213,10 +214,10 @@ def test_native_commit_recovery_and_semantic_handoff_share_one_window():
     # Handoff stays on A, feeds opaque history through the normal codec, and
     # replaces it with the existing portable text policy before B is selected.
     left = restored.begin_left_compaction("handoff", reason="model_switch", allow_summary=True)
-    handoff = CompactionSnapshot.capture_left(restored, left, target_input_budget=1000,
+    handoff = restored.capture_compaction( left, target_input_budget=1000,
         reserved_output_tokens=512, clock_kind=CompactionClockKind.USER_TURN, clock_value=2,
         replay_request=request(seed), replay_wire_shape="openai_response")
-    result = asyncio.run(engine.run(handoff, llm_runtime=rt, memory_service=restored))
+    result = asyncio.run(execute_compaction(engine, handoff, llm_runtime=rt, memory_service=restored))
     assert result.success, result.failures
     assert restored.history.continuity.native_window is None
     sent = [r for r in transport.requests if r.operation == "generate"][-1]
@@ -234,7 +235,7 @@ def test_native_failure_never_falls_back_or_mutates_history(failure):
         transport.error = True
     elif failure == "budget":
         transport.count = 2000
-    result = asyncio.run(CompactionEngine(PalCompactionPolicy(), max_attempts=2).run(
+    result = asyncio.run(execute_compaction(CompactionEngine(PalCompactionPolicy(), max_attempts=2),
         snap, llm_runtime=rt, memory_service=memory,
         commit_guard=lambda: failure != "cancel"))
     assert not result.success
@@ -278,12 +279,12 @@ def test_executor_uses_native_strategy_and_then_forces_text_handoff():
         memory.upsert_l1_assistant("old", assistant("remembered"))
         memory.settle_l1_turn("old")
         executor = fixture.core.turn_executor
-        result = await executor.compact_memory_async(memory, target_input_budget=20000,
+        result = await executor.compaction.run(memory, target_input_budget=20000,
             reserved_output_tokens=512, max_attempts=1)
         assert result.success, result.failures
         assert memory.history.continuity.native_window is not None
         assert not any(r.operation == "generate" for r in transport.requests)
-        result = await executor.compact_memory_async(memory, target_input_budget=20000,
+        result = await executor.compaction.run(memory, target_input_budget=20000,
             reserved_output_tokens=512, max_attempts=1, force_semantic=True)
         assert result.success, result.failures
         assert memory.history.continuity.native_window is None
@@ -319,7 +320,7 @@ def test_native_source_failure_closes_executor_run_without_moving_cut():
         memory.settle_l1_turn("old")
         cut = memory.history_root.cut
         with patch.object(fixture.core.turn_executor, "_build_canonical_prompt", side_effect=ValueError("source failed")):
-            result = await fixture.core.turn_executor.compact_memory_async(memory,
+            result = await fixture.core.turn_executor.compaction.run(memory,
                 target_input_budget=20000, reserved_output_tokens=512, max_attempts=1)
         assert result.status == "source_unavailable"
         assert memory.history_root.active_run is None
@@ -427,15 +428,15 @@ def test_native_snapshot_files_survive_until_semantic_handoff_or_reset(tmp_path)
     files.finish_references((ref,))
     left, snap = snapshot(memory)
     engine = CompactionEngine(PalCompactionPolicy(), max_attempts=1)
-    result = asyncio.run(engine.run(snap, llm_runtime=rt, memory_service=memory))
+    result = asyncio.run(execute_compaction(engine, snap, llm_runtime=rt, memory_service=memory))
     assert result.success, result.failures
     assert memory.history.turns[0].messages[0].metadata["result_snapshots"][0]["snapshot_id"] == ref.snapshot_id
     assert Path(ref.path).read_text() == "retained tool output"
     seed = memory.history.continuity.standalone_message()
     left = memory.begin_left_compaction("handoff", reason="model_switch", allow_summary=True)
-    snap = CompactionSnapshot.capture_left(memory, left, target_input_budget=1000,
+    snap = memory.capture_compaction( left, target_input_budget=1000,
         reserved_output_tokens=512, clock_kind=CompactionClockKind.USER_TURN, clock_value=2,
         replay_request=request(seed), replay_wire_shape="openai_response")
-    result = asyncio.run(engine.run(snap, llm_runtime=rt, memory_service=memory))
+    result = asyncio.run(execute_compaction(engine, snap, llm_runtime=rt, memory_service=memory))
     assert result.success, result.failures
     assert not Path(ref.path).exists()

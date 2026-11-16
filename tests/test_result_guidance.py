@@ -6,10 +6,13 @@ failure recovery moves into typed result fields, and successful results carry
 no capability reminders unless this result's facts justify them.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
+
+from pal.execution.tool_facade import LifecycleAccess
 
 import pytest
 
-from pal.core import PalCore as _PalCoreBootstrap  # noqa: F401  (import-order bootstrap)
+from pal.core.runtime import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityResult
 from pal.execution.result_guidance import (
     MAX_RESULT_AFFORDANCES,
@@ -70,6 +73,7 @@ def _guidance(**overrides) -> ToolGuidance:
 
 def _echo_semantics() -> ToolExecutionSemantics:
     return ToolExecutionSemantics(
+        lifecycle_access=LifecycleAccess.SHARED,
         invocation_mode=InvocationMode.DIRECT,
         effect_kind=EffectKind.NONE,
         idempotency=Idempotency.IDEMPOTENT,
@@ -117,10 +121,10 @@ class TestDescriptorLayering:
         assert "Failure next steps" not in description
 
     def test_registry_description_and_search_keep_static_relation(self, tmp_path):
-        from pal.core import PalCore
+        from pal.core.runtime import PalCore
         from pal.execution import register_with_core
 
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
@@ -619,6 +623,7 @@ class TestScopedRoleFiltering:
                 examples=({"value": "x"},),
                 handler=probe_handler,
                 execution=ToolExecutionSemantics(
+                    lifecycle_access=LifecycleAccess.SHARED,
                     invocation_mode=InvocationMode.DIRECT,
                     effect_kind=EffectKind.NONE,
                     idempotency=Idempotency.IDEMPOTENT,

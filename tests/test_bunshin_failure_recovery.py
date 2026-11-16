@@ -29,7 +29,7 @@ class CorrectingModel(NonStreamingLLM):
         self.path = path
         self.requests = []
 
-    def generate(self, request, **options):
+    def _generate_response(self, request, **options):
         self.requests.append(request)
         round_number = len(self.requests)
         if round_number <= 2:
@@ -143,7 +143,7 @@ def test_receipt_query_distinguishes_absence_and_caches_confirmed_receipt(tmp_pa
 
 
 class SingleToolModel(CorrectingModel):
-    def generate(self, request, **options):
+    def _generate_response(self, request, **options):
         self.requests.append(request)
         if len(self.requests) == 1:
             return generation_result_from_values(tool_calls=[new_tool_call(

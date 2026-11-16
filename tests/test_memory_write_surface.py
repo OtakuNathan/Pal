@@ -1,9 +1,10 @@
 """Model memory CRUD uses the facade while backend adapters stay internal."""
+from tests.core_factory import build_core
 from pathlib import Path
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.memory import MemoryService, register_with_core as register_memory
 from pal.memory.contracts import L3MutationResult, MemoryQuery
 from pal.memory.embedding import HashingEmbedder
@@ -20,10 +21,9 @@ INTERNAL_ALIASES = ("write_provider_memory", "recall_provider_memory",
 
 @pytest.fixture(params=["mock", "sqlite_vec"])
 def memory_runtime(request, tmp_path):
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
-    memory = MemoryService(l3_selector=L3ProviderSelector(
-        resolver=runtime.l3_plugin_registry.require))
+    memory = MemoryService()
     repository = None
     try:
         register_memory(core.context, memory)
@@ -111,7 +111,7 @@ def test_reconciliation_reads_original_store_without_switch_or_fallback(memory_r
     other = MockL3Plugin(provider_id="other_l3", records=[{
         "document_id": mem_ref, "document_kind": "fact", "summary": "Different store"}])
     # The registry resolver is the same one used by the production facade.
-    runtime.l3_plugin_registry.register(other)
+    memory.providers.register(other)
     memory.l3_selector.active_provider_id = other.provider_id
     recalled = runtime.invoke_direct_tool(new_tool_call(name="recall_memory", args={
         "provider_id": provider.provider_id, "mem_ref": mem_ref}))
@@ -225,7 +225,7 @@ def test_native_case_contract_and_recovery_keep_nested_object_constraints(memory
 @pytest.mark.parametrize("name", ["", "   "])
 def test_empty_indirect_name_rejects_before_dispatch(name):
     from pal.execution.capabilities import register_with_core as register_execution
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
     try:
         register_execution(core.context)

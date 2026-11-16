@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import sys
@@ -7,18 +8,10 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from pal.core import PalCore
-from pal.plugins import PluginHost
-from pal.plugins.lifecycle import WriterPreferredRWGate
-from pal.execution.runtime import _is_plugin_lifecycle_tool
+from pal.core.runtime import PalCore
+from pal.plugins.host import PluginHost
+from pal.foundation.lifecycle_gate import WriterPreferredRWGate
 from pal.shared import RuntimeStatus
-
-
-def test_plugin_lifecycle_gate_recognizes_aliases_and_canonical_paths() -> None:
-    for action, alias in (("manage", "manage_plugin"), ("rescan", "rescan_plugins")):
-        assert _is_plugin_lifecycle_tool(alias)
-        assert _is_plugin_lifecycle_tool(f"op_plugin_mgmt_{action}")
-    assert not _is_plugin_lifecycle_tool("manage_mcp_server")
 
 
 def _write_plugin(
@@ -78,7 +71,7 @@ def test_raii_dependency_cascade_uses_fresh_generations(tmp_path: Path) -> None:
     _write_plugin(builtin_root, "base")
     _write_plugin(builtin_root, "dependent", requires=("base",))
     ledger: list[tuple[str, str, object]] = []
-    core = PalCore()
+    core = build_core()
     host = PluginHost(
         context=core.context,
         runtime_root=tmp_path,
@@ -114,7 +107,7 @@ def test_reload_cascades_dependents_but_does_not_restore_manual_detach(tmp_path:
     _write_plugin(builtin_root, "base")
     _write_plugin(builtin_root, "dependent", requires=("base",))
     ledger: list[tuple[str, str, object]] = []
-    core = PalCore()
+    core = build_core()
     host = PluginHost(
         context=core.context,
         runtime_root=tmp_path,
@@ -159,7 +152,7 @@ def test_reattach_stops_on_cleanup_failure_and_can_recover(tmp_path: Path) -> No
     root = tmp_path / "builtin"
     _write_plugin(root, "cleanup_test")
     ledger = []
-    core = PalCore()
+    core = build_core()
     host = PluginHost(context=core.context, runtime_root=tmp_path,
                       builtin_root=root, services={"ledger": ledger})
     fail_cleanup = True
@@ -192,7 +185,7 @@ def test_bootstrap_never_publishes_plugin_with_disabled_dependency(tmp_path: Pat
     builtin_root = tmp_path / "builtin"
     _write_plugin(builtin_root, "base", enabled=False)
     _write_plugin(builtin_root, "dependent", requires=("base",))
-    core = PalCore()
+    core = build_core()
     host = PluginHost(
         context=core.context,
         runtime_root=tmp_path,
@@ -222,7 +215,7 @@ def test_third_party_id_conflict_cannot_replace_first_party_manifest(tmp_path: P
     _write_plugin(builtin_root, "base")
     community_root = tmp_path / "plugins" / "community"
     _write_plugin(community_root, "base", requires=("shadow",))
-    core = PalCore()
+    core = build_core()
 
     class Repository:
         def __init__(self) -> None:
@@ -347,7 +340,7 @@ def test_plugin_core_subscription_is_replaced_and_closed_with_generation(tmp_pat
         "        handle.ports['events'] = scope.subscribe_core_events({'memory.sleep'})\n"
         "        scope.context.register_module(handle)",
     ))
-    core = PalCore()
+    core = build_core()
     host = PluginHost(context=core.context, runtime_root=tmp_path,
                       builtin_root=root, services={"ledger": []})
     sys.path.insert(0, str(root))

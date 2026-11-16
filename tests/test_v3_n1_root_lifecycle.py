@@ -9,6 +9,7 @@ logs_n1_prefix_red.txt; recovery details and checksums are recorded in
 docs/archive/session_compaction/test_log_summary.md).
 """
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
 
 from tests.turn_fakes import continuation as make_continuation, require_port as require_test_port
 
@@ -19,9 +20,10 @@ import unittest
 import weakref
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
+from pal.shared.ports import PortRegistry
 
-from pal.core.compaction import CompactionEngine
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionEngine
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.turn_executor import TurnExecutor
 from pal.llm import generation_result_from_values
 from pal.llm.ir import LLMMessageIR, MessageRole, MessageState, TextPartIR
@@ -61,7 +63,7 @@ def small_root() -> HistoryRoot:
 
 
 def executor(memory: MemoryService, llm) -> TurnExecutor:
-    ports = {'memory:memory': memory, 'llm:llm': llm}
+    ports = PortRegistry({'memory:memory': memory, 'llm:llm': llm})
     return TurnExecutor(
         SimpleNamespace(port_registry=ports, require_port=lambda key: require_test_port(ports, key),
                         execution_runtime=None),
@@ -215,13 +217,13 @@ class RootContractTests(unittest.TestCase):
 class ExecutorFailureTests(unittest.TestCase):
     def test_schema_failure_terminates_run_and_allows_later_attempt(self):
         async def scenario():
-            class InvalidLLM:
-                async def agenerate(self, request):
+            class InvalidLLM(NonStreamingLLM):
+                async def respond(self, request):
                     return generation_result_from_values(text='NOT_JSON')
 
             memory = service_with_work()
             ex = executor(memory, InvalidLLM())
-            result = await ex.compact_memory_async(
+            result = await ex.compaction.run(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
                 continuation=make_continuation(turn_id='T'))
             self.assertFalse(result.success)
@@ -237,15 +239,15 @@ class ExecutorFailureTests(unittest.TestCase):
         async def scenario():
             started, release = asyncio.Event(), asyncio.Event()
 
-            class WaitingLLM:
-                async def agenerate(self, request):
+            class WaitingLLM(NonStreamingLLM):
+                async def respond(self, request):
                     started.set()
                     await release.wait()
                     return generation_result_from_values(text='NOT_JSON')
 
             memory = service_with_work()
             ex = executor(memory, WaitingLLM())
-            task = asyncio.create_task(ex.compact_memory_async(
+            task = asyncio.create_task(ex.compaction.run(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
                 continuation=make_continuation(turn_id='T')))
             try:
@@ -264,15 +266,15 @@ class ExecutorFailureTests(unittest.TestCase):
 
     def test_deadline_expiry_fails_run_and_next_attempt_is_eligible(self):
         async def scenario():
-            class HangingLLM:
-                async def agenerate(self, request):
+            class HangingLLM(NonStreamingLLM):
+                async def respond(self, request):
                     await asyncio.Event().wait()
                     return generation_result_from_values(text='{}')
 
             memory = service_with_work()
             engine = CompactionEngine(PalCompactionPolicy(), max_attempts=1,
                                       timeout_seconds=0.05)
-            ports = {'memory:memory': memory, 'llm:llm': HangingLLM()}
+            ports = PortRegistry({'memory:memory': memory, 'llm:llm': HangingLLM()})
             ex = TurnExecutor(
                 SimpleNamespace(port_registry=ports,
                                 require_port=lambda key: require_test_port(ports, key),
@@ -289,7 +291,7 @@ class ExecutorFailureTests(unittest.TestCase):
                 compaction_engine=engine,
                 compaction_clock_provider=lambda: 1,
             )
-            result = await ex.compact_memory_async(
+            result = await ex.compaction.run(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
                 continuation=make_continuation(turn_id='T'))
             self.assertFalse(result.success)

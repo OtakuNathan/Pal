@@ -3,26 +3,16 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR as _ToolCallIR
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Protocol, runtime_checkable
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, Protocol
 
-from pal.llm.ir import (
-    LLMFinishReason,
-    LLMRequestIR,
-    LLMResponseIR,
-    LLMResponseUpdate,
-    LLMMessageIR,
-    LLMUsageIR,
-    MessageRole,
-    ReasoningPartIR,
-    ReplayEnvelope,
-    TextPartIR,
-)
+from pal.llm.ir import LLMRequestIR, LLMResponseIR, LLMResponseUpdate, LLMMessageIR, LLMUsageIR, MessageRole, ReasoningPartIR, TextPartIR
 from pal.llm.conversions import request_ir_from_prompt
 from pal.llm.projection_contracts import ProjectionSendReceipt
 from pal.llm.projection_contracts import EndpointBinding, ProjectionSessionPort
 from pal.llm.request_contracts import LLMPreparedPlan, RequestSubmission
 from pal.llm.shapes.base import EncodedRequest
 from pal.shared.ports import PortKey
+from pal.shared.enums import LLMFinishReason
 
 
 @dataclass(frozen=True)
@@ -179,26 +169,6 @@ class LLMPreflightAdvice:
     breakdown: dict[str, int | bool] = field(default_factory=dict)
 
 
-class LLMQueryPort(Protocol):
-    def prompt_cache_eligible_anchor_request(
-        self, *, logical_scope_id: str = "pal:resident", endpoint_id: str = "",
-    ) -> dict[str, Any]: ...
-
-    def prompt_cache_confirmed_anchor_request(
-        self, *, logical_scope_id: str = "pal:resident", endpoint_id: str = "",
-    ) -> dict[str, Any]: ...
-
-    def resolve_endpoint_facts(
-        self, *, preferred_endpoint_id: str | None = None,
-        preferred_endpoint_source: str | None = None,
-    ) -> dict[str, Any]: ...
-
-    def resolve_max_output_tokens(
-        self, *, preferred_endpoint_id: str | None = None,
-        preferred_endpoint_source: str | None = None,
-    ) -> int | None: ...
-
-
 class LLMProjectionPort(Protocol):
     def prepare_generation_plan(self, request: LLMRequestIR) -> LLMPreparedPlan | None: ...
 
@@ -209,47 +179,36 @@ class LLMProjectionPort(Protocol):
     def retire_projection_sessions(self) -> None: ...
 
 
-class LLMRuntimePort(LLMQueryPort, Protocol):
+class LLMService(Protocol):
+    def plan_compaction(self, endpoint_id: str | None = None, *, force_semantic: bool = False) -> LLMCompactionPlan: ...
+
+    def release_context(self, context_id: str) -> None: ...
+
+    def prompt_cache_eligible_anchor_request(
+        self, *, logical_scope_id: str = "pal:resident", endpoint_id: str = "",
+    ) -> dict[str, Any]: ...
+
+    def prompt_cache_confirmed_anchor_request(
+        self, *, logical_scope_id: str = "pal:resident", endpoint_id: str = "",
+    ) -> dict[str, Any]: ...
+
+
+    def resolve_max_output_tokens(
+        self, *, preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> int | None: ...
+
+
+    def metadata(self, *, preferred_endpoint_id: str | None = None, preferred_endpoint_source: str | None = None) -> LLMMetadata: ...
+
     @property
     def projection_port(self) -> LLMProjectionPort | None: ...
 
-    @property
-    def last_endpoint_id(self) -> str | None: ...
-
-    @property
-    def last_model_id(self) -> str | None: ...
-
-    @property
-    def last_projection_receipt(self) -> ProjectionSendReceipt | None: ...
-
-    def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+    async def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         ...
 
-    async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        ...
 
     def generate(
-        self, request: LLMRequestIR, *,
-        projection: EncodedRequest | None = None,
-        projection_binding: EndpointBinding | None = None,
-        projection_attempt_id: str = "",
-        generation_plan: LLMPreparedPlan | None = None,
-        on_submitted: Callable[[RequestSubmission], None] | None = None,
-    ) -> LLMGenerationResult:
-        ...
-
-    async def agenerate(
-        self, request: LLMRequestIR, *,
-        projection: EncodedRequest | None = None,
-        projection_binding: EndpointBinding | None = None,
-        projection_attempt_id: str = "",
-        generation_plan: LLMPreparedPlan | None = None,
-        on_submitted: Callable[[RequestSubmission], None] | None = None,
-        on_event: Callable[[dict[str, Any]], None] | None = None,
-    ) -> LLMGenerationResult:
-        ...
-
-    def astream(
         self, request: LLMRequestIR, *,
         projection: EncodedRequest | None = None,
         projection_binding: EndpointBinding | None = None,
@@ -260,32 +219,9 @@ class LLMRuntimePort(LLMQueryPort, Protocol):
     ) -> AsyncGenerator[LLMResponseUpdate, None]:
         ...
 
-    def supports_streaming(self, request: LLMRequestIR | None = None) -> bool:
-        ...
 
+LLM_RUNTIME = PortKey[LLMService]("llm:llm", LLMService)
 
-
-
-LLM_RUNTIME = PortKey[LLMRuntimePort]("llm:llm", LLMRuntimePort)
-LLM_QUERY = PortKey[LLMQueryPort]("llm:query", LLMQueryPort)
-
-
-@dataclass(frozen=True)
-class LLMSideTurn:
-    runtime: LLMRuntimePort
-    release: Callable[[], None]
-    preferred_endpoint_id: str | None = None
-    preferred_model_id: str | None = None
-
-
-class LLMSideTurnPort(Protocol):
-    def create_side_turn(
-        self, *, scope_id: str, branch_id: str, message_ids: tuple[str, ...],
-    ) -> LLMSideTurn: ...
-
-
-# Optional feature port: ordinary LLM providers need not implement side turns.
-LLM_SIDE_TURNS = PortKey[LLMSideTurnPort]("llm:side_turns", LLMSideTurnPort)
 
 def generation_result_from_values(
     text: str = "",
@@ -358,8 +294,48 @@ def _normalize_finish_reason(value: LLMFinishReason | str) -> LLMFinishReason:
     return LLMFinishReason(normalized or LLMFinishReason.STOP.value)
 
 
-@runtime_checkable
-class NativeCompactionRuntimePort(Protocol):
-    def compaction_strategy(self, endpoint_id: str | None = None) -> str: ...
-    async def acompact_native(self, request: LLMRequestIR, *, timeout_seconds: float = 180.0,
-                              next_request: LLMRequestIR | None = None) -> tuple[ReplayEnvelope, int, dict[str, Any]]: ...
+async def collect_generation(stream: AsyncIterator[LLMResponseUpdate]) -> LLMGenerationResult:
+    """Collect the terminal semantic response without selecting a transport."""
+    response = None
+    completion = None
+    async for update in stream:
+        response = update.response
+        completion = update.completion
+    if response is None:
+        raise RuntimeError("LLM generation ended without a semantic response")
+    return completion if completion is not None else LLMGenerationResult(response=response)
+
+
+@dataclass(frozen=True)
+class LLMMetadata:
+    endpoint_id: str | None = None
+    model_id: str | None = None
+    wire_shape: str | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    max_output_tokens_upper_limit: int | None = None
+    supports_streaming: bool = False
+    supports_tools: bool = False
+    supports_vision: bool = False
+    input_modalities: list[str] = field(default_factory=list)
+    output_modalities: list[str] = field(default_factory=list)
+    capabilities: dict[str, Any] = field(default_factory=dict)
+    thinking_levels: list[str] = field(default_factory=list)
+    default_thinking_level: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        from dataclasses import asdict
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class LLMCompactionPlan:
+    strategy: str = "semantic_checkpoint"
+
+    @property
+    def include_completed_tail(self) -> bool:
+        return self.strategy == "openai_responses"
+
+    @property
+    def promote_before_capture(self) -> bool:
+        return not self.include_completed_tail

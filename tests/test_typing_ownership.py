@@ -1,10 +1,11 @@
+from tests.core_factory import build_core
 import asyncio
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock
 
 from pal.channel.capabilities import TypingSubscriber
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.scheduling import ResidentTurnKind
 from pal.core.turn_events import TURN_END, TURN_START
 
@@ -27,7 +28,7 @@ def test_typing_end_uses_start_route_and_is_idempotent():
 
 class ContinuationTypingTests(IsolatedAsyncioTestCase):
     async def test_direct_continuation_pairs_events_even_on_failure(self):
-        core = PalCore()
+        core = build_core()
         events = []
         for topic in (TURN_START, TURN_END):
             core.context.turn_event_bus.subscribe(topic, lambda topic, event: events.append(topic))
@@ -43,7 +44,7 @@ class ContinuationTypingTests(IsolatedAsyncioTestCase):
             core.close()
 
     async def test_tracked_continuation_does_not_duplicate_task_events(self):
-        core = PalCore()
+        core = build_core()
         events = []
         for topic in (TURN_START, TURN_END):
             core.context.turn_event_bus.subscribe(topic, lambda topic, event: events.append(topic))

@@ -326,20 +326,20 @@ def test_runtime_refresh_loads_edits_and_removals_and_rejects_invalid_reload(tmp
         endpoint_invoker=ShapeEndpointInvoker(transport=Transport(frames(WireShape.OPENAI_COMPLETION, '{}', False))),
         config=RuntimeConfig(runtime_root=tmp_path),
     )
-    assert runtime.generate(_request()).tool_calls[0].args == {"generation": 1}
+    assert runtime._generate_response(_request()).tool_calls[0].args == {"generation": 1}
     path.write_text(source(2))
     os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     assert runtime.refresh_llm_endpoints()["endpoint_response_hook_count"] == 1
-    assert runtime.generate(_request()).tool_calls[0].args == {"generation": 2}
+    assert runtime._generate_response(_request()).tool_calls[0].args == {"generation": 2}
     path.unlink()
     assert runtime.refresh_llm_endpoints()["endpoint_response_hook_count"] == 0
-    assert runtime.generate(_request()).tool_calls[0].args == {}
+    assert runtime._generate_response(_request()).tool_calls[0].args == {}
     path.write_text('raise RuntimeError("broken configuration")\n')
     previous = runtime.provider_response_hooks
     with pytest.raises(ProviderResponseHookError, match="import failed"):
         runtime.refresh_llm_endpoints()
     assert runtime.provider_response_hooks is previous
-    assert runtime.generate(_request()).tool_calls[0].args == {}
+    assert runtime._generate_response(_request()).tool_calls[0].args == {}
 
 
 def test_output_continuation_does_not_apply_endpoint_hook_again_to_merged_result(tmp_path):
@@ -369,7 +369,7 @@ def test_output_continuation_does_not_apply_endpoint_hook_again_to_merged_result
     runtime = LLMRuntime(EndpointResolver(endpoints=(ep,)), _Settings(active=ep.endpoint_id),
                          endpoint_invoker=invoker, config=RuntimeConfig(runtime_root=tmp_path))
     async def consume():
-        return [update async for update in runtime.astream(_request())]
+        return [update async for update in runtime.generate(_request())]
     result = asyncio.run(consume())[-1].response
     assert result.text == "first second"
     assert admissions == [ep.endpoint_id, ep.endpoint_id]

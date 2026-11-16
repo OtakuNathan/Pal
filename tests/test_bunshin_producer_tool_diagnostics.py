@@ -1,5 +1,6 @@
 """Content-free producer routing diagnostics, authority, and finite retention."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -244,13 +245,13 @@ def test_started_and_terminal_include_pre_handler_failures_without_behavior_chan
 
 
 def test_real_facade_distinguishes_execution_discovery_and_rejected_routes():
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
     from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput
     from tests.capability_fixture import mount_test_capability
 
     async def scenario():
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime

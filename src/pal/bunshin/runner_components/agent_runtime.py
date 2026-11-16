@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.shared.ports import PortRegistry
 from pal.bunshin.runner_components.models import BunshinRuntimeBundle
 from pal.bunshin.runner_components.models import BunshinAgentLoopState
 from pal.bunshin.runner_components.runtime_build import _bunshin_noop_failure_handler
@@ -6,7 +7,8 @@ from pal.bunshin.runner_components.llm_settings import _bunshin_llm_request_meta
 from pal.bunshin.runner_components.llm_settings import _bunshin_temperature
 from pal.bunshin.runner_components.prompt_values import _llm_tools_for_allowed
 from dataclasses import dataclass, replace
-from pal.core import AgentTurnRuntime, MainContext
+from pal.core.agent_turn_runtime import AgentTurnRuntime
+from pal.core.main_context import MainContext
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.turns import TurnContinuation
@@ -42,11 +44,11 @@ class AgentRuntime:
         context = MainContext(
             execution_runtime=state.execution_runtime,
             prompt_fragment_registry=prompt_fragment_registry,
-            port_registry={
+            port_registry=PortRegistry({
                 "llm:llm": llm_runtime,
                 "memory:memory": state.memory_service,
                 "agent_io:output": output_port,
-            },
+            }),
         )
 
         def adapt_request(prompt: LLMRequestIR) -> LLMRequestIR:

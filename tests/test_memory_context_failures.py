@@ -1,9 +1,13 @@
+from pal.shared.ports import PortRegistry
+from tests.core_factory import build_core
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore, TurnContinuation, register_with_core
+from pal.core.runtime import PalCore
+from pal.core.turns import TurnContinuation
+from pal.core.capabilities import register_with_core
 from pal.core.prompt_compiler import PromptCompiler
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.foundation import EventEnvelope
@@ -16,7 +20,7 @@ def test_compiler_exposes_redacted_memory_load_failure(error_type):
     memory = SimpleNamespace(build_pack=Mock(side_effect=error_type("history unavailable token=private-value")))
     compiler = PromptCompiler(SimpleNamespace(
         prompt_fragment_registry=PromptFragmentRegistry(), execution_runtime=None,
-        require_port=lambda _: memory, port_registry={},
+        require_port=lambda _: memory, port_registry=PortRegistry({}),
     ))
     request = compiler.build_canonical_prompt(PromptAssemblyContext())
     text = request.metadata["runtime_reminder_text"]
@@ -30,7 +34,7 @@ def test_compiler_exposes_redacted_memory_load_failure(error_type):
 def test_host_without_memory_service_does_not_report_a_failed_load():
     compiler = PromptCompiler(SimpleNamespace(
         prompt_fragment_registry=PromptFragmentRegistry(), execution_runtime=None,
-        require_port=Mock(side_effect=KeyError("memory:memory")), port_registry={},
+        require_port=Mock(side_effect=KeyError("memory:memory")), port_registry=PortRegistry({}),
     ))
     assert compiler.build_canonical_prompt(PromptAssemblyContext()).metadata["runtime_reminder_text"] == ""
 
@@ -48,7 +52,7 @@ def test_memory_failure_keeps_deep_root_cause_without_stack_frames(implicit):
     memory = SimpleNamespace(build_pack=Mock(side_effect=error))
     compiler = PromptCompiler(SimpleNamespace(
         prompt_fragment_registry=PromptFragmentRegistry(), execution_runtime=None,
-        require_port=lambda _: memory, port_registry={},
+        require_port=lambda _: memory, port_registry=PortRegistry({}),
     ))
     text = compiler.build_canonical_prompt(PromptAssemblyContext()).metadata["runtime_reminder_text"]
     if implicit:
@@ -61,7 +65,7 @@ def test_memory_failure_keeps_deep_root_cause_without_stack_frames(implicit):
 
 
 def test_active_turn_load_failure_reaches_model_without_a_hidden_retry(monkeypatch):
-    core, memory = PalCore(), MemoryService()
+    core, memory = build_core(), MemoryService()
     register_with_core(core)
     register_memory(core.context, memory)
     reader = Mock(side_effect=OSError("active history unavailable"))
@@ -82,7 +86,7 @@ def test_active_turn_load_failure_reaches_model_without_a_hidden_retry(monkeypat
 
 
 def test_turn_delivers_memory_failure_once_and_withdraws_it_after_recovery(monkeypatch):
-    core, memory = PalCore(), MemoryService()
+    core, memory = build_core(), MemoryService()
     register_with_core(core)
     register_memory(core.context, memory)
     memory.begin_l1_turn("memory-failure", user_text="Continue the earlier task")

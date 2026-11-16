@@ -1,4 +1,5 @@
 """Verify model-visible skill data, failure causes and post-commit effects."""
+from tests.core_factory import build_core
 import errno
 import json
 import os
@@ -8,7 +9,7 @@ import pytest
 
 from pal.bunshin.ipc import BunshinManagerRpcError
 from pal.bunshin.workflow_capabilities import BunshinPublicProvider
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
 from pal.execution import register_with_core as register_execution
 from pal.foundation import PalV2Database
@@ -22,7 +23,7 @@ from tests.test_tool_failure_affordances import invoke, metadata, read
 
 @pytest.fixture
 def core(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_execution(core.context)
     core.publish_module_capabilities("execution")
     execution = core.context.execution_runtime

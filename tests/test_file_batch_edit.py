@@ -1,3 +1,4 @@
+from tests.core_factory import build_core
 from unittest.mock import patch
 
 import pytest
@@ -210,11 +211,11 @@ def test_error_after_replacement_does_not_claim_nothing_applied(tmp_path):
 
 
 def test_partial_success_survives_runtime_output_validation(tmp_path):
-    from pal.core import PalCore
+    from pal.core.runtime import PalCore
     from pal.execution import register_with_core
     from pal.shared.tool_protocol import new_tool_call
     from pal.execution.tool_facade import EffectOutcome
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime

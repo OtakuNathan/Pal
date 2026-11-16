@@ -16,6 +16,7 @@ import json
 import tempfile
 import unittest
 from types import SimpleNamespace
+from pal.shared.ports import PortRegistry
 
 from pal.core.turns import LLMRequestEffect
 from pal.llm.endpoint import ShapeEndpointInvoker
@@ -92,14 +93,14 @@ def _runtime(transport) -> LLMRuntime:
 
 
 def _executor(memory, runtime):
-    from pal.core.compaction import CompactionEngine
-    from pal.core.pal_compaction import PalCompactionPolicy
+    from pal.llm.compaction_engine import CompactionEngine
+    from pal.llm.resident_compaction import PalCompactionPolicy
     from pal.core.turn_executor import TurnExecutor
 
     async def call_port(port, async_name, _sync_name, *args):
         return await getattr(port, async_name)(*args)
 
-    ports = {"memory:memory": memory, "llm:llm": runtime}
+    ports = PortRegistry({"memory:memory": memory, "llm:llm": runtime})
     return TurnExecutor(
         SimpleNamespace(port_registry=ports, require_port=lambda key: require_test_port(ports, key),
                         execution_runtime=None),
@@ -136,7 +137,7 @@ def _drive(executor, request):
     async def run():
         return await executor._handle_llm_request(
             LLMRequestEffect(assembly_context=PromptAssemblyContext()),
-            SimpleNamespace(
+            make_continuation(
                 budget_failure_feedback_text="",
                 llm_round_index=0,
                 preferred_llm_endpoint_id=None,
@@ -244,7 +245,7 @@ class VerticalTraceTests(unittest.TestCase):
 
         # Compaction now has benefit and succeeds through the real engine,
         # the real install, and the post-commit rebase.
-        result = asyncio.run(ex.compact_memory_async(
+        result = asyncio.run(ex.compaction.run(
             memory, target_input_budget=100_000, reserved_output_tokens=1024,
             continuation=make_continuation(turn_id="T")))
         self.assertNotEqual(result.status, "no_benefit")
@@ -269,13 +270,13 @@ class VerticalTraceTests(unittest.TestCase):
         root.commit("manual")
         memory.append_l1_user("T", user("Q2", "q2"))
         request2 = _request_for(memory, ())
-        self.assertIsNone(ex._prepare_turn_projection(runtime, request2))
+        self.assertIsNone(ex.projection.prepare(runtime, request2))
         kinds = [d.get("kind") for d in ex.state.diagnostics]
         self.assertIn("two_segment_turn_projection_stale_left", kinds)
 
         # Once the rebase lands, the projection engages again.
-        ex._rebase_projection_after_left_install(runtime, "pal:resident", root)
-        pack = ex._prepare_turn_projection(runtime, request2)
+        ex.projection.rebase(runtime, "pal:resident", root)
+        pack = ex.projection.prepare(runtime, request2)
         self.assertIsNotNone(pack)
 
 

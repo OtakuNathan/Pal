@@ -204,7 +204,7 @@ class ModelSwitchMixin:
             busy = self._model_switch_busy_reason()
             ticket = None if busy else self._compaction_gate().claim(
                 "pal:resident", trigger=CompactionTrigger.MODEL_SWITCH,
-                deadline_seconds=self.turn_executor.compaction_deadline_seconds(),
+                deadline_seconds=self.turn_executor.compaction.deadline_seconds(),
             )
             if ticket is not None:
                 request.payload["stage"] = "executing"

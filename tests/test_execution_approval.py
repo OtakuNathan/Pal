@@ -5,7 +5,7 @@ from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 import asyncio
 import unittest
 
-from pal.core import PalCore as _PalCoreBootstrap
+from pal.core.runtime import PalCore as _PalCoreBootstrap
 from pal.execution.approval import ApprovalExecutionDecorator, ExecutionApprovalRequest
 from pal.shared import ToolExecutionResult
 

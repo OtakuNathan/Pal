@@ -5,7 +5,7 @@ import asyncio
 import json
 from typing import Any
 from uuid import uuid4
-from pal.llm.contracts import LLMRuntimePort, LLMPreflightAdvice, LLMPreflightRequest
+from pal.llm.contracts import LLMService, LLMPreflightAdvice, LLMPreflightRequest
 from pal.llm.ir import LLMRequestIR
 from pal.shared import ResponseHandle, TurnDeliveryBinding
 from pal.bunshin.runner_components.reporter import Reporter
@@ -15,30 +15,22 @@ from pal.bunshin.runner_components.heartbeat import Heartbeat
 class _BunshinLLMRuntimeAdapter:
     """Role progress around the same explicit LLM contract used by resident Core."""
 
-    def __init__(self, reporter: Reporter, heartbeat: Heartbeat, base_runtime: LLMRuntimePort, state: "BunshinAgentLoopState") -> None:
+    def __init__(self, reporter: Reporter, heartbeat: Heartbeat, base_runtime: LLMService, state: "BunshinAgentLoopState") -> None:
         self._reporter = reporter
         self._heartbeat = heartbeat
         self._base = base_runtime
         self._state = state
 
-    @property
-    def last_endpoint_id(self) -> str | None:
-        return self._base.last_endpoint_id
+    def plan_compaction(self, endpoint_id=None, *, force_semantic=False):
+        from pal.llm.contracts import LLMCompactionPlan
+        return self._base.plan_compaction(endpoint_id, force_semantic=force_semantic)
 
-    @property
-    def last_model_id(self) -> str | None:
-        return self._base.last_model_id
-
-    @property
-    def last_projection_receipt(self) -> ProjectionSendReceipt | None:
-        return self._base.last_projection_receipt
+    def release_context(self, context_id):
+        self._base.release_context(context_id)
 
     @property
     def projection_port(self):
         return self._base.projection_port
-
-    def supports_streaming(self, request: LLMRequestIR | None = None) -> bool:
-        return self._base.supports_streaming(request)
 
     def prompt_cache_eligible_anchor_request(self, *, logical_scope_id="pal:resident", endpoint_id=""):
         return self._base.prompt_cache_eligible_anchor_request(
@@ -56,55 +48,23 @@ class _BunshinLLMRuntimeAdapter:
             preferred_endpoint_source=preferred_endpoint_source,
         )
 
-    def resolve_endpoint_facts(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None):
-        return self._base.resolve_endpoint_facts(
-            preferred_endpoint_id=preferred_endpoint_id,
-            preferred_endpoint_source=preferred_endpoint_source,
-        )
+    def metadata(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None):
+        return self._base.metadata(preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source)
 
-    def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        return self._base.preflight(request)
+    async def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+        return await self._base.preflight(request)
 
-    async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        return await self._base.apreflight(request)
 
-    def generate(self, request, *, projection=None, projection_binding=None,
-                 projection_attempt_id="", generation_plan=None, on_submitted=None):
-        return self._base.generate(
-            request, projection=projection, projection_binding=projection_binding,
-            projection_attempt_id=projection_attempt_id, generation_plan=generation_plan,
-            on_submitted=on_submitted,
-        )
 
-    async def agenerate(self, request, *, projection=None, projection_binding=None,
-                        projection_attempt_id="", generation_plan=None, on_submitted=None,
-                        on_event=None):
-        is_compaction = "compaction" in str(request.metadata.get("purpose") or "").lower()
-        if not is_compaction:
-            await self._reporter.emit_progress(
-                "llm_round_started", round=self._state.llm_round_count,
-                tool_call_count=self._state.tool_call_count, tool_count=len(request.tools),
-            )
-        awaitable = self._base.agenerate(
-            request, projection=projection, projection_binding=projection_binding,
-            projection_attempt_id=projection_attempt_id, generation_plan=generation_plan,
-            on_submitted=on_submitted, on_event=self._progress_sink(on_event),
-        )
-        if is_compaction:
-            return await awaitable
-        return await self._heartbeat.await_with_progress_heartbeat(
-            awaitable, phase="llm_round_waiting", round=self._state.llm_round_count,
-            tool_call_count=self._state.tool_call_count,
-        )
-
-    async def astream(self, request, *, projection=None, projection_binding=None,
+    async def generate(self, request, *, projection=None, projection_binding=None,
                       projection_attempt_id="", generation_plan=None, on_submitted=None,
                       on_event=None):
         await self._reporter.emit_progress(
             "llm_round_started", round=self._state.llm_round_count,
             tool_call_count=self._state.tool_call_count, tool_count=len(request.tools),
         )
-        iterator = self._base.astream(
+        iterator = self._base.generate(
             request, projection=projection, projection_binding=projection_binding,
             projection_attempt_id=projection_attempt_id, generation_plan=generation_plan,
             on_submitted=on_submitted, on_event=self._progress_sink(on_event),

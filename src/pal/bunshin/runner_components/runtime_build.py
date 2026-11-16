@@ -4,7 +4,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 from pal.artifact import ArtifactManager, ArtifactRepository, register_with_core as register_artifact_with_core
-from pal.core import CoreRuntimeState, MainContext
+from pal.core.contracts import CoreRuntimeState
+from pal.core.main_context import MainContext
 from pal.core.module_lifecycle import ModuleLifecycle
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.runtime_state import RuntimeSnapshotCoordinator
@@ -101,10 +102,7 @@ def build_slim_bunshin_runtime(
     activate_worker_extension(context, Path(runtime_root), database_path=configured_db_path or None)
     register_artifact_with_core(context, artifact_service)
     memory_service = MemoryService(
-        l3_selector=L3ProviderSelector(
-            resolver=context.execution_runtime.l3_plugin_registry.require,
-            active_provider_id="sqlite_vec_l3",
-        ),
+
     )
     register_memory_with_core(context, memory_service)
     register_skill_with_core(
@@ -261,4 +259,3 @@ async def close_role_runtime(
         failures.append(exc)
     if failures:
         raise ExceptionGroup("bunshin runtime shutdown failed", failures)
-

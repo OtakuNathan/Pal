@@ -270,6 +270,7 @@ class DreamingService:
             raise ValueError("unknown dreaming run")
         self.run_id = run_id
         acquired = False
+        admitted = False
         source = self.provider.repository
         candidate = None
         pipeline = None
@@ -290,13 +291,13 @@ class DreamingService:
             if self.core is not None:
                 while True:
                     self._resolve_main_provider()
-                    if await self.core.try_enter_memory_maintenance_async(self.provider):
+                    if await self.core.try_enter_memory_maintenance_async():
+                        admitted = True
                         break
                     await self.core.wait_for_memory_maintenance_async()
-                acquired = True
-            else:
-                source.freeze()
-                acquired = True
+            source = self.provider.repository
+            source.freeze()
+            acquired = True
             # Rebuild affected input after the write fence, including additions
             # and deletions since preprocessing. Cached semantic work is keyed
             # by the full input/configuration fingerprint.
@@ -379,6 +380,8 @@ class DreamingService:
         finally:
             if candidate is not None:
                 candidate.close()
+            if admitted and not acquired:
+                await self.core.leave_memory_maintenance_async()
             if acquired:
                 source.thaw()
                 self.provider.repository.thaw()

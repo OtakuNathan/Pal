@@ -27,9 +27,10 @@ from tests.turn_fakes import continuation as make_continuation
 import asyncio
 import unittest
 from types import SimpleNamespace
+from pal.shared.ports import PortRegistry
 
-from pal.core.compaction import CompactionEngine
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionEngine
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.turn_executor import TurnExecutor
 from pal.llm import generation_result_from_values
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR, WireShape
@@ -81,7 +82,7 @@ class _FakeNetwork(NonStreamingLLM):
         self.requests: list = []
         self._host = host
 
-    async def agenerate(self, request, *args, **kwargs):
+    async def respond(self, request, *args, **kwargs):
         self.requests.append(request)
         from tests.test_runtime_compaction import (
             _valid_bunshin_payload,
@@ -96,21 +97,14 @@ class _FakeNetwork(NonStreamingLLM):
         return generation_result_from_values(text=text)
 
 
-class _Ports:
+class _Ports(PortRegistry):
     """Minimal port registry: memory + llm only, fake network behind llm."""
 
     def __init__(self, memory_service: MemoryService, llm: _FakeNetwork) -> None:
-        self._ports = {"memory:memory": memory_service, "llm:llm": llm}
-
-    def get(self, name: str):
-        return self._ports.get(name)
+        super().__init__({"memory:memory": memory_service, "llm:llm": llm})
 
     def require_port(self, name):
-        name = name.name if isinstance(name, PortKey) else name
-        value = self._ports.get(name)
-        if value is None:
-            raise KeyError(name)
-        return value
+        return self.require(name) if isinstance(name, PortKey) else self[name]
 
 
 class _Clock:
@@ -179,7 +173,7 @@ class H01CombinationMatrixTests(unittest.TestCase):
             core_mode="bunshin" if host == "bunshin" else "",
         )
 
-        result = asyncio.run(executor.compact_memory_async(
+        result = asyncio.run(executor.compaction.run(
             service,
             target_input_budget=1_000_000,
             reserved_output_tokens=1024,

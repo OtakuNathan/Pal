@@ -24,7 +24,7 @@ from pal.core.compaction_coordinator import (
     CompactionTicket,
     compaction_gate_active,
 )
-from pal.core.compaction import CompactionRunResult
+from pal.llm.compaction_engine import CompactionRunResult
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.memory.contracts import MemoryCompactResult
 
@@ -52,7 +52,7 @@ from pal.core.prompt_debug_log import (
     summarize_last_provider_payload,
 )
 from pal.core.prompt_compiler import PromptCompiler
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.tool_surface import ToolSurface
 from pal.core.turn_executor import TurnExecutor
@@ -125,17 +125,11 @@ class TurnManager:
         return continuation
 
     def _resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int:
-        llm_runtime = self.context.port_registry.get("llm:llm")
-        if llm_runtime is not None:
-            fn = getattr(llm_runtime, "resolve_max_output_tokens", None)
-            if callable(fn):
-                try:
-                    result = fn(preferred_endpoint_id=preferred_endpoint_id)
-                except TypeError:
-                    result = fn()
-                if result is not None:
-                    return result
-        return self.config.fallback_max_output_tokens
+        llm_runtime = self.context.port_registry.optional(LLM_RUNTIME)
+        if llm_runtime is None:
+            return self.config.fallback_max_output_tokens
+        result = llm_runtime.resolve_max_output_tokens(preferred_endpoint_id=preferred_endpoint_id)
+        return self.config.fallback_max_output_tokens if result is None else result
 
     def resume(
         self,
@@ -285,7 +279,7 @@ class TurnManager:
             history = self.context.port_registry.get(RESIDENT_HISTORY.name)
             if history is not None:
                 history.finish_partial_stream(continuation.turn_id)
-            from pal.core.prompt_context import completed_tool_contexts
+            from pal.memory.prompt_context import completed_tool_contexts
             reader = getattr(memory_service, "active_l1_turn", None)
             active = reader(continuation.turn_id) if callable(reader) else None
             contexts = completed_tool_contexts(continuation, active) if active is not None else ()
@@ -525,7 +519,7 @@ class CoreTurnIOPort:
 
 @dataclass
 class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
-    context: MainContext = field(default_factory=MainContext)
+    context: MainContext
     state: CoreRuntimeState = field(default_factory=CoreRuntimeState)
     config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
     main_loop: MainLoop = field(default_factory=MainLoop)
@@ -1989,7 +1983,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 hot_cache_epoch = cache_epoch if not estimated_notice else ""
                 ticket = gate.claim(
                     RESIDENT_COMPACTION_SCOPE,
-                    deadline_seconds=self.turn_executor.compaction_deadline_seconds(
+                    deadline_seconds=self.turn_executor.compaction.deadline_seconds(
                         max_attempts=3 if hot_cache_epoch else None,
                     ),
                     trigger=(
@@ -2099,7 +2093,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             if not eligible():
                 return CompactionRunResult(status="ticket_cancelled")
             gate.advance(ticket, CompactionPhase.GENERATING)
-        run_result = await self.turn_executor.compact_memory_async(
+        run_result = await self.turn_executor.compaction.run(
             self.context.require_port(MEMORY), target_input_budget=target_input_budget,
             reserved_output_tokens=reserved_output_tokens,
             preferred_endpoint_id=preferred_endpoint_id,

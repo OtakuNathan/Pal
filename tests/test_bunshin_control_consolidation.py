@@ -1,10 +1,11 @@
 """Pending batch: unified workflow control preserves owner and routing boundaries."""
+from tests.core_factory import build_core
 from unittest.mock import Mock
 
 import pytest
 
 from pal.bunshin.workflow_capabilities import BunshinPublicProvider
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.module_registry import ModuleHandle
 from pal.execution import register_with_core
 from pal.execution.tool_facade import EffectKind
@@ -13,7 +14,7 @@ from pal.shared.tool_protocol import new_tool_call
 
 @pytest.fixture
 def env(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     provider = BunshinPublicProvider(tmp_path, context=core.context, wake_manager=Mock())

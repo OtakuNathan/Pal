@@ -1,6 +1,7 @@
+from tests.core_factory import build_core
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput
 from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
@@ -28,7 +29,7 @@ def test_workflow_descriptions_only_publish_authored_examples(name, authored):
 
 @pytest.mark.parametrize('indirect', [False, True])
 def test_worker_routes_only_through_its_actual_surface(indirect):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime

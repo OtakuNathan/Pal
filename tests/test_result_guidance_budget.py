@@ -5,11 +5,14 @@ The truncation budget covers normal output only. Error presentation, status,
 recovery guidance and validated affordances are independent of that budget.
 """
 from __future__ import annotations
+from tests.core_factory import build_core
+
+from pal.execution.tool_facade import LifecycleAccess
 
 import asyncio
 from pathlib import Path
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.execution.contracts import ToolCallBudget
 from pal.execution.tool_facade import (
@@ -44,7 +47,7 @@ def _big_text() -> str:
 
 
 def _core():
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities("execution")
     return core
@@ -60,6 +63,7 @@ def _mount_boom(runtime, *, handler, alias="boom", mode=InvocationMode.DIRECT) -
         examples=({"value": "x"},),
         handler=handler,
         execution=ToolExecutionSemantics(
+            lifecycle_access=LifecycleAccess.SHARED,
             invocation_mode=mode,
             effect_kind=EffectKind.NONE,
             idempotency=Idempotency.IDEMPOTENT,
@@ -322,7 +326,7 @@ class TestOutputAndDiagnosticPresentation:
 
 class TestLongLineHintOnlyForRealReads:
     def _core(self):
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
         core.publish_module_capabilities("execution")
         return core

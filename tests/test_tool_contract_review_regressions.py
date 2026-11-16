@@ -1,5 +1,6 @@
 """Public invocation, discovery and delivery regressions from the 2026-10-09 audit."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -15,7 +16,7 @@ from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.bunshin.runner_components.artifacts import Artifacts
 from pal.bunshin.runner_components.completion import Completion
 from pal.bunshin.runner_components.text_deliverables import TextDeliverables
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput, StrictToolModel, ToolGuidance
 from pal.mcp.compiler import McpCompiler
@@ -252,7 +253,7 @@ def test_dynamic_mcp_names_keep_operation_and_plural_recall(runtime, name):
 
 def test_core_configuration_is_mounted_and_callable():
     from pal.core.capabilities import register_with_core
-    core = PalCore()
+    core = build_core()
     from tests.test_cache_warm_deadline import _Settings
     settings = _Settings()
     core.cache_warm_deadline.settings_provider = lambda: settings
@@ -275,7 +276,7 @@ def test_core_configuration_is_mounted_and_callable():
 def test_real_browser_multiplex_actions_are_discoverable():
     from tests.test_browser_cli_plugin import _FakeManager
     from pal.web_fetch import WebFetchService, register_with_core
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context, WebFetchService(browser_manager=_FakeManager()))
     core.publish_module_capabilities('web_fetch')
     runtime = core.context.execution_runtime

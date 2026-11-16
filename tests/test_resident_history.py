@@ -1,4 +1,6 @@
+from tests.turn_fakes import continuation as make_continuation
 """Resident continuity and historical evidence, with isolated runtime roots."""
+from tests.compaction_composition import execute_compaction
 import asyncio
 import json
 from datetime import datetime
@@ -10,8 +12,8 @@ import pytest
 from pal.memory.persistence.conversation import ConversationHistoryReference, history_records
 from pal.memory.persistence.journal import ResidentJournalStore
 from pal.memory.persistence.owner import ResidentHistoryPromptProvider
-from pal.core.compaction import CompactionEngine, CompactionSnapshot, CompactionClockKind
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionEngine, CompactionSnapshot, CompactionClockKind
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.execution.result_snapshots import render_snapshot_hint
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR, ReasoningPartIR, ReplayEnvelope, WireShape
 from pal.memory.contracts import L2Entry
@@ -242,7 +244,7 @@ def test_executor_automatically_persists_last_round_without_turn_settlement(tmp_
         executor = _executor(memory, _runtime(CapturingTransport(["last reply"])))
         executor.context.port_registry["memory:persistence"] = instance.history
         executor.build_turn_prompt = lambda *args, **kwargs: _request_for(memory, ())
-        continuation = SimpleNamespace(budget_failure_feedback_text="", llm_round_index=0,
+        continuation = make_continuation(budget_failure_feedback_text="", llm_round_index=0,
             preferred_llm_endpoint_id=None, preferred_llm_model_id=None, finalization_only=False,
             tool_observations=[], last_response_mode=None, turn_id="T", delivery_binding=None)
         await executor._handle_llm_request(LLMRequestEffect(assembly_context=PromptAssemblyContext()), continuation)
@@ -645,10 +647,10 @@ def test_archive_failure_prevents_compact_install_and_right_is_preserved(tmp_pat
         source = frozen(memory)
         before = memory.history.turns
         archive = instance.history.prepare_history_reference(source)
-        snapshot = CompactionSnapshot.capture_left(memory, source, target_input_budget=100000,
+        snapshot = memory.capture_compaction( source, target_input_budget=100000,
             reserved_output_tokens=1024, clock_kind=CompactionClockKind.USER_TURN, clock_value=1)
         with patch.object(ConversationHistoryReference, "stage", side_effect=OSError("disk unavailable")):
-            result = await CompactionEngine(PalCompactionPolicy(), max_attempts=1).run(snapshot,
+            result = await execute_compaction(CompactionEngine(PalCompactionPolicy(), max_attempts=1), snapshot,
                 memory_service=memory, llm_runtime=_Transport(_ScriptedLLM(_valid_pal_payload("summary"))), commit_hooks=archive)
         assert result.status == "commit_failed"
         assert memory.history.turns == before
@@ -661,19 +663,6 @@ def test_executor_commits_archive_after_durable_install_even_on_post_commit_faul
     from tests.test_runtime_compaction import _valid_pal_payload
     from tests.test_two_segment_executor_flow import _Transport, _ScriptedLLM
 
-    class FaultyEngine(CompactionEngine):
-        async def _commit(self, *args, **kwargs):
-            result = await super()._commit(*args, **kwargs)
-            if fault == "cancel_after_install":
-                raise asyncio.CancelledError
-            return result
-
-        @staticmethod
-        def _result(snapshot, **kwargs):
-            if fault == "packaging" and kwargs.get("status") == "compacted":
-                raise RuntimeError("packaging failed after RAM install")
-            return CompactionEngine._result(snapshot, **kwargs)
-
     async def scenario():
         instance = app(tmp_path)
         memory = begin(instance)
@@ -681,15 +670,24 @@ def test_executor_commits_archive_after_durable_install_even_on_post_commit_faul
         instance.history.record_reply("t", "visible reply")
         memory.settle_l1_turn("t")
         executor = instance.handle.core.turn_executor
-        executor._compaction_engine = FaultyEngine(PalCompactionPolicy(), max_attempts=1)
+        executor.compaction.engine = CompactionEngine(PalCompactionPolicy(), max_attempts=1)
+        install = memory.install_compaction
+        async def install_with_fault(*args, **kwargs):
+            result = await install(*args, **kwargs)
+            if fault == "cancel_after_install":
+                raise asyncio.CancelledError
+            if fault == "packaging":
+                raise RuntimeError("packaging failed after RAM install")
+            return result
+        memory.install_compaction = install_with_fault
         transport = _Transport(_ScriptedLLM(_valid_pal_payload("summary")))
         transport.projection_port = None
         executor.context.port_registry["llm:llm"] = transport
         if fault == "cancel_after_install":
             with pytest.raises(asyncio.CancelledError):
-                await executor.compact_memory_async(memory, target_input_budget=100000, reserved_output_tokens=4096)
+                await executor.compaction.run(memory, target_input_budget=100000, reserved_output_tokens=4096)
         else:
-            result = await executor.compact_memory_async(memory, target_input_budget=100000, reserved_output_tokens=4096)
+            result = await executor.compaction.run(memory, target_input_budget=100000, reserved_output_tokens=4096)
             assert result.success, result.failures
         saved = ResidentJournalStore(tmp_path).read()
         assert saved["modules"]["memory"]["payload"]["l1_turns"][0]["messages"][0]["semantic_kind"] == "runtime_context_summary"

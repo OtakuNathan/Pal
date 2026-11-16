@@ -1,4 +1,6 @@
 """Pending batch: MCP input adaptation stays local and server control stays scoped."""
+from pal.shared.ports import PortRegistry
+from tests.core_factory import build_core
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -6,7 +8,7 @@ import base64
 import pytest
 from jsonschema import Draft202012Validator
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.module_registry import ModuleHandle
 from pal.execution import register_with_core
 from pal.execution.contracts import CapabilityCall
@@ -97,7 +99,7 @@ def test_scoped_artifact_converts_without_reading_private_source_urls(tmp_path, 
             'local_file': {'preferred_path': str(path), 'preferred_mime_type': 'image/png'}}}}
     context = SimpleNamespace(execution_runtime=SimpleNamespace(turn_io=SimpleNamespace(
         artifact_scope_for_turn=lambda turn: 'conversation' if turn == 'origin' else None)),
-        port_registry={'artifact:artifact': SimpleNamespace(info=info)})
+        port_registry=PortRegistry({'artifact:artifact': SimpleNamespace(info=info)}))
     result = resolve_artifact_input(context, 'a1', mode, CapabilityCall(name='analyze', meta={'turn_id': 'origin'}))
     expected = str(path.resolve()) if mode == 'path' else base64.b64encode(path.read_bytes()).decode()
     assert result == (f'data:image/png;base64,{expected}' if mode in {'url', 'data_url'} else expected)
@@ -121,7 +123,7 @@ def test_local_config_carries_exact_tool_and_parameter_mapping(tmp_path):
 
 @pytest.fixture
 def managed(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     provider = McpManagerPluginProvider(runtime_root=tmp_path, core_context=core.context)
@@ -190,7 +192,7 @@ def test_inline_conversion_limit_is_checked_before_dispatch(tmp_path):
         source.truncate(8 * 1024 * 1024 + 1)
     service = SimpleNamespace(info=lambda *args: {'artifact': {'metadata': {'local_file': {'preferred_path': str(path)}}}})
     context = SimpleNamespace(execution_runtime=SimpleNamespace(turn_io=SimpleNamespace(artifact_scope_for_turn=lambda turn: 'scope')),
-        port_registry={'artifact:artifact': service})
+        port_registry=PortRegistry({'artifact:artifact': service}))
     with pytest.raises(McpArtifactInputError, match='inline conversion limit'):
         resolve_artifact_input(context, 'a1', 'base64', CapabilityCall(name='analyze'))
     assert resolve_artifact_input(context, 'a1', 'path', CapabilityCall(name='analyze')) == str(path.resolve())

@@ -5,6 +5,7 @@ Reads one endpoint row in read-only mode. Does not select a resident model,
 modify configuration, load resident history, or expose credential material.
 """
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
 
 import argparse
 import asyncio
@@ -73,7 +74,7 @@ async def verify(root: Path, endpoint_id: str) -> None:
             LLMMessageIR(MessageRole.ASSISTANT, replay=replay),
             LLMMessageIR(MessageRole.USER, (TextPartIR("Reply with only the project identifier and its color."),)),
         ), tools=(), policy=policy)
-        outcome = await runtime.agenerate(continuation)
+        outcome = await collect_generation(runtime.generate(continuation))
         passed = "PAL-LUNA-47" in outcome.text and "violet" in outcome.text.lower()
         print(json.dumps({"endpoint": endpoint_id, "strategy": runtime.compaction_strategy(),
             "canonical_items": len(replay.payload["output"]), "compacted_input_tokens": tokens,

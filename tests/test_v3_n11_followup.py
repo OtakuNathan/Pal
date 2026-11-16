@@ -5,6 +5,7 @@ Ported from the 29a879f review package (pal_v3_n1_review_29a879f)
 draft spec tests (N1-R1..R4). Red run captured on 29a879f before fixes.
 """
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
 
 from tests.turn_fakes import continuation as make_continuation
 import asyncio
@@ -13,7 +14,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from pal.core.compaction import CompactionEngine
+from pal.llm.compaction_engine import CompactionEngine
 from pal.llm import generation_result_from_values
 from pal.llm.ir import ReasoningPartIR, MessageState, TextPartIR
 from pal.memory import MemoryService
@@ -29,8 +30,8 @@ from tests.test_v3_n1_root_lifecycle import (
 )
 
 
-class ImmediateLLM:
-    async def agenerate(self, request):
+class ImmediateLLM(NonStreamingLLM):
+    async def respond(self, request):
         return generation_result_from_values(text=_valid_pal_payload('ACCEPTED_NEW_LEFT'))
 
 
@@ -133,24 +134,18 @@ class SettlementOutcomeTests(unittest.TestCase):
         async def scenario():
             memory = service_with_work()
             ex = executor(memory, ImmediateLLM())
-            ex._rebase_projection_after_left_install = Mock()
-            original = CompactionEngine._result
+            ex.projection.rebase = Mock()
+            install = memory.install_compaction
             injected = []
 
-            def fail_only_after_actual_commit(snapshot, **kwargs):
-                if kwargs.get('status') == 'compacted':
-                    self.assertEqual(memory.history_root.last_run.phase.value,
-                                     'committed')
-                    injected.append(True)
-                    raise RuntimeError(
-                        'injected result packaging failure AFTER actual commit')
-                return original(snapshot, **kwargs)
+            async def fail_only_after_actual_commit(*args, **kwargs):
+                await install(*args, **kwargs)
+                self.assertEqual(memory.history_root.last_run.phase.value, 'committed')
+                injected.append(True)
+                raise RuntimeError('injected result packaging failure AFTER actual commit')
 
-            # Real engine and real install run. Only the post-commit
-            # result-packaging boundary fails.
-            with patch.object(CompactionEngine, '_result',
-                              new=staticmethod(fail_only_after_actual_commit)):
-                result = await ex.compact_memory_async(
+            with patch.object(memory, 'install_compaction', new=fail_only_after_actual_commit):
+                result = await ex.compaction.run(
                     memory, target_input_budget=100_000, reserved_output_tokens=1024,
                     continuation=make_continuation(turn_id='T'))
             self.assertEqual(injected, [True])
@@ -163,15 +158,15 @@ class SettlementOutcomeTests(unittest.TestCase):
             self.assertIsNotNone(
                 result.memory_result,
                 'callers need the accepted result, not an invented empty success')
-            ex._rebase_projection_after_left_install.assert_called_once()
+            ex.projection.rebase.assert_called_once()
         asyncio.run(scenario())
 
     def test_reset_during_generation_does_not_make_old_cleanup_raise_stale_run(self):
         async def scenario():
             entered, release = asyncio.Event(), asyncio.Event()
 
-            class WaitingLLM:
-                async def agenerate(self, request):
+            class WaitingLLM(NonStreamingLLM):
+                async def respond(self, request):
                     entered.set()
                     await release.wait()
                     return generation_result_from_values(
@@ -179,7 +174,7 @@ class SettlementOutcomeTests(unittest.TestCase):
 
             memory = service_with_work()
             ex = executor(memory, WaitingLLM())
-            task = asyncio.create_task(ex.compact_memory_async(
+            task = asyncio.create_task(ex.compaction.run(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
                 continuation=make_continuation(turn_id='T')))
             try:
@@ -206,14 +201,14 @@ class SettlementOutcomeTests(unittest.TestCase):
 
     def test_generation_failure_still_returns_failure_with_old_left(self):
         async def scenario():
-            class BadLLM:
-                async def agenerate(self, request):
+            class BadLLM(NonStreamingLLM):
+                async def respond(self, request):
                     return generation_result_from_values(text='NOT_JSON')
 
             memory = service_with_work()
             before = memory.l1_store.turns.turns
             ex = executor(memory, BadLLM())
-            result = await ex.compact_memory_async(
+            result = await ex.compaction.run(
                 memory, target_input_budget=100_000, reserved_output_tokens=1024,
                 continuation=make_continuation(turn_id='T'))
             self.assertFalse(result.success)

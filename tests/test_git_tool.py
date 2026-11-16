@@ -10,7 +10,7 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from unittest.mock import patch
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.git_tool import GitTool, ScopedGitReadPlan, classify_git_command
 from pal.shared import RuntimeStatus

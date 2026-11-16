@@ -1,5 +1,6 @@
 """Provider diagnostics and partial writes must survive model-facing delivery."""
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
 
 import asyncio
 import json
@@ -68,8 +69,8 @@ def test_memory_health_retains_root_after_long_frames():
     backend = SimpleNamespace(last_embedding_error=report, inspect_summary=lambda: {'last_embedding_error': report})
     registry = SimpleNamespace(plugins={'test': backend}, get=lambda _: backend)
     provider = MemoryIntrospectionProvider(
-        service=SimpleNamespace(l3_selector=SimpleNamespace(active_provider_id='test')),
-        context=SimpleNamespace(execution_runtime=SimpleNamespace(l3_plugin_registry=registry)))
+        service=SimpleNamespace(l3_selector=SimpleNamespace(active_provider_id='test'), providers=registry),
+        context=SimpleNamespace())
     for action in (provider.active_provider, provider.list_providers):
         result = action(IntrospectionCall(name='audit'))
         assert 'OSError: storage offline' in result.llm_text
@@ -184,8 +185,8 @@ def test_batch_review_preserves_provider_and_item_results(setup_review, monkeypa
 @pytest.mark.parametrize("finish", ["error", "content_filter", "length"])
 def test_skill_sanitizer_failure_keeps_provider_response(services, runtime, finish):
     service, _ = services
-    class LLM:
-        async def agenerate(self, request):
+    class LLM(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(text="provider detail: unavailable", finish_reason=finish)
     service.llm_runtime = LLM()
     final = deliver(runtime, lambda: asyncio.run(SkillAssimilateTool(service).ainvoke({"source_text": "Do work"})))
@@ -196,8 +197,8 @@ def test_skill_sanitizer_failure_keeps_provider_response(services, runtime, fini
 
 def test_skill_invalid_sanitizer_json_keeps_cause_and_response(services, runtime, caplog):
     service, _ = services
-    class LLM:
-        async def agenerate(self, request):
+    class LLM(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(text="not JSON: provider payload", finish_reason="stop")
     service.llm_runtime = LLM()
     final = deliver(runtime, lambda: asyncio.run(SkillAssimilateTool(service).ainvoke({"source_text": "Do work"})))
@@ -208,8 +209,8 @@ def test_skill_invalid_sanitizer_json_keeps_cause_and_response(services, runtime
 
 def test_skill_unusable_sanitizer_payload_keeps_provider_details(services, runtime, caplog):
     service, _ = services
-    class LLM:
-        async def agenerate(self, request):
+    class LLM(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(text='{"error": "provider diagnostic for invalid candidate"}')
     service.llm_runtime = LLM()
     final = deliver(runtime, lambda: asyncio.run(SkillAssimilateTool(service).ainvoke({"source_text": "Do work"})))

@@ -92,7 +92,9 @@ class _ArtifactFixture:
 class FixtureExecution:
     def __init__(self, root: Path, case_id: str):
         self.root, self.case_id = root, case_id
-        self.core = PalCore()
+        from pal.core.main_context import MainContext
+        from pal.execution.backend import build_execution_runtime
+        self.core = PalCore(context=MainContext(execution_runtime=build_execution_runtime()))
         register_with_core(self.core.context)
         handle = build_lsp_plugin(runtime_root=root).register_with_core(self.core.context)
         handle.introspection_provider._request_or_error = self._lsp

@@ -13,6 +13,7 @@ Does not own:
 - tasking rules
 
 Exposes:
+- `WriterPreferredRWGate` (generic cancellation-safe lifecycle admission)
 - `EventEnvelope`
 - `PalV2Database`
 - `RawSQLHookRegistry`

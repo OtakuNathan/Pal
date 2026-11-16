@@ -1,4 +1,5 @@
 """Memory bodies reach the output snapshots intact, through default and explicitly selected providers."""
+from tests.core_factory import build_core
 from pathlib import Path
 
 import pytest
@@ -14,10 +15,9 @@ from pal.shared.tool_protocol import new_tool_call
 @pytest.mark.parametrize("view", ["summary", "origin"])
 @pytest.mark.parametrize("explicit_provider", [False, True])
 def test_long_memory_can_be_read_completely_from_snapshot(view, explicit_provider):
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
-    memory = MemoryService(l3_selector=L3ProviderSelector(
-        resolver=runtime.l3_plugin_registry.require))
+    memory = MemoryService()
     body = "  pagination 原始记忆\n" + "    保留缩进与内容。\n" * 500 + "完整结尾\n  "
     record = {
         "document_id": "fact:paging", "scope": "system", "title": "pagination",
@@ -62,9 +62,9 @@ def test_long_memory_can_be_read_completely_from_snapshot(view, explicit_provide
 
 @pytest.mark.parametrize("explicit_provider", [False, True])
 def test_all_selected_hits_remain_available_in_snapshot(explicit_provider):
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
-    memory = MemoryService(l3_selector=L3ProviderSelector(resolver=runtime.l3_plugin_registry.require))
+    memory = MemoryService()
     records = [{"document_id": f"fact:item-{index}", "scope": "system", "title": "many hits",
                 "summary": f"record-{index}: " + "complete body " * 40} for index in range(6)]
     try:

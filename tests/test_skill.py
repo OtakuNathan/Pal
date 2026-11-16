@@ -1,4 +1,6 @@
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
+from tests.core_factory import build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -11,7 +13,8 @@ from pathlib import Path
 
 from pal.skill.models import SkillModel
 from pal.skill.tools import SkillUpdateTool
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime import PalCore
+from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.execution.tool_facade import CompleteResult, EffectKind, Idempotency, RetryPolicy
 from pal.foundation import PalV2Database
@@ -36,12 +39,12 @@ from pal.skill import (
 )
 
 
-class _FakeLLMRuntime:
+class _FakeLLMRuntime(NonStreamingLLM):
     def __init__(self, text: str) -> None:
         self.text = text
         self.requests = []
 
-    async def agenerate(self, request):
+    async def respond(self, request):
         self.requests.append(request)
         return generation_result_from_values(text=self.text, finish_reason="stop")
 
@@ -413,7 +416,7 @@ Run the workflow.
         self.assertEqual([hit["skill_id"] for hit in disabled.structured["hits"]], ["disabled.commit"])
 
     def test_skill_search_is_discoverable_as_introspection_with_other_aliases_preserved(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
@@ -444,7 +447,7 @@ Run the workflow.
                 manual_text="Inspect, execute, and verify.",
             )
         )
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
@@ -491,7 +494,7 @@ Run the workflow.
         self.assertEqual(update_record.execution.retry_policy, RetryPolicy.RECONCILE_FIRST)
 
     def test_skill_module_declares_internal_plugin_development_skill(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
@@ -516,7 +519,7 @@ Run the workflow.
         self.assertIn("ModuleHandle", injected.structured["manual_text"])
 
     def test_self_maintenance_is_discoverable_for_configuration_and_repair(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
@@ -581,7 +584,7 @@ Run the workflow.
                         self.assertEqual(parsed.runtime_root, Path("/path/to/runtime"))
 
     def test_skill_module_declares_internal_llm_adapter_endpoint_skill(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
@@ -609,7 +612,7 @@ Run the workflow.
         self.assertIn("user-controlled", injected.structured["manual_text"])
 
     def test_skill_module_declares_internal_channel_provider_skill(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
@@ -639,7 +642,7 @@ Run the workflow.
         self.assertIn("FactoryChannelProvider", injected.structured["manual_text"])
 
     def test_lsp_module_declares_internal_lsp_template_skill(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
@@ -677,7 +680,7 @@ Run the workflow.
             handle.shutdown_sync()
 
     def test_bunshin_module_does_not_declare_legacy_development_skills(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
@@ -693,7 +696,7 @@ Run the workflow.
 
 
     def test_skill_prompt_stays_registered_but_skill_tools_are_not_resident_llm_tools(self) -> None:
-        core = PalCore()
+        core = build_core()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)

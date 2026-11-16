@@ -1030,7 +1030,8 @@ class PluginHost:
         self.context.control_action_registry.unregister_module(handle.module_id)
         for provider_id in list(handle.provider_refs):
             self.context.execution_runtime.unregister_provider_ref(provider_id)
-            self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
+        if handle.l3_provider is not None:
+            self.context.require_port("memory:memory").unregister_l3_provider(handle.l3_provider)
         handle.mounted = False
 
     def _replay_optional_contributions(self, plugin_id: str) -> None:
@@ -1255,8 +1256,8 @@ class PluginHost:
             if provider is None:
                 continue
             self.context.execution_runtime.register_provider_ref(provider_id, provider)
-            if hasattr(provider, "provider_id") and self.context.execution_runtime.l3_plugin_registry.get(provider_id) is None:
-                self.context.execution_runtime.l3_plugin_registry.register(provider)
+            if handle.l3_provider is provider:
+                self.context.require_port("memory:memory").register_l3_provider(provider)
 
     def _restore_prompt_fragment_providers(self, handle: ModuleHandle) -> None:
         for provider in handle.prompt_fragment_providers:

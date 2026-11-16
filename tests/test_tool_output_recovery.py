@@ -1,11 +1,12 @@
 """Failed output contracts retain evidence without repeating tool execution."""
+from tests.core_factory import build_core
 from pathlib import Path
 import asyncio
 import json
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution.contracts import ToolCallBudget
 from pal.execution.tool_facade import InvocationMode, ToolHandlerResult, EffectReceipt, EffectOutcome
 from pal.shared.tool_protocol import new_tool_call
@@ -59,7 +60,7 @@ def test_output_contract_failure_keeps_operation_guidance_in_unbudgeted_metadata
 
 
 def test_output_contract_error_preserves_large_result_in_snapshot():
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
     calls = []
     body = "RESULT_BEGIN" + "x" * 20000 + "RESULT_END"
@@ -86,7 +87,7 @@ def test_output_contract_error_preserves_large_result_in_snapshot():
 
 
 def test_non_json_output_error_remains_deliverable():
-    core = PalCore()
+    core = build_core()
     runtime = core.context.execution_runtime
     mount_test_capability(runtime, **_echo_kwargs(mode=InvocationMode.DIRECT,
         handler=lambda _: ToolHandlerResult(output={"wrong": object()}, llm_text="original body")))

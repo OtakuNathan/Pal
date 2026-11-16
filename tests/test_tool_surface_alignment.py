@@ -1,9 +1,10 @@
 """Recovery surfaces follow current aliases after tool consolidation."""
+from tests.core_factory import build_core
 from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution
 from pal.execution.tool_facade import EmptyToolInput, EmptyToolOutput, ToolGuidance
 from pal.memory import MemoryService, register_with_core as register_memory
@@ -15,7 +16,7 @@ from tests.capability_fixture import mount_test_capability
 
 @pytest.fixture
 def core():
-    core = PalCore()
+    core = build_core()
     register_execution(core.context)
     core.publish_module_capabilities('execution')
     try:

@@ -23,6 +23,8 @@ PromptCompiler (the app-level node drives the app's own executor).  Faked:
 network frames only.
 """
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
+from tests.compaction_composition import execute_compaction
 
 import asyncio
 import json
@@ -32,12 +34,12 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.core.compaction import (
+from pal.llm.compaction_engine import (
     CompactionClockKind,
     CompactionEngine,
     CompactionSnapshot,
 )
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.turns import LLMRequestEffect
 from pal.llm import generation_result_from_values
 from pal.memory import MemoryService
@@ -60,7 +62,7 @@ def history(text: str = "A closed task to summarize") -> MemoryService:
     return service
 
 
-class ReplyFixture:
+class ReplyFixture(NonStreamingLLM):
     """Controlled provider answers; preflight answers READY (fits)."""
 
     def __init__(self, responses):
@@ -68,7 +70,7 @@ class ReplyFixture:
         self.requests = []
         self.preflights = []
 
-    async def apreflight(self, request):
+    async def preflight(self, request):
         self.preflights.append(request)
         return SimpleNamespace(
             status=LLMPreflightStatus.READY,
@@ -76,7 +78,7 @@ class ReplyFixture:
             reserved_output_tokens=4096,
         )
 
-    async def agenerate(self, request):
+    async def respond(self, request):
         self.requests.append(request)
         return self.responses.pop(0)
 
@@ -84,8 +86,7 @@ class ReplyFixture:
 def compact(service, response, *, op="review-operation", max_attempts=1):
     root = service.history_root
     left = service.begin_left_compaction(op, reason="review")
-    snapshot = CompactionSnapshot.capture_left(
-        service, left, target_input_budget=100_000,
+    snapshot = service.capture_compaction( left, target_input_budget=100_000,
         reserved_output_tokens=4096,
         clock_kind=CompactionClockKind.USER_TURN, clock_value=1,
         metadata={"compaction_op_id": op},
@@ -93,7 +94,7 @@ def compact(service, response, *, op="review-operation", max_attempts=1):
     provider = ReplyFixture([response])
     engine = CompactionEngine(PalCompactionPolicy(), max_attempts=max_attempts,
                               timeout_seconds=5)
-    result = asyncio.run(engine.run(snapshot, llm_runtime=provider,
+    result = asyncio.run(execute_compaction(engine, snapshot, llm_runtime=provider,
                                     memory_service=service))
     return result, provider
 
@@ -175,7 +176,7 @@ class C1SourceBoundaryTests(unittest.TestCase):
         never a source trimmed small enough to sneak through a READY window.
         """
 
-        class WindowFixture:
+        class WindowFixture(NonStreamingLLM):
             """READY while the request text fits ``window_chars``; else the
             endpoint reports COMPACT_REQUIRED — a real window simulated by
             measured request size, not by naming a code path."""
@@ -189,7 +190,7 @@ class C1SourceBoundaryTests(unittest.TestCase):
                 request = getattr(preflight_request, "request", preflight_request)
                 return sum(len(message.text) for message in request.messages)
 
-            async def apreflight(self, preflight_request):
+            async def preflight(self, preflight_request):
                 self.preflights.append(preflight_request)
                 size = self._size(preflight_request)
                 status = (LLMPreflightStatus.READY
@@ -199,7 +200,7 @@ class C1SourceBoundaryTests(unittest.TestCase):
                                        target_input_budget=100_000,
                                        reserved_output_tokens=4096)
 
-            async def agenerate(self, request):
+            async def respond(self, request):
                 self.requests.append(request)
                 return valid_response()
 
@@ -208,8 +209,7 @@ class C1SourceBoundaryTests(unittest.TestCase):
         before_turns = root.all_turns()
         before_left = tuple(m.message_id for m in root.left_messages())
         left = service.begin_left_compaction("op-a03", reason="review")
-        snapshot = CompactionSnapshot.capture_left(
-            service, left, target_input_budget=100_000,
+        snapshot = service.capture_compaction( left, target_input_budget=100_000,
             reserved_output_tokens=4096,
             clock_kind=CompactionClockKind.USER_TURN, clock_value=1,
             metadata={"compaction_op_id": "op-a03"},
@@ -217,7 +217,7 @@ class C1SourceBoundaryTests(unittest.TestCase):
         provider = WindowFixture(window_chars=50_000)
         engine = CompactionEngine(PalCompactionPolicy(), max_attempts=1,
                                   timeout_seconds=5)
-        result = asyncio.run(engine.run(snapshot, llm_runtime=provider,
+        result = asyncio.run(execute_compaction(engine, snapshot, llm_runtime=provider,
                                         memory_service=service))
         self.assertEqual(result.status, "source_too_large", result.failures)
         # No generation was ever attempted on the oversized source.
@@ -274,8 +274,7 @@ class C2HandoffAcceptanceTests(unittest.TestCase):
         service = history()
         root = service.history_root
         left = service.begin_left_compaction("op-b03", reason="review")
-        snapshot = CompactionSnapshot.capture_left(
-            service, left, target_input_budget=100_000,
+        snapshot = service.capture_compaction( left, target_input_budget=100_000,
             reserved_output_tokens=4096,
             clock_kind=CompactionClockKind.USER_TURN, clock_value=1,
             metadata={"compaction_op_id": "op-b03"},
@@ -283,7 +282,7 @@ class C2HandoffAcceptanceTests(unittest.TestCase):
         provider = ReplyFixture([mixed_tool_response(), valid_response()])
         engine = CompactionEngine(PalCompactionPolicy(), max_attempts=2,
                                   timeout_seconds=5)
-        result = asyncio.run(engine.run(snapshot, llm_runtime=provider,
+        result = asyncio.run(execute_compaction(engine, snapshot, llm_runtime=provider,
                                         memory_service=service))
         self.assertTrue(result.success, result.failures)
         self.assertEqual(result.attempts, 2)
@@ -393,22 +392,21 @@ class C3RecoveryReentryTests(unittest.TestCase):
             service.settle_l1_turn("closed")
             service.history_root.promote()
 
-            class _SeedNetwork:
-                async def agenerate(self, request, *a, **kw):
+            class _SeedNetwork(NonStreamingLLM):
+                async def respond(self, request, *a, **kw):
                     return generation_result_from_values(
                         text=_valid_pal_payload("RESTORED SEED SUMMARY"))
 
             async def install_seed():
                 left = service.begin_left_compaction("run-app", reason="review")
-                snapshot = CompactionSnapshot.capture_left(
-                    service, left, target_input_budget=100_000,
+                snapshot = service.capture_compaction( left, target_input_budget=100_000,
                     reserved_output_tokens=1024,
                     clock_kind=CompactionClockKind.USER_TURN, clock_value=1,
                     metadata={"compaction_op_id": "run-app"},
                 )
                 engine = CompactionEngine(PalCompactionPolicy(),
                                           max_attempts=1, timeout_seconds=10.0)
-                return await engine.run(snapshot, llm_runtime=_SeedNetwork(),
+                return await execute_compaction(engine, snapshot, llm_runtime=_SeedNetwork(),
                                         memory_service=service)
 
             install = asyncio.run(install_seed())
@@ -616,13 +614,13 @@ class C3RecoveryReentryTests(unittest.TestCase):
         runtime = _runtime(transport)
         executor = _executor(restored, runtime)
         bootstrap_calls = {"count": 0}
-        original = executor._bootstrap_projection_from_current_left
+        original = executor.projection.bootstrap
 
         def counted(*args, **kwargs):
             bootstrap_calls["count"] += 1
             return original(*args, **kwargs)
 
-        executor._bootstrap_projection_from_current_left = counted
+        executor.projection.bootstrap = counted
         try:
             restored.begin_l1_turn("T", user_message=user("After restore.", "c3-q1"))
             first = _drive(executor, _model_view_request(restored))
@@ -674,7 +672,7 @@ class C3RecoveryReentryTests(unittest.TestCase):
 
             request = _request_for(service, ())
             self.assertIsNone(
-                executor._prepare_turn_projection(runtime, request),
+                executor.projection.prepare(runtime, request),
                 "a materialized stale prefix must keep the strict refusal; "
                 "the counter can never authorize retired wire content")
             kinds = [d.get("kind") for d in executor.state.diagnostics]
@@ -685,10 +683,10 @@ class C3RecoveryReentryTests(unittest.TestCase):
             self.assertEqual(str(getattr(outcome.status, "value", outcome.status)), "ok")
 
             # An explicit rebase rebuilds the lineage; prepare engages again.
-            executor._rebase_projection_after_left_install(
+            executor.projection.rebase(
                 runtime, "pal:resident", root)
             self.assertIsNotNone(
-                executor._prepare_turn_projection(runtime, request))
+                executor.projection.prepare(runtime, request))
         finally:
             runtime.close()
 

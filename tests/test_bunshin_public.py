@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pal.shared.ports import PortRegistry
+from tests.core_factory import build_context, build_core
 
 from pal.bunshin.runner_components.session_memory import SessionMemory
 
@@ -2831,7 +2833,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         async def scenario() -> None:
             run_dir = self.runtime_root / "agent-session"
             run_dir.mkdir(parents=True)
-            context = MainContext()
+            context = build_context()
             memory_service = MemoryService()
             register_execution_with_core(context)
             register_memory_with_core(context, memory_service)
@@ -4794,7 +4796,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput.__module__,
             "pal.bunshin.workflow_capabilities",
         )
-        core = PalCore()
+        core = build_core()
         register_bunshin_with_core(core.context, runtime_root=self.runtime_root)
         core.publish_module_capabilities("bunshin")
         try:
@@ -5616,7 +5618,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             sessions={},
         )
         context = SimpleNamespace(
-            port_registry={"channel:channel": Runtime([dead, recovery])}
+            port_registry=PortRegistry({"channel:channel": Runtime([dead, recovery])})
         )
         provider = BunshinManagerProvider(self.runtime_root, context=context)
         event = {

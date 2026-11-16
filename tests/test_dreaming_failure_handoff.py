@@ -1,5 +1,6 @@
 """Silent dreaming failures reuse durable once tasks and resident L1; no network."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.foundation import PalV2Database, EventEnvelope
 from pal.memory import MemoryService
 from pal.memory.contracts import L3CommitRequest
@@ -36,7 +37,7 @@ def env(tmp_path):
     request = L3CommitRequest(kind="fact", title="Explicit APIs", summary="Prefer explicit public APIs.",
                              search_text="explicit public APIs", topics=["API"])
     provider.commit(request); provider.commit(replace(request, title="API design"))
-    core = PalCore()
+    core = build_core()
     manager = ProactiveManager(repository=ProactiveRepository())
     core.context.port_registry.register(SILENT_ONCE_SCHEDULER, manager)
     service = DreamingService(storage=storage, provider=provider, llm=ReviewingLLM(fail_review=True), core=core)

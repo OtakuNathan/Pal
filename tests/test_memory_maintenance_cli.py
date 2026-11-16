@@ -1,3 +1,4 @@
+from tests.core_factory import build_core
 import argparse
 import asyncio
 import json
@@ -6,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.main import _build_parser
 from pal.memory.maintenance import MemoryBackendOwner
@@ -110,11 +111,11 @@ def test_cli_parser_routes_backend_and_embedding_commands():
 def test_resident_controls_select_real_provider_and_reject_busy_mutation(tmp_path):
     from pal.memory.service import MemoryService
     from pal.plugins.l3.stubs import MockL3Plugin
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     memory = MemoryService()
     provider = MockL3Plugin(provider_id="fixture")
-    core.context.execution_runtime.l3_plugin_registry.register(provider)
+    core.context.require_port("memory:memory").providers.register(provider)
     owner = MemoryBackendOwner(core, memory)
     try:
         selected = asyncio.run(owner.dispatch("select", {"name": "fixture"}))
@@ -166,9 +167,9 @@ def test_live_memory_cli_uses_resident_owner_and_refuses_offline_migration(store
     from pal.packages.process import runtime_lease
     root, storage, patch = stored_memory
     async def run():
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
-        core.context.execution_runtime.l3_plugin_registry.register(MockL3Plugin(provider_id="fixture"))
+        core.context.require_port("memory:memory").providers.register(MockL3Plugin(provider_id="fixture"))
         memory = MemoryService()
         service = CoreConfigurationService(root, None, memory_owner=MemoryBackendOwner(core, memory))
         parser = _build_parser()

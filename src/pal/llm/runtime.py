@@ -20,10 +20,11 @@ from typing import Any
 from pal.llm.contracts import (
     LLMGenerationResult,
     LLMPreflightAdvice,
+    LLMMetadata,
+    LLMCompactionPlan,
     LLMPreflightRequest,
-    LLMRuntimePort,
+    LLMService,
     LLMProjectionPort,
-    LLMSideTurn,
 )
 from pal.llm.credentials import LLMCredentialUnavailableError
 from pal.llm.endpoint_factory import build_default_endpoint_invoker
@@ -168,6 +169,8 @@ class EndpointResolver:
         return next((item for item in self.endpoints if item.endpoint_id == preferred_endpoint_id), None)
 
 
+_CALL_FACTS: ContextVar[dict[str, Any] | None] = ContextVar("llm_call_facts", default=None)
+
 @dataclass
 class LLMRuntime:
     endpoint_resolver: EndpointResolver
@@ -243,6 +246,9 @@ class LLMRuntime:
     def _bind_model_adapters(endpoints, models, responses) -> dict[str, BoundModelAdapter]:
         return {endpoint.endpoint_id: bind_model_adapter(LLMEndpointSpec.from_value(endpoint), models, responses)
                 for endpoint in endpoints}
+
+    def plan_compaction(self, endpoint_id: str | None = None, *, force_semantic: bool = False) -> LLMCompactionPlan:
+        return LLMCompactionPlan("semantic_checkpoint" if force_semantic else self.compaction_strategy(endpoint_id))
 
     def compaction_strategy(self, endpoint_id: str | None = None) -> str:
         adapter = self.model_adapters.get(endpoint_id or self.active_endpoint_id or "")
@@ -393,39 +399,10 @@ class LLMRuntime:
             session.rebind(binding, capabilities=capabilities)
         return session
 
-    def fork_projection_session(self, scope_id: str, branch_id: str, message_ids: tuple[str, ...]) -> EndpointProjectionSession:
-        """Read-only capture; the resident owner and any active round stay untouched."""
-        source = self._projection_sessions.get(scope_id)
-        identity = LogicalSessionId(branch_id)
-        return (source.fork_prefix(identity, message_ids) if source is not None
-                else EndpointProjectionSession(identity))
-
-    def fork_side_turn(self, scope_id: str, branch_id: str, message_ids: tuple[str, ...]) -> LLMSideTurn:
-        projection = self.fork_projection_session(scope_id, branch_id, message_ids)
-        child = self.fork_transient()
-        child._projection_sessions[scope_id] = projection
-        endpoint = child.active_endpoint()
-        return LLMSideTurn(
-            runtime=child, release=child.retire_projection_sessions,
-            preferred_endpoint_id=endpoint.endpoint_id if endpoint is not None else None,
-            preferred_model_id=endpoint.model_id if endpoint is not None else None,
-        )
-
-    def fork_transient(self) -> LLMRuntime:
-        """Share transport/accounting, isolate generation receipts and projections."""
-        from copy import copy
-
-        child = copy(self)
-        child.last_request = None
-        child.last_endpoint_id = None
-        child.last_model_id = None
-        child.last_projection_receipt = None
-        child._projection_sessions = {}
-        child._detached_stream_tasks = set()
-        managed = self._managed_invoker()
-        if managed is not None:
-            child.endpoint_invoker = managed.fork_transient()
-        return child
+    def release_context(self, context_id: str) -> None:
+        session = self._projection_sessions.pop(context_id, None)
+        if session is not None:
+            session.retire()
 
     def prepare_generation_plan(
         self, request: LLMRequestIR
@@ -840,7 +817,7 @@ class LLMRuntime:
             self.think_level = normalized
         return normalized
 
-    def preflight(self, request: LLMPreflightRequest, *, stream_control: LLMStreamControl | None = None) -> LLMPreflightAdvice:
+    def _preflight_response(self, request: LLMPreflightRequest, *, stream_control: LLMStreamControl | None = None) -> LLMPreflightAdvice:
         self.refresh_runtime_settings()
         endpoints = self._enabled_endpoints(request.request)
         endpoint = endpoints[0] if endpoints else None
@@ -863,13 +840,17 @@ class LLMRuntime:
             },
         )
 
-    async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+    async def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         if any(is_native_window(m) for m in request.request.messages):
             control = LLMStreamControl()
-            return await self._await_native_job(lambda: self.preflight(request, stream_control=control), control)
-        return self.preflight(request)
+            return await self._await_native_job(lambda: self._preflight_response(request, stream_control=control), control)
+        return self._preflight_response(request)
 
-    def resolve_endpoint_facts(
+    def metadata(self, *, preferred_endpoint_id: str | None = None, preferred_endpoint_source: str | None = None) -> LLMMetadata:
+        return LLMMetadata(**self._endpoint_facts(preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source))
+
+    def _endpoint_facts(
         self,
         *,
         preferred_endpoint_id: str | None = None,
@@ -930,12 +911,7 @@ class LLMRuntime:
             return int(endpoint.max_output_tokens)
         return int(endpoint.context_window) if endpoint.context_window is not None else None
 
-    def supports_streaming(self, request: LLMRequestIR | None = None) -> bool:
-        endpoints = self._enabled_endpoints(request) if request is not None else [self.active_endpoint()]
-        endpoint = endpoints[0] if endpoints else None
-        return bool(endpoint and endpoint.supports_streaming)
-
-    def generate(
+    def _generate_response(
         self, request: LLMRequestIR, *,
         projection: "EncodedRequest | None" = None,
         projection_binding: "EndpointBinding | None" = None,
@@ -1041,6 +1017,8 @@ class LLMRuntime:
                     )
                     if receipt is not None:
                         self.last_projection_receipt = receipt
+                        if (facts := _CALL_FACTS.get()) is not None:
+                            facts["projection_receipt"] = receipt
                     return self._success(endpoint, response, projection_receipt=receipt)
                 except LLMEndpointSpecStaleError as exc:
                     if allow_stale_refresh:
@@ -1168,39 +1146,6 @@ class LLMRuntime:
             return None
         return None
 
-    async def agenerate(
-        self, request: LLMRequestIR, *,
-        projection: "EncodedRequest | None" = None,
-        projection_binding: "EndpointBinding | None" = None,
-        projection_attempt_id: str = "",
-        generation_plan: "LLMPreparedPlan | None" = None,
-        on_submitted: Callable[[RequestSubmission], None] | None = None,
-        on_event: Callable[[dict[str, Any]], None] | None = None,
-    ) -> LLMGenerationResult:
-        loop = asyncio.get_running_loop()
-        notify = (lambda receipt: loop.call_soon_threadsafe(on_submitted, receipt)) if on_submitted else None
-        active = True
-
-        def deliver_event(event: dict[str, Any]) -> None:
-            if active and on_event is not None:
-                on_event(event)
-
-        def run() -> LLMGenerationResult:
-            sink = (lambda event: loop.call_soon_threadsafe(deliver_event, event)) if on_event else None
-            token = _CALL_EVENT_SINK.set(sink)
-            try:
-                return self.generate(
-                    request, projection=projection, projection_binding=projection_binding,
-                    projection_attempt_id=projection_attempt_id,
-                    generation_plan=generation_plan, on_submitted=notify,
-                )
-            finally:
-                _CALL_EVENT_SINK.reset(token)
-
-        try:
-            return await asyncio.to_thread(run)
-        finally:
-            active = False
 
     def _iter_stream_updates(
         self,
@@ -1264,8 +1209,8 @@ class LLMRuntime:
                     continue
             effective = prepared.request
             if prepared.compact_required:
-                response = self._compact_required_result(endpoint, effective).response
-                yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
+                result = self._compact_required_result(endpoint, effective)
+                yield LLMResponseUpdate(result.response, delta_kind=LLMResponseDeltaKind.STATE, completion=result)
                 return
             semantic_seen = False
             for attempt in range(self.endpoint_retry_attempts):
@@ -1316,8 +1261,10 @@ class LLMRuntime:
                         )
                         if recovered.finish_reason == LLMFinishReason.ERROR:
                             raise _accounted_response_error(endpoint, recovered)
-                        recovery_updates = tuple(stream_recovery_updates(completed, recovered))
-                        yield from recovery_updates
+                        if endpoint.supports_streaming:
+                            yield from stream_recovery_updates(completed, recovered)
+                        else:
+                            yield LLMResponseUpdate(recovered, delta_kind=LLMResponseDeltaKind.STATE)
                         completed = recovered
                     if completed.finish_reason == LLMFinishReason.ERROR:
                         raise _accounted_response_error(endpoint, completed)
@@ -1330,9 +1277,15 @@ class LLMRuntime:
                     )
                     if receipt is not None:
                         self.last_projection_receipt = receipt
+                        if (facts := _CALL_FACTS.get()) is not None:
+                            facts["projection_receipt"] = receipt
                     self._record_success(endpoint, completed)
                     self.last_endpoint_id = endpoint.endpoint_id
+                    if (facts := _CALL_FACTS.get()) is not None:
+                        facts["preferred_endpoint_id"] = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
+                    if (facts := _CALL_FACTS.get()) is not None:
+                        facts["preferred_model_id"] = endpoint.model_id
                     return
                 except LLMEndpointSpecStaleError as exc:
                     if allow_stale_refresh and not semantic_seen and not bool(
@@ -1425,7 +1378,7 @@ class LLMRuntime:
         ).response
         yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
 
-    async def astream(
+    async def generate(
         self, request: LLMRequestIR, *,
         projection: "EncodedRequest | None" = None,
         projection_binding: "EndpointBinding | None" = None,
@@ -1454,6 +1407,8 @@ class LLMRuntime:
             token = _CALL_EVENT_SINK.set(
                 (lambda event: enqueue(LLMProgressEvent(event))) if on_event else None
             )
+            facts_token = _CALL_FACTS.set({})
+            terminal = None
             try:
                 for update in self._iter_stream_updates(
                     request,
@@ -1464,10 +1419,20 @@ class LLMRuntime:
                     generation_plan=generation_plan,
                     on_submitted=enqueue if on_submitted is not None else None,
                 ):
-                    enqueue(update)
+                    if terminal is not None:
+                        enqueue(terminal)
+                    if update.delta_kind == LLMResponseDeltaKind.STATE:
+                        terminal = update
+                    else:
+                        terminal = None
+                        enqueue(update)
+                if terminal is not None:
+                    result = terminal.completion or LLMGenerationResult(response=terminal.response, **(_CALL_FACTS.get() or {}))
+                    enqueue(replace(terminal, completion=result))
             except BaseException as exc:  # noqa: BLE001
                 enqueue(exc)
             finally:
+                _CALL_FACTS.reset(facts_token)
                 _CALL_EVENT_SINK.reset(token)
                 enqueue(done)
 
@@ -2006,7 +1971,11 @@ class LLMRuntime:
         projection_receipt: ProjectionSendReceipt | None = None,
     ) -> LLMGenerationResult:
         self.last_endpoint_id = endpoint.endpoint_id
+        if (facts := _CALL_FACTS.get()) is not None:
+            facts["preferred_endpoint_id"] = endpoint.endpoint_id
         self.last_model_id = endpoint.model_id
+        if (facts := _CALL_FACTS.get()) is not None:
+            facts["preferred_model_id"] = endpoint.model_id
         self._record_success(endpoint, response)
         return LLMGenerationResult(
             response=response,

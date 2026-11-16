@@ -2,7 +2,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from pal.core import PalCore  # Import-order bootstrap.
+from pal.core.runtime import PalCore
 from pal.bunshin.scoped_execution import _workflow_capability
 from pal.bunshin.candidate_builder import CANDIDATE_BUILDER_TOOL_SPECS
 from pal.execution.runtime import ExecutionRuntime

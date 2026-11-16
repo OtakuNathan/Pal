@@ -122,3 +122,5 @@ Notes:
   snapshot/restore/reset
 - instance-level actions are hydrated at runtime and compiled into exact bound
   actions
+
+Lifecycle access is declared on each immutable tool execution contract: shared, exclusive, or owner-managed. Aliases never select locking behavior. The generic fence lives in Foundation; L3 providers are owned by Memory.

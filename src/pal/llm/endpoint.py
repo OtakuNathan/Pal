@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from pal.foundation.diagnostics import diagnostic_text, exception_report
 from pal.llm.ir import (
+    LLMResponseDeltaKind,
     LLMRequestIR,
     LLMResponseIR,
     LLMResponseUpdate,
@@ -89,17 +90,6 @@ class ShapeEndpointInvoker:
         activate = getattr(self.transport, "activate_endpoint", None)
         if callable(activate):
             activate(endpoint_id)
-
-    def fork_transient(self) -> ShapeEndpointInvoker:
-        """Borrow transport/usage reporting without retaining side content in the host."""
-        from copy import copy
-
-        with self._binding_lock:
-            child = copy(self)
-            child.prompt_cache = self.prompt_cache.fork_transient()
-            child._codecs = dict(self._codecs)
-        child._binding_lock = RLock()
-        return child
 
     def close(self) -> None:
         close = getattr(self.transport, "close", None)
@@ -217,11 +207,17 @@ class ShapeEndpointInvoker:
         native_sink: Callable[["NativeCandidate"], None] | None = None,
         submission_sink: Callable[[RequestSubmission], None] | None = None,
     ) -> Iterator[LLMResponseUpdate]:
-        yield from self._iterate(endpoint, request, stream=True,
-                                 timeout_seconds=timeout_seconds,
-                                 stream_control=stream_control,
-                                 projection=projection,
-                                 native_sink=native_sink, submission_sink=submission_sink)
+        updates = self._iterate(endpoint, request, stream=bool(endpoint.supports_streaming),
+                                timeout_seconds=timeout_seconds, stream_control=stream_control,
+                                projection=projection, native_sink=native_sink, submission_sink=submission_sink)
+        if endpoint.supports_streaming:
+            yield from updates
+        else:
+            terminal = None
+            for update in updates:
+                terminal = update.response
+            if terminal is not None:
+                yield LLMResponseUpdate(terminal, delta_kind=LLMResponseDeltaKind.STATE)
 
     def _iterate(
         self, endpoint: LLMEndpointModel, request: LLMRequestIR, *,

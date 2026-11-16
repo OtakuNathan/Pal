@@ -90,8 +90,7 @@ async def inject_pending_interjection_async(
                            for item in messages]
                 message = replace(message, metadata={**dict(message.metadata), "interjection_sources": sources})
         memory_service = context.port_registry.get("memory:memory")
-        append_user = getattr(memory_service, "append_l1_user", None)
-        if not callable(append_user):
+        if memory_service is None:
             return
 
         async def append_and_acknowledge() -> bool:
@@ -108,15 +107,9 @@ async def inject_pending_interjection_async(
                 ):
                     return False
                 try:
-                    result = append_user(str(continuation.turn_id), message)
-                    if inspect.isawaitable(result):
-                        await result
+                    await memory_service.append_interjection(str(continuation.turn_id), message)
                 except (Exception, asyncio.CancelledError):
-                    committed = await _l1_contains_message_async(
-                        memory_service,
-                        turn_id=str(continuation.turn_id),
-                        message_id=message.message_id,
-                    )
+                    committed = memory_service.contains_l1_message(str(continuation.turn_id), message.message_id)
                     if not committed:
                         raise
                 # Append and acknowledgement share the channel transition
@@ -207,40 +200,6 @@ async def _acknowledge_cross_scope_interjection_async(
         # The interjection is already durable. A secondary-channel receipt
         # failure must not duplicate it by restoring the original envelope.
         return
-
-
-async def _l1_contains_message_async(
-    memory_service: Any,
-    *,
-    turn_id: str,
-    message_id: str,
-) -> bool:
-    contains = getattr(memory_service, "contains_l1_message", None)
-    if callable(contains):
-        try:
-            result = contains(turn_id, message_id)
-            if inspect.isawaitable(result):
-                result = await result
-            return bool(result)
-        except Exception:
-            pass
-
-    # Compatibility fallback for small host/test memory ports. This query is
-    # only used after append raised, to distinguish "failed before commit"
-    # from "committed, then the adapter raised".
-    active_turn = getattr(memory_service, "active_l1_turn", None)
-    if not callable(active_turn):
-        return False
-    try:
-        turn = active_turn(turn_id)
-        if inspect.isawaitable(turn):
-            turn = await turn
-        return any(
-            str(getattr(item, "message_id", "") or "") == message_id
-            for item in (getattr(turn, "messages", ()) or ())
-        )
-    except Exception:
-        return False
 
 
 __all__ = ["inject_pending_interjection_async"]

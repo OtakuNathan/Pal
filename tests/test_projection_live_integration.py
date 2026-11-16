@@ -9,16 +9,19 @@
 """
 
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
+from pal.llm.contracts import collect_generation
 
 from pal.shared.ports import PortKey
 
 import asyncio
 import unittest
 from types import SimpleNamespace
+from pal.shared.ports import PortRegistry
 from pal.core.turns import TurnContinuation
 
-from pal.core.compaction import CompactionEngine
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.compaction_engine import CompactionEngine
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.turn_executor import TurnExecutor
 from pal.llm import generation_result_from_values
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
@@ -126,11 +129,11 @@ class RuntimeHostingTests(unittest.TestCase):
         self.assertIsNone(runtime.endpoint_projection_session("s"))
 
 
-class _Network:
+class _Network(NonStreamingLLM):
     def __init__(self) -> None:
         self.requests: list = []
 
-    async def agenerate(self, request, *a, **kw):
+    async def respond(self, request, *a, **kw):
         self.requests.append(request)
         from tests.test_runtime_compaction import _valid_pal_payload
 
@@ -138,16 +141,12 @@ class _Network:
             text=_valid_pal_payload("LIVE REBASE SEED"))
 
 
-class _Ports:
+class _Ports(PortRegistry):
     def __init__(self, memory, llm) -> None:
-        self._ports = {"memory:memory": memory, "llm:llm": llm}
-
-    def get(self, name):
-        return self._ports.get(name)
+        super().__init__({"memory:memory": memory, "llm:llm": llm})
 
     def require_port(self, name):
-        name = name.name if isinstance(name, PortKey) else name
-        return self._ports[name]
+        return self.require(name) if isinstance(name, PortKey) else self[name]
 
 
 class ExecutorLiveRebaseTests(unittest.TestCase):
@@ -183,7 +182,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
             compaction_clock_provider=lambda: 1,
         )
 
-        result = asyncio.run(executor.compact_memory_async(
+        result = asyncio.run(executor.compaction.run(
             service,
             target_input_budget=1_000_000,
             reserved_output_tokens=1024,
@@ -208,7 +207,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
         service.history_root.promote()
         root = service.history_root
 
-        class _Boom:
+        class _Boom(NonStreamingLLM):
             @property
             def projection_port(self):
                 return self
@@ -216,7 +215,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
             def endpoint_projection_session(self, scope_id, *, rebind=True, plan=None):
                 raise RuntimeError("hosting exploded")
 
-            async def agenerate(self, request, *a, **kw):
+            async def respond(self, request, *a, **kw):
                 from tests.test_runtime_compaction import _valid_pal_payload
 
                 return generation_result_from_values(
@@ -242,7 +241,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
             compaction_engine=engine,
             compaction_clock_provider=lambda: 1,
         )
-        result = asyncio.run(executor.compact_memory_async(
+        result = asyncio.run(executor.compaction.run(
             service,
             target_input_budget=1_000_000,
             reserved_output_tokens=1024,
@@ -258,11 +257,11 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
         self.assertIn("S", service.l1_store.turns.turns[0].messages[0].text)
 
 
-class _LiveLLM:
+class _LiveLLM(NonStreamingLLM):
     @property
     def projection_port(self):
         return self
-    """LLM port facade: agenerate over the fake network + projection host."""
+    """LLM port facade: complete over the fake network + projection host."""
 
     def __init__(self, runtime: LLMRuntime, network: _Network) -> None:
         self._runtime = runtime
@@ -271,8 +270,8 @@ class _LiveLLM:
     def endpoint_projection_session(self, scope_id, *, rebind=True, plan=None):
         return self._runtime.endpoint_projection_session(scope_id, rebind=rebind, plan=plan)
 
-    async def agenerate(self, request, *a, **kw):
-        return await self._network.agenerate(request, *a, **kw)
+    async def respond(self, request, *a, **kw):
+        return await collect_generation(self._network.generate(request, *a, **kw))
 
 
 if __name__ == "__main__":

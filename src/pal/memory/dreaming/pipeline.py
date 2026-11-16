@@ -62,13 +62,12 @@ class DreamingOutputLimitError(DreamingCapacityError):
 class DreamingPipeline:
     def __init__(self, *, llm, config, storage):
         self.llm, self.config, self.storage = llm, config, storage
-        endpoint = config.endpoint_id or str(getattr(llm, "active_endpoint_id", "") or "")
+        endpoint = config.endpoint_id or llm.metadata().endpoint_id or ""
         self.endpoints = {"merge": endpoint, "review": config.review_endpoint_id or endpoint}
         self.models = {}
         self.thinking = {}
-        resolver = getattr(llm, "resolve_endpoint_facts", None)
         for purpose, endpoint_id in self.endpoints.items():
-            facts = resolver(preferred_endpoint_id=endpoint_id) if callable(resolver) else {}
+            facts = llm.metadata(preferred_endpoint_id=endpoint_id).to_payload()
             self.models[purpose] = dict(facts)
             self.endpoints[purpose] = str(facts.get("endpoint_id") or endpoint_id)
             levels = facts.get("thinking_levels", [])
@@ -87,11 +86,9 @@ class DreamingPipeline:
         return content_hash({"input": cluster.payload(), "configuration": self.config_fingerprint})
 
     def assert_configuration(self):
-        resolver = getattr(self.llm, "resolve_endpoint_facts", None)
-        if callable(resolver):
-            for purpose, endpoint in self.endpoints.items():
-                if dict(resolver(preferred_endpoint_id=endpoint)) != self.models[purpose]:
-                    raise RuntimeError("dreaming endpoint configuration changed during the run")
+        for purpose, endpoint in self.endpoints.items():
+            if self.llm.metadata(preferred_endpoint_id=endpoint).to_payload() != self.models[purpose]:
+                raise RuntimeError("dreaming endpoint configuration changed during the run")
 
     def _cached(self, cluster):
         with self.storage.connection() as connection:
@@ -151,23 +148,21 @@ class DreamingPipeline:
         total_tokens = sum(len(message.text) for message in request.messages) / 2
         material_tokens = len(json.dumps(payload, ensure_ascii=False)) / 2
         output_budget = min(self.config.output_tokens, int(self.models["review" if review else "merge"].get("max_output_tokens") or self.config.output_tokens))
-        preflight = getattr(self.llm, "apreflight", None)
-        if callable(preflight):
-            advice = await preflight(LLMPreflightRequest(request))
-            if str(advice.status) != "ready":
-                return False
-            estimated = getattr(advice, "breakdown", {}).get("estimated_input_tokens")
-            if estimated is not None:
-                total_tokens = int(estimated)
-                key = (kind, review)
-                if key not in self._input_overhead:
-                    empty = await preflight(LLMPreflightRequest(self._request({}, kind=kind, review=review)))
-                    self._input_overhead[key] = int(empty.breakdown.get("estimated_input_tokens", 0))
-                material_tokens = max(0, int(estimated) - self._input_overhead[key]) + 32
+        advice = await self.llm.preflight(LLMPreflightRequest(request))
+        if str(advice.status) != "ready":
+            return False
+        estimated = advice.breakdown.get("estimated_input_tokens")
+        if estimated is not None:
+            total_tokens = int(estimated)
+            key = (kind, review)
+            if key not in self._input_overhead:
+                empty = await self.llm.preflight(LLMPreflightRequest(self._request({}, kind=kind, review=review)))
+                self._input_overhead[key] = int(empty.breakdown.get("estimated_input_tokens", 0))
+            material_tokens = max(0, int(estimated) - self._input_overhead[key]) + 32
         if material_tokens > self.config.input_tokens:
             return False
-        # Include instructions/schema and, for review, both originals and the
-        # candidate. Reserve room for reasoning and faithful output expansion.
+    # Include instructions/schema and, for review, both originals and the
+    # candidate. Reserve room for reasoning and faithful output expansion.
         if total_tokens > output_budget * 0.5:
             return False
         return True
@@ -180,15 +175,8 @@ class DreamingPipeline:
             raise DreamingCapacityError("Complete request exceeds input budget")
         request = self._request(payload, kind=kind, review=review, correction=correction)
         async with asyncio.timeout(self.config.request_timeout_seconds):
-            stream = getattr(self.llm, "astream", None)
-            if callable(stream):
-                response = None
-                async for update in stream(request):
-                    response = update.response
-                if response is None:
-                    raise RuntimeError("dreaming LLM returned no response")
-            else:
-                response = (await self.llm.agenerate(request)).response
+            from pal.llm.contracts import collect_generation
+            response = (await collect_generation(self.llm.generate(request))).response
         self.usage["calls"] += 1
         self.usage["input_tokens"] += response.usage.input_tokens
         self.usage["output_tokens"] += response.usage.output_tokens

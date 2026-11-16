@@ -4,6 +4,7 @@ Paired prompt ablation on the same current matcher, not a historical code compar
 Synthetic tasks and isolated tool registry; no live business state is accessed.
 """
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
 import argparse
 import asyncio
 import json
@@ -105,11 +106,7 @@ async def run_case(llm, values, fx, variant, case, repetition, prior_fragments=N
     available = {name: specs[name] for name in discovery | {'call_tool'} if name in specs}
     messages = prompt_messages(variant, task, prior_fragments, candidate_fragments)
     for _ in range(6):
-        outcome = await asyncio.wait_for(llm.agenerate(LLMRequestIR(
-            messages=tuple(messages), tools=tuple(tool_definition_ir_from_dict(t) for t in available.values()),
-            model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=max_output_tokens, temperature=0),
-            metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none',
-                      'think_level': 'medium', 'case_id': key})), timeout=150)
+        outcome = await asyncio.wait_for(collect_generation(llm.generate(LLMRequestIR(messages=tuple(messages), tools=tuple((tool_definition_ir_from_dict(t) for t in available.values())), model_hint=values['model_id'], policy=GenerationPolicyIR(max_output_tokens=max_output_tokens, temperature=0), metadata={'preferred_endpoint_id': values['endpoint_id'], 'endpoint_fallback_policy': 'none', 'think_level': 'medium', 'case_id': key}))), timeout=150)
         if outcome.preferred_endpoint_id != values['endpoint_id'] or outcome.preferred_model_id != values['model_id']:
             raise RuntimeError('Endpoint or model drift')
         message = outcome.response.message

@@ -1,4 +1,5 @@
 """Full-catalog selection benchmark keeps labels, visibility and recovery honest."""
+from tests.llm_fakes import NonStreamingLLM
 import asyncio
 from types import SimpleNamespace
 
@@ -55,8 +56,8 @@ def test_selection_flow_recovers_mode_and_never_has_a_business_handler():
     calls=[new_tool_call(name='search_tools',args={'query':'list plugins','domain':'plugin'}),
            new_tool_call(name='select_tool',args={'name':'list_plugins','invocation_mode':'direct'}),
            new_tool_call(name='select_tool',args={'name':'list_plugins','invocation_mode':'indirect'})]
-    class Model:
-        async def agenerate(self,request):
+    class Model(NonStreamingLLM):
+        async def respond(self,request):
             assert {t.name for t in request.tools}=={'search_tools','read_tool','select_tool'}
             if len(calls)==1:
                 assert request.messages[-1].parts[0].structured['error_code']=='wrong_invocation_mode'
@@ -74,8 +75,8 @@ def test_directory_visibility_is_distinct_from_keyword_recall():
     calls = [new_tool_call(name='search_tools', args={'domain': 'llm'}),
              new_tool_call(name='read_tool', args={'name': case['alias']}),
              new_tool_call(name='select_tool', args={'name': case['alias'], 'invocation_mode': 'indirect'})]
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             return generation_result_from_values(tool_calls=[calls.pop(0)], preferred_endpoint_id='fixture', preferred_model_id='fixture')
     row = asyncio.run(run_case(Model(), {'model_id': 'fixture', 'endpoint_id': 'fixture'}, case,
         generations['resident_union'], ExecutionRuntime._search_generation, SearchInput.model_json_schema(), []))
@@ -89,8 +90,8 @@ def test_fused_contract_selection_needs_no_redundant_read():
     case = next(c for c in cases if c['category'] == 'catalog' and c['alias'] == 'fill_browser_field')
     calls = [new_tool_call(name='search_tools', args={'domain': 'browser', 'query': 'set input field value'}),
              new_tool_call(name='select_tool', args={'name': case['alias'], 'invocation_mode': 'indirect'})]
-    class Model:
-        async def agenerate(self, request):
+    class Model(NonStreamingLLM):
+        async def respond(self, request):
             if len(calls) == 1:
                 data = request.messages[-1].parts[0].structured
                 assert data['hits'][0]['input_contract']
@@ -109,8 +110,8 @@ def test_fused_contract_selection_needs_no_redundant_read():
 def test_valid_wrong_tool_stops_without_correctness_oracle():
     _,cases,gens=build_flow_catalog()
     case=next(c for c in cases if c.get('alias')=='manage_plugin' and c['category']=='catalog')
-    class Model:
-        async def agenerate(self,request):
+    class Model(NonStreamingLLM):
+        async def respond(self,request):
             return generation_result_from_values(tool_calls=[new_tool_call(name='select_tool',
                 args={'name':'list_plugins','invocation_mode':'indirect'})],preferred_endpoint_id='fixture',preferred_model_id='fixture')
     row=asyncio.run(run_case(Model(),{'model_id':'fixture','endpoint_id':'fixture'},case,
@@ -136,8 +137,8 @@ def test_endpoint_failure_without_identity_is_not_model_drift():
     from pal.llm.runtime import _failure_result
     _,cases,gens=build_flow_catalog()
     case=next(c for c in cases if c['category']=='catalog' and c['alias']=='list_plugins')
-    class Model:
-        async def agenerate(self,request):
+    class Model(NonStreamingLLM):
+        async def respond(self,request):
             return _failure_result('fixture service unavailable', exc=TimeoutError('fixture timeout'))
     row=asyncio.run(run_case(Model(),{'model_id':'fixture','endpoint_id':'fixture'},case,
         gens['resident_union'],ExecutionRuntime._search_generation,SearchInput.model_json_schema(),[]))
@@ -150,8 +151,8 @@ def test_successful_response_from_other_endpoint_is_still_rejected():
     import pytest
     _,cases,gens=build_flow_catalog()
     case=next(c for c in cases if c['category']=='catalog' and c['alias']=='list_plugins')
-    class Model:
-        async def agenerate(self,request):
+    class Model(NonStreamingLLM):
+        async def respond(self,request):
             return generation_result_from_values(text='response',preferred_endpoint_id='other',preferred_model_id='fixture')
     with pytest.raises(RuntimeError,match='Endpoint/model drift'):
         asyncio.run(run_case(Model(),{'model_id':'fixture','endpoint_id':'fixture'},case,

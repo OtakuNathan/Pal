@@ -1,6 +1,8 @@
 # llm
 
 Owns:
+- shared semantic/native compaction execution, checkpoint prompts, schemas and validators
+- one asynchronous semantic response stream for complete and streamed responses
 - immutable provider-neutral LLM request, message, response, usage, and update IR
 - ChatGPT plan OAuth registration, renewable credentials, and explicit usage-pause recovery
 - explicit endpoint selection; no automatic fallback or implicit first endpoint
@@ -26,7 +28,6 @@ Does not own:
 - local side effects
 - tasking state
 - scheduler state
-- Pal/Bunshin compaction prompts, schemas, validators, or renderers
 
 Exposes:
 - `LLMRequestIR`, `LLMMessageIR`, `LLMResponseIR`, and shape codecs
@@ -36,7 +37,7 @@ Exposes:
   database edits
 - `/status` for active-model, request, token, cache-hit, reasoning-token, and
   provider-reported cost statistics
-- semantic compaction uses `agenerate`; bound native strategies use the same endpoint
+- semantic compaction consumes the same generation stream; bound native strategies use the same endpoint
   auth/transport lifecycle for standalone compact and exact input-token counting
 - model adapters bind request hooks, response normalizers and compaction policy;
   see [model compaction](../../../docs/llm_compaction.md)
@@ -118,7 +119,7 @@ Invariants:
 
 The [LLM contract](../../../docs/pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)
 defines accepted configuration vocabulary, per-shape `off` behavior, manual
-budget validation, and configuration/restart boundaries. Core owns compact's
+budget validation, and configuration/restart boundaries. LLM owns compact's
 visible summary limit and total output allowance; see the
 [compact contract](../../../docs/pal_memory_contract.md#compact).
 

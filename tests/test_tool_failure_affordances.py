@@ -1,5 +1,6 @@
 """Exercise the final tool text and receipts, including wrapper and delivery paths."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -9,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.core.turns import ToolCallEffect
 from pal.execution import register_with_core
 from pal.execution.contracts import CapabilityCall, CapabilityResult, ToolCallBudget
@@ -26,7 +27,7 @@ from tests.turn_fakes import continuation
 
 @pytest.fixture
 def runtime(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities("execution")
     runtime = core.context.execution_runtime
@@ -485,7 +486,7 @@ def test_browser_value_error_is_not_misreported_as_missing_scope(runtime):
 @pytest.mark.parametrize("feedback_failure", [False, True])
 def test_failure_feedback_preserves_original_error_and_metadata(feedback_failure):
     async def run():
-        core = PalCore()
+        core = build_core()
         executor = core.turn_executor
         original = ToolExecutionResult(name="probe", ok=False, text="KeyError: missing setting",
             llm_text="KeyError: missing setting\nTool result metadata: original receipt",

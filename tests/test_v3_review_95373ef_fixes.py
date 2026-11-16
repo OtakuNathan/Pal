@@ -295,7 +295,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         memory=MemoryService();memory.begin_l1_turn('T',user_message=user('Q','q'))
         runtime=_runtime(CapturingTransport(['A']))
         ex=_executor(memory,runtime)
-        pack=ex._prepare_turn_projection(runtime,_request_for(memory,()))
+        pack=ex.projection.prepare(runtime,_request_for(memory,()))
         self.assertIsNotNone(pack)
         endpoint=runtime.active_endpoint()
         endpoint.capabilities_blob={**dict(endpoint.capabilities_blob or {}),'unsupported_request_parameters':['temperature']}
@@ -327,7 +327,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         runtime=_runtime(transport)
         ex=_executor(memory,runtime)
         request=_request_for(memory,())
-        pack=ex._prepare_turn_projection(runtime,request)
+        pack=ex.projection.prepare(runtime,request)
         self.assertIsNotNone(pack)
         encoded,binding,handle=pack
         endpoint=runtime.active_endpoint()
@@ -336,7 +336,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
             endpoint.max_output_tokens=64
             return original_refresh()
         runtime.refresh_llm_endpoints=refresh_and_shrink
-        result=runtime.generate(
+        result=runtime._generate_response(
             request,
             projection=encoded,projection_binding=binding,
             projection_attempt_id=handle['attempt'].attempt_id,
@@ -367,10 +367,10 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         endpoint=runtime.active_endpoint()
         endpoint.capabilities_blob={**dict(endpoint.capabilities_blob or {}),
                                     'max_output_recovery':{'max_continuations':2}}
-        pack=ex._prepare_turn_projection(runtime,request)
+        pack=ex.projection.prepare(runtime,request)
         self.assertIsNotNone(pack)
         encoded,binding,handle=pack
-        result=runtime.generate(
+        result=runtime._generate_response(
             request,
             projection=encoded,projection_binding=binding,
             projection_attempt_id=handle['attempt'].attempt_id,
@@ -384,7 +384,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         self.assertIsNone(getattr(receipt,'native',None),
                           'A recovered contribution cannot carry attempt #1 native')
         memory.upsert_l1_assistant('T',result.response.message)
-        ex._observe_turn_projection(pack,SimpleNamespace(turn_id='T'),result)
+        ex.projection.accept(pack,SimpleNamespace(turn_id='T'),result)
         session=handle['session']
         if result.response.message.message_id in session.frozen_message_ids():
             self.assertIn('RECOVERY_ONLY_SUFFIX',repr([c.items for c in session.chunks]),
@@ -407,14 +407,14 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         # A live lineage must exist before the install for the rebase to be
         # real (in production the ordinary rounds ran first).
         runtime.endpoint_projection_session('pal:resident')
-        ex._rebase_projection_after_left_install(runtime,'pal:resident',root,memory_service=memory)
+        ex.projection.rebase(runtime,'pal:resident',root,memory_service=memory)
         continuity=memory.l1_store.turns.continuity
         self.assertIsNotNone(continuity)
         model_messages=continuity.project_standalone(list(root.right_messages()))
         request=LLMRequestIR(messages=(LLMMessageIR(role=MessageRole.SYSTEM,parts=(TextPartIR('BASE'),)),*model_messages),
                              tools=(),policy=GenerationPolicyIR(max_output_tokens=64),
                              metadata={'prompt_cache_scope_id':'pal:resident'})
-        pack=ex._prepare_turn_projection(runtime,request)
+        pack=ex.projection.prepare(runtime,request)
         self.assertIsNotNone(pack)
         self.assertEqual(json.dumps(pack[0].payload).count(marker),1,
                          'Raw seed already encoded by rebase + standalone continuity must not duplicate summary')
@@ -434,7 +434,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
             root.begin_compact(f'op-{marker}',reason='test')
             root.mark_ready(f'op-{marker}',Candidate(summary=marker,rendered=marker))
             root.commit(f'op-{marker}')
-            ex._rebase_projection_after_left_install(runtime,'pal:resident',root,memory_service=memory)
+            ex.projection.rebase(runtime,'pal:resident',root,memory_service=memory)
 
         root.begin_right_turn('T',user_text='old question')
         root.stream_right_assistant('T',assistant('old answer','old-a'))
@@ -448,7 +448,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         self.assertIsNotNone(second)
         raw_ids=tuple(m.message_id for m in root.left_messages())
         self.assertIn(second.source_id,raw_ids,'the second seed owns the new left')
-        model_ids=ex._left_model_view_ids(memory,raw_ids)
+        model_ids=ex.projection.left_model_ids(memory,raw_ids)
         self.assertIn(second.standalone_id,model_ids,
                       'the model view substitutes the standalone reference')
         self.assertNotIn(second.source_id,model_ids)
@@ -456,7 +456,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         request=LLMRequestIR(messages=(LLMMessageIR(role=MessageRole.SYSTEM,parts=(TextPartIR('BASE'),)),*model_messages),
                              tools=(),policy=GenerationPolicyIR(max_output_tokens=64),
                              metadata={'prompt_cache_scope_id':'pal:resident'})
-        pack=ex._prepare_turn_projection(runtime,request)
+        pack=ex.projection.prepare(runtime,request)
         self.assertIsNotNone(pack)
         payload=json.dumps(pack[0].payload)
         self.assertEqual(payload.count('GEN_TWO_95373EF'),1,
@@ -474,7 +474,8 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
             entered=asyncio.Event()
             async def hanging(*a,**k):
                 entered.set();await asyncio.Event().wait()
-            runtime.agenerate=hanging
+                yield
+            runtime.generate=hanging
             task=asyncio.create_task(ex._handle_llm_request(LLMRequestEffect(assembly_context=PromptAssemblyContext()),_continuation()))
             try:
                 await asyncio.wait_for(entered.wait(),2)
@@ -510,7 +511,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         session=runtime.endpoint_projection_session('pal:resident',rebind=False)
         self.assertEqual(list(getattr(session,'native_by_attempt',{})),[],
                          'no native may associate with a replaced round')
-        next_pack=ex._prepare_turn_projection(runtime,_request_for(memory,()))
+        next_pack=ex.projection.prepare(runtime,_request_for(memory,()))
         self.assertIsNotNone(next_pack)
         payload=json.dumps(next_pack[0].payload)
         self.assertEqual(payload.count(fallback),1,
@@ -575,12 +576,12 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         ex=_executor(memory,runtime)
         request=_request_for(memory,());ex.build_turn_prompt=lambda *a,**k:request
         captured=[]
-        original_prepare=ex._prepare_turn_projection
+        original_prepare=ex.projection.prepare
         def spy_prepare(runtime_arg,req,*a,**k):
             pack=original_prepare(runtime_arg,req,*a,**k)
             if pack is not None:captured.append(pack)
             return pack
-        ex._prepare_turn_projection=spy_prepare
+        ex.projection.prepare=spy_prepare
         async def round_trip():
             return await ex._handle_llm_request(
                 LLMRequestEffect(assembly_context=PromptAssemblyContext()),_continuation())
@@ -592,7 +593,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         committed_native=dict(getattr(session,'native_by_attempt',{}))
         self.assertGreaterEqual(committed_chunks,1)
         # Late cleanup AFTER the commit must be a no-op: nothing rolls back.
-        ex._abandon_turn_projection_round(pack_a)
+        ex.projection.abandon(pack_a)
         self.assertEqual(len(session.chunks),committed_chunks,
                          'a late finally must not roll back a committed round')
         self.assertEqual(dict(getattr(session,'native_by_attempt',{})),committed_native)
@@ -605,7 +606,7 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         active=getattr(session,'_active',None)
         self.assertIsNone(active,'a completed round leaves no open draft')
         # A's stale pack arriving after B committed: still a no-op.
-        ex._abandon_turn_projection_round(pack_a)
+        ex.projection.abandon(pack_a)
         self.assertEqual(len(session.chunks),committed_chunks+1,
                          'B committed its own round; A\'s late cleanup changed nothing')
         runtime.close()
@@ -690,14 +691,14 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         root.begin_compact('trace-compact',reason='test')
         root.mark_ready('trace-compact',Candidate(summary='TRACE_SUMMARY_95373EF',rendered='TRACE_SUMMARY_95373EF'))
         root.commit('trace-compact')
-        ex._rebase_projection_after_left_install(runtime,'pal:resident',root,memory_service=memory)
+        ex.projection.rebase(runtime,'pal:resident',root,memory_service=memory)
         continuity=memory.l1_store.turns.continuity
         self.assertIsNotNone(continuity)
         model_messages=continuity.project_standalone(list(root.right_messages()))
         request=LLMRequestIR(messages=(LLMMessageIR(role=MessageRole.SYSTEM,parts=(TextPartIR('BASE'),)),*model_messages),
                              tools=(),policy=GenerationPolicyIR(max_output_tokens=64),
                              metadata={'prompt_cache_scope_id':'pal:resident'})
-        pack=ex._prepare_turn_projection(runtime,request)
+        pack=ex.projection.prepare(runtime,request)
         self.assertIsNotNone(pack)
         self.assertEqual(json.dumps(pack[0].payload).count('TRACE_SUMMARY_95373EF'),1,
                          'the standalone summary rides exactly once after the install')

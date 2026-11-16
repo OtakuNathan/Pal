@@ -1,9 +1,10 @@
+from tests.core_factory import build_core
 import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.memory.service import MemoryService
 from tests.turn_fakes import continuation as make_continuation
 from pal.core.core_events import TURN_TOOL_RESULT_COMMITTED
@@ -18,10 +19,10 @@ from pal.shared.tool_protocol import new_tool_call
 @pytest.mark.parametrize('delivery', ['complete', 'failed', 'incomplete', 'other_scope'])
 def test_only_committed_terminal_result_in_owning_scope_consumes_event(notify_first, delivery):
     async def run():
-        core = PalCore()
+        core = build_core()
         register_with_core(core.context)
         core.context.port_registry['core:core'] = core
-        def append(*args):
+        def append(turn_id, result):
             if delivery == 'failed':
                 raise RuntimeError('persist failed')
         memory = MemoryService()

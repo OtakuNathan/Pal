@@ -288,7 +288,7 @@ class BootstrapCoverageTests(unittest.TestCase):
                 runtime.active_endpoint_id = "shape-endpoint"
                 executor = _executor(service, runtime)
                 try:
-                    pack = executor._prepare_turn_projection(
+                    pack = executor.projection.prepare(
                         runtime, _model_view_request(service))
                     self.assertIsNotNone(
                         pack, "the fresh bootstrap must engage for every shape")
@@ -365,7 +365,7 @@ class BootstrapCoverageTests(unittest.TestCase):
                         "view exactly once")
             generation_before = restored.history_root.left_generation
 
-            compacted = asyncio.run(executor2.compact_memory_async(
+            compacted = asyncio.run(executor2.compaction.run(
                 restored,
                 target_input_budget=100_000,
                 reserved_output_tokens=1024,

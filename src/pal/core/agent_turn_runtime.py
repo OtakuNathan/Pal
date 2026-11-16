@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from pal.core.prompt_compiler import PromptCompiler
-from pal.core.compaction import CompactionEngine, CompactionPolicy
+from pal.llm.compaction_engine import CompactionEngine, CompactionPolicy
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.turn_executor import TurnExecutor
@@ -69,7 +69,7 @@ class AgentTurnRuntime:
             )
         prompt_compiler = PromptCompiler(context)
         if compaction_policy is None:
-            from pal.core.pal_compaction import PalCompactionPolicy
+            from pal.llm.resident_compaction import PalCompactionPolicy
 
             compaction_policy = PalCompactionPolicy()
         compaction_engine = CompactionEngine(
@@ -77,16 +77,12 @@ class AgentTurnRuntime:
             max_attempts=max(
                 1,
                 int(
-                    getattr(
-                        config,
-                        "llm_compaction_retry_attempts",
-                        3,
-                    )
+                    config.llm_compaction_retry_attempts
                     or 1
                 ),
             ),
             timeout_seconds=float(
-                getattr(config, "llm_compaction_timeout_seconds", 180.0)
+                config.llm_compaction_timeout_seconds
                 or 180.0
             ),
         )

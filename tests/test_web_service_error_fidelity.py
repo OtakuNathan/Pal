@@ -1,5 +1,6 @@
 """Search and browser failures survive provider, process and tool boundaries."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import io
 import json
@@ -13,7 +14,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core as register_execution
 from pal.execution.contracts import ToolCallBudget
 from pal.foundation.diagnostics import exception_report
@@ -103,7 +104,7 @@ def search_service(*providers):
 
 @pytest.fixture
 def core(tmp_path):
-    core = PalCore()
+    core = build_core()
     register_execution(core.context)
     core.publish_module_capabilities("execution")
     core.context.execution_runtime.configure_runtime_root(tmp_path)

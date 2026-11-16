@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -10,7 +11,7 @@ import pytest
 
 from pal.artifact import (ArtifactManager, ArtifactRepository, ArtifactRecordModel,
                           ArtifactRepresentationModel, ArtifactHotStateModel)
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import register_with_core
 from pal.foundation import PalV2Database
 from pal.shared.tool_protocol import new_tool_call
@@ -54,7 +55,7 @@ def test_long_text_is_readable_beyond_artifact_preview_with_file_tool(manager, a
     assert not any('transcribe_artifact' in action for action in preview.next_actions)
     exposure = manager.select_prompt_exposure('scope', 'opening', 'read attachment', {})
     assert path in exposure.text and 'read_file' in exposure.text
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime

@@ -21,6 +21,8 @@ Executor-level fixtures reuse the N3 vertical-trace harness: real runtime,
 invoker, codec decode, MemoryService/HistoryRoot; only frames are faked.
 """
 from __future__ import annotations
+from tests.turn_fakes import continuation as make_continuation
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -169,8 +171,8 @@ class ToolCallTransport(CapturingTransport):
         yield _JSONFrame(0, payload)
 
 
-def _continuation(finalization_only: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(
+def _continuation(finalization_only: bool = False):
+    return make_continuation(
         budget_failure_feedback_text="",
         llm_round_index=0,
         preferred_llm_endpoint_id=None,
@@ -507,7 +509,7 @@ class F6ResetLineageTests(unittest.TestCase):
         memory.soft_reset()
         memory.begin_l1_turn("T2", user_message=user("Q2", "q2"))
         request2 = _request_for(memory, ())
-        pack = ex._prepare_turn_projection(runtime, request2)
+        pack = ex.projection.prepare(runtime, request2)
         self.assertIsNone(pack,
                           "a lineage whose frozen spans are not durable must "
                           "not replay retired history")
@@ -567,7 +569,7 @@ class OwnerPortWiringTests(unittest.TestCase):
     """
 
     def test_interrupt_reaches_memory_owner(self):
-        core = PalCore()
+        core = build_core()
         core.context.port_registry["memory:memory"] = MemoryService()
         replies: list[str] = []
 
@@ -587,7 +589,7 @@ class OwnerPortWiringTests(unittest.TestCase):
         self.assertEqual(replies, ["No active turn to interrupt."])
 
     def test_execute_soft_reset_retires_projection_sessions_via_port(self):
-        core = PalCore()
+        core = build_core()
         transport = CapturingTransport(["unused"])
         llm = _runtime(transport)
         session = llm.endpoint_projection_session("pal:resident")

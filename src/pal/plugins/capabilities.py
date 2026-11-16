@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
-    INDIRECT_CONTROL,
+    INDIRECT_LIFECYCLE,
+    INDIRECT_PACKAGE_WRITE,
+    INDIRECT_PACKAGE_READ,
     INDIRECT_LOCAL_READ,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
@@ -112,7 +114,7 @@ class PluginsIntrospectionProvider:
             use_when="A plugin or channel provider .palpkg, or legacy provider .whl, is ready to install or upgrade. The call briefly waits for completion; longer jobs report notification availability. A scheduled completion event wakes Pal to continue the initiating task; do not poll.", do_not_use_when="Only dependencies of an installed package need repair; use prepare_package.",
             failure_next_steps="Read inspect_package_status. Failure does not confirm installation or activation; retry after correcting the reported cause.",
             next_tool_hints=(NextToolHint(name="inspect_package_status", use_when="Notification is unavailable, the outcome is uncertain, or detailed diagnostics are needed."),)),
-        InputModel=PackageInstallInput, aliases=("install_package",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+        InputModel=PackageInstallInput, aliases=("install_package",), execution=INDIRECT_PACKAGE_WRITE)
     def package_install(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._start_package_job(call, "install", path=Path(call.args["path"]))
 
@@ -122,7 +124,7 @@ class PluginsIntrospectionProvider:
             do_not_use_when="Installing a new artifact; use install_package.",
             failure_next_steps="Use inspect_package_status for the stage and cause. Missing system privileges or configuration must be resolved before retrying.",
             next_tool_hints=(NextToolHint(name="inspect_package_status", use_when="Notification is unavailable, the outcome is uncertain, or preparation diagnostics are needed."),)),
-        InputModel=PackagePrepareInput, aliases=("prepare_package",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+        InputModel=PackagePrepareInput, aliases=("prepare_package",), execution=INDIRECT_PACKAGE_WRITE)
     def package_prepare(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._start_package_job(call, "prepare", name=call.args["name"], kind=call.args.get("kind", "plugin"))
 
@@ -132,7 +134,7 @@ class PluginsIntrospectionProvider:
             do_not_use_when="Temporary detach or disabling startup. Built-in plugins and channel providers cannot be uninstalled here.",
             failure_next_steps="Use inspect_package_status and retry the same uninstall. Cleanup failure preserves remaining resources; undeclared data cannot be purged.",
             next_tool_hints=(NextToolHint(name="inspect_package_status", use_when="Notification is unavailable, or retained data and unfinished cleanup need inspection."),)),
-        InputModel=PluginUninstallInput, aliases=("uninstall_plugin",), execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+        InputModel=PluginUninstallInput, aliases=("uninstall_plugin",), execution=INDIRECT_PACKAGE_WRITE)
     def uninstall(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._start_package_job(call, "uninstall", name=call.args["name"],
                                     purge_data=bool(call.args.get("purge_data", False)))
@@ -141,7 +143,7 @@ class PluginsIntrospectionProvider:
         guidance=ToolGuidance(search_objects=('status',), search_terms=('state', 'show', 'get', 'installation',), purpose="Inspect package installation stages, failures, private environments and activation results.",
             use_when="Inspecting progress or diagnosing dependencies; use job_id and bounded wait_ms when no completion notification is available.", do_not_use_when="Repeated polling when a completion notice is scheduled. Reading a plugin's application data.",
             failure_next_steps="Unknown jobs may belong to another runtime root; verify the selected runtime."),
-        InputModel=PackageStatusInput, aliases=("inspect_package_status",), execution=INDIRECT_LOCAL_READ)
+        InputModel=PackageStatusInput, aliases=("inspect_package_status",), execution=INDIRECT_PACKAGE_READ)
     def package_status(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self._package_result(self.jobs().status, job_id=call.args.get("job_id"), wait_ms=call.args.get("wait_ms", 0))
         if self.completion_events is not None:
@@ -215,7 +217,7 @@ class PluginsIntrospectionProvider:
             use_when="Choose attach to load an enabled detached plugin while preserving an existing instance; detach to temporarily unload; reload to replace changed code and owned resources, restoring affected dependents; enable to persistently enable and load; disable to unload and persistently disable. All operations take the same exact plugin name.",
             do_not_use_when="Reconnecting one channel endpoint (use manage_channel_endpoint(operation=restart)). Installing or uninstalling files (use package tools). Metadata scanning (use rescan_plugins). Resident core changes require host activation.",
             failure_next_steps="Use inspect_plugin for the selected plugin's errors, blockers and cleanup state. Reconcile incomplete cleanup before retrying. Reload can interrupt dependents and does not promise rollback. Discover names with list_plugins.",
-        ), InputModel=PluginManagementInput, aliases=("manage_plugin",), execution=INDIRECT_CONTROL,
+        ), InputModel=PluginManagementInput, aliases=("manage_plugin",), execution=INDIRECT_LIFECYCLE,
     )
     def manage(self, call: IntrospectionCall) -> IntrospectionResult:
         handler = {
@@ -288,7 +290,7 @@ class PluginsIntrospectionProvider:
             use_when='After installation or manifest changes. Default mode=scan discovers metadata only. Explicit mode=scan_and_attach_new_first_party also attaches newly discovered enabled first-party plugins. Inspect scan_errors and attach_errors separately; neither mode reloads existing code or enables disabled plugins.',
             do_not_use_when="Reloading or restarting one specific plugin (use manage_plugin operation=reload).",
             failure_next_steps="If scan_errors occur, check plugin manifest files. Previous plugin generation is preserved on error.",
-        ), InputModel=PluginRescanInput, aliases=("rescan_plugins",), execution=INDIRECT_CONTROL)
+        ), InputModel=PluginRescanInput, aliases=("rescan_plugins",), execution=INDIRECT_LIFECYCLE)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         if call.args.get("mode", "scan") == "scan_and_attach_new_first_party":
             return self.rescan_and_attach_new_first_party(call)

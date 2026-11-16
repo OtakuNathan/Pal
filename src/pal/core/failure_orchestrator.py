@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
 
 from pal.memory.contracts import MEMORY
 
@@ -239,7 +240,7 @@ class FailureOrchestrator:
                 )
                 self._debug_log_prompt(request)
                 try:
-                    outcome = await llm_runtime.agenerate(request)
+                    outcome = await collect_generation(llm_runtime.generate(request))
                 except Exception as exc:
                     diagnostic = exception_reason(exc)
                     return FailureFlowOutcome(

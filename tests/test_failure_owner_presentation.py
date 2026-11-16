@@ -189,7 +189,7 @@ def test_failure_group_with_shared_cause_and_cycle_terminates():
 
 
 def test_compaction_success_does_not_repeat_recovered_attempt_errors():
-    from pal.core.compaction import CompactionRunResult
+    from pal.llm.compaction_engine import CompactionRunResult
 
     result = CompactionRunResult(status="compacted", attempts=2,
         failures=("schema:invalid JSON",), failure_details=("ValueError: invalid JSON",))

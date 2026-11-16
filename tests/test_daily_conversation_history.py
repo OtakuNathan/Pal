@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pal.core import PalCore as _PalCoreBootstrap
+from pal.core.runtime import PalCore as _PalCoreBootstrap
 from pal.memory.persistence.conversation import ConversationTextJournal
 
 

@@ -1,5 +1,6 @@
 """Presentation changes must preserve executable contracts and exact evidence."""
 from __future__ import annotations
+from tests.core_factory import build_core
 
 import asyncio
 import json
@@ -61,7 +62,7 @@ def test_exact_handler_text_survives_core_bunshin_and_wire_shapes(source):
 
 
 def test_read_tool_full_contract_is_retained_only_in_structured_channel():
-    core = PalCore()
+    core = build_core()
     register_with_core(core.context)
     core.publish_module_capabilities('execution')
     runtime = core.context.execution_runtime

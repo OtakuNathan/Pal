@@ -1,7 +1,7 @@
 from __future__ import annotations
 import contextlib
 from typing import Any
-from pal.llm.contracts import LLMGenerationResult
+from pal.llm.contracts import LLMGenerationResult, LLMService
 from pal.llm.ir import LLMMessageIR, LLMResponseIR, MessageRole, TextPartIR
 from pal.shared import LLMFinishReason, BunshinInvocationPack
 from pal.bunshin.runner_components.numeric_values import _optional_positive_int
@@ -156,20 +156,8 @@ def _runtime_max_output_tokens(
     preferred_endpoint_id: str | None = None,
     preferred_endpoint_source: str | None = None,
 ) -> int | None:
-    resolver = getattr(llm_runtime, "resolve_max_output_tokens", None)
-    if not callable(resolver):
-        return None
-    with contextlib.suppress(Exception):
-        try:
-            return _optional_positive_int(
-                resolver(preferred_endpoint_id=preferred_endpoint_id, preferred_endpoint_source=preferred_endpoint_source)
-            )
-        except TypeError:
-            try:
-                return _optional_positive_int(resolver(preferred_endpoint_id=preferred_endpoint_id))
-            except TypeError:
-                return _optional_positive_int(resolver())
-    return None
+    return _optional_positive_int(llm_runtime.resolve_max_output_tokens(
+        preferred_endpoint_id=preferred_endpoint_id, preferred_endpoint_source=preferred_endpoint_source))
 
 
 def _runtime_endpoint_facts(
@@ -178,19 +166,8 @@ def _runtime_endpoint_facts(
     preferred_endpoint_id: str | None = None,
     preferred_endpoint_source: str | None = None,
 ) -> dict[str, Any]:
-    resolver = getattr(llm_runtime, "resolve_endpoint_facts", None)
-    if not callable(resolver):
-        return {}
-    with contextlib.suppress(Exception):
-        try:
-            facts = resolver(preferred_endpoint_id=preferred_endpoint_id, preferred_endpoint_source=preferred_endpoint_source)
-        except TypeError:
-            try:
-                facts = resolver(preferred_endpoint_id=preferred_endpoint_id)
-            except TypeError:
-                facts = resolver()
-        return dict(facts) if isinstance(facts, dict) else {}
-    return {}
+    return llm_runtime.metadata(preferred_endpoint_id=preferred_endpoint_id,
+        preferred_endpoint_source=preferred_endpoint_source).to_payload()
 
 
 def _max_output_tokens_from_context_window(context_window: int, llm_runtime: Any) -> int:

@@ -8,17 +8,19 @@ delivery documenting what exists and what does not.
 """
 
 from __future__ import annotations
+from tests.llm_fakes import NonStreamingLLM
+from tests.compaction_composition import execute_compaction
 
 import asyncio
 import unittest
 from types import SimpleNamespace
 
-from pal.core.compaction import (
+from pal.llm.compaction_engine import (
     CompactionClockKind,
     CompactionEngine,
     CompactionSnapshot,
 )
-from pal.core.pal_compaction import PalCompactionPolicy
+from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.memory import MemoryService
 from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
 
@@ -59,8 +61,7 @@ class OwnerBudgetFactsTests(unittest.TestCase):
         root = service.history_root
         root.promote()
         left_snapshot = service.begin_left_compaction("run-b03", reason="auto")
-        snapshot = CompactionSnapshot.capture_left(
-            service, left_snapshot,
+        snapshot = service.capture_compaction( left_snapshot,
             target_input_budget=1,  # deliberately impossible
             reserved_output_tokens=1024,
             clock_kind=CompactionClockKind.USER_TURN, clock_value=1,
@@ -69,11 +70,11 @@ class OwnerBudgetFactsTests(unittest.TestCase):
         engine = CompactionEngine(policy=PalCompactionPolicy(),
                                   max_attempts=1, timeout_seconds=10.0)
 
-        class _NoNetwork:
-            async def agenerate(self, request, *a, **kw):  # pragma: no cover
+        class _NoNetwork(NonStreamingLLM):
+            async def respond(self, request, *a, **kw):  # pragma: no cover
                 raise AssertionError("preflight must refuse before any send")
 
-        result = asyncio.run(engine.run(
+        result = asyncio.run(execute_compaction(engine,
             snapshot, llm_runtime=_NoNetwork(), memory_service=service))
         self.assertFalse(result.success)
         # The left segment is untouched after the refused run.

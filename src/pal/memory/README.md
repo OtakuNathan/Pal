@@ -1,6 +1,9 @@
 # memory
 
 Owns:
+- L3 provider publication and selection
+- compact capture, archive staging and candidate installation
+- borrowed closed L1 prefixes with private transient tails
 - `L1/L2/L3` memory semantics
 - runtime-owned `L1` and `L2`, with encrypted resident baseline, incremental
   admission/round journal and a full clean-shutdown checkpoint
@@ -15,7 +18,7 @@ Does not own:
 - execution policy
 - worker lifecycle
 - service lifecycle
-- compaction prompts, schemas, source selection, retry policy, or host
+- compaction prompts, schemas, retry policy, or host
   semantic preferences
 
 Exposes:

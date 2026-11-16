@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from copy import copy, deepcopy
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
 from pal.control.contracts import ControlAction
+from pal.core.main_context import MainContext
 from pal.core.agent_turn_runtime import AgentTurnRuntime
 from pal.core.core_events import TURN_END, TURN_START
 from pal.core.turn_executor import TurnExecutor
@@ -16,11 +17,9 @@ from pal.core.turns import (
     TurnContinuation, TurnOutcome, channel_turn_program,
 )
 from pal.foundation.diagnostics import exception_reason
-from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest, LLM_SIDE_TURNS
+from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
-from pal.memory.service import InMemoryL1Store, MemoryService
-from pal.memory.turn_ir import L1TurnState, L1TurnStore
 from pal.shared import EventKind, LLMFinishReason, LLMPreflightStatus, RuntimeStatus
 from pal.shared.ports import PortRegistry
 
@@ -45,7 +44,7 @@ class BtwTurnExecutor(TurnExecutor):
 
     def build_turn_prompt(self, *args, **kwargs):
         prompt = super().build_turn_prompt(*args, **kwargs)
-        return replace(prompt, metadata={**dict(prompt.metadata), "transient_history": True})
+        return replace(prompt, metadata={**dict(prompt.metadata), "transient_history": True, "projection_scope_id": self._scope_id})
 
     def _history_submission_observer(self, request):
         # The closed L captured at admission never advances during a side turn.
@@ -60,7 +59,7 @@ class BtwTurnExecutor(TurnExecutor):
                 max_output_tokens=effect.max_output_tokens,
                 tools=self._resolve_llm_tools(continuation, effect.tools_override),
             )
-            advice = await self.context.require_port("llm:llm").apreflight(LLMPreflightRequest(request=prompt))
+            advice = await self.context.require_port("llm:llm").preflight(LLMPreflightRequest(request=prompt))
             continuation.prompt_budget_snapshot = dict(advice.breakdown or {})
             if advice.status != LLMPreflightStatus.READY or self._is_hard_budget_overflow(advice):
                 self.failed = True
@@ -115,33 +114,24 @@ class BtwTurn:
         source = core.context.require_port("memory:memory")
         # L can end in a closed prefix of the currently active main turn.
         # Its captured immutable messages become settled only in this branch.
-        turns = tuple(replace(t, state=L1TurnState.SETTLED) for t in source.history_root.left_turns())
-        self.memory = MemoryService(l1_store=InMemoryL1Store(L1TurnStore(turns)))
-        self.memory.history_root.promote()
-        self.context = copy(core.context)
-        self.context.port_registry = PortRegistry(dict(core.context.port_registry))
-        self.context.port_registry.pop(RESIDENT_HISTORY.name, None)
-        self.context.port_registry["memory:memory"] = self.memory
-        self.context.execution_runtime = core.context.execution_runtime.fork_transient()
+        self.memory = source.borrow_context()
+        ports = PortRegistry(dict(core.context.port_registry))
+        ports.pop(RESIDENT_HISTORY.name, None)
+        ports["memory:memory"] = self.memory
+        self.context = MainContext(execution_runtime=core.context.execution_runtime.fork_transient(),
+            port_registry=ports, prompt_fragment_registry=core.context.prompt_fragment_registry,
+            module_registry=core.context.module_registry)
         self.execution = self.context.execution_runtime
         self.snapshots = self.execution.result_snapshots
-        self.llm_branch = None
+        self.llm = core.context.require_port("llm:llm")
         try:
             self.snapshots.bind_history(self.memory.history)
             main = core.state.active_turns.get(core.state.active_turn_id)
             settings = (deepcopy(main.turn_settings_snapshot) if main is not None
                         else core.turn_manager._build_turn_settings_snapshot())
-            _, ids = core.turn_executor._left_view_seed(source, source.history_root)
-            factory = core.context.port_registry.optional(LLM_SIDE_TURNS)
-            if factory is None:
-                raise ValueError("The current LLM provider does not support side questions")
-            self.llm_branch = factory.create_side_turn(
-                scope_id="pal:resident", branch_id=self.turn_id, message_ids=ids,
-            )
-            self.llm = self.llm_branch.runtime
-            endpoint_id = (main.preferred_llm_endpoint_id if main is not None else None) or self.llm_branch.preferred_endpoint_id
-            model_id = (main.preferred_llm_model_id if main is not None else None) or self.llm_branch.preferred_model_id
-            self.context.port_registry["llm:llm"] = self.llm
+            facts = self.llm.metadata()
+            endpoint_id = (main.preferred_llm_endpoint_id if main is not None else None) or facts.endpoint_id
+            model_id = (main.preferred_llm_model_id if main is not None else None) or facts.model_id
             # ToolSurface returns fresh contract dictionaries backed by the
             # captured generation's immutable schemas. Retain those schemas;
             # deepcopy tries to mutate their frozen dict/list implementations.
@@ -154,6 +144,7 @@ class BtwTurn:
                 should_enter_failure_flow_for_tool_result=lambda _: False,
                 handle_llm_provider_errors=False, executor_type=BtwTurnExecutor,
             )
+            self.runtime.executor._scope_id = self.turn_id
             self.continuation = TurnContinuation(
                 turn_id=self.turn_id, opening_event=event,
                 delivery_binding=envelope.opening_delivery_binding,
@@ -168,8 +159,7 @@ class BtwTurn:
             )
         except BaseException:
             try:
-                if self.llm_branch is not None:
-                    self.llm_branch.release()
+                self.llm.release_context(self.turn_id)
             finally:
                 self.execution.unbind_result_history(self.memory)
             raise
@@ -247,7 +237,7 @@ class BtwTurn:
                 self.memory.history.clear,
                 lambda: self.snapshots.finish_turn(self.turn_id),
                 lambda: self.execution.unbind_result_history(self.memory),
-                self.llm_branch.release,
+                lambda: self.llm.release_context(self.turn_id),
                 self.execution.logical_state.reset_state,
             )
             for release in cleanup:

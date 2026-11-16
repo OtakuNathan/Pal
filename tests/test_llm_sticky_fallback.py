@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pal.llm.contracts import collect_generation
+from tests.core_factory import build_core
 
 import asyncio
 import tempfile
@@ -6,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from pal.core import PalCore
+from pal.core.runtime import PalCore
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.llm import EndpointResolver, LLMRuntime, RuntimeSettingRepository
 from pal.llm.repository import LLM_ENDPOINT_FALLBACK_SETTING_KEY
@@ -90,7 +92,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             settings_repository=_MemorySettingsRepository("alpha"),
             endpoint_invoker=_FailoverInvoker(),
         )
-        core = PalCore()
+        core = build_core()
         register_execution_with_core(core.context)
         register_llm_with_core(core.context, runtime)
         for module in ("execution", "llm"):
@@ -154,8 +156,8 @@ class PalLLMNoFallbackTests(unittest.TestCase):
                 RuntimeSettingRepository().set(LLM_ENDPOINT_FALLBACK_SETTING_KEY, "on")
                 request = request_ir_from_prompt(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64)
 
-                first = runtime.generate(request)
-                second = runtime.generate(request)
+                first = runtime._generate_response(request)
+                second = runtime._generate_response(request)
 
                 self.assertEqual(first.finish_reason, LLMFinishReason.ERROR)
                 self.assertEqual(second.finish_reason, LLMFinishReason.ERROR)
@@ -177,7 +179,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             endpoint_invoker=invoker,
         )
 
-        outcome = runtime.generate(
+        outcome = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=64,
@@ -204,7 +206,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             endpoint_retry_attempts=1,
         )
 
-        outcome = runtime.generate(
+        outcome = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=64,
@@ -238,7 +240,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             runtime.resolve_max_output_tokens(preferred_endpoint_id="missing", preferred_endpoint_source="profile"),
             None,
         )
-        facts = runtime.resolve_endpoint_facts(preferred_endpoint_id="missing", preferred_endpoint_source="profile")
+        facts = runtime._endpoint_facts(preferred_endpoint_id="missing", preferred_endpoint_source="profile")
         self.assertEqual(facts["endpoint_id"], "missing")
         self.assertIsNone(facts["max_output_tokens"])
         self.assertFalse(facts["supports_vision"])
@@ -259,7 +261,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             endpoint_invoker=_FailoverInvoker(),
         )
 
-        facts = runtime.resolve_endpoint_facts()
+        facts = runtime._endpoint_facts()
 
         self.assertTrue(facts["supports_tools"])
         self.assertTrue(facts["supports_vision"])
@@ -311,7 +313,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             max_output_tokens=64,
         )
 
-        result = runtime.generate(request)
+        result = runtime._generate_response(request)
 
         self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
         self.assertEqual(invoker.calls, ["vision-primary"])
@@ -341,7 +343,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             max_output_tokens=64,
         )
 
-        result = runtime.generate(request)
+        result = runtime._generate_response(request)
 
         self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
         self.assertIn("unavailable", result.text)
@@ -360,7 +362,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             endpoint_retry_attempts=1,
         )
 
-        outcome = runtime.generate(
+        outcome = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=64,
@@ -403,7 +405,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             event_sink=events.append,
         )
 
-        outcome = runtime.generate(request_ir_from_prompt(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64))
+        outcome = runtime._generate_response(request_ir_from_prompt(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64))
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
         self.assertEqual(invoker.calls, ["slow", "slow", "slow"])
@@ -440,7 +442,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             event_sink=events.append,
         )
 
-        outcome = runtime.generate(
+        outcome = runtime._generate_response(
             request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=64,
@@ -483,7 +485,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
             metadata={"timeout_seconds": 1},
         )
 
-        outcome = asyncio.run(runtime.agenerate(request))
+        outcome = asyncio.run(collect_generation(runtime.generate(request)))
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
         self.assertEqual(invoker.calls, ["blocked"])
@@ -518,7 +520,7 @@ class PalLLMNoFallbackTests(unittest.TestCase):
                     settings_repository=RuntimeSettingRepository(),
                     endpoint_invoker=_FailoverInvoker(),
                 )
-                core = PalCore()
+                core = build_core()
                 register_execution_with_core(core.context)
                 core.publish_module_capabilities("execution")
                 register_llm_with_core(core.context, runtime)
