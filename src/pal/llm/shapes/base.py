@@ -11,10 +11,12 @@ from pal.llm.ir import (
     LLMResponseDeltaKind,
     LLMResponseIR,
     LLMResponseUpdate,
+    ThinkingLevel,
     WireShape,
 )
 from pal.shared.json_values import freeze_json_mapping, thaw_json
 from pal.llm.decode_contracts import ShapeDecodeError
+from pal.llm.request_capabilities import bind_request_capabilities
 from pal.llm.cache_capabilities import PromptCacheCapabilities, bind_prompt_cache_capabilities
 from pal.llm.response_blocks import ResponseBlockSnapshot, ResponseBlockUpdate, decode_response_blocks
 
@@ -37,6 +39,9 @@ class ShapeContext:
     cache_capabilities: PromptCacheCapabilities = field(init=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "capabilities", bind_request_capabilities(
+            self.wire_shape, self.model_id, self.capabilities,
+        ))
         object.__setattr__(self, "cache_capabilities", bind_prompt_cache_capabilities(
             wire_shape=self.wire_shape, provider_id=self.provider_id, model_id=self.model_id,
             base_url=self.base_url, capabilities=self.capabilities,
@@ -192,12 +197,20 @@ class ShapeCodec(Protocol):
 def request_parameter_supported(
     context: ShapeContext,
     parameter: str,
+    *,
+    thinking_level: ThinkingLevel | None = None,
 ) -> bool:
     """Return whether an endpoint accepts one optional generation parameter."""
 
     normalized = str(parameter or "").strip().lower()
     if not normalized:
         return False
+    if normalized in {"temperature", "top_p", "top_logprobs", "logprobs"}:
+        sampling_policy = context.capabilities.get("sampling_policy")
+        if sampling_policy == "unsupported":
+            return False
+        if sampling_policy == "requires_no_reasoning" and thinking_level != ThinkingLevel.OFF:
+            return False
     explicit = context.capabilities.get(f"supports_{normalized}")
     if isinstance(explicit, bool):
         return explicit
@@ -211,6 +224,15 @@ def request_parameter_supported(
         for item in unsupported
         if str(item or "").strip()
     }
+
+
+def openai_reasoning_effort(context: ShapeContext, level: ThinkingLevel | None) -> str | None:
+    if level == ThinkingLevel.OFF:
+        # Omitting effort uses the server default, which can enable reasoning.
+        if context.capabilities.get("sampling_policy") == "requires_no_reasoning":
+            return "none"
+        return None
+    return level.value if level is not None else None
 
 
 class ShapeCodecBase:

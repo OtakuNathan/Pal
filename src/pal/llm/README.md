@@ -53,6 +53,9 @@ Invariants:
   thinking budgets, and leaves the ordinary conversation's selection unchanged
 - endpoint-declared unsupported request parameters are omitted by codecs while
   the provider-neutral generation policy remains unchanged
+- request contexts bind exact-model sampling defaults for native and `openai/`
+  model IDs, independently of provider or transport. Explicit `sampling_policy`
+  overrides the default; projected requests share the final parameter guard
 - exact-model hooks can modify only messages and tool definitions
 - codecs classify reasoning, body text and native tool items before any
   provider-specific normalization; reasoning and body examples are not tool calls

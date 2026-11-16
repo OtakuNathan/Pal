@@ -15,7 +15,6 @@ from pal.llm.ir import (
     MessageRole,
     PromptRegionIR,
     ReasoningPartIR,
-    ThinkingLevel,
     WireShape,
 )
 from pal.llm.shapes.base import (
@@ -26,6 +25,7 @@ from pal.llm.shapes.base import (
     ShapeDecodeError,
     _JSONFrame,
     finalize_cache_spans,
+    openai_reasoning_effort,
     request_parameter_supported,
 )
 from pal.llm.shapes.builder import (
@@ -145,15 +145,16 @@ class OpenAICompletionCodec(ShapeCodecBase):
         }
         if (
             policy.temperature is not None
-            and request_parameter_supported(context, "temperature")
+            and request_parameter_supported(context, "temperature", thinking_level=policy.thinking_level)
         ):
             payload["temperature"] = policy.temperature
         if request.tools:
             payload["tools"] = [openai_tool_definition(tool) for tool in request.tools]
             if policy.tool_choice != "omit":
                 payload["tool_choice"] = policy.tool_choice
-        if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
-            payload["reasoning_effort"] = policy.thinking_level.value
+        effort = openai_reasoning_effort(context, policy.thinking_level)
+        if effort is not None:
+            payload["reasoning_effort"] = effort
         return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAICompletionDecoder":

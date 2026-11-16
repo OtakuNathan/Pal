@@ -105,6 +105,15 @@ class LLMEndpointSpec:
         capabilities = _json_mapping(source.get("capabilities_blob"))
         if capabilities.get("compaction_strategy", "auto") not in {"auto", "semantic_checkpoint", "openai_responses"}:
             raise LLMEndpointSpecError("invalid capabilities_blob.compaction_strategy")
+        sampling_policy = capabilities.get("sampling_policy")
+        if sampling_policy is not None and (
+            wire_shape not in {"openai_response", "openai_completion"}
+            or sampling_policy not in ("supported", "unsupported", "requires_no_reasoning")
+        ):
+            raise LLMEndpointSpecError(
+                "capabilities_blob.sampling_policy requires an OpenAI wire shape and "
+                "supported, unsupported or requires_no_reasoning"
+            )
         access_profile = capabilities.get("access_profile")
         if access_profile is not None:
             from pal.llm.chatgpt import API_URL, PROFILE

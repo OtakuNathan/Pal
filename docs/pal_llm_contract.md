@@ -151,6 +151,25 @@ The OpenRouter model id `openai/gpt-6-astra` selects the equivalent
 context remains 1,050,000 tokens, but operators may configure a 272,000-token
 limit to stay below OpenRouter's higher long-context pricing tier.
 
+Request contexts also bind built-in sampling defaults for the exact model IDs
+`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-sol`, and `gpt-6-luna`,
+including their `openai/` aliases. This applies to existing endpoint rows and
+all OpenAI-shaped encode paths, without rewriting configuration or consulting
+provider identity. Astra and 6.1 Sol omit sampling parameters. Terra, Sol and
+Luna omit them unless thinking is explicitly `off`; omission of an effort uses
+the model's reasoning default and does not enable sampling.
+
+`capabilities_blob.sampling_policy` can explicitly override the default with
+`supported`, `unsupported`, or `requires_no_reasoning`; it is valid only for
+the two OpenAI wire shapes. Parameter-specific restrictions still apply. The
+final request guard filters `temperature`, `top_p`, and `top_logprobs` from
+both payload and `extra_body`, including prebuilt projections. It also omits
+Completion `logprobs` and Responses `message.output_text.logprobs` includes
+when unsupported. SIWC retains its stricter access-profile restrictions even
+when a model supports sampling with reasoning disabled. Unknown model IDs keep
+their existing behavior. Built-in defaults follow the
+[OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters).
+
 ## Responses reasoning continuation
 
 `openai_response` sends `store=false` and
@@ -410,9 +429,12 @@ Changing resident codec/runtime Python code requires a full external host restar
 ### Thinking switches and manual budgets
 
 `off` is Pal's thinking switch, not an effort keyword. Anthropic explicitly sends
-`thinking: {"type": "disabled"}` and no effort. The OpenAI codecs omit their
-reasoning field for `off`; omission does not itself guarantee that a remote
-service with reasoning enabled by default will disable it.
+`thinking: {"type": "disabled"}` and no effort. For endpoints with
+`sampling_policy=requires_no_reasoning`, the OpenAI codecs encode `off` as
+`reasoning_effort="none"` or `reasoning.effort="none"` to actually disable
+reasoning. Other OpenAI endpoints retain omission of their reasoning field for
+`off`; omission does not itself guarantee that a remote service with reasoning
+enabled by default will disable it.
 
 Anthropic non-off requests without a manual budget send `thinking.type=adaptive`
 and the exact effort. Explicit `thinking_budget_tokens` requests send

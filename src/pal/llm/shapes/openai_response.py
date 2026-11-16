@@ -20,7 +20,6 @@ from pal.llm.ir import (
     MessageRole,
     ReasoningPartIR,
     TextPartIR,
-    ThinkingLevel,
     WireShape,
 )
 from pal.llm.shapes.base import (
@@ -31,6 +30,7 @@ from pal.llm.shapes.base import (
     ShapeDecodeError,
     _JSONFrame,
     finalize_cache_spans,
+    openai_reasoning_effort,
     request_parameter_supported,
 )
 from pal.llm.shapes.builder import (
@@ -162,15 +162,16 @@ class OpenAIResponseCodec(ShapeCodecBase):
             payload["include"] = ["reasoning.encrypted_content"]
         if (
             policy.temperature is not None
-            and request_parameter_supported(context, "temperature")
+            and request_parameter_supported(context, "temperature", thinking_level=policy.thinking_level)
         ):
             payload["temperature"] = policy.temperature
         if request.tools:
             payload["tools"] = [responses_tool_definition(tool) for tool in request.tools]
             if policy.tool_choice != "omit":
                 payload["tool_choice"] = policy.tool_choice
-        if policy.thinking_level is not None and policy.thinking_level != ThinkingLevel.OFF:
-            payload["reasoning"] = {"effort": policy.thinking_level.value}
+        effort = openai_reasoning_effort(context, policy.thinking_level)
+        if effort is not None:
+            payload["reasoning"] = {"effort": effort}
         if policy.reasoning_context is not None:
             if not request_parameter_supported(context, "reasoning.context"):
                 raise ShapeDecodeError("endpoint does not support requested reasoning.context")
