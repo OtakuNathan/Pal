@@ -29,6 +29,8 @@ compact.  Faked: network frames only.
 """
 from __future__ import annotations
 
+from tests.llm_fakes import MemoryRuntimeSettings
+
 from tests.turn_fakes import continuation as make_continuation
 
 import asyncio
@@ -76,12 +78,9 @@ def _blob(payload) -> str:
     return json.dumps(thaw_json(payload), ensure_ascii=False)
 
 
-class _Settings:
-    def get_active_llm_endpoint_id(self):
-        return "shape-endpoint"
-
-    def get_think_level(self, _endpoint_id):
-        return "off"
+class _Settings(MemoryRuntimeSettings):
+    def __init__(self):
+        super().__init__('shape-endpoint')
 
 
 def _endpoint_shape(shape: str) -> LLMEndpointModel:

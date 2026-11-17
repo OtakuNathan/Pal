@@ -1,5 +1,7 @@
 """Offline provider-boundary regressions and a complete same-turn Pal fixture."""
 from __future__ import annotations
+
+from tests.llm_fakes import MemoryRuntimeSettings
 from tests.core_factory import build_core
 
 import asyncio
@@ -43,12 +45,9 @@ def endpoint(profile=PROFILES[0]):
     return ep
 
 
-class Settings:
-    def get_active_llm_endpoint_id(self):
-        return "astra"
-
-    def get_think_level(self, _endpoint_id):
-        return "off"
+class Settings(MemoryRuntimeSettings):
+    def __init__(self):
+        super().__init__('astra')
 
 
 def runtime(ep, transport, tmp_path):

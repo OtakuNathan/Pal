@@ -21,7 +21,6 @@ from pal.memory.dreaming.contracts import ClusterResult
 from pal.memory.dreaming.clustering import Cluster, discover_clusters
 from pal.memory.dreaming.pipeline import DreamingPipeline, validate_result
 from pal.memory.dreaming.service import DreamingService
-from pal.memory.dreaming.runtime import DreamingEventSource
 from pal.memory.embedding import HashingEmbedder
 from pal.memory.service import MemoryService
 from pal.memory.swap_store import SwapStore
@@ -352,6 +351,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(llm.calls), 2 if stage == "merge" else 4)
 
     async def test_monthly_schedule_coalesces_missed_months_and_suppresses_active_deadline(self):
+        from pal.memory.dreaming.runtime import DreamingEventSource
         service = DreamingService(storage=self.storage, provider=self.provider, llm=ReviewingLLM(),
             config=DreamingConfig(enabled=True))
         source = DreamingEventSource(service)

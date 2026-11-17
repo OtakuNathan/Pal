@@ -230,7 +230,8 @@ def test_worker_submission_error_keeps_underlying_cause(runtime, started):
 
 def test_package_background_job_keeps_exception_chain_and_long_details(tmp_path):
     from pal.packages.jobs import PackageJobs
-    jobs = PackageJobs(SimpleNamespace(runtime_root=tmp_path))
+    core = build_core()
+    jobs = PackageJobs(PluginHost(core.context, tmp_path))
     def fail():
         try:
             raise OSError("package root cause")
@@ -244,6 +245,8 @@ def test_package_background_job_keeps_exception_chain_and_long_details(tmp_path)
         assert "package failure start" in result["error"] and "package failure end" in result["error"]
     finally:
         jobs.shutdown()
+        core.close()
+        core.context.execution_runtime.shutdown()
 
 
 @pytest.mark.parametrize("timeout", [False, True])

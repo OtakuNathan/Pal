@@ -23,6 +23,7 @@ from __future__ import annotations
 from pal.shared.ports import PortKey
 
 from tests.turn_fakes import continuation as make_continuation
+from tests.core_factory import build_context
 
 import asyncio
 import unittest
@@ -125,7 +126,7 @@ def _executor(host: str, ports: _Ports) -> TurnExecutor:
         policy = PalCompactionPolicy()
     engine = CompactionEngine(policy=policy, max_attempts=1, timeout_seconds=10.0)
     return TurnExecutor(
-        SimpleNamespace(port_registry=ports, require_port=ports.require_port),
+        build_context(port_registry=ports),
         SimpleNamespace(diagnostics=[]),
         None,
         build_canonical_prompt=None,
@@ -166,6 +167,7 @@ class H01CombinationMatrixTests(unittest.TestCase):
         network = _FakeNetwork(host)
         ports = _Ports(service, network)
         executor = _executor(host, ports)
+        self.addCleanup(executor.context.execution_runtime.shutdown)
         continuation = make_continuation(turn_id=f"{host}-task")
         assembly = SimpleNamespace(
             metadata={"prompt_cache_scope_id": f"{host}:h01"},

@@ -1,5 +1,6 @@
 """Provider cleanup keeps the exact owner until all teardown work completes."""
 from pal.shared.ports import PortRegistry
+from pal.core.module_registry import ModuleHandle, MODULE_TIER_CORE_FOUNDATION
 import asyncio
 from types import SimpleNamespace
 
@@ -316,7 +317,8 @@ def test_runtime_shutdown_keeps_database_until_children_finish(failure):
             if blocked and failure == "resident":
                 raise RuntimeError("pending resident")
         plugin.shutdown_async, manager.stop_async = stop_plugin, stop_channel
-        resident = SimpleNamespace(shutdown_async=stop_resident, shutdown_sync=None)
+        resident = ModuleHandle(module_id='resident', tier=MODULE_TIER_CORE_FOUNDATION,
+                                shutdown_async=stop_resident)
         runtime = SimpleNamespace(
             configuration_service=None,
             plugin_host=plugin, channel_provider_manager=manager,

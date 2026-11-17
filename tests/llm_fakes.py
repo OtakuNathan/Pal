@@ -1,7 +1,41 @@
 """Explicit minimal LLM test implementation; individual tests supply outcomes."""
 from __future__ import annotations
+from contextlib import contextmanager
 
 from pal.llm.contracts import LLMPreflightAdvice
+
+
+class MemoryRuntimeSettings:
+    def __init__(self, active_endpoint_id):
+        self.values = {'active_llm_endpoint_id': active_endpoint_id}
+
+    def get(self, setting_key):
+        return self.values.get(setting_key)
+
+    def set(self, setting_key, setting_value):
+        self.values[setting_key] = setting_value
+        return setting_value
+
+    @contextmanager
+    def selection_transaction(self):
+        previous = dict(self.values)
+        try:
+            yield
+        except BaseException:
+            self.values = previous
+            raise
+
+    def get_active_llm_endpoint_id(self):
+        return self.get('active_llm_endpoint_id')
+
+    def set_active_llm_endpoint_id(self, endpoint_id):
+        return self.set('active_llm_endpoint_id', endpoint_id)
+
+    def get_think_level(self, endpoint_id):
+        return self.get(f'think_level:{endpoint_id}') or 'off'
+
+    def set_think_level(self, endpoint_id, think_level):
+        return self.set(f'think_level:{endpoint_id}', think_level)
 
 
 class NonStreamingLLM:

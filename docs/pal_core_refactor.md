@@ -30,6 +30,10 @@ Sleep first takes Core's admission barrier. Memory then fences its selected L3
 repository, performs maintenance and mounts the published generation. Freeze
 failure releases admission; a published generation that cannot be mounted keeps
 admission closed. Backend and repository differences remain in Memory.
+Mounted means the repository and embedding state are initialized and Memory's
+runtime selector names that committed backend. A generation id alone cannot
+authorize wake. Failed closes retain their repository and reader lease for retry;
+Core owns only the opaque maintenance admission token and scheduling barrier.
 
 ## Publication and execution
 

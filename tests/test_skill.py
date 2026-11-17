@@ -25,6 +25,7 @@ from pal.shared import PromptAssemblyContext
 from pal.skill import (
     SKILL_STATUS_ACTIVE,
     SKILL_STATUS_DISABLED,
+    SKILL_SOURCE_INSTRUCTED,
     SkillAssimilateTool,
     SkillCommitTool,
     SkillDescriptor,
@@ -442,6 +443,7 @@ Run the workflow.
             SkillDescriptor(
                 skill_id="safe.workflow",
                 module_id="test",
+                source_kind=SKILL_SOURCE_INSTRUCTED,
                 title="Safe workflow",
                 summary="Follow the safe workflow.",
                 manual_text="Inspect, execute, and verify.",

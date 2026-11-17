@@ -54,7 +54,7 @@ Resident/shared implementations require an external host restart.
 - [MCP](pal_mcp_contract.md), [Web search](pal_web_search_contract.md), [Web fetch](pal_web_fetch_contract.md).
 - [Execution extensions](execution_extensions.md): optional native shell and worker contributions.
 - [Change admission](pal_change_admission.md): contract changes, generated code, and verification requirements.
-- [Formal checks](../spec/README.md): inventory, generated relations, TLC, and conformance; a passing inventory in ordinary CI does not mean TLC has run.
+- [Formal checks](../spec/README.md): ordinary CI checks Core/Memory models; nightly checks the full inventory and runtime conformance. An inventory-only pass does not mean TLC ran.
 
 ## Design Proposals
 

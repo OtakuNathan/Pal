@@ -26,6 +26,18 @@ def pack(role):
                                 metadata={'bunshin_v2': {'role': role}})
 
 
+@pytest.fixture
+def recovery_execution():
+    from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
+    from pal.execution.backend import build_execution_runtime
+    base = build_execution_runtime()
+    execution = BunshinScopedExecutionRuntime(base_runtime=base, allowed_capabilities=[])
+    try:
+        yield execution
+    finally:
+        base.shutdown()
+
+
 @pytest.mark.parametrize('role', ['architect', 'implementation', 'reviewer', 'verifier'])
 def test_truncation_recovery_matches_the_bound_role_and_refreshes_old_notes(role):
     value = pack(role)
@@ -57,10 +69,11 @@ def test_truncation_recovery_matches_the_bound_role_and_refreshes_old_notes(role
 
 @pytest.mark.parametrize('role', ['architect', 'implementation', 'reviewer', 'verifier'])
 @pytest.mark.parametrize('has_tools', [False, True])
-def test_recovery_request_keeps_the_role_surface_and_allows_reading(monkeypatch, role, has_tools):
+def test_recovery_request_keeps_the_role_surface_and_allows_reading(monkeypatch, role, has_tools, recovery_execution):
     # Exercise the callbacks used by the live agent runtime, not a separate filter.
     tools = [{'function': {'name': name}} for name in ('read_file', 'search_tools', 'submit_review')] if has_tools else []
-    execution = SimpleNamespace(build_llm_tool_contracts=lambda: tools)
+    execution = recovery_execution
+    monkeypatch.setattr(execution, 'build_llm_tool_contracts', lambda: tools)
     state = SimpleNamespace(execution_runtime=execution, memory_service=None,
                             pending_output_length_recovery_note='checkpoint recovery', llm_round_count=1)
     captured = {}

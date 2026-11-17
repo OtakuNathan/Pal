@@ -61,11 +61,34 @@ python -m pytest -q tests/test_import_boundaries.py tests/test_port_contracts.py
 python scripts/run_tlc.py --inventory-only
 ```
 
-Tests use pytest, unittest-style fixtures and Hypothesis. Ordinary CI runs Python
-3.12 on Ubuntu and macOS, domain type checks, architecture boundaries and formal
-inventory. Inventory success does not mean TLC ran. Full TLC and model/runtime
-conformance have a separate [nightly workflow](../.github/workflows/tlc-nightly.yml);
-see [Formal Checks](../spec/README.md). Report skipped checks and platform limits.
+Tests use pytest, unittest-style fixtures and Hypothesis. Install the complete
+`.[test]` extra so clean environments include the JSON Schema and Peewee type
+stubs. Runtime fixtures use declared ports and real lifecycle primitives;
+reloadable classes used with patched module state are imported at the point of use.
+
+The [ordinary CI workflow](../.github/workflows/ci.yml) first checks domain types,
+architecture boundaries, the formal inventory and generated relations. It then
+runs all four pytest batches on Python 3.12, on both Ubuntu and macOS, and executes
+the Core and Memory TLC families. New pushes cancel older runs for the same ref.
+Pytest has at most four independent runners; ordinary TLC groups run one at a
+time with one worker and a 1 GiB heap. On a small development machine, run local
+checks sequentially and avoid overlapping pytest, mypy and TLC processes.
+
+Each pytest matrix job uploads `pytest-<os>-<batch>` with `pytest.log` and JUnit
+`results.xml`, including failed runs. Core/Memory TLC artifacts are named
+`ci-tlc-<group>` and contain bounds, verdicts and counterexamples. Retention is
+14 days. Extra pytest flags can be passed through the batch runner, for example:
+
+```bash
+python scripts/run_test_batch.py core-a -ra --tb=short --junitxml=test-logs/core-a.xml
+```
+
+Full TLC and model/runtime conformance have a separate
+[nightly workflow](../.github/workflows/tlc-nightly.yml), also available through
+manual dispatch. Nightly limits the model matrix to two runners and retains the
+existing per-model two-worker, 2 GiB bounds. An inventory-only pass does not mean
+TLC ran; see [Formal Checks](../spec/README.md) for expected mutant/witness results.
+Report skipped checks and platform limits.
 
 Write raw validation output under ignored `test-logs/` or outside the checkout.
 Keep commands, revision, results and limitations in the relevant report.

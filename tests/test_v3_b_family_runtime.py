@@ -360,7 +360,9 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
         retire_calls: list[dict] = []
         spills: list[str] = []
 
-        class _ExecRuntime:
+        from pal.execution.runtime import ExecutionRuntime
+
+        class _ExecRuntime(ExecutionRuntime):
             def retire_tool_results(self, *, turn_id, result_ids,
                                     execution_lifetime_id=""):
                 retire_calls.append({
@@ -376,6 +378,7 @@ class BFamilyRuntimeFactsTests(unittest.TestCase):
 
         network = _ResidentNetwork()
         ports = _Ports(service, network, execution_runtime=_ExecRuntime())
+        self.addCleanup(ports.execution_runtime.shutdown)
         executor = _executor(ports)
         result = asyncio.run(executor.compaction.run(
             service, target_input_budget=1_000_000, reserved_output_tokens=1024,

@@ -157,8 +157,6 @@ def test_common_installer_preserves_legacy_provider_receipt(tmp_path):
 
 
 def test_live_common_install_rejects_real_provider_factory_failure(tmp_path):
-    from contextlib import nullcontext
-    from types import SimpleNamespace
     import pytest
     from pal.channel.provider_manager import ChannelEndpointProviderManager
     from pal.channel.repository import ChannelEndpointRepository
@@ -166,18 +164,24 @@ def test_live_common_install_rejects_real_provider_factory_failure(tmp_path):
     from pal.packages.integration import RuntimeActivation
     from pal.packages.process import PackageError
     from pal.packages.service import PackageService
+    from pal.plugins.host import PluginHost
+    from tests.core_factory import build_core
+    from tests.test_plugin_publication_rollback import MemoryPluginRepository
     runtime = tmp_path / "runtime"
     manager = ChannelEndpointProviderManager(ChannelRuntime(), ChannelEndpointRepository(), runtime)
-    host = SimpleNamespace(runtime_root=runtime, context=SimpleNamespace(
-        require_port=lambda name: manager,
-        execution_runtime=SimpleNamespace(lifecycle_gate=SimpleNamespace(write=nullcontext)),
-    ))
+    core = build_core()
+    core.context.port_registry['channel:provider_manager'] = manager
+    host = PluginHost(core.context, runtime, third_party_repository=MemoryPluginRepository())
     wheel_path = tmp_path / "example.whl"
     # The fixture returns its build context, which is deliberately not a provider.
     _write_provider_wheel(wheel_path)
     service = PackageService(runtime, activation=RuntimeActivation(host))
-    with pytest.raises(PackageError, match="Provider discovery failed"):
-        service.install(wheel_path)
+    try:
+        with pytest.raises(PackageError, match="channel provider must expose provider_id and endpoint_types"):
+            service.install(wheel_path)
+    finally:
+        core.close()
+        core.context.execution_runtime.shutdown()
     assert service.status(name="example", kind="provider")["items"][0]["status"] == "failed"
     assert "example" not in manager.discovered_runtime_providers
     assert not (runtime / "channel/providers/example").exists()

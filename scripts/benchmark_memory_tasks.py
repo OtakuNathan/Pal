@@ -105,7 +105,6 @@ class MemoryFixture:
         self.repository = storage.open()
         self.provider = SQLiteVecL3Plugin(service=self.memory, repository=self.repository, embedder=HashingEmbedder())
         register_l3(self.core.context, self.provider)
-        self.memory.l3_selector.active_provider_id = self.provider.provider_id
         for module in ('execution', 'memory', self.provider.module_id):
             self.core.publish_module_capabilities(module)
         seeds = {
@@ -129,7 +128,8 @@ class MemoryFixture:
             'summary': '另一个库的同名记录：用户喜欢汽水。'}])
         self.memory.register_l3_provider(self.other)
         if case.goal == 'reconcile':
-            self.memory.l3_selector.active_provider_id = self.other.provider_id
+            self.memory.l3_selector = L3ProviderSelector(
+                resolver=self.memory.providers.require, active_provider_id=self.other.provider_id)
         self.initial = self.snapshot()
 
     def snapshot(self):
@@ -144,6 +144,7 @@ class MemoryFixture:
                 'other_documents': json.loads(json.dumps(self.other.records, ensure_ascii=False))}
 
     def close(self):
+        self.core.close()
         self.runtime.shutdown()
         self.repository.close()
 

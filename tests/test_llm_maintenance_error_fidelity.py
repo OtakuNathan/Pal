@@ -224,6 +224,7 @@ def test_wall_timeout_targets_the_partial_message_for_discard(monkeypatch):
 
 @pytest.fixture
 def dreaming(setup_review):
+    from pal.memory.dreaming.service import DreamingService
     _, provider, storage = setup_review
     item = L3CommitRequest(kind="fact", title="API preference", summary="Use explicit APIs", search_text="Use explicit APIs", topics=["API"])
     provider.commit(item)

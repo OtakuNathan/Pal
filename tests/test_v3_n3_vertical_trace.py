@@ -9,6 +9,8 @@ response normalization, L1 accept.  Faked: the network frames only.
 """
 from __future__ import annotations
 
+from tests.llm_fakes import MemoryRuntimeSettings
+
 from tests.turn_fakes import continuation as make_continuation, require_port as require_test_port
 
 import asyncio
@@ -48,13 +50,9 @@ def _endpoint() -> LLMEndpointModel:
     )
 
 
-class _Settings:
-    def get_active_llm_endpoint_id(self):
-        return "trace-endpoint"
-
-    def get_think_level(self, _endpoint_id):
-        return "off"
-
+class _Settings(MemoryRuntimeSettings):
+    def __init__(self):
+        super().__init__('trace-endpoint')
 
 class CapturingTransport:
     def __init__(self, replies):

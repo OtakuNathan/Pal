@@ -6,6 +6,12 @@ Adding a model without a checked configuration, omitting a config, or leaving a
 generated implementation relation stale fails the inventory check in ordinary CI.
 That check does not claim TLC ran.
 
+Ordinary [CI](../.github/workflows/ci.yml) additionally executes the Core and
+Memory families after the contract checks pass. Those jobs use Python 3.12,
+Java 21, one worker and a 1 GiB heap per model, with an 1800-second per-model
+deadline. They upload `ci-tlc-core` and `ci-tlc-memory` artifacts even on failure.
+The full inventory remains the scope of the nightly workflow below.
+
 `.github/workflows/tlc-nightly.yml` runs daily at **02:00 Europe/London** and also
 supports manual dispatch. GitHub's timezone-aware schedule follows UK daylight
 saving time. Scheduled runs use the default branch, so the workflow starts only
@@ -74,7 +80,7 @@ Both downloads and existing local jars must match. The official `v1.8.0` URL is
 [a rolling pre-release](https://github.com/tlaplus/tlaplus/blob/master/README.md),
 so a version-looking URL alone is insufficient to pin its bytes.
 
-CI uses Java 21, Python 3.12, two TLC workers and a 2 GiB heap per model. Each model
+Nightly uses Java 21, Python 3.12, two TLC workers and a 2 GiB heap per model. Each model
 has an 1800-second deadline; a timeout is incomplete validation and fails CI.
 Full config files preserve bounds and fairness assumptions in the artifacts.
 Per-case artifacts include input TLA/config files and their hashes, command,
