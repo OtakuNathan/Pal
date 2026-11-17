@@ -46,8 +46,12 @@ also need shared event identity. Stable invocation IDs make retries idempotent.
 
 `update_memory` creates a successor ID and content revision. It stores the old
 original and successor relationship in the same generation transaction. Retired
-revisions do not participate in current recall. Their archive outbox is drained
-incrementally; access counts do not create revisions.
+revisions do not participate in current recall. Their archive projection is
+idempotent by document identity, including its FTS entry; access counts do not
+create revisions. A no-change run writes only that catalog projection while
+its source generation stays frozen. The source's historical `archived` flag
+is not the authority for whether a catalog entry already exists, and is not
+updated under the write fence. Repeated runs preserve the same revision bytes.
 
 FTS and pending embedding state commit with content. Vectors record the provider,
 model, available model revision, text processing version, source hash and vector

@@ -300,6 +300,73 @@ def test_cancel_joins_snapshot_worker_before_releasing_module_owner(swap_runtime
         release.set()
 
 
+@pytest.mark.parametrize("cancel_caller", [False, True])
+def test_recovery_timer_cannot_relaunch_while_cancel_joins(swap_runtime, monkeypatch, cancel_caller):
+    core, memory, storage, source, target, command = swap_runtime
+    old_generation = storage.current()
+    saved = source.commit(fact("preserve memory through a paused migration"))
+    copying, release = threading.Event(), threading.Event()
+    prepare = target.prepare_generation
+
+    def prepare_then_wait(*args, **kwargs):
+        prepare(*args, **kwargs)
+        if not copying.is_set():
+            copying.set()
+            assert release.wait(10)
+
+    monkeypatch.setattr(target, "prepare_generation", prepare_then_wait)
+
+    async def scenario():
+        job_id = (await command("swap", name="replacement"))["state"]["job_id"]
+        assert await asyncio.to_thread(copying.wait, 5)
+        manager = memory.on_generation_work.__self__.swaps
+        original_task = manager.tasks[job_id]
+        recovery_tasks = []
+
+        # Provider registration already scheduled the real recovery timer.
+        # Run that main-loop event after the worker's completion callback drops
+        # its task entry, but before cancellation's join continuation resumes.
+        original_task.add_done_callback(lambda done: recovery_tasks.append(
+            asyncio.create_task(core.main_loop.run_once_async(core.context, core.state))))
+        cancellation = asyncio.create_task(command("swap-cancel", job_id=job_id))
+        try:
+            async with asyncio.timeout(5):
+                while not original_task.cancelling():
+                    await asyncio.sleep(0)
+            if cancel_caller:
+                cancellation.cancel()
+                await asyncio.sleep(0)
+                cancellation.cancel()
+        finally:
+            release.set()
+        if cancel_caller:
+            with pytest.raises(asyncio.CancelledError):
+                await cancellation
+        else:
+            await cancellation
+        await asyncio.gather(*recovery_tasks)
+        paused = await command("swap-status", job_id=job_id)
+        assert paused["state"]["paused"]
+        assert not paused["state"]["running"], paused
+        assert storage.current() == old_generation
+        assert not core.memory_maintenance_busy()
+
+        # A later scan also stays stopped; only explicit resume can publish.
+        memory.on_generation_work()
+        await core.run_until_idle_async()
+        assert not (await command("swap-status", job_id=job_id))["state"]["running"]
+        monkeypatch.setattr(target, "prepare_generation", prepare)
+        await command("swap-resume", job_id=job_id)
+        completed = await settled(command, job_id)
+        assert completed["state"]["phase"] == "complete", completed
+        assert target.repository.get_document(saved.document_id) is not None
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()
+
+
 @pytest.mark.parametrize("pause", [False, True])
 def test_restart_rebinds_committed_identity_and_resumes_index_job(swap_runtime, monkeypatch, pause):
     core, memory, storage, source, target, command = swap_runtime

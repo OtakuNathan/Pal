@@ -112,8 +112,10 @@ callers do not supply an indexing flag. Dreaming uses this same boundary for
 publication and recovery, refreshing repository, embedding identity and index
 availability together instead of retaining its source generation's state.
 
-Job cancellation joins worker threads and completes fence cleanup before releasing
-module leases. An explicit cancellation is durably paused: provider-registration
+Job cancellation closes that job's launch admission before joining its worker,
+so recovery timers cannot replace it between task completion and the durable
+pause write. Worker threads and fence cleanup finish before module leases are
+released. An explicit cancellation is durably paused: provider-registration
 scans and host restart leave it stopped until `swap-resume`. A superseded job is
 retired from catalog facts before looking up its former backend, even if that
 plugin has already unloaded. Core retains only the exact source/target modules, so unrelated
@@ -131,6 +133,14 @@ whose embedding configuration does not match its pinned generation uses basic
 retrieval instead of querying old vectors with a different space. Current and
 previous generations, live workflow pins, reader leases and unfinished migration
 jobs prevent collection. Unreferenced private candidates follow retention too.
+
+Retained generations from before embedding constructor metadata was recorded
+keep basic read-only retrieval without constructing a default embedder. Present
+but invalid metadata still fails explicitly. Bunshin adopts legacy workflow pins
+only when a matching workflow snapshot exists, under the workflow creation lock;
+independent reader pins remain independent. Standalone Manager startup upgrades
+an existing catalog before reconciliation, without creating generations or
+resuming incomplete embedding migrations.
 
 ## Model and implementation correspondence
 

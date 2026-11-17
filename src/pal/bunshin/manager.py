@@ -441,9 +441,10 @@ class BunshinManager:
         return self.events.subscribers
 
     async def run(self) -> None:
-        recovery = await asyncio.to_thread(BunshinRecovery(self.workflow_service).recover)
-        from pal.bunshin.memory_binding import reconcile_workflow_memory_references
+        from pal.bunshin.memory_binding import prepare_workflow_memory_references, reconcile_workflow_memory_references
         from pal.foundation.workers import run_worker
+        await run_worker(lambda: prepare_workflow_memory_references(self.runtime_root))
+        recovery = await asyncio.to_thread(BunshinRecovery(self.workflow_service).recover)
         await run_worker(lambda: reconcile_workflow_memory_references(self.runtime_root))
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
         self.role_server, self.role_endpoint_info = await start_role_gateway_server(

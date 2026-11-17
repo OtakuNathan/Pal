@@ -472,12 +472,16 @@ class MemoryStorage:
                 connection.execute("INSERT INTO archive_fts VALUES (?,?)", (row[0], jieba_fts_text(text)))
 
     def flush_revisions(self, repo: MemoryDurableRepository) -> None:
+        """Project revision history without changing the source generation.
+
+        Dreaming keeps its source write-fenced until maintenance finishes. The
+        catalog's document identity makes archive and FTS insertion idempotent;
+        a source ``archived=0`` is only a historical hint, not proof that its
+        catalog projection is absent. Publication follows the same rule.
+        """
         rows = repo.database.execute_sql("SELECT document_id,revision,document_json,successors_json,reason FROM memory_revisions WHERE archived=0").fetchall()
         with self.connection(write=True) as connection:
             self._archive_rows(connection, rows)
-        with repo.database.atomic():
-            for row in rows:
-                repo.database.execute_sql("UPDATE memory_revisions SET archived=1 WHERE document_id=?", (row[0],))
 
     def publish_reindexed(self, repo: MemoryDurableRepository, *, source_generation: str, profile: dict[str, str | None]) -> None:
         """Publish a verified embedding-only candidate under the offline CLI lease.

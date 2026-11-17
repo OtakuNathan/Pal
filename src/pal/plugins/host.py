@@ -1044,8 +1044,8 @@ class PluginHost:
     def _withdraw_generation_surface(self, handle: ModuleHandle) -> None:
         if self.context.module_registry.get(handle.module_id) is not handle:
             return
-        self.context.module_publications.unsubscribe(handle)
         self.context.withdraw_module_control(handle)
+        self.context.module_publications.unsubscribe(handle)
         self.context.withdraw_module_capabilities(handle)
         self.context.prompt_fragment_registry.unregister_module(handle.module_id)
         self.context.event_source_registry.detach_module(handle.module_id, expected_sources=handle.event_sources)

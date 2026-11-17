@@ -195,6 +195,7 @@ class SQLiteVecL3Plugin:
     provider_id: str = "sqlite_vec_l3"
     mounted: bool = True
     read_only: bool = False
+    use_default_embedding: bool = field(default=True, kw_only=True)
     fusion_weights: dict[str, float] = field(
         default_factory=lambda: {
             "vector": 0.40,
@@ -217,10 +218,10 @@ class SQLiteVecL3Plugin:
     def __post_init__(self, embedder: EmbeddingProviderPort | None) -> None:
         if self.embedding_provider is None and embedder is not None:
             self.embedding_provider = embedder
-        if self.embedding_provider is None:
+        if self.embedding_provider is None and self.use_default_embedding:
             self.embedding_provider = OllamaEmbeddingProvider()
         storage = self.repository.catalog
-        self._binding_read_only = self.read_only or bool(storage is not None
+        self._binding_read_only = self.embedding_provider is None or self.read_only or bool(storage is not None
             and storage.is_published(self.repository.generation_id)
             and storage.provider_for_generation(self.repository.generation_id) != self.provider_id)
         self.repository.read_only = self._binding_read_only
@@ -232,7 +233,7 @@ class SQLiteVecL3Plugin:
 
     def _load_embedding_space(self, *, claim: bool = False) -> None:
         repo = self.repository
-        if claim and repo.writable:
+        if claim and repo.writable and self.embedding_provider is not None:
             with repo.write_transaction():
                 previous_space = read_space(repo.database.connection())
                 self._bound_space = claim_empty_space(repo.database.connection(), self.migration_identity)
@@ -260,7 +261,8 @@ class SQLiteVecL3Plugin:
         self._sync_embedding_access()
 
     def _sync_embedding_access(self) -> None:
-        access = embedding_access(self._bound_space is not None and self._catalog_space_matches,
+        access = embedding_access(self.embedding_provider is not None
+            and self._bound_space is not None and self._catalog_space_matches,
             self._bound_space is not None and self._bound_space.profile == self.migration_identity,
             not self._binding_read_only)
         self.read_only = access is not EmbeddingAccess.WRITE
@@ -753,7 +755,7 @@ class SQLiteVecL3Plugin:
         refreshed = (
             {
                 "refreshed": 0,
-                "vector_available": True,
+                "vector_available": self._vector_reads and not self._indexing,
                 "read_only": True,
             }
             if not self.indexes_writable or self._indexing

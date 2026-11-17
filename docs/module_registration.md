@@ -21,6 +21,23 @@ name but failed before PluginHost recorded `claim`, `preparing` can still retire
 through `withdrawing`. Root registration starts shared rollback only after its
 atomic name claim succeeds.
 
+Publication observers and subscription replay retain unfinished compensation
+against the exact handles that acquired it. Successful compensation steps are
+not repeated; failed withdrawals or restoration of the previous projection stay
+owned for retry. Final withdrawal after a failed refresh discards restoration of
+that same handle and clears any partially restored projection instead. Withdrawing
+a rejected replacement still restores a different, retained previous owner.
+Unsubscribing an observer also discards its pending restorations and drains only
+its own withdrawals; another observer's failure cannot block its retirement. An
+observer cannot retire its resources while its own withdrawals remain unfinished.
+
+Direct `MainContext.register_module` follows the same rule. A failed registration
+revokes callback and control admission before retrying cleanup. If cleanup fails,
+its unmounted handle retains the module name; callers retry
+`unregister_module(handle)` before registering a successor. PluginHost retains
+the equivalent scope as `cleanup_pending`. Neither path reports released
+ownership while a derived projection still needs compensation.
+
 Successful withdrawal releases the module name before private cleanup. A newer
 instance may then claim that name even if the old instance retains failed
 private cleanup. Retrying the old scope stays in `cleaning`; it does not repeat

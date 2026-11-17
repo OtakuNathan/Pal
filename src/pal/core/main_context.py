@@ -97,7 +97,6 @@ class MainContext:
         if introspection is not None:
             self.execution_runtime.hydrate_module_handle(handle)
 
-        registered_ports: list[tuple[str, Any]] = []
         if handle.timer_scope is not None:
             handle.timer_scope.bind_owner(lambda: self.module_registry.is_current(handle))
         # Claim the name before entering rollback for shared projections. A
@@ -108,7 +107,6 @@ class MainContext:
                 self.introspection_registry[module_id] = introspection
             bindings = {f"{module_id}:{name}": port for name, port in handle.ports.items()}
             self.port_registry.publish(bindings)
-            registered_ports.extend(bindings.items())
             if handle.l3_provider is not None:
                 self.require_port(MEMORY).register_l3_provider(handle.l3_provider)
             if publish_control:
@@ -117,17 +115,17 @@ class MainContext:
                         name, handle.ports[f"provider:{name}"], owner_id=module_id)
                 self.publish_module_control(handle)
                 self.publish_module_observer(handle)
-        except Exception:
-            for name in handle.provider_refs:
-                self.execution_runtime.unregister_provider_ref(name, expected=handle.ports[f"provider:{name}"])
-            self.withdraw_module_control(handle)
-            self.port_registry.withdraw(dict(registered_ports))
-            memory = self.port_registry.get("memory:memory")
-            if memory is not None and handle.l3_provider is not None:
-                memory.unregister_l3_provider(handle.l3_provider)
-            if self.introspection_registry.get(module_id) is introspection:
-                self.introspection_registry.pop(module_id, None)
-            self.module_registry.unregister(module_id, expected=handle)
+        except BaseException as error:
+            # Rejected registration cannot admit callbacks while its derived
+            # projections are still being cleaned. Keep the exact name owner
+            # until unregister succeeds; callers retry unregister_module(handle).
+            handle.mounted = False
+            try:
+                self.execution_runtime.revoke_subtree_admission(handle)
+                self.withdraw_module_control(handle)
+                self.unregister_module(handle)
+            except BaseException as cleanup_error:
+                error.add_note(f"Module registration cleanup remains pending: {type(cleanup_error).__name__}: {cleanup_error}")
             raise
 
     def unregister_module(self, handle: ModuleHandle) -> bool:
@@ -135,6 +133,9 @@ class MainContext:
         if self.module_registry.get(module_id) is not handle:
             return False
         handle.background_work.retire()
+        handle.mounted = False
+        self.execution_runtime.revoke_subtree_admission(handle)
+        self.withdraw_module_control(handle)
         for name in handle.provider_refs:
             self.execution_runtime.unregister_provider_ref(name, expected=handle.ports[f"provider:{name}"])
         self.event_handler_registry.detach_module(module_id, expected_owner=handle)
@@ -142,7 +143,6 @@ class MainContext:
             self.require_port(MEMORY).unregister_l3_provider(handle.l3_provider)
         self.module_publications.unsubscribe(handle)
         self.module_publications.withdraw(handle)
-        self.withdraw_module_control(handle)
         if self._command_router is not None and handle.ports.get("control") is self._command_router:
             for registered in self.module_registry.modules.values():
                 if registered.control_command_lease is not None:

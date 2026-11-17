@@ -26,6 +26,7 @@ class MemorySwapManager:
         self.service = service
         self.host = host
         self.tasks: dict[str, asyncio.Task[None]] = {}
+        self._pausing: set[str] = set()
         self.closing = False
 
     def _backend(self, name: str) -> SqliteGenerationPort:
@@ -72,21 +73,28 @@ class MemorySwapManager:
         return await join_owned_task(asyncio.create_task(self._cancel(store, job_id), name=f"memory-pause:{job_id}"))
 
     async def _cancel(self, store: SwapStore, job_id: str) -> dict[str, Any]:
-        task = self.tasks.get(job_id)
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        job = store.load(job_id)
-        if job.phase not in (SwapPhase.COMPLETE, SwapPhase.SUPERSEDED):
-            job.paused = True
-            job.error = "Migration paused; resume this job to continue"
-            store.save(job)
-        return self.status(job_id)
+        # Recovery timers do not take the CLI owner's lock. Keep this job's
+        # launch admission closed even after its completion callback removes
+        # the old task, until all worker writes have joined and pause is durable.
+        self._pausing.add(job_id)
+        try:
+            task = self.tasks.get(job_id)
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            job = store.load(job_id)
+            if job.phase not in (SwapPhase.COMPLETE, SwapPhase.SUPERSEDED):
+                job.paused = True
+                job.error = "Migration paused; resume this job to continue"
+                store.save(job)
+            return self.status(job_id)
+        finally:
+            self._pausing.discard(job_id)
 
     def _launch(self, store: SwapStore, job: SwapJob, *, resume: bool = False) -> None:
         if self.closing:
             raise RuntimeError("Memory migration owner is stopping")
-        if job.job_id in self.tasks:
+        if job.job_id in self.tasks or job.job_id in self._pausing:
             return
         facts = store.facts(job)
         decision = decide_launch(job.phase, facts, paused=job.paused and not resume)

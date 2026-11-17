@@ -17,6 +17,24 @@ def _reference_lock(storage, workflow_id):
     return (directory / hashlib.sha256(workflow_id.encode()).hexdigest()).open("a+b")
 
 
+def prepare_workflow_memory_references(runtime_root):
+    """Upgrade an existing catalog once before standalone Manager recovery."""
+    storage = MemoryStorage(runtime_root, read_only=True)
+    if not storage.catalog_path.exists():
+        return
+    from pal.memory.embedding_migration import require_completed_migration
+    require_completed_migration(runtime_root)
+    # Bunshin may upgrade catalog metadata, but never provision or recover a
+    # generation on behalf of the resident Memory owner.
+    with storage.connection() as catalog:
+        head = catalog.execute("""SELECT g.generation_id FROM memory_head h
+            JOIN generations g USING(generation_id) WHERE h.singleton=1
+            AND g.published_at IS NOT NULL AND g.retired_at IS NULL AND g.collected=0""").fetchone()
+    if head is None or not storage.path(str(head[0])).is_file():
+        raise RuntimeError("Bunshin requires an existing published Memory generation; complete Pal migration first")
+    MemoryStorage(runtime_root).initialize()
+
+
 @contextmanager
 def workflow_memory_binding(runtime_root, repository, workflow_id):
     storage = MemoryStorage(runtime_root)
@@ -47,17 +65,19 @@ def reconcile_workflow_memory_references(runtime_root):
     if not storage.catalog_path.exists() or not path.exists():
         return
     with storage.connection() as catalog:
-        owners = catalog.execute("""SELECT p.workflow_id FROM workflow_pins p
-            JOIN workflow_memory_owners o USING(workflow_id) WHERE p.released=0""").fetchall()
+        pins = catalog.execute("""SELECT p.workflow_id,o.workflow_id IS NOT NULL FROM workflow_pins p
+            LEFT JOIN workflow_memory_owners o USING(workflow_id) WHERE p.released=0""").fetchall()
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
-        if not owners:
+        if not pins:
             return
-        candidates = connection.execute("""SELECT aggregate_id FROM bunshin_v2_aggregate_snapshots
-            WHERE aggregate_type='workflow' AND state NOT IN ('COMPLETED','REJECTED','CANCELLED')""").fetchall()
-        active_workflows = {row[0] for row in candidates}
+        workflows = dict(connection.execute("""SELECT aggregate_id,state FROM bunshin_v2_aggregate_snapshots
+            WHERE aggregate_type='workflow'"""))
+        terminal = ('COMPLETED', 'REJECTED', 'CANCELLED')
         released = False
-        for (workflow_id,) in owners:
-            if workflow_id in active_workflows:
+        for workflow_id, managed in pins:
+            if not managed and workflow_id not in workflows:
+                continue  # Generic reader pins never acquire a Bunshin owner.
+            if managed and workflow_id in workflows and workflows[workflow_id] not in terminal:
                 continue
             with _reference_lock(storage, workflow_id) as lock:
                 try:
@@ -67,11 +87,22 @@ def reconcile_workflow_memory_references(runtime_root):
                 workflow = connection.execute("""SELECT state FROM bunshin_v2_aggregate_snapshots
                     WHERE aggregate_type='workflow' AND aggregate_id=?""", (workflow_id,)).fetchone()
                 if workflow is None:
+                    if not managed:
+                        continue
                     with storage.connection(write=True) as catalog:
                         catalog.execute("DELETE FROM workflow_memory_owners WHERE workflow_id=?", (workflow_id,))
                         catalog.execute("DELETE FROM workflow_pins WHERE workflow_id=?", (workflow_id,))
                     released = True
-                elif workflow[0] in ('COMPLETED', 'REJECTED', 'CANCELLED'):
+                    continue
+                if not managed:
+                    # Older Bunshin workflows already own their pinned generation,
+                    # but predate the explicit owner table. Adopt only an existing
+                    # workflow, under the same lock used by workflow creation.
+                    with storage.connection(write=True) as catalog:
+                        catalog.execute("""INSERT OR IGNORE INTO workflow_memory_owners
+                            SELECT workflow_id FROM workflow_pins WHERE workflow_id=? AND released=0""",
+                            (workflow_id,))
+                if workflow[0] in terminal:
                     active = connection.execute("""SELECT 1 FROM bunshin_v2_role_sessions
                         WHERE workflow_id=? AND status NOT IN ('completed','cancelled')
                         UNION ALL SELECT 1 FROM bunshin_v2_role_assignments

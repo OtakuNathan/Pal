@@ -23,14 +23,19 @@ def build_role_memory(runtime_root: Path, *, service: MemoryService, workflow_id
     storage = MemoryStorage(runtime_root, read_only=True)
     repository = storage.open(storage.pinned(workflow_id), read_only=True)
     try:
-        row = repository.database.execute_sql(
+        has_configuration = repository.database.execute_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_embedding_configuration'").fetchone()
+        row = (repository.database.execute_sql(
             "SELECT configuration_json FROM memory_embedding_configuration WHERE singleton=1").fetchone()
-        if row is None:
-            raise RuntimeError("Pinned memory generation has no embedding configuration")
-        embedding = embedding_from_configuration(json.loads(row[0]))
+            if has_configuration else None)
+        # Retained pre-upgrade generations have no constructor metadata. Preserve
+        # their exact/lexical/topic reads without guessing a vector transport or
+        # writing provenance into the workflow's pinned database. Present but
+        # invalid configuration still fails rather than hiding corruption.
+        embedding = embedding_from_configuration(json.loads(row[0])) if row is not None else None
         provider = SQLiteVecL3Plugin(service=service, repository=repository,
             provider_id=storage.provider_for_generation(repository.generation_id),
-            embedding_provider=embedding, read_only=True)
+            embedding_provider=embedding, read_only=True, use_default_embedding=False)
         return RoleMemoryRuntime(provider)
     except BaseException:
         repository.close()

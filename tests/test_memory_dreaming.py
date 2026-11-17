@@ -5,9 +5,11 @@ from pal.bunshin.runner_components.results import Results
 
 import asyncio
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from pal.llm.ir import LLMMessageIR, LLMResponseIR, TextPartIR
-from pal.memory.contracts import L3CommitRequest
+from pal.memory.contracts import L3CommitRequest, L3CorrectRequest
 from pal.memory.dreaming.contracts import DreamingConfig
 from pal.memory.dreaming.contracts import ClusterResult
 from pal.memory.dreaming.clustering import Cluster, discover_clusters
@@ -89,6 +91,124 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         with self.storage.connection() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM generations").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT count(*) FROM archive_records").fetchone()[0], 0)
+
+    def _resident_no_change_service(self):
+        from tests.core_factory import build_core
+        core = build_core()
+        self.addCleanup(core.context.execution_runtime.shutdown)
+        self.addCleanup(core.close)
+        return core, DreamingService(storage=self.storage, provider=self.provider,
+            llm=ReviewingLLM(merge=False), host=core.control_runtime)
+
+    async def test_no_changes_archives_corrected_revisions_without_thawing_source(self):
+        repo = self.provider.repository
+        original = repo.get_document(self.refs[0])
+        corrected = self.provider.correct(L3CorrectRequest(self.refs[0], summary="Prefer typed explicit APIs."))
+        self.assertEqual(corrected.status, "ok")
+        revisions = repo.database.execute_sql("SELECT * FROM memory_revisions ORDER BY document_id").fetchall()
+        core, service = self._resident_no_change_service()
+        archive_rows = self.storage._archive_rows
+
+        def archive(connection, rows):
+            self.assertTrue(core.state.memory_maintenance)
+            self.assertTrue(repo.owns_write_fence)
+            with closing(sqlite3.connect(self.storage.path(self.head))) as outsider, outsider:
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "cannot accept writes"):
+                    outsider.execute("UPDATE memory_facts SET title=title WHERE lifecycle='active'")
+            archive_rows(connection, rows)
+            self.assertTrue(repo.owns_write_fence)
+            self.assertEqual(repo.database.execute_sql(
+                "SELECT writable FROM memory_generation_guard WHERE singleton=1").fetchone()[0], 0)
+
+        with patch.object(self.storage, "_archive_rows", side_effect=archive):
+            for _ in range(2):
+                result = await service.run()
+                self.assertEqual(result["status"], "completed", result)
+                self.assertEqual(result["report"]["outcome"], "no_changes")
+                self.assertEqual(self.storage.current(), self.head)
+                self.assertEqual(repo.database.execute_sql(
+                    "SELECT * FROM memory_revisions ORDER BY document_id").fetchall(), revisions)
+                self.assertTrue(repo.writable)
+                self.assertFalse(repo.owns_write_fence)
+                self.assertFalse(core.state.memory_maintenance)
+                self.assertIsNone(core.state.memory_maintenance_token)
+                with self.storage.connection() as connection:
+                    rows = connection.execute("SELECT document_id,document_json,successors_json FROM archive_records").fetchall()
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]["document_id"], self.refs[0])
+                    self.assertEqual(json.loads(rows[0]["document_json"])["summary"], original["summary"])
+                    self.assertEqual(json.loads(rows[0]["successors_json"]), [corrected.document_id])
+                    self.assertEqual(connection.execute("SELECT count(*) FROM archive_fts").fetchone()[0], 1)
+                self.assertEqual(repo.get_document(corrected.document_id)["summary"], "Prefer typed explicit APIs.")
+
+    async def test_no_changes_archive_failure_rolls_back_and_releases_admission(self):
+        self.provider.correct(L3CorrectRequest(self.refs[0], summary="Prefer typed explicit APIs."))
+        core, service = self._resident_no_change_service()
+        archive_rows = self.storage._archive_rows
+
+        def fail_archive(connection, rows):
+            archive_rows(connection, rows)
+            raise OSError("revision archive unavailable")
+
+        with patch.object(self.storage, "_archive_rows", side_effect=fail_archive):
+            result = await service.run()
+        self.assertEqual(result["status"], "failed", result)
+        self.assertIn("revision archive unavailable", result["report"]["error"])
+        self.assertEqual(self.storage.current(), self.head)
+        self.assertTrue(self.provider.repository.writable)
+        self.assertFalse(self.provider.repository.owns_write_fence)
+        self.assertFalse(core.state.memory_maintenance)
+        self.assertIsNone(core.state.memory_maintenance_token)
+        with self.storage.connection() as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM archive_records").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT count(*) FROM archive_fts").fetchone()[0], 0)
+        self.assertEqual((await service.run())["status"], "completed")
+        self.assertEqual(len(self.storage.history(self.refs[0])), 1)
+
+    async def test_no_changes_cancellation_joins_archive_before_releasing_fence(self):
+        self.provider.correct(L3CorrectRequest(self.refs[0], summary="Prefer typed explicit APIs."))
+        core, service = self._resident_no_change_service()
+        archiving, release = threading.Event(), threading.Event()
+        archive_rows = self.storage._archive_rows
+
+        def archive(connection, rows):
+            archive_rows(connection, rows)
+            archiving.set()
+            if not release.wait(5):
+                raise TimeoutError("archive worker was not released")
+
+        with patch.object(self.storage, "_archive_rows", side_effect=archive):
+            running = asyncio.create_task(service.run())
+            try:
+                self.assertTrue(await asyncio.to_thread(archiving.wait, 5))
+                running.cancel()
+                await asyncio.sleep(0.01)
+                running.cancel()
+                await asyncio.sleep(0.01)
+                self.assertFalse(running.done())
+                self.assertTrue(core.state.memory_maintenance)
+                self.assertTrue(self.provider.repository.owns_write_fence)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await running
+            finally:
+                release.set()
+                if not running.done():
+                    running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+        self.assertEqual(service.status()["status"], "failed")
+        self.assertIn("CancelledError", service.status()["report"]["error"])
+        self.assertEqual(self.storage.current(), self.head)
+        self.assertTrue(self.provider.repository.writable)
+        self.assertFalse(self.provider.repository.owns_write_fence)
+        self.assertFalse(core.state.memory_maintenance)
+        self.assertIsNone(core.state.memory_maintenance_token)
+        # The joined worker may have committed its idempotent catalog projection,
+        # but cancellation must never report the Dreaming run as completed.
+        self.assertEqual((await service.run())["status"], "completed")
+        with self.storage.connection() as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM archive_records").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) FROM archive_fts").fetchone()[0], 1)
 
     async def test_repeated_cancel_joins_candidate_worker_and_releases_its_repository(self):
         service = DreamingService(storage=self.storage, provider=self.provider,

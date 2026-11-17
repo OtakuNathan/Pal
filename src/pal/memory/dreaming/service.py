@@ -357,6 +357,8 @@ class DreamingService:
                 await self._work(tree.advance, candidate or source, stage_replacements)
             report["processed_groups"] = len(clusters)
             if not replacements:
+                # Archive is a catalog projection; the source stays fenced
+                # until the worker joins and maintenance releases admission.
                 await self._work(self.storage.flush_revisions, source)
                 report["outcome"] = "no_changes"
                 self._phase(run_id, "completed", report)
