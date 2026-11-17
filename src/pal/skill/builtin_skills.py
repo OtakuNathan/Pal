@@ -193,6 +193,39 @@ and web integrations belong to plugins. Check actual availability before use.
 | Memory provider and skills | Backend maintenance uses `pal memory` through the resident owner or offline migration; skills retain their live tools. `recall_memory(mem_ref=...)` reads an exact durable reference without waiting for indexing; use it for uncertain outcomes, not as mandatory verification of successful writes. Facts, preferences and experience belong to memory; reusable procedures belong to skills. | Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
 | Host environment / OS service | Prepare the actual systemd/launchd/manual-service change and external restart instructions. | Daemon-reload alone does not replace a running process. Never stop, restart, kill, or schedule a delayed restart of Pal's own host from its active turn. |
 
+### Upgrade host and plugin contracts together
+
+Before changing a resident/shared interface, inventory its consumers in builtins,
+installed community plugins and channel providers, including first-party packages
+maintained in other repositories. Check imports inside methods as well as module
+imports: a plugin can attach successfully and fail only on its first call.
+Record the required host, plugin adapter and native wheel versions/interpreter;
+check worker/helper requirements separately instead of assuming all components
+share a version. Prepare and test the matching artifacts before activation.
+
+Use the current public contracts described in `pal.plugin.development`. Update
+consumers when an interface changes; do not restore removed private helpers,
+guess capabilities with getattr, or add old-signature fallbacks. Host CI alone
+does not establish that separately installed plugins work with the new host.
+
+An execution extension can handle calls for every module. If unrelated shell,
+file, plugin-management and memory tools fail at the same adapter frame, inspect
+that common execution entrypoint first. This does not establish that the memory
+database or every provider is damaged. Verify the actual installed adapter and
+wheel against the loaded host; restarting alone cannot replace an old package.
+If the broken entrypoint also blocks repair tools, prepare an external recovery
+handoff instead of repeatedly calling those tools. Offline package installation
+requires the host to be stopped and its runtime lease available. Hand off the
+coordinated stop/install/start to an external operator; never stop, kill, restart
+or schedule a restart of Pal's own host from its active turn.
+
+After activation, inspect load/cleanup errors and verify through the real host:
+one affected tool, one unrelated module's read-only tool, and plugin status.
+For an execution replacement, also exercise lifecycle/package admission in an
+isolated runtime before release. Direct sidecar tests and successful discovery
+alone do not exercise the shared call path. Report installed, loaded and verified
+versions separately, and leave activation explicitly pending until observed.
+
 ### Publish new plugin tools and verify discovery
 
 Adding an alias to an existing plugin uses the same `manage_plugin operation=reload` path as
@@ -216,6 +249,13 @@ Before activation, use `pal.plugin.development` for local registry preflight.
 underscored aliases; phrases belong in `search_intents`. A non-empty input
 schema needs valid examples at registry compilation. Simple schemas can receive
 generated examples; cross-field constraints often need explicit `examples`.
+
+The maintenance and development manuals themselves are source-owned declarations
+in `pal.skill.builtin_skills`. Update them alongside public interface changes.
+For a manual-only change, update the installed source and reload the `skill`
+plugin, whose reload coverage includes `pal.skill`; read the republished manual
+to verify it. Database edits are not durable overrides. If the release also changes
+resident contracts, include these manuals in that coordinated activation instead.
 
 ## Reuse Core's system observation bus
 
@@ -347,7 +387,11 @@ Put community plugins under the runtime root:
   README.md              # optional human notes
 ```
 
-Use a unique `plugin_id`. Avoid reusing first-party IDs.
+Use a unique `plugin_id` and a stable `module_id` matching the returned handle.
+Avoid reusing first-party IDs or any resident module name. Search domains group
+tools; they do not make a duplicate plugin/module ID unique. PluginHost rejects
+an occupied module ID before candidate startup. A reload creates a new generation
+of the same owner; it is not a second registration under that name.
 
 Minimal `plugin.toml`:
 
@@ -369,6 +413,11 @@ reload_modules = ["runtime", "capabilities"]
 ```
 
 For community plugins, Pal clears modules loaded from the plugin directory during refresh. `reload_modules` is still useful when the plugin imports helper modules through stable names.
+
+Declare consumed ports in `requires_ports` using their qualified names. For the
+slash-command example below, use `requires_ports = ["core:control", "control:control"]`.
+`requires_plugins` names plugin dependencies, not Python packages. Do not add
+resident module names there; declare the resident ports the plugin consumes.
 
 ## System state observations
 
@@ -467,13 +516,25 @@ class DemoPluginBundle:
         # Resource acquisition belongs here. Register cleanup immediately so
         # rollback and detach both release it in reverse order.
         # scope.defer(resource.close)
-        scope.context.register_module(handle)
         return handle
 
 
 def build_plugin(context: PluginBuildContext):
     return DemoPluginBundle()
 ```
+
+Return exactly one fresh `ModuleHandle` from `start(scope)`. PluginHost claims
+the name and publishes its contributions after startup succeeds. Do not expose
+the removed plugin `register_with_core` lifecycle or mutate the live registries.
+If a helper stages a handle with `scope.context.register_module(handle)`, return
+that exact object; staging does not publish it. Register acquired resources with
+`scope.defer` immediately, so failure before returning the handle can clean up.
+
+Use typed public port keys and `scope.context.port_registry.observe(KEY)` for
+dependencies whose generations can change. Retain the reference and resolve
+`.current` when starting an operation; do not cache a provider forever or probe
+its private fields to detect replacement. Publish owned ports through
+`ModuleHandle.ports` and declare typed contracts in `port_contracts`.
 
 ## Capability Provider
 
@@ -564,7 +625,8 @@ tests. Fix example/guidance failures before live activation.
 - `prompt_fragment_providers`: prompt fragments owned by this module.
 - `event_sources`: event sources owned by this module.
 - `event_handlers`: event handlers keyed by event kind.
-- `control_action_handlers`: deterministic control action handlers.
+- `control_action_handlers`: map action kinds to `ControlActionSpec` values,
+  imported from `pal.core.control_action_registry`, not bare functions.
 - `control_commands`: immutable tuple of `ControlCommandSpec` declarations.
   PluginHost validates the complete name/alias set, owns registration through
   rollback and detach, and refreshes channel command menus. Use
@@ -574,9 +636,81 @@ tests. Fix example/guidance failures before live activation.
   declare the corresponding `ports['provider:<qualified_name>']` binding. L3 providers
   register with Memory and use managed generation swap for backend changes.
 - `ports`: internal service ports exposed as `<module_id>:<port_name>`.
+- `control_interactions`: `ControlInteractionSpec` declarations for button/input parsing.
+- `timer_scope`: a scope from `CORE_CONTROL.open_timer_scope()`; Core schedules
+  events while the plugin owns deadline parsing and feature behavior.
+- `configuration_handlers`: module-owned configuration RPC handlers.
+- `channel_extension`: a `ChannelExtension` from `pal.channel.plugin`; declare
+  `[channel] endpoint_types` and require `channel:provider_manager`.
+- `execution_extension`: replacement of the shared execution implementation;
+  use the host-owned installation lifecycle, never patch Core's runtime fields.
 - `cleanup_callbacks`: cleanup functions called on detach.
 
 Keep each surface owned by the plugin's `module_id` so detach can withdraw the full subtree.
+
+Event-source IDs must be nonempty and unique among live registrations. Qualify
+them with the owner and local purpose; even re-registering the same source object
+is rejected. Withdrawal belongs to the original handle/source instance, never
+just its name. Let PluginHost own registration rollback and cleanup retries;
+an old cleanup must not remove its replacement. See `docs/module_registration.md`.
+
+### Local slash commands and replies
+
+Control parses input and routes actions. The owning module executes the action;
+Core provides queries, delivery and coordination. A local command needs no LLM
+turn. This helper can be called from `start(scope)` instead of the echo example's
+handle construction; it also keeps that example's capability provider:
+
+```python
+from pal.control.contracts import ControlAction, ControlCommandSpec
+from pal.control.runtime_contracts import CORE_CONTROL
+from pal.core.control_action_registry import ControlActionSpec
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
+
+
+def build_command_handle(scope, provider):
+    controls = scope.context.port_registry.observe(CORE_CONTROL)
+
+    def parse(invocation):
+        return ControlAction(action_kind="demo_tools_ping", target_scope="demo_tools",
+                             route=invocation.route)
+
+    async def execute(action):
+        await controls.current.reply(action, "Demo plugin is ready.")
+
+    return ModuleHandle(
+        module_id="demo_tools", tier=MODULE_TIER_DETACHABLE, detachable=True,
+        introspection_provider=provider,
+        control_commands=(ControlCommandSpec(
+            name="demo_ping", handler=parse, description="Check the demo plugin",
+            show_in_panel=True,
+        ),),
+        control_action_handlers={"demo_tools_ping": ControlActionSpec(execute)},
+    )
+```
+
+Action handlers are async, return `None`, and send replies through `CORE_CONTROL`.
+The parser only constructs the action; put real work in the handler. Preserve
+the invocation route and use the module ID as `target_scope`. PluginHost publishes
+commands/actions together and withdraws them on detach; do not register commands
+imperatively or add a Core branch for their names.
+
+Execution semantics use `LifecycleAccess` from `pal.execution.tool_facade`.
+Select the matching `pal.execution.tool_semantics` declaration for each tool;
+the registry record exposes `record.execution.lifecycle_access`. Do not import
+removed `_is_package_job_tool` or `_is_plugin_lifecycle_tool` from execution.runtime
+or infer locking from an alias. `SHARED` is ordinary admission, `EXCLUSIVE` is
+lifecycle mutation, and `OWNER_MANAGED` leaves admission to the declared owner.
+ControlActionSpec carries the same explicit policy. Do not use OWNER_MANAGED to
+bypass the lifecycle gate for an ordinary handler.
+
+Timers and ordinary event callbacks check their exact registration on entry;
+queued callbacks for an unloaded generation are ignored. A callback already
+executing can continue across await after unload. This is not a resource lease.
+Background turns must pass their owning ModuleHandle to
+`CORE_CONTROL.start_background_turn`; active work retains that generation and
+blocks its unload until finished or interrupted. Cleanup must release owned
+workers and resources, including partial-startup failures.
 
 ## Lifecycle and Hot Refresh
 
@@ -653,6 +787,11 @@ Before calling the plugin done:
 5. Detach removes the capability from discovery.
 6. Attach again creates a fresh instance and restores the capability.
 7. The plugin does not require the user to run commands manually unless approval or credentials are genuinely needed.
+8. Commands execute and reply through Core, then disappear on detach; failed
+   startup/cleanup cannot withdraw another generation's contributions.
+9. Test against the intended installed host and native dependencies. If replacing
+   execution, verify unrelated module calls and lifecycle/package admission too.
+   Follow `pal.self.maintenance` for a coordinated resident-interface upgrade.
 """
 
 

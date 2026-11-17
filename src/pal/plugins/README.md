@@ -109,6 +109,22 @@ inspect their result before adding another lifecycle request. See
 [package installation](../../../docs/pal_package_installation.md) and the
 [self-maintenance manual](../skill/builtin_skills.py).
 
+Resident interface upgrades must include the separately installed first-party
+adapters that consume them. Check method-local imports as well as plugin startup:
+an execution replacement can attach and still break calls for every module.
+Use `record.execution.lifecycle_access` (`LifecycleAccess` from
+`pal.execution.tool_facade`) instead of the removed private lifecycle classifiers.
+Verify affected and unrelated tools through the real execution entrypoint, and
+exercise lifecycle/package admission in an isolated runtime. Host CI and direct
+sidecar tests alone do not validate that combination.
+
+Keep `pal.self.maintenance` and `pal.plugin.development` in
+`pal.skill.builtin_skills` aligned with public registration/import changes.
+They include executable tool and slash-command examples checked by
+`tests/test_plugin_skill_example.py`. Prepare matching host, adapter and native
+artifacts before an external restart; restarting does not install a new plugin.
+Worker/helper upgrades follow their own protocol/capability requirements.
+
 Modules can contribute `module_observer` for synchronous derived projections of
 published module generations. Core owns replay and identity-checked retirement;
 Skill consumes this seam to maintain declarations. Metadata refresh uses the
