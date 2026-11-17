@@ -103,6 +103,13 @@ Notes:
 - Alias translation applies to Pal routing prose and internal schema annotations.
   Schema literals, defaults, examples, references and external MCP descriptions
   retain their original values for discovery, validation and invocation
+- LLM schema presentation removes titles only at schema positions. Native
+  reference expansion prunes root definitions only when local reachability is
+  provable; scoped/unknown references retain their definitions. Validation keeps
+  the original schemas. Presentation version 2 and compiled provider specs enter
+  the generation fingerprint: deployment deliberately changes the tool prefix
+  once, then deterministic compilation keeps it stable. Existing L1 tool-result
+  text is replayed verbatim; discovery projection only affects new results.
 - The internal path-deletion adapter (not a public model tool) removes the final filesystem entry. Symbolic links are unlinked
   without following their targets, including dangling links and directory links.
   SHA-256 checks apply only to regular files; snapshot guards check the entry

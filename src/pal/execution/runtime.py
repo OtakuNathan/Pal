@@ -1308,14 +1308,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     }
                     suggestion['contract']['score'] = suggestion['score']
             result["usage_hint"] = (
-                "No matching tools for these query words and filters; this does not prove a capability is unavailable. "
-                "Search uses positive purpose text plus aliases and declared discovery terms. "
-                "Shorten to the object/domain (e.g. 'browser tabs') and omit unknown filters. "
-                "Suggestions fuse lexical intent, purpose and bounded fuzzy retrieval, not proof that the requested capability exists. "
-                "Each includes its full callable contract. Compare it with the original request, including unmatched terms; "
-                "invoke directly if it supports that request. Do not silently discard requirements. "
-                "Use read_tool only if contract information is missing or changed. "
-                "If still unresolved, browse a relevant search_tools domain directory before falling back; use read_tool only for a known alias."
+                "No exact match; this is not proof of unavailability. "
+                "Check suggestions' contracts against the original task, including unmatched_terms. "
+                "Invoke if a complete contract supports it; use read_tool only for missing information. "
+                "Otherwise shorten the query, correct filters, or browse search_tools(domain=owner)."
             )
         if not hits and not result.get('suggestions') and domain and domain in available_domains and directory_records:
             # Navigation is independent of query matching. Only the visible,
@@ -1335,13 +1331,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
             }
             result["usage_hint"] = (
                 ("Domain directory requested. " if browse_directory else "No query match was returned. ") +
-                "The directory lists all available tool names and brief purposes in this domain, "
-                "not matches for the requested task. Compare their purposes with the whole original request. "
-                "Purposes may be shortened; full contracts remain available through read_tool. "
-                "Use read_tool on a plausible alias to check its contract, then invoke only if it supports the task. "
-                "Large results use the ordinary output snapshot; use read_file to inspect omitted content. "
-                "Supply query words within the same domain to rank full contracts. "
-                "If this domain has no suitable tool, choose another domain explicitly or report it unresolved."
+                "Entries are navigation, not matches. Use read_tool for a plausible alias's full contract, "
+                "or query within this domain. Read omitted snapshot content with read_file. "
+                "If unsuitable, choose another domain explicitly or report the task unresolved."
             )
         elif not hits and (not domain or domain not in available_domains):
             result["available_domains"] = sorted(available_domains - {""})

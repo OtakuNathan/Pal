@@ -117,11 +117,8 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
         result.update(hits=[contract(row) for row in ranked[:limit]], total_count=len(ranked),
                       returned_count=min(len(ranked), limit), truncated=len(ranked) > limit)
         result["usage_hint"] = (
-            "Candidates are ranked by positive purpose and tool-authored search terms "
-            + ("within this domain. " if domain else "across visible tools and the supplied filters. ") +
-            "Lexical overlap is not proof that every requested feature exists. Compare the full contract "
-            "with the original task, including unmatched terms; invoke only if it supports the task. "
-            "No extra read_tool is needed when the contract is complete."
+            "Matches are not proof of every requested feature; check unmatched_terms against the original task. "
+            "Invoke when the complete contract supports it; no extra read_tool is needed."
         )
     elif domain and not browse and not excluded_alias and records:
         # Spelling-only recovery after lexical retrieval misses. No central
@@ -160,7 +157,7 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
                          **({"purpose_truncated": True} if len(purpose) > 160 else {})})
         result["directory"] = {"domain": domain, "tools": page, "total_count": len(records)}
         result["usage_hint"] = "Domain directory requested." if browse else "No positive query evidence; directory entries are navigation, not matches."
-        result["usage_hint"] += " Read a plausible contract before invocation, or query the purpose within the same domain. Large results use the ordinary output snapshot; use read_file to inspect omitted content."
+        result["usage_hint"] += " Use read_tool for a plausible alias or query this domain. Read omitted snapshot content with read_file."
     elif not result["hits"] and not result.get("suggestions"):
         result.setdefault("usage_hint", "No matching tools within this domain and supplied filters.")
     if result.get("usage_hint"):

@@ -17,9 +17,9 @@ class RuntimeConfig:
     max_output_size_bytes: int = 262_144
 
     # tool / prompt budget
-    default_max_result_size_chars: int = 50_000
+    default_max_result_size_chars: int = 5_000
     max_tool_result_tokens: int = 100_000
-    active_tool_result_preview: int = 1_000
+    active_tool_result_preview: int = 5_000
     chars_per_token: float = 3.5
     context_margin_factor: float = 0.05
     context_margin_cap: int = 16_384

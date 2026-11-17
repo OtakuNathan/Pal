@@ -12,7 +12,8 @@ class RuntimeConfigTests(unittest.TestCase):
         cfg = RuntimeConfig.defaults()
         self.assertEqual(cfg.max_lines_to_read, 2_000)
         self.assertEqual(cfg.default_max_output_tokens, 25_000)
-        self.assertEqual(cfg.default_max_result_size_chars, 50_000)
+        self.assertEqual(cfg.default_max_result_size_chars, 5_000)
+        self.assertEqual(cfg.active_tool_result_preview, 5_000)
         self.assertEqual(cfg.stagnation_repeat_threshold, 3)
         self.assertEqual(cfg.llm_base_retry_delay_ms, 500)
         self.assertEqual(cfg.llm_max_output_recovery_attempts, 3)
@@ -33,12 +34,12 @@ class RuntimeConfigTests(unittest.TestCase):
 
     def test_load_without_runtime_root_returns_defaults(self) -> None:
         cfg = RuntimeConfig.load(None)
-        self.assertEqual(cfg.default_max_result_size_chars, 50_000)
+        self.assertEqual(cfg.default_max_result_size_chars, 5_000)
 
     def test_load_with_missing_config_returns_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = RuntimeConfig.load(Path(tmpdir))
-            self.assertEqual(cfg.default_max_result_size_chars, 50_000)
+            self.assertEqual(cfg.default_max_result_size_chars, 5_000)
             self.assertEqual(cfg.stagnation_repeat_threshold, 3)
 
     def test_load_reads_read_section(self) -> None:
@@ -74,7 +75,7 @@ class RuntimeConfigTests(unittest.TestCase):
             cfg = RuntimeConfig.load(Path(tmpdir))
             self.assertEqual(cfg.stagnation_repeat_threshold, 7)
             self.assertEqual(cfg.stagnation_oscillation_window, 10)
-            self.assertEqual(cfg.default_max_result_size_chars, 50_000)
+            self.assertEqual(cfg.default_max_result_size_chars, 5_000)
 
     def test_load_reads_llm_section(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -114,14 +115,14 @@ class RuntimeConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             cfg = RuntimeConfig.load(Path(tmpdir))
-            self.assertEqual(cfg.default_max_result_size_chars, 50_000)
+            self.assertEqual(cfg.default_max_result_size_chars, 5_000)
 
     def test_load_handles_corrupt_toml(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
             config_path.write_text("this is not valid toml {{{{", encoding="utf-8")
             cfg = RuntimeConfig.load(Path(tmpdir))
-            self.assertEqual(cfg.default_max_result_size_chars, 50_000)
+            self.assertEqual(cfg.default_max_result_size_chars, 5_000)
 
 
 if __name__ == "__main__":

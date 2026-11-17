@@ -12,8 +12,8 @@ TOOL_DISCOVERY_STOP_RULE = (
 )
 
 TOOL_DISCOVERY_STOP_HINT = (
-    "If reasonable searches and relevant inventory reveal no suitable callable, it may be unavailable. "
-    "Explain that possibility and any uncertainty rather than repeating discovery indefinitely."
+    "If rephrasing, corrected filters and the relevant directory still yield no suitable tool, "
+    "report possible unavailability and uncertainty; stop repeating discovery."
 )
 
 

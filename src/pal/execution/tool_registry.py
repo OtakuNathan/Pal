@@ -363,12 +363,15 @@ def compile_registry_generation(
                 "function": {
                     "name": alias,
                     "description": record.compiled_description,
-                    "input_schema": native_input_contract(record.input_schema) if record.native_function else record.input_schema,
+                    "input_schema": (native_input_contract(record.input_schema) if record.native_function
+                                     else compact_input_contract(record.input_schema)),
                 },
             }
 
     search_domain_catalog(search_records)  # Reject ambiguous ownership before publication.
     stable = {
+        "presentation_version": 2,
+        "provider_specs": provider_specs,
         "aliases": [
             {
                 "alias": alias,

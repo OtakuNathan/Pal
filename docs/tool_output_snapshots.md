@@ -12,6 +12,13 @@ examined using ordinary shell text tools. A truncated oversized source line rece
 a conditional shell inspection/edit hint; `edit_file` still requires complete
 affected lines. Query limits and artifact page/block selection are unchanged.
 
+The default per-result inline limit and head/tail preview allowance are both
+5,000 characters. Oversized results share the inline limit between the preview
+and snapshot reference, so the actual preview is slightly shorter. Required
+delivery metadata remains outside the preview. Configure these independently with
+`[budget].default_max_result_size_chars` and `[budget].active_tool_result_preview`
+in the runtime's `config.toml`. Token limits can further reduce the inline limit.
+
 The file is a historical copy, not a claim about the current resource. A fresh
 read/query may be appropriate when current state is needed. Never automatically
 repeat a side-effecting command to recover output. Failure status, effect outcome,
