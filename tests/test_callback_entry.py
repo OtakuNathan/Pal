@@ -63,7 +63,10 @@ def test_logically_unloaded_owner_is_ignored_even_if_cleanup_has_not_withdrawn_c
         state["release"].set()
         assert host.attach("callback_owner")["status"] == "ok"
         owner = host.generations["callback_owner"].handle
-        with patch.object(core.context.module_publications, "unsubscribe", side_effect=OSError("cleanup unavailable")):
+        # Fail before timer/event withdrawal: observer unsubscription now runs
+        # after timer closure and no longer leaves callbacks available to test
+        # their logical-owner admission guard.
+        with patch.object(core.context, "withdraw_module_control", side_effect=OSError("cleanup unavailable")):
             assert host.detach("callback_owner")["status"] == "error"
         assert not host._record("callback_owner").attached
         assert not owner.timer_scope.closed
