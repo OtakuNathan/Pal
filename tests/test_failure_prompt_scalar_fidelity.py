@@ -7,7 +7,8 @@ import asyncio
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from pal.core.turns import ToolObservation, _render_failure_primary_input
+from pal.core.turns import ToolObservation
+from pal.failure.presentation import _render_failure_primary_input
 from pal.failure import FailureDraft
 from tests.test_failure_flow import _core_with_failure_runtime, _ToolLoopFailureLLM
 
@@ -109,7 +110,7 @@ def test_safe_mode_tool_exception_chain_reaches_verification_request():
             raise RuntimeError("transport wrapper failed") from exc
 
     with patch("pal.execution.runtime.ExecutionRuntime.execute_tool_async", side_effect=fail):
-        asyncio.run(core.failure_orchestrator._run_failure_flow_async(draft, allowed_tools=[]))
+        asyncio.run(core.failure_recovery.current._run_failure_flow_async(draft, allowed_tools=[]))
     assert len(llm.requests) == 3
     for request in llm.requests[1:]:
         packet = json.loads(request.messages[1].text)
@@ -154,7 +155,7 @@ def test_safe_mode_model_exception_keeps_root_cause_without_stack():
         severity="medium", primary_blocker="probe failed",
     )
     try:
-        result = asyncio.run(core.failure_orchestrator._run_failure_flow_async(draft, allowed_tools=[]))
+        result = asyncio.run(core.failure_recovery.current._run_failure_flow_async(draft, allowed_tools=[]))
         for text in (result.verification.reason, result.enriched_fields["current_blocker"]):
             assert "endpoint refused connection" in text
             assert "model request failed" not in text

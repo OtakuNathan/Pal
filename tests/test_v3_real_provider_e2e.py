@@ -17,6 +17,7 @@ MemoryService so nothing live is mutated):
 4. a post-compact round answers on the rebuilt prefix (rebase consumed).
 """
 from __future__ import annotations
+from pal.execution.runtime import ExecutionRuntime
 
 import asyncio
 import json
@@ -56,7 +57,7 @@ def _e2e_executor(memory, runtime):
     ports = PortRegistry({"memory:memory": memory, "llm:llm": runtime})
     return TurnExecutor(
         SimpleNamespace(port_registry=ports, require_port=ports.__getitem__,
-                        execution_runtime=None),
+                        execution_runtime=ExecutionRuntime()),
         SimpleNamespace(diagnostics=[]), None,
          build_canonical_prompt=None,
         debug_log_prompt=lambda *a: None, debug_log_outcome=lambda *a: None,

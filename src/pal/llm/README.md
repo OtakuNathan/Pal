@@ -1,6 +1,8 @@
 # llm
 
 Owns:
+- `/think`, `/model`, `/refresh_llm_endpoint`, their button callbacks and presentation
+- model-selection validation and endpoint-refresh effects; Core supplies context-change coordination
 - shared semantic/native compaction execution, checkpoint prompts, schemas and validators
 - one asynchronous semantic response stream for complete and streamed responses
 - immutable provider-neutral LLM request, message, response, usage, and update IR
@@ -128,3 +130,9 @@ It returns all loaded enabled endpoint capabilities with `(active)` on the selec
 label, current thinking and process usage summaries. Configuration and human
 status controls keep their existing ownership; see the LLM contract for accounting
 scope, unavailable-state handling and activation boundaries.
+
+`snapshot_turn_settings()` returns an immutable `LLMTurnSettings` for the current
+thinking choices and cache policies. Core and Bunshin consume the same snapshot;
+refresh errors propagate instead of silently selecting empty settings.
+`resolve_output_budget()` owns endpoint limits and the configured default,
+including a caller's explicit requested budget.

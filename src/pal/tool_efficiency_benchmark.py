@@ -110,14 +110,14 @@ class FixtureExecution:
 
             register_browser(self.core.context, WebFetchService(browser_manager=_BrowserFixture(root)))
             self.core.publish_module_capabilities('web_fetch')
-            self.runtime.register_provider_ref('artifact:artifact', _ArtifactFixture())
+            self.runtime.register_provider_ref('artifact:artifact', _ArtifactFixture(), owner_id="artifact")
             channel = ChannelRuntime()
             channel.endpoint_registry.register(SimpleNamespace(
                 endpoint=SimpleNamespace(endpoint_id='telegram_main'),
                 derive_default_reply_target=lambda: {'chat_id': '42'},
             ))
             self.core.context.port_registry['channel:channel'] = channel
-            self.runtime.register_provider_ref('core:turn_io', _FixtureTurnIO())
+            self.runtime.replace_provider_ref('core:turn_io', _FixtureTurnIO(), owner_id="core", expected=self.runtime.turn_io)
             register_proactive(self.core.context, ProactiveManager())
             self.core.publish_module_capabilities('proactive')
 

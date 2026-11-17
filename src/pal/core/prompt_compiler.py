@@ -51,11 +51,7 @@ class PromptCompiler:
         self.context = context
 
     def _project_llm_text(self, value: object) -> str:
-        runtime = getattr(self.context, "execution_runtime", None)
-        projector = getattr(runtime, "project_llm_text", None)
-        if callable(projector):
-            return str(projector(value))
-        return str(value or "")
+        return self.context.execution_runtime.project_llm_text(value)
 
     def collect_prompt_fragments(self, assembly_context: PromptAssemblyContext) -> list[PromptFragment]:
         indexed_fragments: list[tuple[int, int, PromptFragment]] = []
@@ -280,11 +276,7 @@ class PromptCompiler:
         codecs remain pure IR-to-wire encoders.
         """
 
-        manager = None
-        port_registry = getattr(self.context, "port_registry", None)
-        get_port = getattr(port_registry, "get", None)
-        if callable(get_port):
-            manager = get_port("artifact:artifact")
+        manager = self.context.port_registry.get("artifact:artifact")
 
         resolved_messages: list[dict[str, Any]] = []
         for raw_message in messages:
@@ -303,9 +295,7 @@ class PromptCompiler:
                 candidate = str(raw_part.get("source_url") or "").strip()
                 source = candidate if candidate.startswith("data:image/") else ""
                 if not source and manager is not None:
-                    to_data_url = getattr(manager, "to_data_url", None)
-                    if callable(to_data_url):
-                        source = str(to_data_url(representation_id) or "").strip()
+                    source = str(manager.to_data_url(representation_id) or "").strip()
                 if not source:
                     raise ValueError(
                         "artifact image could not be resolved before LLM IR construction: "
@@ -885,7 +875,7 @@ class PromptCompiler:
         return self._extract_user_message_text(assembly_context.event)
 
     def _extract_user_message_text(self, event) -> str:
-        return extract_text_from_payload(getattr(event, "payload", None))
+        return extract_text_from_payload(event.payload if event is not None else None)
 
     def _ensure_memory_pack(self, assembly_context: PromptAssemblyContext) -> PromptAssemblyContext:
         if assembly_context.turn_kind in {"failure", "proactive_trigger"}:
@@ -895,13 +885,8 @@ class PromptCompiler:
         try:
             from pal.memory import MemoryPackRequest
 
-            require_port = getattr(self.context, "require_port", None)
-            if not callable(require_port):
-                return assembly_context
-            try:
-                memory_service = require_port(MEMORY)
-            except KeyError:
-                # Hosts without a memory service have no load to attempt.
+            memory_service = self.context.port_registry.get(MEMORY.name)
+            if memory_service is None:
                 return assembly_context
             pack = memory_service.build_pack(
                 MemoryPackRequest(
@@ -909,15 +894,8 @@ class PromptCompiler:
                     include_l1_recent_context=not bool(assembly_context.metadata.get("typed_l1_projection")),
                     task_id=assembly_context.task_id,
                     work_order_id=assembly_context.work_order_id,
-                    active_input_id=str(
-                        getattr(
-                            getattr(assembly_context, "event", None),
-                            "event_id",
-                            "",
-                        )
-                        or ""
-                    )
-                    or None,
+                    active_input_id=assembly_context.event.event_id
+                        if assembly_context.event is not None else None,
                 )
             )
         except Exception as exc:

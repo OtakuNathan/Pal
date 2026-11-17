@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import dataclass, field
 
 from pal.core.events import EventHandler
+from pal.core.module_registry import ModuleHandle
+from pal.control.runtime_contracts import CORE_CONTROL, ControlRuntimePort
 from pal.foundation import EventEnvelope
 from pal.foundation.diagnostics import exception_report
 from pal.proactive.runtime import ProactiveManager, ProactiveRunner
@@ -16,7 +18,7 @@ class ProactiveTriggerHandler(EventHandler):
     manager: ProactiveManager
     runner: ProactiveRunner | None = None
     tasks: set[asyncio.Task] = field(default_factory=set)
-    lifecycle_gate: object | None = None
+    owner: ModuleHandle | None = field(default=None, init=False, repr=False)
 
     def can_handle(self, event_kind: str) -> bool:
         return event_kind == EventKind.PROACTIVE_TRIGGER
@@ -27,14 +29,16 @@ class ProactiveTriggerHandler(EventHandler):
         definition = self.manager.registered.get(event.payload.proactive_id)
         if definition is None:
             return []
-        core = context.require_port("core:core")
+        core = context.require_port(CORE_CONTROL)
         # The source may have drained several events, or user input may have
         # won admission since prepare(). Requeue without opening a turn/run.
-        if not core.can_start_proactive_turn():
+        if not core.can_start_background_turn():
             self.manager.enqueue_trigger(event.payload)
             return []
+        if self.owner is None:
+            raise RuntimeError("Proactive handler has no module owner")
         try:
-            continuation = self._build_continuation(core, event.payload, definition)
+            continuation = self._build_continuation(context, core, event.payload, definition)
         except Exception as exc:
             run_id = None
             if self.runner is not None:
@@ -46,6 +50,7 @@ class ProactiveTriggerHandler(EventHandler):
             return []
         task = core.start_background_turn(
             continuation, lambda: self._run_trigger_async(core, event.payload, continuation),
+            owner=self.owner,
         )
         if task is None:
             self.manager.enqueue_trigger(event.payload)
@@ -55,26 +60,21 @@ class ProactiveTriggerHandler(EventHandler):
         return []
 
     @staticmethod
-    def _build_continuation(core, trigger, definition):
+    def _build_continuation(context, core: ControlRuntimePort, trigger, definition):
         options = core.turn_execution_options()
         return build_proactive_turn_continuation(
-            core.context,
+            context,
             trigger,
             definition,
             core_mode=str(options.get("core_mode") or "default"),
             max_output_tokens=int(options.get("max_output_tokens") or 1024),
         )
 
-    async def _run_trigger_async(self, core, trigger: ProactiveTriggerEvent, continuation) -> str:
-        gate = self.lifecycle_gate or core.context.execution_runtime.lifecycle_gate
-        async with gate.read_async():
-            return await self._run_trigger_guarded_async(core, trigger, continuation)
-
-    async def _run_trigger_guarded_async(self, core, trigger: ProactiveTriggerEvent, continuation) -> str:
+    async def _run_trigger_async(self, core: ControlRuntimePort, trigger: ProactiveTriggerEvent, continuation) -> str:
         proactive_run_id = None
         try:
             proactive_run_id = self.runner.begin_run(trigger) if self.runner is not None else None
-            outcome = await core.run_turn_continuation_async(continuation)
+            outcome = await core.run_turn(continuation)
             self.manager.mark_run_completed(trigger.proactive_id)
             if self.runner is not None:
                 self.runner.complete_run(proactive_run_id, turn_id=outcome.turn_id, final_reply=settled_output_text(outcome))
@@ -86,12 +86,12 @@ class ProactiveTriggerHandler(EventHandler):
             return "failed"
         return "success"
 
-    def _record_failure(self, core, trigger, continuation, run_id, exc, *, interrupted=False) -> None:
+    def _record_failure(self, core: ControlRuntimePort, trigger, continuation, run_id, exc, *, interrupted=False) -> None:
         errors = [("interrupted: " if interrupted else "") + exception_report(exc)]
         turn_id = continuation.turn_id if continuation is not None else ""
         if continuation is not None:
             try:
-                core.turn_manager.cleanup_interrupted(turn_id, reason="interrupted" if interrupted else "failed")
+                core.finish_interrupted_turn(turn_id, reason="interrupted" if interrupted else "failed")
             except Exception as cleanup_exc:
                 errors.append("Turn cleanup also failed:\n" + exception_report(cleanup_exc))
         if self.runner is not None:
@@ -105,5 +105,12 @@ class ProactiveTriggerHandler(EventHandler):
                 self.runner.results.append({})
             self.runner.results[-1].update(proactive_run_id=run_id, proactive_id=trigger.proactive_id,
                 turn_id=turn_id, status="failed", error_text="\n\n".join(errors))
-        core.state.diagnostics.append({"kind": "proactive.trigger.failed", "turn_id": turn_id,
+        core.record_diagnostic("proactive.trigger.failed", {"turn_id": turn_id,
             "proactive_id": trigger.proactive_id, "proactive_run_id": run_id, "error": "\n\n".join(errors)})
+
+    async def shutdown(self) -> None:
+        tasks = tuple(self.tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)

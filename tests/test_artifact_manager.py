@@ -1,7 +1,7 @@
 from __future__ import annotations
 from tests.llm_fakes import scripted_llm
 from pal.shared.ports import PortRegistry
-from tests.core_factory import build_core
+from tests.core_factory import build_context, build_core
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
@@ -101,7 +101,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         register_core_with_core(core)
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
-        core.context.execution_runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
+        core.context.execution_runtime.replace_provider_ref("core:turn_io", _TurnIO(self.scope_key), owner_id="core", expected=core.context.execution_runtime.turn_io)
         register_artifact_with_core(core.context, self.manager)
         core.publish_module_capabilities("artifact")
         call = new_tool_call(name="call_tool", args={"name": "import_artifact", "args": {"path": str(path)}})
@@ -185,7 +185,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
-        runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
+        runtime.replace_provider_ref("core:turn_io", _TurnIO(self.scope_key), owner_id="core", expected=runtime.turn_io)
         register_artifact_with_core(core.context, self.manager)
         core.publish_module_capabilities("artifact")
         register_browser(core.context, browser)
@@ -1165,7 +1165,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(suggestion.split()[1], aliases)
         self.assertIn("search_tools", aliases)
         self.assertIn("search_tools", " ".join(_next_actions_for(SimpleNamespace(kind="audio"))))
-        core.context.execution_runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
+        core.context.execution_runtime.replace_provider_ref("core:turn_io", _TurnIO(self.scope_key), owner_id="core", expected=core.context.execution_runtime.turn_io)
         ref = self._register_text("refund-policy.txt", "refund terms are on page one")
 
         contracts = {
@@ -1318,6 +1318,7 @@ class _Ports:
 
 class _PromptContext:
     def __init__(self, registry: _Registry, artifact_manager: ArtifactManager) -> None:
+        self.execution_runtime = build_context().execution_runtime
         self.prompt_fragment_registry = registry
         self.port_registry = _Ports(artifact_manager)
 

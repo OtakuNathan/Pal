@@ -12,12 +12,21 @@ Flags follow the operation. Use the actual runtime directory:
 pal memory providers --runtime-root /path/to/runtime --json
 pal memory inspect sqlite_vec_l3 --runtime-root /path/to/runtime --json
 pal memory refresh-indexes sqlite_vec_l3 --limit 32 --retry-failed --runtime-root /path/to/runtime --json
-pal memory select sqlite_vec_l3 --runtime-root /path/to/runtime --json
+pal memory swap sqlite_vec_l3 --runtime-root /path/to/runtime --json
+pal memory swap-status JOB_ID --runtime-root /path/to/runtime --json
+pal memory swap-cancel JOB_ID --runtime-root /path/to/runtime --json
+pal memory swap-resume JOB_ID --runtime-root /path/to/runtime --json
 ```
 
-`attach`, `detach` and `select` require a running owner and an idle Pal.
-`select` changes the running selection until restart; it does not change the
-embedding model or rewrite existing data. Inspection/refresh hold a generation
+`attach` and `detach` require a running owner and an idle Pal. Detaching the
+active backend through this CLI requires a completed managed swap first.
+`swap` prepares a private database in the background, synchronizes concurrent
+writes and publishes a verified generation atomically. Index building follows
+publication; failures retain the selected data and can be resumed. The former
+`select` command has been removed. See [managed swap](pal_memory_swap.md).
+`swap-cancel` persists a pause until an explicit `swap-resume`; restart and backend
+registration do not restart a paused job. Committed data remains selected.
+Inspection/refresh hold a generation
 lease until their worker finishes, including cancellation. An owner timeout has
 an unknown outcome; inspect owner state before retrying. It never triggers direct
 writes from a second process. Offline `providers`/`inspect` can read the published
@@ -47,9 +56,10 @@ pal memory embedding status --runtime-root /path/to/runtime --json
 pal memory embedding resume --runtime-root /path/to/runtime --json
 ```
 
-The migration clones an unpublished memory generation. Changed provider/model/
-revision/text-processing identity marks vectors stale even when dimensions match;
-transport-only changes can reuse compatible vectors. It rebuilds bounded batches,
+The migration clones an unpublished memory generation. Provider/model, revision,
+text-processing or configuration-fingerprint changes discard source vectors and
+metadata before rebuilding, even when dimensions match. Endpoint configuration
+is part of that fingerprint. It rebuilds bounded batches,
 checks unchanged memory content/references and complete finite vectors, then checks
 sample retrieval before publishing the candidate and updating configuration.
 

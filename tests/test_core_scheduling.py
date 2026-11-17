@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 from hypothesis import given, strategies as st
 
-from pal.core.capabilities import register_with_core
 from pal.core.scheduling import (
     CoreScheduler, CoreTurnPhase, ResidentTurnKind, SchedulingEvent,
 )
@@ -72,7 +71,6 @@ def test_reset_cannot_release_a_shutdown_barrier():
             entered.set()
             await resume.wait()
         core.context.port_registry[RESIDENT_HISTORY.name] = SimpleNamespace(reset_async=reset)
-        core.context.require_port("llm:llm").retire_projection_sessions = lambda: None
         task = asyncio.create_task(core._execute_soft_reset_async(None))
         await entered.wait()
         core.state.scheduler.set_barrier("quiescing:shutdown", True)
@@ -82,6 +80,79 @@ def test_reset_cannot_release_a_shutdown_barrier():
         assert core.state.scheduler.state.barriers == {"quiescing:shutdown"}
         assert not core.can_start_proactive_turn()
     asyncio.run(scenario())
+
+
+def test_cancelled_reset_notification_releases_its_barrier():
+    from tests.cache_reminder_factory import attach_cache_reminder
+
+    async def scenario():
+        core, _ = make_core(Model())
+        attach_cache_reminder(core)
+        try:
+            async with core.context.execution_runtime.lifecycle_gate.write_async():
+                task = asyncio.create_task(core._execute_soft_reset_async(None))
+                async with asyncio.timeout(2):
+                    while not core.state.resident_quiescing:
+                        await asyncio.sleep(0)
+                core.state.scheduler.set_barrier("quiescing:shutdown", True)
+                task.cancel()
+                await asyncio.sleep(0)
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert core.state.scheduler.state.barriers == {"quiescing:shutdown"}
+            core.state.scheduler.set_barrier("quiescing:shutdown", False)
+            assert core.can_start_proactive_turn()
+        finally:
+            core.close()
+            core.context.execution_runtime.shutdown()
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+def test_reset_setup_failure_releases_its_barrier(monkeypatch):
+    async def scenario():
+        core, _ = make_core(Model())
+        memory = core.context.require_port("memory:memory")
+        def fail(*, reason):
+            raise OSError("compaction cancellation unavailable")
+        monkeypatch.setattr(memory, "cancel_active_compaction", fail)
+        try:
+            with pytest.raises(OSError, match="cancellation unavailable"):
+                await core._execute_soft_reset_async(None)
+            assert not core.state.scheduler.state.barriers
+            assert core.can_start_proactive_turn()
+        finally:
+            core.close()
+            core.context.execution_runtime.shutdown()
+    asyncio.run(scenario())
+
+
+def test_repeated_reset_cancellation_still_finishes_barrier_cleanup():
+    from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
+
+    async def scenario():
+        core, _ = make_core(Model())
+        entered = asyncio.Event()
+        async def observe(_payload):
+            entered.set()
+            await asyncio.Event().wait()
+        core.context.register_module(ModuleHandle("slow_observer", MODULE_TIER_DETACHABLE,
+            control_observers={"core.context_change.started": observe}))
+        try:
+            task = asyncio.create_task(core._execute_soft_reset_async(None))
+            await entered.wait()
+            async with core.state.channel_turn_transition_lock:
+                task.cancel()
+                await asyncio.sleep(0)
+                task.cancel()
+                await asyncio.sleep(0)
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert not core.state.resident_quiescing
+            assert core.can_start_proactive_turn()
+        finally:
+            core.close()
+            core.context.execution_runtime.shutdown()
+    asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
 def test_user_input_in_pump_has_priority_over_proactive():
@@ -99,7 +170,6 @@ def test_proactive_source_before_user_source_still_gives_user_priority():
     async def scenario():
         model = Model(blocked=True)
         core, _ = make_core(model)
-        register_with_core(core)
         manager = ProactiveManager()
         register_proactive(core.context, manager, ProactiveRunner())
         manager.hydrate(ProactiveDefinition(proactive_id="quiz", goal="quiz"))
@@ -134,7 +204,6 @@ def test_proactive_waits_through_io_and_finalization_then_follows_user_queue():
     async def scenario():
         model = Model(blocked=True)
         core, _ = make_core(model)
-        register_with_core(core)
         manager, runner = ProactiveManager(), ProactiveRunner()
         register_proactive(core.context, manager, runner)
         manager.hydrate(ProactiveDefinition(proactive_id="quiz", goal="QUIZ_SENTINEL"))
@@ -189,7 +258,6 @@ def test_proactive_waits_through_io_and_finalization_then_follows_user_queue():
 def test_already_drained_proactive_event_requeues_if_chat_won_admission():
     async def scenario():
         core, _ = make_core(Model())
-        register_with_core(core)
         manager = ProactiveManager()
         manager.hydrate(ProactiveDefinition(proactive_id="quiz", goal="quiz"))
         handler = ProactiveTriggerHandler(manager)
@@ -212,7 +280,7 @@ def test_cancellation_before_task_start_releases_lease_without_opening_l1():
     async def scenario():
         core, events = make_core(Model())
         continuation = TurnContinuation("job", iter(()), "job")
-        task = core.start_background_turn(continuation, lambda: asyncio.sleep(60))
+        task = core.start_background_turn(continuation, lambda: asyncio.sleep(60), owner=None)
         assert task is not None
         assert not core.can_start_proactive_turn()
         task.cancel()
@@ -250,7 +318,7 @@ def test_task_creation_failure_rolls_back_only_its_reservation(monkeypatch):
             raise RuntimeError("creation failed")
         monkeypatch.setattr(asyncio, "create_task", fail)
         with pytest.raises(RuntimeError, match="creation failed"):
-            core.start_background_turn(continuation, lambda: asyncio.sleep(0))
+            core.start_background_turn(continuation, lambda: asyncio.sleep(0), owner=None)
         assert core.state.scheduler.state.phase == CoreTurnPhase.IDLE
         assert not core.state.turn_tasks
         assert core.can_start_proactive_turn()

@@ -17,3 +17,8 @@ Exposes:
 Boundary:
 - `supervisor` provisions Pal instances, database files, and first-run defaults
 - `bootstrap` only composes the in-process runtime from the already-provisioned database
+
+Optional service startup belongs to plugin declarations. Dreaming is composed by
+PluginHost with its explicit L3 dependency, rather than by backend inspection in
+Bootstrap. Configuration RPC receives the live operation registry; each resident
+module contributes its own operations.

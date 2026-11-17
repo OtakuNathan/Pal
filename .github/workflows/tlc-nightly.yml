@@ -24,10 +24,11 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 2
       matrix:
         include:
           - {group: core, shard: 0, shards: 1}
+          - {group: memory, shard: 0, shards: 1}
           - {group: execution, shard: 0, shards: 1}
           - {group: llm, shard: 0, shards: 1}
           - {group: foundation, shard: 0, shards: 1}
@@ -37,12 +38,13 @@ jobs:
           - {group: bunshin, shard: 1, shards: 3}
           - {group: bunshin, shard: 2, shards: 3}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
           cache: pip
-      - uses: actions/setup-java@v4
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '21'
@@ -57,7 +59,7 @@ jobs:
           --heap 2g --workers 2 --timeout 1800 --output test-logs/tlc
       - name: Preserve results, bounds and counterexamples
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tlc-${{ matrix.group }}-${{ matrix.shard }}
           path: test-logs/tlc
@@ -69,12 +71,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
           cache: pip
-      - uses: actions/setup-java@v4
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '21'
@@ -92,6 +95,10 @@ jobs:
             tests/test_channel_provider_cleanup.py tests/test_channel_replacement_cleanup.py \
             tests/test_package_cleanup_ownership.py \
             tests/test_lifecycle_gate_cancellation.py tests/test_plugin_publication_rollback.py \
+            tests/test_registration_ownership.py tests/test_memory_swap.py tests/test_embedding_space.py \
+            tests/test_memory_maintenance.py tests/test_workflow_memory_references.py \
+            tests/test_bunshin_web_lifetime.py tests/test_memory_resource_lifetime.py \
+            tests/test_control_lifetime.py tests/test_database_lifetime.py \
             tests/test_plugin_entry_withdrawal.py tests/test_execution_extension_admission.py \
             tests/test_history_listener_noexcept.py tests/test_bunshin_workflow_selection.py \
             tests/test_bunshin_verifier_authoring_runtime.py tests/test_bunshin_imported_plan_model.py \
@@ -100,7 +107,7 @@ jobs:
             2>&1 | tee test-logs/conformance/pytest.log
       - name: Preserve regression results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tlc-conformance
           path: test-logs/conformance

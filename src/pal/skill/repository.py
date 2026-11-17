@@ -80,6 +80,9 @@ class SkillRepository:
             skills = tuple(skill for skill in skills if skill.active)
         return skills
 
+    def clear_declared_skills(self) -> None:
+        SkillModel.delete().where(SkillModel.source_kind == SKILL_SOURCE_DECLARED).execute()
+
     def delete_declared_skills_for_module(self, module_id: str) -> int:
         return (
             SkillModel.delete()
@@ -156,6 +159,9 @@ class ReadOnlySkillRepository(SkillRepository):
             if (not (enabled_only or active_only) or skill.enabled)
             and (not active_only or skill.active)
         )
+
+    def clear_declared_skills(self) -> None:
+        self._declared.clear()
 
     def delete_declared_skills_for_module(self, module_id: str) -> int:
         removed = [key for key, skill in self._declared.items() if skill.module_id == module_id]

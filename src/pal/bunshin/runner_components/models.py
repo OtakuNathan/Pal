@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR
+from pal.execution.contracts import ExecutionRuntimePort
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from pal.core.runtime_config import RuntimeConfig
@@ -13,7 +14,7 @@ from pal.shared import ChannelEnvelope, EndpointConfig, EventKind, ResponseHandl
 @dataclass
 class BunshinRuntimeBundle:
     llm_runtime: Any
-    execution_runtime: Any
+    execution_runtime: ExecutionRuntimePort
     memory_service: MemoryService
     module_registry: Any
     runtime_state_coordinator: RuntimeSnapshotCoordinator

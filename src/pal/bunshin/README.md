@@ -1,5 +1,26 @@
 # bunshin
 
+Workflows hold a durable reference to their L3 generation. Roles, retries and
+recovery borrow it read-only, including its embedding constructor. Writes within
+the same generation remain visible; a swap retires that generation while existing
+workflow and process references keep it alive. There are no workflow database
+copies. Explicit forgetting uses the shared tombstone catalog. Memory candidates
+continue through explicit review. Manager reconciles finished workflows and
+interrupted registrations at startup and during its existing outbox lifecycle;
+cleanup does not depend on Dreaming. Workflow creation runs in an owned worker
+whose completion is joined through cancellation.
+
+The Manager web broker constructs only Execution, Web Search and Web Fetch.
+Its shared runtime has no workflow or memory dependency. Runtime constructors
+register resource cleanup before publishing modules and transfer ownership only
+when construction succeeds. Shutdown closes web-request admission first, drains
+already-admitted requests under the shared lifecycle gate, then closes the runtime.
+Concurrent requests remain independent. Manager and web-runtime close operations
+retain and join their cleanup tasks through repeated caller cancellation.
+Cleanup retains unsuccessful actions for retry and never replays an already
+successful resource closer. Role runtime cleanup uses the same owner and drains
+execution calls before releasing its resources.
+
 Package layout:
 - `pal.bunshin` is the single implementation and public package; it has no
   parallel versioned implementation or compatibility import package
@@ -228,3 +249,11 @@ direct. `rebind_bunshin_task_delivery` is now indirect: discover/read its contra
 and invoke through `call_tool`; its destination selection and Manager binding
 validation are unchanged. Main Pal now has 11 authored Bunshin aliases with one
 direct tool. The 36 role-only aliases are outside this change.
+
+Resident manager events implement `BunshinEventPort`: readiness, draining,
+accepted-part lookup and delivery acknowledgements are required operations.
+The handler submits `ControlDelivery` directly through `CORE_CONTROL` and
+acknowledges each accepted part before settling the event. Failed channel or
+manager acknowledgements preserve the pending event and accepted-part ledger.
+Manager startup reads prompt logging from the Core snapshot; subsequent changes
+arrive through the declared observer. Wakeups use Core's public interface.

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import contextmanager
 from tests.core_factory import build_core
 
 import asyncio
@@ -26,6 +27,16 @@ from pal.shared import EventKind, IntrospectionCall, SourceKind
 class _Settings:
     active_endpoint_id: str | None = "primary"
     think_level: str = "balanced"
+
+    def get(self, setting_key):
+        return None
+
+    def set(self, setting_key, setting_value):
+        return setting_value
+
+    @contextmanager
+    def selection_transaction(self):
+        yield
 
     def get_think_level(self, endpoint_id: str) -> str:
         _ = endpoint_id
@@ -389,7 +400,10 @@ class LLMUsageLedgerTests(unittest.TestCase):
         )
         core = build_core()
         register_llm_with_core(core.context, runtime)
-        action = ControlPlane().parse_event(
+        from pal.core.capabilities import register_with_core as register_core
+        from tests.control_factory import build_control_plane
+        register_core(core)
+        action = build_control_plane().parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
                 source_kind=SourceKind.CHANNEL,

@@ -12,6 +12,8 @@ from pal.core.runtime import PalCore
 class RuntimeStatusTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.core = build_core()
+        from pal.core.capabilities import register_with_core
+        register_with_core(self.core)
         self.core._deliver_control_delivery_async = AsyncMock()
         self.route = ControlRoute(endpoint_id="test", channel_kind="test")
         self.action = ControlAction(
@@ -61,4 +63,4 @@ class RuntimeStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_available_without_llm_statistics(self) -> None:
         message = await self.status()
         self.assertIn("State: idle", message)
-        self.assertIn("LLM statistics unavailable.", message)
+        self.assertNotIn("LLM status", message)

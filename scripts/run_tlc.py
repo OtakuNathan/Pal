@@ -18,7 +18,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "spec/tlc-suite.json"
-GROUPS = ("core", "execution", "llm", "foundation", "channel", "bunshin", "projection")
+GROUPS = ("core", "execution", "llm", "foundation", "channel", "bunshin", "projection", "memory")
 SUCCESS = "Model checking completed. No error has been found."
 
 
@@ -87,11 +87,22 @@ def check_generated(group: str | None) -> list[str]:
         "foundation": ("spec/foundation/FdLeaseImplementationTopology.tla", render_fd_lease_implementation_topology),
     }
     checked = []
+    if group is None or group == "memory":
+        from pal.memory.swap_formal import render_swap_relation
+        path = "spec/memory/MemorySwapReducer.tla"
+        if (ROOT / path).read_text() != render_swap_relation():
+            raise ValueError(f"Generated implementation model is stale: {path}")
+        checked.append(path)
     if group is None or group == "core":
         from pal.core.scheduling import render_scheduling_topology
+        from pal.core.registration_formal import render_registration_relation
 
         path = "spec/core/ResidentSchedulingTopology.tla"
         if (ROOT / path).read_text() != render_scheduling_topology():
+            raise ValueError(f"Generated implementation model is stale: {path}")
+        checked.append(path)
+        path = "spec/core/ModuleRegistrationReducer.tla"
+        if (ROOT / path).read_text() != render_registration_relation():
             raise ValueError(f"Generated implementation model is stale: {path}")
         checked.append(path)
     for name, (path, render) in renderers.items():

@@ -146,15 +146,6 @@ CoreCapabilitiesCoreIntrospectionProviderConfigureInput = _strict_model(
     },
 )
 
-CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput = _strict_model(
-    'CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput',
-    {
-        'enabled': (bool, Field(None, description='Whether Pal should suggest compacting before the confirmed A prompt cache expires.')),
-        'lead_seconds': (int, Field(None, description='How many seconds before the A TTL to show the reminder.', ge=30)),
-        'min_prefix_tokens': (int, Field(None, description='Minimum estimated prompt prefix size required before scheduling a reminder.', ge=1024)),
-    },
-)
-
 class FileReadRangeItem(StrictToolModel):
     offset: int = Field(1, description="1-based line number to start this block from. Defaults to 1.", ge=1)
     limit: int = Field(2000, description="Maximum number of lines to return for this block. Defaults to 2000.", ge=1)

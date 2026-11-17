@@ -12,9 +12,13 @@ from pal.execution.generated_tool_models import (
 )
 
 import math
+import json
+import threading
 from functools import wraps
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from typing import Any
+from pal.memory.backend_contracts import SqliteGenerationPort
+from pal.memory.storage import MemoryStorage
 
 from pal.foundation import utc_now
 from pal.foundation.diagnostics import exception_reason
@@ -32,6 +36,11 @@ from pal.memory.mutations import mutation_id_from_call
 from pal.memory.candidates import memory_star_from_args, star_text_fields
 from pal.memory.contracts import RECALL_PROMOTION_THRESHOLD, L3BatchCommitRequest, L3BatchCommitResult
 from pal.memory.embedding import EmbeddingProviderPort, OllamaEmbeddingProvider
+from pal.memory.embedding_config import embedding_configuration
+from pal.memory.embedding_space import (
+    EmbeddingAccess, EmbeddingSpace, accepts_vector, claim_empty_space,
+    embedding_access, read_space, reset_empty_space,
+)
 from pal.memory.repository import (
     MemoryDurableRepository,
     cosine_similarity,
@@ -102,6 +111,15 @@ def _provider_recovery(handler):
                 reason="Inspect the original mutation target before retrying.",
             ),))
         return result
+    return invoke
+
+
+def _generation_operation(handler):
+    @wraps(handler)
+    def invoke(self, *args, **kwargs):
+        with self._generation_lock:
+            self._sync_embedding_access()
+            return handler(self, *args, **kwargs)
     return invoke
 
 
@@ -188,19 +206,214 @@ class SQLiteVecL3Plugin:
     )
     min_vector_similarity: float = 0.35
     last_embedding_error: str = ""
+    _generation_lock: Any = field(default_factory=threading.RLock, init=False, repr=False)
+    _indexing: bool = field(default=False, init=False, repr=False)
+    _vector_reads: bool = field(default=True, init=False, repr=False)
+    _binding_read_only: bool = field(default=False, init=False, repr=False)
+    _bound_space: EmbeddingSpace | None = field(default=None, init=False, repr=False)
+    _catalog_space_matches: bool = field(default=True, init=False, repr=False)
+    _retired_repositories: list[MemoryDurableRepository] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self, embedder: EmbeddingProviderPort | None) -> None:
-        self.repository.read_only = self.read_only
-        if not self.read_only:
-            self.repository.ensure_schema()
         if self.embedding_provider is None and embedder is not None:
             self.embedding_provider = embedder
         if self.embedding_provider is None:
             self.embedding_provider = OllamaEmbeddingProvider()
+        storage = self.repository.catalog
+        self._binding_read_only = self.read_only or bool(storage is not None
+            and storage.is_published(self.repository.generation_id)
+            and storage.provider_for_generation(self.repository.generation_id) != self.provider_id)
+        self.repository.read_only = self._binding_read_only
+        if not self.repository.read_only:
+            self.repository.ensure_schema()
+        if storage is not None:
+            self._indexing = storage.indexing_pending(self.repository.generation_id)
+        self._load_embedding_space(claim=not self._binding_read_only)
+
+    def _load_embedding_space(self, *, claim: bool = False) -> None:
+        repo = self.repository
+        if claim and repo.writable:
+            with repo.write_transaction():
+                previous_space = read_space(repo.database.connection())
+                self._bound_space = claim_empty_space(repo.database.connection(), self.migration_identity)
+                if self._bound_space is not None and self._bound_space.profile == self.migration_identity:
+                    configuration = embedding_configuration(self.embedding_provider)
+                    if configuration is not None:
+                        repo.database.execute_sql("INSERT OR REPLACE INTO memory_embedding_configuration VALUES (1,?)",
+                            (json.dumps(configuration, sort_keys=True),))
+                if previous_space is None and self._bound_space is not None:
+                    for row in repo.list_projection_rows():
+                        repo.queue_embedding(document_id=row["document_id"], source_text=str(row.get("search_text") or ""),
+                            space_profile=self.migration_identity, **self.profile)
+        else:
+            self._bound_space = read_space(repo.database.connection())
+        self._catalog_space_matches = True
+        storage = repo.catalog
+        if storage is not None and storage.is_published(repo.generation_id):
+            profile = storage.generation_profile(repo.generation_id)
+            if (claim and self._bound_space is not None and self._bound_space.profile == self.migration_identity
+                    and not profile):
+                profile = storage.claim_generation_profile(repo.generation_id, self.provider_id, self.migration_identity)
+            self._catalog_space_matches = bool(self._bound_space is not None
+                and storage.provider_for_generation(repo.generation_id) == self.provider_id
+                and profile == self._bound_space.profile)
+        self._sync_embedding_access()
+
+    def _sync_embedding_access(self) -> None:
+        access = embedding_access(self._bound_space is not None and self._catalog_space_matches,
+            self._bound_space is not None and self._bound_space.profile == self.migration_identity,
+            not self._binding_read_only)
+        self.read_only = access is not EmbeddingAccess.WRITE
+        self._vector_reads = access is not EmbeddingAccess.BLOCKED
+
+    @property
+    def indexes_writable(self) -> bool:
+        return self._vector_reads and not self.read_only and self.repository.writable
 
     @property
     def module_id(self) -> str:
         return f"l3.{self.provider_id}"
+
+    @property
+    def generation_port(self) -> SqliteGenerationPort | None:
+        return self if self.repository.catalog is not None else None
+
+    @property
+    def storage(self) -> MemoryStorage:
+        if self.repository.catalog is None:
+            raise RuntimeError("Backend has no managed generation catalog")
+        return self.repository.catalog
+
+    @property
+    def profile(self) -> dict[str, str | None]:
+        return {"provider_id": self._embedding_provider_id(), "model_name": self._embedding_model_name(),
+                **self._embedding_profile()}
+
+    @property
+    def migration_identity(self) -> dict[str, str | None]:
+        return {**self.profile, "configuration_fingerprint":
+                self.embedding_provider.configuration_fingerprint if self.embedding_provider is not None else "unavailable"}
+
+    def prepare_generation(self, repository: MemoryDurableRepository, documents=None) -> None:
+        if repository.catalog is not None and repository.catalog.is_published(repository.generation_id):
+            raise RuntimeError("Embedding preparation requires an unpublished generation")
+        with repository.write_transaction():
+            if documents is not None:
+                space = read_space(repository.database.connection())
+                if space is None or space.profile != self.migration_identity:
+                    raise RuntimeError("Candidate embedding identity changed during migration")
+            if documents is None:
+                repository.Vector.delete().execute()
+                repository.Embedding.delete().execute()
+                # Vector indexes belong to one embedding space and generation.
+                indexes = repository.database.execute_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name GLOB 'memory_vec_idx_*' AND sql LIKE '%USING vec0%'").fetchall()
+                if indexes:
+                    status = ensure_sqlite_vec_loaded(repository.database)
+                    if not status.available:
+                        raise RuntimeError(f"Cannot discard source vector indexes: {status.detail}")
+                # Dropping the virtual table also removes its shadow tables.
+                for (name,) in indexes:
+                    if name.replace("_", "").isalnum():
+                        repository.database.execute_sql(f'DROP TABLE "{name}"')
+                reset_empty_space(repository.database.connection(), self.migration_identity)
+                repository.database.execute_sql("DELETE FROM memory_embedding_configuration")
+                configuration = embedding_configuration(self.embedding_provider)
+                if configuration is not None:
+                    repository.database.execute_sql("INSERT INTO memory_embedding_configuration VALUES (1,?)",
+                        (json.dumps(configuration, sort_keys=True),))
+                repository.rebuild_fts_indexes()
+                documents = [row["document_id"] for row in repository.list_projection_rows()]
+            for document_id in documents:
+                repository.sync_fts_row(document_id)
+                document = repository.get_document(document_id)
+                if document is not None:
+                    repository.queue_embedding(document_id=document_id,
+                        source_text=str(document.get("search_text") or ""), space_profile=self.migration_identity, **self.profile)
+                else:
+                    ids = [row.embedding_id for row in repository.Embedding.select().where(
+                        repository.Embedding.document_id == document_id)]
+                    repository.Vector.delete().where(repository.Vector.embedding_id.in_(ids)).execute()
+                    repository.Embedding.delete().where(repository.Embedding.document_id == document_id).execute()
+        if repository is self.repository:
+            self._load_embedding_space()
+
+    def bind_generation(self, generation_id: str) -> None:
+        with self._generation_lock:
+            storage = self.repository.catalog
+            if storage is None or storage.current() != generation_id or storage.active_provider_id() != self.provider_id:
+                raise RuntimeError("Backend cannot bind an uncommitted memory generation")
+            if storage.generation_profile(generation_id) != self.migration_identity:
+                raise RuntimeError("Backend embedding identity differs from the committed generation")
+            if not self.generation_is_bound(generation_id):
+                self._replace_repository(storage.open(generation_id), read_only=False)
+            self._close_retired_repositories()
+
+    def generation_is_bound(self, generation_id: str) -> bool:
+        with self._generation_lock:
+            return (self.repository.generation_id == generation_id and not self.read_only
+                    and not self._binding_read_only and self._catalog_space_matches
+                    and self._bound_space is not None
+                    and self._bound_space.profile == self.migration_identity)
+
+    def _replace_repository(self, repository: MemoryDurableRepository, *, read_only: bool) -> None:
+        # Prepare every binding-dependent field privately. A load/validation
+        # failure cannot publish a partially initialized repository to callers.
+        try:
+            prepared = replace(self, repository=repository, read_only=read_only)
+            if not read_only and prepared.read_only:
+                raise RuntimeError("Published database embedding identity differs from its catalog")
+        except BaseException:
+            self._retired_repositories.append(repository)
+            self._close_retired_repositories()
+            raise
+        self._retired_repositories.append(self.repository)
+        self.repository = prepared.repository
+        self.read_only = prepared.read_only
+        self._binding_read_only = prepared._binding_read_only
+        self._indexing = prepared._indexing
+        self._vector_reads = prepared._vector_reads
+        self._bound_space = prepared._bound_space
+        self._catalog_space_matches = prepared._catalog_space_matches
+
+    def _close_retired_repositories(self) -> None:
+        failures = []
+        for repository in tuple(self._retired_repositories):
+            try:
+                repository.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                self._retired_repositories.remove(repository)
+        if failures:
+            raise ExceptionGroup("Retired memory repositories could not be closed", failures)
+
+    def close(self) -> None:
+        with self._generation_lock:
+            self.mounted = False
+            if self.repository not in self._retired_repositories:
+                self._retired_repositories.append(self.repository)
+            self._close_retired_repositories()
+
+    def retire_generation(self, generation_id: str) -> None:
+        with self._generation_lock:
+            if self.repository.generation_id == generation_id:
+                self._binding_read_only = True
+                self.read_only = True
+                self.repository.read_only = True
+
+    def index_generation(self, generation_id: str, *, limit: int) -> dict[str, object]:
+        with self._generation_lock:
+            if self.repository.generation_id != generation_id or self.repository.catalog.current() != generation_id:
+                raise RuntimeError("Memory indexing generation was superseded")
+            result = self.refresh_indexes(limit=limit, retry_failed=True)
+            return {**result, "pending": self.repository.inventory()["retryable_embeddings"]}
+
+    def finish_indexing(self, generation_id: str) -> None:
+        with self._generation_lock:
+            if self.repository.generation_id == generation_id:
+                self._indexing = False
 
     def iter_providers(self) -> list["SQLiteVecL3Plugin"]:
         return [self]
@@ -211,21 +424,26 @@ class SQLiteVecL3Plugin:
     def resolve_provider_label(self, provider: "SQLiteVecL3Plugin") -> str:
         return provider.provider_id
 
+    @_generation_operation
     def inspect_summary(self) -> dict[str, Any]:
         """Passive hub facts: never probe embedding transport for a summary."""
         return {**self.repository.inventory(), "mounted": self.mounted,
-                "read_only": bool(getattr(self.repository, "read_only", False)),
+                "read_only": self.read_only, "embedding_space_matches": self._vector_reads,
                 "embedding_configured": self.embedding_provider is not None,
                 "last_embedding_error": self.last_embedding_error}
 
+    @_generation_operation
     def inspect(self) -> dict[str, Any]:
         sqlite_vec_status = ensure_sqlite_vec_loaded(self.repository.database)
         inventory = self.repository.inventory()
-        provider_health = self._embedding_health()
+        provider_health = (self._embedding_health() if self._vector_reads else
+                           {"healthy": False, "detail": "Embedding identity differs or is unknown; migrate this generation"})
         inventory.update(
             {
                 "provider_id": self.provider_id,
                 "mounted": self.mounted,
+                "read_only": self.read_only,
+                "embedding_space_matches": self._vector_reads,
                 "vector_backend": "sqlite-vec" if sqlite_vec_status.available else "python-fallback",
                 "vector_backend_detail": sqlite_vec_status.detail,
                 "embedding_provider_id": self._embedding_provider_id(),
@@ -387,11 +605,14 @@ class SQLiteVecL3Plugin:
         )
         return _provider_mutation_result("delete", result)
 
+    @_generation_operation
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         if not self.mounted and self.repository.catalog is not None:
-            self.repository = self.repository.catalog.open(
-                self.repository.generation_id if self.read_only else None, read_only=self.read_only)
+            self._replace_repository(self.repository.catalog.open(
+                self.repository.generation_id if self._binding_read_only else None,
+                read_only=self._binding_read_only), read_only=self._binding_read_only)
+        self._close_retired_repositories()
         self.mounted = True
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -400,12 +621,12 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
+    @_generation_operation
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         if self.repository.frozen:
             return IntrospectionResult(status="unavailable", text="memory maintenance owns the connection", llm_text="memory maintenance owns the connection")
-        self.mounted = False
-        self.repository.close()
+        self.close()
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="memory provider detached",
@@ -425,14 +646,17 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("L3 provider indexes refreshed", payload),
         )
 
+    @_generation_operation
     def commit_batch(self, request: L3BatchCommitRequest) -> L3BatchCommitResult:
         from pal.memory.mutations import commit_batch
         return commit_batch(self, request)
 
+    @_generation_operation
     def commit(self, request: L3CommitRequest) -> L3MutationResult:
         from pal.memory.mutations import commit
         return commit(self, request)
 
+    @_generation_operation
     def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:
         document_ids, reused = [], []
         for entry in entries:
@@ -455,12 +679,14 @@ class SQLiteVecL3Plugin:
         return L3RetireResult(status="ok", document_ids=document_ids, reused_document_ids=reused,
                               metadata={"retired": len(document_ids), "reused": len(reused)})
 
+    @_generation_operation
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:
         from pal.memory.mutations import correct
         return correct(self, request)
 
+    @_generation_operation
     def delete(self, request: L3DeleteRequest) -> L3MutationResult:
-        if not self.mounted or self.read_only or self.repository.frozen:
+        if not self.mounted or self.read_only or not self.repository.writable:
             return L3MutationResult(status="unavailable", document_id=request.document_id)
         document_id = str(request.document_id or "").strip()
         if not document_id:
@@ -518,6 +744,7 @@ class SQLiteVecL3Plugin:
             metadata.update(lookup_status="superseded" if successors else "retired", successors=successors)
         return L3RecallResult(metadata=metadata)
 
+    @_generation_operation
     def recall(self, query: MemoryQuery) -> L3RecallResult:
         if query.mem_ref:
             return self._recall_exact(query)
@@ -529,7 +756,7 @@ class SQLiteVecL3Plugin:
                 "vector_available": True,
                 "read_only": True,
             }
-            if self.read_only
+            if not self.indexes_writable or self._indexing
             else self.refresh_indexes(limit=min(max(query.limit, 1), 8))
         )
         candidate_limit = max(query.limit * 4, 16)
@@ -540,8 +767,10 @@ class SQLiteVecL3Plugin:
         )
         topic_candidates = self.repository.list_topic_candidates(query.topic_scope, limit=candidate_limit)
         vector_query_text = _stable_document_search_text(search_text, " ".join(query.topic_scope) if query.topic_scope else "")
-        embedding_health = self._embedding_health() if vector_query_text else {"healthy": True}
-        vector_candidates = self._vector_candidates(vector_query_text, limit=candidate_limit)
+        embedding_health = ({"healthy": False, "detail": "generation index is rebuilding or its embedding identity differs"}
+                            if self._indexing or not self._vector_reads
+                            else self._embedding_health() if vector_query_text else {"healthy": True})
+        vector_candidates = {} if self._indexing or not self._vector_reads else self._vector_candidates(vector_query_text, limit=candidate_limit)
         candidate_ids = set(lexical_candidates) | set(topic_candidates) | set(vector_candidates)
         hits = []
         scored_hits = []
@@ -635,19 +864,17 @@ class SQLiteVecL3Plugin:
             },
         )
 
+    @_generation_operation
     def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, Any]:
-        if self.read_only or self.repository.frozen or not self.mounted:
-            return {"refreshed": 0, "read_only": True, "vector_available": True}
+        if not self.indexes_writable or not self.mounted:
+            return {"refreshed": 0, "read_only": True, "vector_available": self._vector_reads,
+                    "detail": "embedding-space-mismatch; migrate this generation" if not self._vector_reads else "read-only"}
         if self.embedding_provider is None:
             return {"refreshed": 0, "vector_available": False, "detail": "embedding-provider-unavailable"}
         active_provider_id = self._embedding_provider_id()
         active_model_name = self._embedding_model_name()
-        with self.repository.write_lock:
-            if self.repository.frozen:
-                return {"refreshed": 0, "read_only": True}
-            with self.repository.write_transaction():
-                retargeted = self.repository.retarget_embeddings(
-                    provider_id=active_provider_id, model_name=active_model_name, **self._embedding_profile())
+        identity = self.migration_identity
+        provider = self.embedding_provider
         refreshed = 0
         failed_retried = 0
         failed_again = 0
@@ -662,14 +889,22 @@ class SQLiteVecL3Plugin:
             pending.append((metadata, document))
             source_texts.append(str(document.get("search_text") or ""))
         try:
-            vectors = self.embedding_provider.embed_documents(source_texts) if source_texts else []
+            vectors = provider.embed_documents(source_texts) if source_texts else []
             if source_texts and len(vectors) != len(source_texts):
                 raise RuntimeError("embedding provider returned mismatched batch size")
+            space = read_space(self.repository.database.connection())
+            dimension = space.dimension if space is not None else None
+            for vector in vectors:
+                if (space is None or not accepts_vector(space.profile == identity == self.migration_identity, dimension, len(vector))
+                        or not all(math.isfinite(value) for value in vector)):
+                    raise RuntimeError("Embedding response changed identity or vector dimension; migrate embedding space first")
+                dimension = len(vector)
             self.last_embedding_error = ""
         except Exception as exc:
             self.last_embedding_error = exception_reason(exc)
+            self._sync_embedding_access()
             with self.repository.write_lock:
-                if not self.repository.frozen:
+                if self.indexes_writable:
                     with self.repository.write_transaction():
                         for metadata, document in pending:
                             current = self.repository.get_embedding(metadata.embedding_id)
@@ -685,7 +920,6 @@ class SQLiteVecL3Plugin:
                 "retry_failed": retry_failed,
                 "failed_retried": failed_retried,
                 "failed_again": failed_again,
-                "retargeted": retargeted,
                 "embedding_provider_id": active_provider_id,
                 "embedding_model": active_model_name,
                 "last_embedding_error": self.last_embedding_error,
@@ -708,9 +942,11 @@ class SQLiteVecL3Plugin:
                     continue
                 if self._embedding_provider_id() != metadata.provider_id or self._embedding_model_name() != metadata.model_name:
                     continue
+                if self.migration_identity != identity:
+                    raise RuntimeError("Embedding identity changed while indexing; response was discarded")
                 with self.repository.write_transaction():
                     self.repository.upsert_vector_blob(embedding_id=metadata.embedding_id,
-                        vector_blob=serialize_vector(vector), dimension=len(vector))
+                        vector_blob=serialize_vector(vector), dimension=len(vector), profile=identity)
                     self.repository.mark_embedding_ready(embedding_id=metadata.embedding_id,
                         norm=math.sqrt(sum(value * value for value in vector)))
                 refreshed += 1
@@ -722,7 +958,6 @@ class SQLiteVecL3Plugin:
             "retry_failed": retry_failed,
             "failed_retried": failed_retried,
             "failed_again": failed_again,
-            "retargeted": retargeted,
             "embedding_provider_id": active_provider_id,
             "embedding_model": active_model_name,
             "last_embedding_error": self.last_embedding_error,
@@ -735,6 +970,7 @@ class SQLiteVecL3Plugin:
         self.repository.queue_embedding(
             document_id=document_id,
             source_text=str(document.get("search_text") or ""),
+            space_profile=self.migration_identity,
             provider_id=self._embedding_provider_id(),
             model_name=self._embedding_model_name(),
             index_status="stale" if stale else "pending",
@@ -761,10 +997,16 @@ class SQLiteVecL3Plugin:
         )
 
     def _vector_candidates(self, search_text: str, *, limit: int) -> dict[str, float]:
-        if not search_text or self.embedding_provider is None:
+        self._sync_embedding_access()
+        if not search_text or self.embedding_provider is None or not self._vector_reads:
             return {}
+        identity = self.migration_identity
         try:
             query_vector = self.embedding_provider.embed_query(search_text)
+            space = read_space(self.repository.database.connection())
+            if (space is None or not accepts_vector(space.profile == identity == self.migration_identity,
+                    space.dimension, len(query_vector)) or not all(math.isfinite(value) for value in query_vector)):
+                raise RuntimeError("Query vector differs from this generation's embedding space")
             self.last_embedding_error = ""
         except Exception as exc:
             self.last_embedding_error = exception_reason(exc)

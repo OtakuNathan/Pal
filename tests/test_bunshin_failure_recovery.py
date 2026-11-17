@@ -14,7 +14,8 @@ from pal.bunshin import worker_main
 from pal.bunshin.checkpoint import AgentSessionCheckpointError
 from pal.bunshin.runner_components.models import _BunshinCooperativeCancel, _BunshinCooperativeRestart
 from pal.bunshin.runner_components.reporter import Reporter
-from pal.bunshin.runner_components.runtime_build import close_role_runtime
+from pal.bunshin.runner_components.runtime_build import RuntimeCleanup
+from pal.bunshin.runner_components.memory_runtime import RoleMemoryRuntime
 from pal.bunshin.semantic_orchestration.worker_results import _worker_terminal_failure
 from pal.execution.runtime import ExecutionRuntime
 from pal.llm import generation_result_from_values
@@ -269,7 +270,7 @@ def test_worker_wire_preserves_primary_terminal_when_cleanup_fails(tmp_path, fai
 
 
 @pytest.mark.parametrize("other_resources_fail", [False, True])
-def test_memory_close_failure_still_closes_remaining_runtime_resources(other_resources_fail):
+def test_memory_close_failure_still_closes_remaining_runtime_resources(other_resources_fail, tmp_path):
     async def scenario():
         memory_error = OSError("memory close failed")
         errors = {
@@ -290,18 +291,19 @@ def test_memory_close_failure_still_closes_remaining_runtime_resources(other_res
         async def close_async_module():
             close_resource("async_module")
 
-        context = SimpleNamespace(module_registry=SimpleNamespace(modules={
-            "async": SimpleNamespace(shutdown_async=close_async_module),
-            "sync": SimpleNamespace(shutdown_sync=lambda: close_resource("sync_module")),
+        from pal.foundation.lifecycle_gate import WriterPreferredRWGate
+        context = SimpleNamespace(execution_runtime=SimpleNamespace(lifecycle_gate=WriterPreferredRWGate()), module_registry=SimpleNamespace(modules={
+            "async": SimpleNamespace(shutdown_async=close_async_module, shutdown_sync=None),
+            "sync": SimpleNamespace(shutdown_sync=lambda: close_resource("sync_module"), shutdown_async=None),
         }))
         with pytest.raises(ExceptionGroup) as caught:
-            await close_role_runtime(
-                memory_repository_args={"repository": object()},
-                l3_plugin=SimpleNamespace(repository=SimpleNamespace(close=lambda: close_resource("memory"))),
+            await RuntimeCleanup(
+                role_memory=RoleMemoryRuntime(
+                    provider=SimpleNamespace(close=lambda: close_resource("memory"))),
                 llm_runtime=SimpleNamespace(close=lambda: close_resource("llm")),
                 context=context,
                 database=SimpleNamespace(close=lambda: close_resource("database")),
-            )
+            ).close()
 
         assert sorted(closed) == ["async_module", "database", "llm", "memory", "sync_module"]
         assert caught.value.exceptions == tuple(errors.values())

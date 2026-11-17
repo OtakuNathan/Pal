@@ -53,7 +53,7 @@ class BtwTurnExecutor(TurnExecutor):
     async def execute_turn_effect_async(self, continuation, effect):
         if isinstance(effect, LLMPreflightEffect):
             self._ensure_not_interrupted(continuation)
-            await self._ensure_l1_turn_async(continuation, effect.assembly_context)
+            self._begin_l1_turn(continuation, effect.assembly_context)
             prompt = self.build_turn_prompt(
                 continuation, effect.assembly_context,
                 max_output_tokens=effect.max_output_tokens,
@@ -87,7 +87,7 @@ class BtwTurnExecutor(TurnExecutor):
         output = self._agent_output_port()
         if output is not None and continuation.delivery_binding is not None:
             await self._call_output_port_async(
-                output, "queue_status", continuation.delivery_binding, "llm_waiting",
+                output.queue_status, continuation.delivery_binding, "llm_waiting",
                 payload={"elapsed_seconds": elapsed_seconds,
                          "text": f"Side question is still processing · {int(elapsed_seconds)}s elapsed."},
             )

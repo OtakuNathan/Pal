@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pal.failure.contracts import FailureDraft
+from pal.failure.contracts import FailureDraft, FailureUserFeedback
 from pal.foundation.diagnostics import diagnostic_reason, diagnostic_text, public_diagnostics
 
 
@@ -100,3 +100,12 @@ def _project_diagnostic_value(value: Any) -> Any:
     failures and false/zero status values are all evidence for the verdict.
     """
     return public_diagnostics(value)
+
+
+def render_failure_feedback_text(feedback: FailureUserFeedback) -> str:
+    parts = [feedback.summary.strip()]
+    if feedback.blocker.strip():
+        parts.append(f"Blocker: {feedback.blocker.strip()}")
+    if feedback.next_step.strip():
+        parts.append(f"Next step: {feedback.next_step.strip()}")
+    return "\n".join(part for part in parts if part)

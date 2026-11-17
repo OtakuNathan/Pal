@@ -19,11 +19,16 @@ from pal.shared import IntrospectionResult
 
 class Embeddings:
     provider_id = "fixture"
+    transport = "fixture"
     text_processing_version = "search_text_v1"
 
     def __init__(self, config):
         self.model_name = config.embedding_ollama_model_name
         self.model_revision = config.embedding_model_revision or None
+
+    @property
+    def configuration_fingerprint(self):
+        return f"fixture:{self.model_name}:{self.model_revision}"
 
     def embed_documents(self, texts):
         return [[1.0, 0.0] if self.model_name == "old" else [0.0, 1.0] for text in texts]
@@ -109,7 +114,7 @@ def test_cli_parser_routes_backend_and_embedding_commands():
     assert parser.parse_args(["memory", "embedding", "resume"]).embedding_command == "resume"
 
 
-def test_resident_controls_select_real_provider_and_reject_busy_mutation(tmp_path):
+def test_resident_controls_reject_unmanaged_swap_and_busy_mutation(tmp_path):
     from pal.memory.service import MemoryService
     from pal.plugins.l3.stubs import MockL3Plugin
     core = build_core()
@@ -118,10 +123,10 @@ def test_resident_controls_select_real_provider_and_reject_busy_mutation(tmp_pat
     register_memory(core.context, memory)
     provider = MockL3Plugin(provider_id="fixture")
     memory.register_l3_provider(provider)
-    owner = MemoryBackendOwner(core, memory)
+    owner = MemoryBackendOwner(core.context, memory)
     try:
-        selected = asyncio.run(owner.dispatch("select", {"name": "fixture"}))
-        assert selected["selection_scope"] == "until_restart"
+        with pytest.raises(ValueError, match="managed generation migration"):
+            asyncio.run(owner.dispatch("swap", {"name": "fixture"}))
         assert memory.l3_selector.active_provider_id == "fixture"
         core.memory_maintenance_busy = lambda: True
         with pytest.raises(RuntimeError, match="busy"):
@@ -174,14 +179,14 @@ def test_live_memory_cli_uses_resident_owner_and_refuses_offline_migration(store
         memory = MemoryService()
         register_memory(core.context, memory)
         memory.register_l3_provider(MockL3Plugin(provider_id="fixture"))
-        service = CoreConfigurationService(root, None, memory_owner=MemoryBackendOwner(core, memory))
+        service = CoreConfigurationService(root, core.context.execution_runtime.lifecycle_gate, core.context.configuration_operations)
         parser = _build_parser()
         def parse(*args):
             return parser.parse_args(["memory", *args, "--runtime-root", str(root), "--json"])
         with runtime_lease(root):
             await service.start_async()
             try:
-                assert await run_memory_cli_async(parse("select", "fixture")) == 0
+                assert await run_memory_cli_async(parse("providers")) == 0
                 result = json.loads(capsys.readouterr().out)
                 assert result["activation"] == "live"
                 assert memory.l3_selector.active_provider_id == "fixture"
@@ -189,7 +194,7 @@ def test_live_memory_cli_uses_resident_owner_and_refuses_offline_migration(store
                 assert "Stop Pal" in json.loads(capsys.readouterr().out)["error"]
                 assert not migration.journal_path(root).exists()
                 await service.stop_async()
-                assert await run_memory_cli_async(parse("select", "fixture")) == 2
+                assert await run_memory_cli_async(parse("providers")) == 2
                 assert json.loads(capsys.readouterr().out)["outcome"] == "unknown"
             finally:
                 await service.stop_async()

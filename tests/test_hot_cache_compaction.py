@@ -1,15 +1,16 @@
 from tests.core_factory import build_core
+from tests.cache_reminder_factory import attach_cache_reminder
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from pal.core.cache_warm_deadline import CacheWarmDeadlineManager
+from pal.cache_reminder.cache_warm_deadline import CacheWarmDeadlineManager
 from pal.core.runtime import PalCore
 from pal.llm import generation_result_from_values
 from pal.llm.ir import LLMFinishReason
-from tests.test_cache_warm_deadline import _ControlledSleep, _Settings, _route, _snapshot
+from tests.test_cache_warm_deadline import _ControlledTimers, _Settings, _route, _snapshot
 from tests.test_runtime_compaction import _ScriptedLLM, _attach_hot_cache, _memory_with_turns, _valid_pal_payload
 
 
@@ -18,10 +19,10 @@ async def discard(notice):
 
 
 def manager_for(snapshot, *, busy=lambda: False):
-    sleep = _ControlledSleep()
+    sleep = _ControlledTimers()
     manager = CacheWarmDeadlineManager(
         cache_snapshot=lambda: snapshot, settings_provider=lambda: _Settings(),
-        has_active_turn=busy, deliver_notice=discard, expire_notice=discard, sleep=sleep,
+        has_active_turn=busy, deliver_notice=discard, expire_notice=discard, timers=sleep,
     )
     return manager, sleep
 
@@ -32,11 +33,11 @@ def test_timer_restarts_full_idle_interval_after_interaction():
         manager, sleep = manager_for(live)
         assert manager.schedule_after_turn_commit(route=_route(), turn_id='one')
         await asyncio.sleep(0)
-        assert sleep.calls == [60]
+        assert sleep.calls == [60, 90]
         await manager.clear_for_user_activity()
         assert manager.schedule_after_turn_commit(route=_route(), turn_id='two')
         await asyncio.sleep(0)
-        assert sleep.calls == [60, 60]
+        assert sleep.calls == [60, 90, 60, 90]
         manager.close()
     asyncio.run(scenario())
 
@@ -61,7 +62,7 @@ def test_claim_rechecks_lifetime_and_does_not_consume_invalid_notice(invalid):
         await asyncio.sleep(0)
         await sleep.release(0)
         if invalid == 'expired_notice':
-            manager._active_notice = replace(manager._active_notice, expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+            manager._active_notice = replace(manager._active_notice, expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)))
         elif invalid == 'expired_cache':
             live['anchor_remaining_ttl_seconds'] = 0
         elif invalid == 'epoch_changed':
@@ -87,7 +88,10 @@ def hot_executor(llm):
 def compact(executor, service):
     return asyncio.run(executor.compaction.run(
         service, target_input_budget=8192, reserved_output_tokens=2048,
-        cache_epoch='epoch-a', max_attempts=3,
+        replay_guard=lambda: bool(executor.llm.current.prompt_cache_warm_deadline_snapshot().get('eligible')
+            and executor.llm.current.prompt_cache_warm_deadline_snapshot().get('anchor_epoch') == 'epoch-a'
+            and executor.llm.current.prompt_cache_warm_deadline_snapshot().get('anchor_remaining_ttl_seconds', 0) > 0),
+        max_attempts=3,
     ))
 
 
@@ -170,12 +174,14 @@ def test_busy_core_does_not_claim_compact_reminder():
 
     core = build_core()
     core.turn_manager.latest_active_turn_id = Mock(return_value='busy')
-    core.cache_warm_deadline.claim_compaction = Mock()
+    manager = attach_cache_reminder(core)
+    manager.claim_compaction = Mock()
     core._complete_compact_reply_async = AsyncMock()
     action = ControlAction(
-        action_kind='compact_memory', target_scope='memory', route=_route(),
+        action_kind='cache_warm_deadline_compact', target_scope='cache_reminder', route=_route(),
         args={'cache_epoch': 'epoch-a'},
     )
-    asyncio.run(core._handle_compact_memory_async(action))
-    core.cache_warm_deadline.claim_compaction.assert_not_called()
-    core._complete_compact_reply_async.assert_awaited_once()
+    core._deliver_control_delivery_async = AsyncMock(return_value=True)
+    asyncio.run(core.handle_control_action_async(action))
+    manager.claim_compaction.assert_not_called()
+    core._deliver_control_delivery_async.assert_awaited_once()

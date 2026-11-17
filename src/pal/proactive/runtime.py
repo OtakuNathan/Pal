@@ -222,6 +222,7 @@ class ProactiveManager(ProactiveManagerPort):
         self.schedule_engine.unregister(proactive_id)
         if removed is not None or deleted:
             self._notify_change()
+            self._notify_ready()
         return removed is not None or deleted
 
     def set_enabled(self, proactive_id: str, enabled: bool) -> ProactiveDefinition | None:

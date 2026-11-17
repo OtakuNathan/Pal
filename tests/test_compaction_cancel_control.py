@@ -178,7 +178,12 @@ def test_x07_refresh_revokes_live_ticket_before_switch(tmp_path):
         assert ticket.phase == CompactionPhase.GENERATING
 
         # The user switches endpoint/settings mid warm-generate.
-        await core._handle_refresh_llm_endpoint_async(_action("refresh_llm_endpoint"))
+        from pal.core.capabilities import register_with_core
+        from pal.llm.control import LLMControl
+        from tests.test_control_plane import _FakeLLMRuntime, _FakeSettingsRepository
+        register_with_core(core)
+        llm_control = LLMControl(core.context, _FakeLLMRuntime(_FakeSettingsRepository()), lambda: "")
+        await llm_control.refresh(_action("refresh_llm_endpoint"))
 
         revoked = core.state.compaction_tickets[RESIDENT_COMPACTION_SCOPE]
         assert revoked.op_id == ticket.op_id

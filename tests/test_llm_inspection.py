@@ -1,3 +1,5 @@
+
+from pal.failure.tools import select_failure_descriptors
 """Pending batch: one passive, parameterless LLM snapshot and an active label."""
 from tests.core_factory import build_core
 from types import SimpleNamespace
@@ -131,7 +133,7 @@ def test_only_new_parameterless_tool_is_exposed_and_old_aliases_are_withdrawn(ru
         generation = execution.registry_generation
         names = {name for name, record in generation.search_records.items() if record['module_id'] == 'llm'}
         assert names == {'inspect_llm'}
-        recovery = ToolSurface(core.context).select_failure_descriptors(SimpleNamespace(subsystem='llm'))
+        recovery = select_failure_descriptors(core.context, SimpleNamespace(subsystem='llm'))
         assert {item.name for item in recovery} == {'read_tool', 'inspect_llm'}
         assert not names.intersection(generation.direct_aliases)
         contract = generation.search_records['inspect_llm']['input_contract']

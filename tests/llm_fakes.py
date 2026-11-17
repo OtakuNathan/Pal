@@ -17,6 +17,15 @@ class NonStreamingLLM:
     def release_context(self, context_id):
         pass
 
+    def end_prompt_cache_turn(self, turn_id):
+        pass
+
+    def prompt_cache_reminder_snapshot(self):
+        return {}
+
+    def prompt_cache_warm_deadline_snapshot(self):
+        return {}
+
     def supports_streaming(self, request=None):
         return False
 
@@ -27,6 +36,17 @@ class NonStreamingLLM:
 
     def _endpoint_facts(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None):
         return {"supports_streaming": self.supports_streaming()}
+
+    def snapshot_turn_settings(self):
+        from pal.llm.contracts import LLMTurnSettings
+        return LLMTurnSettings()
+
+    def resolve_output_budget(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None, requested=None):
+        limit = self.resolve_max_output_tokens(preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source)
+        if requested is not None:
+            return min(requested, limit) if limit is not None else requested
+        return limit if limit is not None else 4096
 
     def resolve_max_output_tokens(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None):
         return None

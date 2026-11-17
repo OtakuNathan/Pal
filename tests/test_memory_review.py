@@ -1,8 +1,8 @@
 from tests.compaction_composition import execute_compaction
-from tests.core_factory import build_context
+from tests.core_factory import build_context, build_core
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -54,7 +54,7 @@ def test_replayed_proposal_checks_owner_before_returning_draft(setup_review):
 
 
 def test_review_entry_opens_preview_and_advances_to_next_pending_candidate(setup_review):
-    from pal.control import ControlPlane
+    from tests.control_factory import build_control_plane
     reviews, _, _ = setup_review
     state = stage(reviews, candidates=[FACT, {**FACT, "title": "Second"}])
     spec = reviews.delivery(state, ROUTE, opening=True).interaction
@@ -73,7 +73,7 @@ def test_review_entry_opens_preview_and_advances_to_next_pending_candidate(setup
     assert next_button.action_args["args"]["candidate_id"] == "c2"
     resumed = reviews.get(state["batch_id"], ROUTE, resume=True)
     assert reviews.delivery(resumed, ROUTE).interaction.items[0].item_id == "c2"
-    panel = ControlPlane().list_panel_commands()
+    panel = build_control_plane().list_panel_commands()
     assert any(item.name == "memory_review" and item.panel_button and item.panel_label == "Memory proposals" for item in panel)
 
 
@@ -278,21 +278,24 @@ def test_registered_commit_capability_is_reached_only_after_final_action(setup_r
     from pal.memory.capabilities import register_with_core
     reviews, provider, _ = setup_review
     context = build_context()
+    core = build_core(context=context)
+    from pal.core.capabilities import register_with_core as register_core
+    register_core(core)
+    core._deliver_control_delivery_async = AsyncMock(return_value=True)
     handle = register_with_core(context, reviews.memory)
     context.execution_runtime.hydrate_module_handle(handle)
     context.execution_runtime.mount_subtree(handle)
-    handler = handle.control_action_handlers["memory_candidate_decision"]
     state = stage(reviews)
     async def run():
-        accepted = await handler(ControlAction("memory_candidate_decision", "memory",
+        await core.handle_control_action_async(ControlAction("memory_candidate_decision", "memory",
             target_id=state["batch_id"], route=ROUTE,
             args={"decision": "accept", "candidate_id": "c1", "revision": state["revision"]}))
         assert provider.repository.list_projection_rows() == []
-        button = accepted["delivery"].interaction.buttons[0][0]
+        button = core._deliver_control_delivery_async.await_args.args[0].interaction.buttons[0][0]
         args = button.action_args["args"]
-        result = await handler(ControlAction("memory_candidate_decision", "memory",
+        await core.handle_control_action_async(ControlAction("memory_candidate_decision", "memory",
             target_id=state["batch_id"], route=ROUTE, args=args))
-        assert result["delivery"].delivery_kind == "interactive_resolve"
+        assert core._deliver_control_delivery_async.await_args.args[0].delivery_kind == "interactive_resolve"
         assert len(provider.repository.list_projection_rows()) == 1
     asyncio.run(run())
 
@@ -304,16 +307,19 @@ def test_sequential_handler_edits_only_current_candidate_then_returns_to_it(setu
     from pal.memory.capabilities import register_with_core
     reviews, provider, _ = setup_review
     context = build_context()
+    core = build_core(context=context)
+    from pal.core.capabilities import register_with_core as register_core
+    register_core(core)
+    core._deliver_control_delivery_async = AsyncMock(return_value=True)
     handle = register_with_core(context, service=reviews.memory)
     context.execution_runtime.mount_subtree(handle)
-    handler = handle.control_action_handlers["memory_candidate_decision"]
     state = stage(reviews, candidates=[FACT, {**FACT, "title": "Second"}])
 
     async def click(button, **extra):
         args = {**button.action_args["args"], **extra}
-        result = await handler(ControlAction("memory_candidate_decision", "memory",
+        await core.handle_control_action_async(ControlAction("memory_candidate_decision", "memory",
             target_id=state["batch_id"], route=ROUTE, args=args))
-        return result["delivery"].interaction
+        return core._deliver_control_delivery_async.await_args.args[0].interaction
 
     async def run():
         card = reviews.delivery(state, ROUTE).interaction

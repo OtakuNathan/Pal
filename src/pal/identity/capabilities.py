@@ -72,8 +72,19 @@ def register_with_core(context: MainContext, service: IdentityService) -> Module
     service.refresh_projection()
     provider = IdentityIntrospectionProvider(service=service)
     prompt_provider = IdentityPromptFragmentProvider(service=service)
+    async def inspect_configuration(params):
+        return configuration_snapshot(service, params)
+
+    async def refresh_configuration(params):
+        if params:
+            raise ValueError("refresh takes no arguments")
+        service.refresh_projection()
+        return configuration_snapshot(service, {})
+
     handle = ModuleHandle(
         module_id="identity",
+        configuration_handlers={"identity.inspect": inspect_configuration,
+                                "identity.refresh": refresh_configuration},
         tier=MODULE_TIER_CORE_FOUNDATION,
         detachable=False,
         introspection_provider=provider,
@@ -83,3 +94,14 @@ def register_with_core(context: MainContext, service: IdentityService) -> Module
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)
     return handle
+
+
+def configuration_snapshot(service: IdentityService, params: dict) -> dict:
+    if params:
+        raise ValueError("inspect takes no arguments")
+    persona, preferences = service.get_persona(), service.get_preferences()
+    return {"status": "ok", "activation": "live", "refresh_scope": "resident_projection",
+            "startup_pinned_fields": ["display_name", "core_policy"],
+            "state": {"has_persona": persona is not None, "has_preferences": preferences is not None,
+                      "persona": asdict(persona) if persona is not None else None,
+                      "preferences": asdict(preferences) if preferences is not None else None}}

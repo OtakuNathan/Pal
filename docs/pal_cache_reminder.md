@@ -32,9 +32,17 @@ the current epoch, expiration time, running turns, and one-time consumption vali
 estimated reminder performs a normal manual compact; the normal compact attempts legitimate prefix reuse according to existing rules, falling back to the cold path when necessary.
 The estimate does not authorize a strict hot-cache compact, nor does it guarantee a cache hit or cost savings.
 
+The optional first-party `cache_reminder` plugin owns the policy, cards, button
+handlers and transient timer state. It registers separate show and withdraw
+events through Core's timer interface; the main loop executes their callbacks.
+Its callbacks request Core delivery and compaction coordination. PalCore has no
+reminder-specific field or cache-epoch branch. Disabling or unloading the plugin
+cancels its timers, including events already queued for dispatch. Reload replaces
+its callbacks and configuration operations without changing Core.
+
 Read-only status and parameter configuration still use `pal core cache-reminder show/configure`, with no new model tools added.
 This change includes resident core/LLM code; after the source is updated, running Pal instances must be restarted independently to load it;
-plugin reload cannot activate these changes. This implementation did not restart online instances and did not modify the running configuration.
+plugin reload alone cannot install the new resident timer/coordination interfaces. After that host update, subsequent reminder-only changes can reload through `manage_plugin(name="cache_reminder", operation="reload")`. This implementation did not restart online instances and did not modify the running configuration.
 
 Policy basis: [OpenAI caching documentation](https://developers.openai.com/api/docs/guides/prompt-caching),
 [Anthropic caching documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),

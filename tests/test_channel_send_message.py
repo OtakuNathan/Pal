@@ -18,7 +18,8 @@ from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate
 from pal.core.runtime import PalCore
 from pal.core.capabilities import register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
-from pal.shared import ChannelStreamUpdateKind
+from pal.shared import ChannelStreamUpdateKind, TurnDeliveryBinding
+from tests.turn_fakes import continuation
 from tests.runtime_channel_providers import telegram_endpoint_module
 
 
@@ -288,6 +289,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_current_websocket_peer_reply_must_use_normal_final(self) -> None:
         core, runtime, _ = self._build_core()
+        del core.context.port_registry["core:core"]
         peer_endpoint = _ActiveMessageEndpoint(
             endpoint=EndpointConfig(
                 endpoint_id="petra",
@@ -296,9 +298,8 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         runtime.register_endpoint(peer_endpoint)
-        core.state.active_turns["peer-turn"] = SimpleNamespace(
-            delivery_binding=SimpleNamespace(endpoint=peer_endpoint.endpoint)
-        )
+        core.state.active_turns["peer-turn"] = continuation(turn_id="peer-turn",
+            delivery_binding=TurnDeliveryBinding(peer_endpoint.endpoint, ResponseHandle("peer", {}), "peer-scope"))
 
         result = await core.context.execution_runtime.execute_tool_async(
             new_tool_call(

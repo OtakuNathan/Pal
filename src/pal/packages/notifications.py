@@ -5,7 +5,11 @@ import asyncio
 from copy import deepcopy
 import threading
 
+from pal.control.runtime_contracts import CORE_CONTROL
+from pal.core.scheduling import ResidentTurnKind
 from pal.foundation import EventEnvelope
+from pal.foundation.diagnostics import exception_report
+from pal.memory.contracts import MEMORY
 from pal.core.core_events import TURN_END, TURN_TOOL_RESULT_COMMITTED
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.shared.result_rendering import render_structured_for_llm
@@ -43,6 +47,8 @@ class PackageCompletionSource:
 
     def __init__(self, context):
         self.context = context
+        self.host = context.port_registry.observe(CORE_CONTROL)
+        self.memory = context.port_registry.observe(MEMORY)
         self.pending = {}
         self.claimed = set()
         self.seen = set()
@@ -54,20 +60,16 @@ class PackageCompletionSource:
         self.closed = False
         self.registered = False
 
-    @property
-    def core(self):
-        return self.context.port_registry.get("core:core")
-
     def notifier(self, turn_id):
-        core = self.core
-        opening = core.state.active_turns.get(turn_id) if core is not None else None
-        binding = getattr(opening, "delivery_binding", None)
-        memory = self.context.port_registry.get("memory:memory")
-        if self.closed or binding is None or not callable(getattr(memory, "begin_l1_turn", None)):
+        host = self.host.optional
+        if self.closed or host is None or self.memory.optional is None:
+            return None
+        binding = host.delivery_binding_for_turn(turn_id)
+        if binding is None:
             return None
         if not self.registered:
             self.context.event_source_registry.attach(MODULE, self)
-            self.context.event_handler_registry.register(EVENT, self, module_id=MODULE)
+            self.context.event_handler_registry.register(EVENT, self, owner=None, module_id=MODULE)
             self.context.core_event_bus.subscribe(TURN_TOOL_RESULT_COMMITTED, self._on_delivery)
             self.context.core_event_bus.subscribe(TURN_END, self._on_delivery)
             self.registered = True
@@ -86,7 +88,7 @@ class PackageCompletionSource:
                 observation = {key: value for key, value in state.items()
                                if key not in {"notification", "notification_error", "next_step"}}
                 self.pending[job_id] = (deepcopy(observation), binding, turn_id)
-            core.notify_ready()
+            host.notify_ready()
         return notify
 
     def stage_status_delivery(self, call, result):
@@ -94,11 +96,11 @@ class PackageCompletionSource:
         if not self.registered or not call.args.get("job_id") or result.status != "ok":
             return
         turn_id = call.meta.get("turn_id")
-        call_id = getattr(call.meta.get("tool_call"), "call_id", None)
-        if not call_id:
+        tool_call = call.meta.get("tool_call")
+        if tool_call is None:
             return
-        opening = self.core.state.active_turns.get(turn_id)
-        binding = getattr(opening, "delivery_binding", None)
+        call_id = tool_call.call_id
+        binding = self.host.current.delivery_binding_for_turn(turn_id)
         if binding is None:
             return
         states = (result.structured or {}).get("jobs", ())
@@ -131,9 +133,7 @@ class PackageCompletionSource:
                     self.claimed.discard(job_id)
 
     def _idle(self):
-        from pal.core.scheduling import ResidentTurnKind
-
-        return not self.core.resident_admission_reason(ResidentTurnKind.BACKGROUND)
+        return self.host.current.can_start_background_turn(kind=ResidentTurnKind.BACKGROUND)
 
     def prepare(self, context):
         with self.lock:
@@ -154,71 +154,69 @@ class PackageCompletionSource:
 
     async def handle(self, event, context):
         from pal.core.turns import TurnContinuation
-        core = self.core
+        host = self.host.current
         job_id = event.payload
-        async with core.state.channel_turn_transition_lock:
-            with self.lock:
-                if self.closed or job_id not in self.claimed or job_id not in self.pending:
-                    return []
-                if not self._idle():
-                    self.claimed.discard(job_id)
-                    return []
-                state, binding, opening_turn = self.pending[job_id]
-                self.started.add(job_id)
-            identity = f"package:{job_id}:completed"
-            text = (
-                "<runtime_context_update>Background package operation completed. This is an observation, "
-                "not a new user request. Continue unfinished work from the initiating task within its existing "
-                "authorization. Do not repeat the operation. Inspect the actual activation result; "
-                "completion alone does not mean activation succeeded.</runtime_context_update>\n"
-                + render_structured_for_llm(state)
-            )
-            message = LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR(text),),
-                                  message_id=identity, semantic_kind="runtime_context_artifact",
-                                  metadata={"opening_turn_id": opening_turn})
-            opening = EventEnvelope(event_kind=EVENT, source_kind="packages", payload=message, event_id=identity)
-            continuation = TurnContinuation(turn_id=identity, opening_event=opening, delivery_binding=binding,
-                program=completion_program(opening, **core.turn_execution_options()), correlation_id=opening_turn)
-            from pal.core.scheduling import ResidentTurnKind
-
-            task = core.start_background_turn(
-                continuation, lambda: self._run(job_id, continuation),
-                kind=ResidentTurnKind.BACKGROUND,
-            )
-            if task is None:
-                with self.lock:
-                    self.started.discard(job_id)
-                    self.claimed.discard(job_id)
+        with self.lock:
+            if self.closed or job_id not in self.claimed or job_id not in self.pending:
                 return []
-            self.tasks.add(task)
-            task.add_done_callback(self.tasks.discard)
+            if not self._idle():
+                self.claimed.discard(job_id)
+                return []
+            state, binding, opening_turn = self.pending[job_id]
+            self.started.add(job_id)
+        identity = f"package:{job_id}:completed"
+        text = (
+            "<runtime_context_update>Background package operation completed. This is an observation, "
+            "not a new user request. Continue unfinished work from the initiating task within its existing "
+            "authorization. Do not repeat the operation. Inspect the actual activation result; "
+            "completion alone does not mean activation succeeded.</runtime_context_update>\n"
+            + render_structured_for_llm(state)
+        )
+        message = LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR(text),),
+                              message_id=identity, semantic_kind="runtime_context_artifact",
+                              metadata={"opening_turn_id": opening_turn})
+        opening = EventEnvelope(event_kind=EVENT, source_kind="packages", payload=message, event_id=identity)
+        continuation = TurnContinuation(turn_id=identity, opening_event=opening, delivery_binding=binding,
+            program=completion_program(opening, **host.turn_execution_options()), correlation_id=opening_turn)
+        # Admission and task registration are synchronous on the owner loop.
+        # User input can win admission before dispatch without consuming the job.
+        try:
+            task = host.start_background_turn(
+                continuation, lambda: self._run(job_id, continuation), owner=None,
+                kind=ResidentTurnKind.BACKGROUND)
+        except BaseException:
+            with self.lock:
+                self.started.discard(job_id)
+                self.claimed.discard(job_id)
+            raise
+        if task is None:
+            with self.lock:
+                self.started.discard(job_id)
+                self.claimed.discard(job_id)
+            return []
+        self.tasks.add(task)
+        task.add_done_callback(lambda finished: self._on_task_done(job_id, finished))
         return []
 
     async def _run(self, job_id, continuation):
-        core = self.core
+        host = self.host.current
         try:
-            memory = self.context.port_registry["memory:memory"]
-            core._begin_tool_result_turn(continuation)
-            memory.begin_l1_turn(continuation.turn_id, user_message=continuation.opening_event.payload)
-            await core.run_turn_continuation_async(continuation)
+            await host.run_turn(continuation)
             return "success"
         except asyncio.CancelledError:
-            core.turn_manager.cleanup_interrupted(continuation.turn_id, reason="interrupted")
             raise
         except Exception as exc:
-            core.turn_manager.cleanup_interrupted(continuation.turn_id, reason="failed")
-            core.state.diagnostics.append({"kind": EVENT + ".failed", "job_id": job_id,
-                                           "error": f"{type(exc).__name__}: {exc}"})
+            host.record_diagnostic(EVENT + ".failed", {"job_id": job_id, "error": exception_report(exc)})
             return "failed"
-        finally:
-            # A failed model continuation is not a reason to replay effects.
-            with self.lock:
-                self.pending.pop(job_id, None)
-                self.claimed.discard(job_id)
-                self.started.discard(job_id)
-            core.state.active_turns.pop(continuation.turn_id, None)
-            core.turn_manager._mark_turn_exited(continuation.turn_id)
-            core.notify_ready()
+
+    def _on_task_done(self, job_id, task):
+        # This also runs when cancellation precedes the coroutine's first step.
+        self.tasks.discard(task)
+        with self.lock:
+            self.pending.pop(job_id, None)
+            self.claimed.discard(job_id)
+            self.started.discard(job_id)
+        self.host.current.notify_ready()
 
     def close(self):
         with self.lock:
@@ -227,9 +225,16 @@ class PackageCompletionSource:
             self.claimed.clear()
             self.deliveries.clear()
         if self.registered:
-            self.context.event_source_registry.detach_module(MODULE)
+            self.context.event_source_registry.detach_module(MODULE, expected_sources=(self,))
             self.context.event_handler_registry.detach_module(MODULE)
             self.context.core_event_bus.unsubscribe(TURN_TOOL_RESULT_COMMITTED, self._on_delivery)
             self.context.core_event_bus.unsubscribe(TURN_END, self._on_delivery)
+        try:
+            owner_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            owner_loop = None
         for task in tuple(self.tasks):
-            task.get_loop().call_soon_threadsafe(task.cancel)
+            if task.get_loop() is owner_loop:
+                task.cancel()
+            else:
+                task.get_loop().call_soon_threadsafe(task.cancel)

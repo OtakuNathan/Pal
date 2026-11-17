@@ -17,6 +17,8 @@ from typing import Any, Mapping, Protocol
 
 from pal.execution import CapabilityCall
 from pal.foundation import utc_now
+from pal.foundation.lifecycle_gate import WriterPreferredRWGate
+from pal.foundation.workers import join_owned_task
 from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import dispatch_sidecar_request, pack_sidecar_message, read_sidecar_message
 from pal.llm.credentials import LLMCredentialResolver
@@ -354,6 +356,10 @@ class BunshinManager:
     role_gateway: RoleAssignmentGateway = field(init=False)
     harness_registry: BunshinHarnessRegistry = field(init=False)
     _host_tool_bundle: Any | None = field(default=None, init=False, repr=False)
+    _host_tool_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _host_tool_gate: WriterPreferredRWGate = field(default_factory=WriterPreferredRWGate, init=False, repr=False)
+    _host_tools_closing: bool = field(default=False, init=False, repr=False)
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _llm_json_transport: DirectEndpointTransport | None = field(
         default=None,
         init=False,
@@ -436,6 +442,9 @@ class BunshinManager:
 
     async def run(self) -> None:
         recovery = await asyncio.to_thread(BunshinRecovery(self.workflow_service).recover)
+        from pal.bunshin.memory_binding import reconcile_workflow_memory_references
+        from pal.foundation.workers import run_worker
+        await run_worker(lambda: reconcile_workflow_memory_references(self.runtime_root))
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
         self.role_server, self.role_endpoint_info = await start_role_gateway_server(
             self.runtime_root,
@@ -687,7 +696,8 @@ class BunshinManager:
                 view=str(params.get("view") or "status"),
             )
         if method == "v2_start_workflow":
-            result = self.workflow_service.start_workflow(params)
+            from pal.foundation.workers import run_worker
+            result = await run_worker(lambda: self.workflow_service.start_workflow(params))
             self._wake_event.set()
             return result
         if method == "v2_rebind_task_delivery":
@@ -861,6 +871,9 @@ class BunshinManager:
                 await asyncio.sleep(0.05)
                 continue
             try:
+                from pal.bunshin.memory_binding import reconcile_workflow_memory_references
+                from pal.foundation.workers import run_worker
+                await run_worker(lambda: reconcile_workflow_memory_references(self.runtime_root))
                 await self.semantic_orchestrator.recover_background_assignments()
                 if self.workflow_outbox.start_available(max_concurrency=self.max_parallel_modules + 8):
                     await asyncio.sleep(0)
@@ -1806,15 +1819,20 @@ class BunshinManager:
         return state
 
     async def _host_tool_runtime_bundle(self) -> Any:
-        if self._host_tool_bundle is None:
-            from pal.bunshin.runner_components.runtime_build import build_slim_bunshin_runtime
+        async with self._web_request_admission():
+            return await self._admitted_host_tool_runtime_bundle()
 
-            self._host_tool_bundle = await asyncio.to_thread(
-                build_slim_bunshin_runtime,
-                self.runtime_root,
-                llm_authority="none",
-            )
-        return self._host_tool_bundle
+    async def _admitted_host_tool_runtime_bundle(self) -> Any:
+        from pal.bunshin.runner_components.host_web_runtime import build_host_web_runtime
+        from pal.foundation.workers import run_worker
+        async with self._host_tool_lock:
+            if self._host_tool_bundle is None:
+                def build():
+                    # Transfer ownership before awaiting the worker result, so
+                    # cancellation still leaves a bundle that close_all owns.
+                    self._host_tool_bundle = build_host_web_runtime(self.runtime_root)
+                await run_worker(build)
+            return self._host_tool_bundle
 
     async def web_broker_search(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self._web_broker_call(
@@ -1830,12 +1848,27 @@ class BunshinManager:
             alias="read_browser_page",
         )
 
+    @contextlib.asynccontextmanager
+    async def _web_request_admission(self):
+        if self._host_tools_closing:
+            raise RuntimeError("Manager web broker is closing")
+        async with self._host_tool_gate.read_async():
+            if self._host_tools_closing:
+                raise RuntimeError("Manager web broker is closing")
+            yield
+
     async def _web_broker_call(
         self,
         params: dict[str, Any],
         *,
         canonical_path: str,
         alias: str,
+    ) -> dict[str, Any]:
+        async with self._web_request_admission():
+            return await self._admitted_web_broker_call(params, canonical_path=canonical_path, alias=alias)
+
+    async def _admitted_web_broker_call(
+        self, params: dict[str, Any], *, canonical_path: str, alias: str,
     ) -> dict[str, Any]:
         state = self._require_broker_run(params)
         allowed = {
@@ -1847,7 +1880,7 @@ class BunshinManager:
             raise PermissionError(
                 f"role assignment does not allow {canonical_path}"
             )
-        bundle = await self._host_tool_runtime_bundle()
+        bundle = await self._admitted_host_tool_runtime_bundle()
         runtime = bundle.execution_runtime
         record = runtime.registry_generation.direct_aliases.get(alias)
         if record is None or record.canonical_path != canonical_path:
@@ -2007,6 +2040,13 @@ class BunshinManager:
         self._shutdown_event.set()
 
     async def close_all(self) -> None:
+        self._host_tools_closing = True
+        if (self._close_task is None or (self._close_task.done()
+                and (self._close_task.cancelled() or self._close_task.exception() is not None))):
+            self._close_task = asyncio.create_task(self._close_all(), name="bunshin-manager-close")
+        await join_owned_task(self._close_task)
+
+    async def _close_all(self) -> None:
         # The semantic orchestrator owns worker processes.  Cancelling its
         # logical tasks enters each process owner's close path, which withdraws
         # process authority, signals once when needed, and reaps the child.
@@ -2027,11 +2067,11 @@ class BunshinManager:
                 "manager shutdown retained active worker accounting: "
                 + ", ".join(sorted(active))
             )
-        if self._host_tool_bundle is not None:
-            close = getattr(self._host_tool_bundle, "close", None)
-            if callable(close):
-                await close()
-            self._host_tool_bundle = None
+        async with self._host_tool_gate.write_async():
+            async with self._host_tool_lock:
+                if self._host_tool_bundle is not None:
+                    await self._host_tool_bundle.close()
+                    self._host_tool_bundle = None
         if self._llm_json_transport is not None:
             await asyncio.to_thread(self._llm_json_transport.close)
             self._llm_json_transport = None

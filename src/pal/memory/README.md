@@ -1,6 +1,7 @@
 # memory
 
 Owns:
+- `/memory_review` parsing, review decisions and presentation; replies use Core's control port
 - L3 provider publication and selection
 - compact capture, archive staging and candidate installation
 - borrowed closed L1 prefixes with private transient tails
@@ -81,3 +82,55 @@ existing run report and private diagnostic log, then request an idempotent silen
 once proactive handoff through Core. Notification transport is not a precondition
 for sleep. The handoff uses existing proactive persistence and shared L1; see
 [Dreaming](../../../docs/pal_memory_dreaming.md).
+
+Dreaming is a first-party optional plugin dependent on `sqlite_vec_l3`. PluginHost
+owns startup, shutdown and provider-generation replacement; Bootstrap does not
+probe backend internals. Dreaming owns its cron timer and failure handoff prompt,
+while Core supplies generic timers and maintenance admission. Memory backend
+configuration operations are registered by Memory itself through the common RPC
+operation registry.
+
+Backend changes use Memory-owned generation migration and catalog CAS, with
+transactional change capture, a final write fence, stable references and deferred
+indexing. Provider identities are qualified by the L3 domain and validated before
+module publication. Plugin cleanup preserves the committed selection. Dreaming and
+backend migration share `GenerationMaintenance`, the production generation reducer,
+and the single `SwapStore.publish` transaction. Semantic review may transform a
+candidate; pure backend changes preserve canonical content. Backend changes notify
+the last user route before sleep, await delivery, and fail before publication if
+that delivery fails. The CLI announces sleep before requesting the change. Scheduled
+Dreaming remains silent. Committed generations must mount before ordinary ingress
+reopens, including recovery after a lost acknowledgement. Index recovery cannot
+release a maintenance admission whose source writer is still held. Every admission
+also has an opaque Core token: both original cleanup and recovery release that
+captured token, so they cannot clear a subsequent owner's maintenance barrier.
+Wake requires a fully initialized backend binding and the matching runtime
+selector, not just a repository with the current generation id. Failed closes
+remain owned by the backend until a later bind or shutdown succeeds. Pausing a
+migration joins its worker and durably records the pause even when its caller
+is cancelled. Candidate ownership is recorded before copying files, so failed
+construction remains collectible under the existing retention policy.
+
+Bunshin workflows hold durable generation references. Roles, retries and recovery
+borrow that database read-only and reconstruct its declared embedding configuration;
+there are no per-workflow or per-role database copies. Main-session writes within
+that same generation remain visible. After swap, retired generations reject writes
+and remain alive until logical references and actual reader leases drain. Bunshin
+reconciles terminal and interrupted registrations independently of Dreaming. Global
+forget tombstones remain authoritative. See [managed swap](../../../docs/pal_memory_swap.md).
+
+Explicitly cancelled migration jobs remain durably paused until resumed. Recovery
+retires superseded jobs before resolving their former backend. Memory's shared
+worker join drains repeated cancellation for migration, CLI and Dreaming work;
+candidate acquisition and final cleanup retain ownership until those workers exit.
+
+Each generation pins one full embedding profile and one vector dimension. Reload
+or runtime configuration drift cannot retarget its vectors. Mismatched or unknown
+provenance exposes basic reads until a private-generation migration completes;
+response and repository guards reject cross-model or cross-dimension results.
+Dreaming publication and recovery rebind through the backend generation port;
+the backend reloads embedding identity and catalog-owned indexing state together.
+Vector inserts/updates maintain their native search entry in the write transaction.
+Retirement removes native entries in the correction/merge transaction while
+retaining original vectors for history. Index failures roll back those writes;
+read-only readers do not depend on a later writer query to repair membership.

@@ -188,7 +188,7 @@ and web integrations belong to plugins. Check actual availability before use.
 | MCP server configuration | Edit TOML/JSON under `plugins/mcp/`, then `rescan_mcp_servers`; use manage_mcp_server(operation=attach|detach) for configured server connections. | Rescan reconnects changed enabled server configurations and updates tool discovery. Use inspect_mcp_state for manager health, list_mcp_servers for discovery, and read_mcp_server(name=...) for one server's state. Editing manager implementation requires plugin reload. |
 | LSP server configuration | Runtime overrides under `plugins/lsp/servers/`, then `rescan_lsp_servers`; prepare/doctor the target workspace. | Rescan updates config and invalidates changed sessions; workspace preparation/use starts the needed server. Templates have their own development skill. |
 | Bunshin profile/family customization | Use `pal bunshin catalog`, `pal bunshin profile`, and `pal bunshin family` commands. `read_bunshin_catalog` remains the workflow-discovery tool. | Online operations reach the sidecar; offline mutation requires the stopped-host lease. Overrides affect future Tasks, not existing snapshots. Refresh validates catalog data, not Python implementation. |
-| Core status and cache reminder | `observe_core` reports workload and cache deadline together. Use `pal core cache-reminder show/configure` for reminder settings. | Online configuration reaches the owner outside the conversation queue; disabling cancels the timer immediately. Other values apply at subsequent scheduling. Offline configuration reports on_start. |
+| Core status and cache reminder | `observe_core` reports resident workload. Use `pal core cache-reminder show/configure` for cache-reminder state and settings; the optional `cache_reminder` plugin owns this feature. | Online configuration reaches the owner outside the conversation queue; disabling cancels the timer immediately. Other values apply at subsequent scheduling. Offline configuration reports on_start. |
 | Search / browser settings | Use `pal web-search` for backend config/auth/enable/active changes. Browser extension development still uses manage_browser_extension. | Health/auth tools report current configuration and last request observations. Verify repaired connectivity with a subsequent request; do not treat persisted settings as proof of network success. |
 | Memory provider and skills | Backend maintenance uses `pal memory` through the resident owner or offline migration; skills retain their live tools. `recall_memory(mem_ref=...)` reads an exact durable reference without waiting for indexing; use it for uncertain outcomes, not as mandatory verification of successful writes. Facts, preferences and experience belong to memory; reusable procedures belong to skills. | Declared built-in skills are owned by source and republished by the module; do not treat a database edit as a durable built-in override. |
 | Host environment / OS service | Prepare the actual systemd/launchd/manual-service change and external restart instructions. | Daemon-reload alone does not replace a running process. Never stop, restart, kill, or schedule a delayed restart of Pal's own host from its active turn. |
@@ -570,7 +570,9 @@ tests. Fix example/guidance failures before live activation.
   rollback and detach, and refreshes channel command menus. Use
   `show_in_panel=True` with a description for public commands. Do not register
   plugin commands imperatively or hand-write unregister callbacks.
-- `provider_refs`: named providers that execution runtime may route to.
+- `provider_refs`: Execution infrastructure references named `<module_id>:<local_name>`;
+  declare the corresponding `ports['provider:<qualified_name>']` binding. L3 providers
+  register with Memory and use managed generation swap for backend changes.
 - `ports`: internal service ports exposed as `<module_id>:<port_name>`.
 - `cleanup_callbacks`: cleanup functions called on detach.
 

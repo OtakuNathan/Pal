@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
-from pal.control.contracts import ControlRoute
+from pal.control.contracts import ControlDelivery, ControlRoute
 from pal.core.compaction_coordinator import CompactionTicket
 from pal.core.turn_state import AgentTurnRuntimeState
 from pal.core.scheduling import CoreScheduler
 from pal.foundation import utc_now
+from pal.shared.maintenance import MaintenanceToken
 
 
 @dataclass
@@ -19,8 +21,15 @@ class PendingControlRequest:
     control_scope_key: str
     route: ControlRoute
     created_at: str = field(default_factory=utc_now)
-    expires_at: str = field(default_factory=utc_now)
+    expires_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     payload: dict[str, Any] = field(default_factory=dict)
+    expired_delivery: ControlDelivery | None = None
+    context_sensitive: bool = False
+    executing: bool = False
+
+    @property
+    def expired(self) -> bool:
+        return datetime.now(timezone.utc) >= self.expires_at
 
 
 @dataclass
@@ -45,6 +54,8 @@ class CoreRuntimeState(AgentTurnRuntimeState):
     resident_interrupt_task: asyncio.Task[bool] | None = None
     memory_ingress_reservations: int = 0
     memory_control_reservations: int = 0
+    memory_maintenance_component: str = "maintenance"
+    memory_maintenance_token: MaintenanceToken | None = None
     memory_maintenance_changed: asyncio.Event = field(default_factory=asyncio.Event)
     resident_drained_event: asyncio.Event = field(default_factory=asyncio.Event)
     resident_execution_lifetime_id: str = "pal:resident"

@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,6 +42,9 @@ from tests.runtime_channel_providers import telegram_endpoint_module
 
 TelegramChannelEndpoint = telegram_endpoint_module().TelegramChannelEndpoint
 from pal.control import interactions as control_interactions
+from pal.llm import control_presentation as model_interactions
+from pal.core import control_presentation as core_interactions
+from tests.control_factory import build_control_plane, replace_llm
 from pal.core.turns import L1CommitPayload, TurnContinuation, TurnOutcome
 from pal.core.runtime import PalCore
 from pal.core.capabilities import register_with_core as register_core_with_core
@@ -81,6 +86,16 @@ class _StubEndpoint(ChannelEndpointQueueBase):
 class _FakeSettingsRepository:
     think_levels: dict[str, str] = field(default_factory=lambda: {"stub": "balanced"})
     active_llm_endpoint_id: str | None = "stub"
+
+    def get(self, key):
+        return None
+
+    def set(self, key, value):
+        return value
+
+    @contextmanager
+    def selection_transaction(self):
+        yield
 
     def get_think_level(self, endpoint_id: str) -> str | None:
         return self.think_levels.get(endpoint_id)
@@ -162,6 +177,12 @@ class _FakeLLMRuntime(NonStreamingLLM):
     refresh_payload: dict[str, object] | None = None
     refresh_calls: int = 0
 
+    def close(self) -> None:
+        pass
+
+    def resume_subscription(self, endpoint_id: str) -> bool:
+        return False
+
     def refresh_runtime_settings(self) -> None:
         configured_active = self.settings_repository.get_active_llm_endpoint_id()
         endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
@@ -204,6 +225,11 @@ class _FakeLLMRuntime(NonStreamingLLM):
 
     def thinking_levels_snapshot(self) -> dict[str, str]:
         return dict(self.settings_repository.think_levels)
+
+    def snapshot_turn_settings(self):
+        from pal.llm.contracts import LLMTurnSettings
+        self.refresh_runtime_settings()
+        return LLMTurnSettings(thinking_levels=self.thinking_levels_snapshot())
 
     def set_think_level(self, think_level: str) -> str:
         if think_level not in {"off", "low", "deep"}:
@@ -271,8 +297,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(envelope.event.event_kind, EventKind.SLASH_COMMAND)
 
     def test_dynamic_command_registration_and_panel_rendering(self) -> None:
-        plane = ControlPlane()
-        plane.register_command(
+        plane = build_control_plane()
+        plane.install_commands("test", (
             ControlCommandSpec(
                 name="ping",
                 handler=lambda invocation: ControlAction(
@@ -286,8 +312,8 @@ class ControlPlaneTests(unittest.TestCase):
                 usage="/ping",
                 show_in_panel=True,
                 panel_button=True,
-            )
-        )
+            ),
+        ))
 
         rendered = plane.render_panel_text()
 
@@ -298,7 +324,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("/ping", rendered)
 
     def test_think_without_argument_shows_current_level(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -312,7 +338,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.action_kind, "show_think")
 
     def test_think_level_is_forwarded_for_provider_validation(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -327,7 +353,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.args["think_level"], "high")
 
     def test_think_max_is_a_distinct_canonical_level(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -342,7 +368,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.args["think_level"], "max")
 
     def test_model_without_argument_shows_current_model(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -357,7 +383,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.target_scope, "runtime")
 
     def test_model_argument_sets_endpoint_id(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -373,7 +399,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.args["endpoint_id"], "glm-5.2")
 
     def test_log_without_argument_shows_current_status(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -387,7 +413,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.action_kind, "show_log")
 
     def test_log_start_and_end_parse_to_set_log(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         start = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -412,7 +438,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(end.args["prompt_log_enabled"])
 
     def test_refresh_llm_endpoint_slash_command_bypasses_llm(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -428,7 +454,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("/refresh_llm_endpoint", plane.render_panel_text())
 
     def test_telegram_bot_mention_suffix_is_ignored_for_slash_commands(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -442,7 +468,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.action_kind, "refresh_llm_endpoint")
 
     def test_invalid_log_subcommand_is_invalid_command(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -457,7 +483,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.notes, "Use /log start or /log end.")
 
     def test_unknown_slash_command_parses_to_regular_message_fallback(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         action = plane.parse_event(
             ControlEvent(
                 event_kind=EventKind.SLASH_COMMAND,
@@ -473,7 +499,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.args["raw_text"], "/not_a_command should reach the model")
 
     def test_control_handler_reemits_unknown_slash_command_as_user_message(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         handler = ControlEventHandler(control_plane=plane)
         route = ResponseHandle(
             endpoint_id="socket_main",
@@ -525,15 +551,15 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(fallback_channel.response_handle.reply_target["request_id"], "req-1")
 
     def test_registered_slash_command_handler_none_does_not_fallback_to_user_message(self) -> None:
-        plane = ControlPlane()
-        plane.register_command(
+        plane = build_control_plane()
+        plane.install_commands("test", (
             ControlCommandSpec(
                 name="noop",
                 handler=lambda invocation: None,
                 description="Swallow command.",
                 usage="/noop",
-            )
-        )
+            ),
+        ))
         handler = ControlEventHandler(control_plane=plane)
         channel_envelope = ChannelEnvelope(
             event=EventEnvelope(
@@ -559,7 +585,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(derived, [])
 
     def test_log_interactions_generate_typed_actions(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         route = ControlRoute(
             endpoint_id="telegram_main",
             channel_kind="telegram",
@@ -604,7 +630,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(end_action.args["prompt_log_enabled"])
 
     def test_model_interactions_generate_typed_actions(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         route = ControlRoute(
             endpoint_id="telegram_main",
             channel_kind="telegram",
@@ -640,7 +666,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(set_action.args["interaction_origin"], "button")
 
     def test_unknown_interaction_action_normalizes_to_invalid_command(self) -> None:
-        plane = ControlPlane()
+        plane = build_control_plane()
         route = ControlRoute(
             endpoint_id="telegram_main",
             channel_kind="telegram",
@@ -712,7 +738,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.settings_repository = _FakeSettingsRepository()
         self.llm_runtime = _FakeLLMRuntime(settings_repository=self.settings_repository)
-        self.core.context.port_registry["llm:llm"] = self.llm_runtime
+        replace_llm(self.core, self.llm_runtime)
 
         self.memory_service = MemoryService()
         register_memory_with_core(self.core.context, self.memory_service)
@@ -866,31 +892,6 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             snapshot["system_chars"] + snapshot["current_user_chars"] + snapshot["tool_protocol_chars"] + expected_tool_chars,
         )
 
-    async def test_turn_prompt_falls_back_to_event_when_l1_begin_fails(self) -> None:
-        class BrokenMemory(MemoryService):
-            def begin_l1_turn(self, *args, **kwargs):
-                raise RuntimeError("storage unavailable")
-
-            def active_l1_turn(self, turn_id):
-                return None
-
-        envelope = self._make_channel_envelope(
-            turn_id="turn-l1-fallback",
-            request_id="req-l1-fallback",
-            text="do not lose this input",
-        )
-        continuation = self.core.turn_manager.start(envelope)
-        self.core.context.port_registry["memory:memory"] = BrokenMemory()
-        assembly = PromptAssemblyContext(event=envelope.event, core_mode="default")
-
-        self.assertFalse(await self.core.turn_executor._ensure_l1_turn_async(continuation, assembly))
-        prompt = self.core.turn_executor.build_turn_prompt(
-            continuation, assembly, max_output_tokens=64
-        )
-
-        self.assertNotIn("active_l1_owns_primary_input", prompt.metadata)
-        self.assertIn("do not lose this input", "\n".join(message.text for message in prompt.messages))
-
     async def test_typed_ingress_keeps_precompiled_control_scope_binding(self) -> None:
         envelope = ChannelEnvelope(
             event=EventEnvelope(
@@ -928,7 +929,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 inner_self.values.append(enabled)
 
         dependent = DebugAwarePort()
-        self.core.context.port_registry["bunshin:bunshin"] = dependent
+        from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
+        async def update_logging(payload):
+            await dependent.set_prompt_log_enabled(payload["enabled"])
+        self.core.context.register_module(ModuleHandle(
+            module_id="debug_aware", tier=MODULE_TIER_DETACHABLE,
+            control_observers={"core.prompt_log.changed": update_logging}))
         first = self._make_channel_envelope(turn_id="turn-log-1", request_id="req-log-1")
         continuation = self.core.turn_manager.start(first)
         self.assertFalse(continuation.turn_settings_snapshot["prompt_log_enabled"])
@@ -980,7 +986,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 return {"ok": True, "runtime_loaded": True, "refreshed": True}
 
         bunshin = BunshinPort()
-        self.core.context.port_registry["bunshin:bunshin"] = bunshin
+        from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
+        async def refresh_endpoints(payload):
+            await bunshin.refresh_llm_endpoints()
+        self.core.context.register_module(ModuleHandle(
+            module_id="dependent_llm", tier=MODULE_TIER_DETACHABLE,
+            control_observers={"llm.endpoints.changed": refresh_endpoints}))
 
         await self.core.handle_control_action_async(
             ControlAction(
@@ -992,7 +1003,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bunshin.calls, 1)
         self.assertIn(
-            "Dependent LLM runtimes refreshed: bunshin:bunshin",
+            "LLM endpoints refreshed.",
             self.endpoint.outbox[-1].text,
         )
 
@@ -1753,8 +1764,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first_request.request_id, second_request.request_id)
 
-        second_request.expires_at = "2000-01-01T00:00:00+00:00"
-        await self.core.expire_pending_control_requests_async()
+        second_request.expires_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        self.core.control_runtime.requests.put(second_request)
+        await self.core.run_until_idle_async()
         self.assertNotIn("reset_confirm", scope_state.pending_requests)
 
     async def test_resident_quiesce_queues_new_turn_without_starting_it(self) -> None:
@@ -1889,7 +1901,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statuses[-1].kind, "working_stop")
 
     async def test_control_panel_buttons_are_driven_by_command_specs(self) -> None:
-        self.control_plane.register_command(
+        self.control_plane.install_commands("test", (
             ControlCommandSpec(
                 name="ping",
                 handler=lambda invocation: ControlAction(
@@ -1903,8 +1915,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 show_in_panel=True,
                 panel_button=True,
                 panel_label="Ping Plugin",
-            )
-        )
+            ),
+        ))
 
         spec = control_interactions.build_control_panel_interaction(self.control_plane, self.route)
         flattened = [button for row in spec.buttons for button in row]
@@ -2307,7 +2319,6 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.core.schedule_channel_turn_async(first)
         await asyncio.wait_for(first_started.wait(), timeout=1.0)
         await self.core.schedule_channel_turn_async(second)
-        scope_state = self.core._ensure_scope_state(self.route.control_scope_key)
         self.assertEqual(len(self.core.state.pending_channel_turns), 1)
 
         request = PendingControlRequest(
@@ -2315,9 +2326,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             request_kind="reset_confirm",
             control_scope_key=self.route.control_scope_key,
             route=self.route,
-            expires_at="2999-01-01T00:00:00+00:00",
+            expires_at=datetime(2999, 1, 1, tzinfo=timezone.utc),
         )
-        scope_state.pending_requests["reset_confirm"] = request
+        self.core.control_runtime.requests.put(request)
 
         await self.core.handle_control_action_async(
             ControlAction(

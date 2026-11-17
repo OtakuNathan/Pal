@@ -141,6 +141,10 @@ def register_with_core(core, runtime: FailureRuntime) -> ModuleHandle:
     from pal.failure.handler import FailureEventHandler
     from pal.shared import EventKind
 
+    from pal.failure.recovery import FailureRecovery
+    from pal.failure.contracts import FAILURE_RECOVERY
+
+    recovery = FailureRecovery(core.context, runtime)
     provider = FailureIntrospectionProvider(runtime=runtime)
     event_handler = FailureEventHandler(core=core)
     handle = ModuleHandle(
@@ -149,8 +153,9 @@ def register_with_core(core, runtime: FailureRuntime) -> ModuleHandle:
         detachable=False,
         introspection_provider=provider,
         event_handlers={EventKind.REPLY_FAILED: [event_handler]},
-        ports={"failure": runtime},
+        ports={"failure": runtime, "recovery": recovery},
+        port_contracts=(FAILURE_RECOVERY,),
     )
     core.context.register_module(handle)
-    core.context.event_handler_registry.register(EventKind.REPLY_FAILED, event_handler, module_id="failure")
+    core.context.event_handler_registry.register(EventKind.REPLY_FAILED, event_handler, owner=handle, module_id="failure")
     return handle

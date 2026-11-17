@@ -978,6 +978,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             "mcp": "pal.mcp",
             "bunshin": "pal.bunshin",
             "sqlite_vec_l3": "pal.plugins.l3",
+            "dreaming": "pal.memory.dreaming",
             "web_fetch": "pal.web_fetch",
             "web_search": "pal.web_search",
         }
@@ -1163,29 +1164,37 @@ class PalV2BootstrapTests(unittest.TestCase):
         module = runtime.core.context.module_registry.require("l3.sqlite_vec_l3")
         record = runtime.plugin_host.first_party_records["sqlite_vec_l3"]
         cleanup_calls: list[str] = []
+        blocked = True
 
         def fail_cleanup() -> None:
             cleanup_calls.append("cleanup")
-            raise RuntimeError("cleanup failed")
+            if blocked:
+                raise RuntimeError("cleanup failed")
 
         module.cleanup_callbacks.append(fail_cleanup)
         published = tuple(module.published_capabilities)
 
-        result = runtime.plugin_host.detach("sqlite_vec_l3")
-        disabled = runtime.plugin_host.disable("sqlite_vec_l3")
+        try:
+            result = runtime.plugin_host.detach("sqlite_vec_l3")
+            disabled = runtime.plugin_host.disable("sqlite_vec_l3")
 
-        self.assertEqual(result["status"], "error")
-        self.assertEqual(disabled["status"], "error")
-        self.assertTrue(disabled["enabled"])
-        self.assertFalse(record.attached)
-        self.assertTrue(record.enabled)
-        self.assertNotIn("sqlite_vec_l3", runtime.plugin_host.first_party_disabled)
-        self.assertFalse(module.mounted)
-        self.assertEqual(cleanup_calls, ["cleanup", "cleanup"])
-        self.assertEqual(tuple(module.published_capabilities), ())
-        self.assertIn("sqlite_vec_l3", runtime.plugin_host.generations)
-        for alias in published:
-            self.assertNotIn(alias, runtime.core.context.capability_registry.descriptors)
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(disabled["status"], "error")
+            self.assertTrue(disabled["enabled"])
+            self.assertFalse(record.attached)
+            self.assertTrue(record.enabled)
+            self.assertNotIn("sqlite_vec_l3", runtime.plugin_host.first_party_disabled)
+            self.assertFalse(module.mounted)
+            self.assertEqual(cleanup_calls, ["cleanup", "cleanup"])
+            self.assertEqual(tuple(module.published_capabilities), ())
+            self.assertIn("sqlite_vec_l3", runtime.plugin_host.generations)
+            for alias in published:
+                self.assertNotIn(alias, runtime.core.context.capability_registry.descriptors)
+        finally:
+            blocked = False
+        self.assertEqual(runtime.plugin_host.detach("sqlite_vec_l3")["status"], "ok")
+        self.assertEqual(cleanup_calls, ["cleanup"] * 3)
+        self.assertNotIn("sqlite_vec_l3", runtime.plugin_host.generations)
 
     def test_failed_plugin_attach_rolls_back_every_runtime_projection(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -1200,15 +1209,19 @@ class PalV2BootstrapTests(unittest.TestCase):
         cleanup_calls: list[str] = []
         failed_handles = []
 
+        async def handle_action(_action):
+            pass
+
         def fail_publication(module_id):
             module = runtime.core.context.module_registry.require(module_id)
             failed_handles.append(module)
             runtime.core.context.event_handler_registry.register(
-                event_kind, object(), module_id=module_id,
+                event_kind, object(), owner=module, module_id=module_id,
             )
-            runtime.core.context.control_action_registry.register(
-                module_id, action_kind, lambda _action: None,
-            )
+            from pal.core.control_action_registry import ControlActionSpec
+            spec = ControlActionSpec(handle_action)
+            module.control_action_handlers[action_kind] = spec
+            runtime.core.context.control_action_registry.register(module_id, action_kind, spec)
             module.cleanup_callbacks.append(lambda: cleanup_calls.append("cleanup"))
             raise RuntimeError("publication failed after runtime contributions")
 
@@ -1221,7 +1234,6 @@ class PalV2BootstrapTests(unittest.TestCase):
         module = failed_handles[0]
         self.assertNotIn(module.module_id, runtime.core.context.event_handler_registry.by_module)
         self.assertNotIn(event_kind, runtime.core.context.event_handler_registry.handlers)
-        self.assertNotIn(module.module_id, runtime.core.context.control_action_registry.by_module)
         self.assertNotIn(action_kind, runtime.core.context.control_action_registry.handlers)
         self.assertIsNone(runtime.core.context.module_registry.get(module.module_id))
         self.assertNotIn("sqlite_vec_l3", runtime.plugin_host.generations)
@@ -1266,6 +1278,8 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         # Backend maintenance is internal; attachment publishes the provider,
         # while daily memory tools remain owned by the resident memory module.
+        initial_dreaming = handle.core.context.module_registry.require("memory.dreaming")
+        self.assertIn("dreaming", plugin_host.generations)
         initial_module = handle.core.context.module_registry.require("l3.sqlite_vec_l3")
         l3_caps_before = tuple(initial_module.published_capabilities)
         self.assertEqual(l3_caps_before, ())
@@ -1281,6 +1295,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(detached.status, "ok")
 
         self.assertFalse(initial_module.mounted)
+        self.assertIsNone(handle.core.context.module_registry.get("memory.dreaming"))
+        self.assertNotIn("dreaming", plugin_host.generations)
         self.assertIsNone(handle.core.context.module_registry.get("l3.sqlite_vec_l3"))
         self.assertTrue(daily_tools <= handle.core.context.capability_registry.descriptors.keys())
 
@@ -1297,6 +1313,10 @@ class PalV2BootstrapTests(unittest.TestCase):
             CapabilityCall(name='manage_plugin', args={'name': 'sqlite_vec_l3', 'operation': 'attach'})
         )
         self.assertEqual(attached.status, "ok")
+
+        restored_dreaming = handle.core.context.module_registry.require("memory.dreaming")
+        self.assertIsNot(restored_dreaming, initial_dreaming)
+        self.assertIs(restored_dreaming.ports["dreaming"].provider, handle.memory_service.providers.get("sqlite_vec_l3"))
 
         # Capabilities restored
         reattached_module = handle.core.context.module_registry.require("l3.sqlite_vec_l3")
@@ -1404,7 +1424,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             )
         )
         from pal.memory.maintenance import MemoryBackendOwner
-        inventory = asyncio.run(MemoryBackendOwner(handle.core, handle.memory_service).dispatch(
+        inventory = asyncio.run(MemoryBackendOwner(handle.core.context, handle.memory_service).dispatch(
             "inspect", {"name": "sqlite_vec_l3"}))
 
         self.assertEqual(committed.status, "ok")
@@ -2692,7 +2712,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             storage = MemoryStorage(self.runtime_root)
             self.assertTrue(storage.current())
             with storage.connection() as connection:
-                self.assertIsNotNone(connection.execute("SELECT value FROM memory_settings WHERE key='workflow_pins_initialized'").fetchone())
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM workflow_memory_owners").fetchone()[0], 0)
             return original(host)
         with patch.object(PluginHost, "bootstrap", new=bootstrap):
             handle = self._compose_runtime(

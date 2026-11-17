@@ -55,8 +55,8 @@ class CoreIntrospectionProvider:
         action_name="observe",
         guidance=ToolGuidance(
             search_objects=('state', 'states', 'task', 'tasks', 'turn', 'turns'),
-            search_terms=('status', 'inspect', 'show', 'get', 'check', 'summary', 'cache', 'deadline', 'reminder', 'queue', 'backlog'),
-            purpose="Inspect core runtime state, queued events, active turns, detached modules and the prompt-cache reminder deadline together.",
+            search_terms=('status', 'inspect', 'show', 'get', 'check', 'summary', 'queue', 'backlog'),
+            purpose="Inspect core runtime state, queued events, active turns, detached modules.",
             use_when='Diagnosing core health: event backlog, stuck turns, or checking which modules are detached. Queue backlog and active turns are current workload observations. The mode label alone does not prove maintenance or draining; defer activation while Pal is busy.',
             do_not_use_when="Checking control plane status (use pal control status). Checking execution tool count (use inspect_execution_state).",
             failure_next_steps="Read-only diagnostic. If event queue is backed up, turns may be stuck. If modules are unexpectedly detached, investigate lifecycle.",
@@ -68,7 +68,6 @@ class CoreIntrospectionProvider:
         snapshot = inspect_core(self)
         history = self.core.context.port_registry.optional(RESIDENT_HISTORY)
         payload = inspection_snapshot(snapshot.__dict__, sections={
-            "cache_reminder": lambda: self.core.cache_warm_deadline.inspect(),
             "resident_history": lambda: history.inspect() if history is not None else {"status": "unavailable"},
         })
         return IntrospectionResult(
@@ -89,58 +88,6 @@ class CoreIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Core mode label", {"mode": self.core.state.mode}),
         )
 
-    def cache_warm_deadline(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        snapshot = self.core.cache_warm_deadline.inspect()
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="cache warm deadline status",
-            structured=snapshot,
-            llm_text=render_titled_structured_for_llm(
-                "Cache warm deadline",
-                snapshot,
-            ),
-        )
-
-    # Configuration maintenance is exposed through the official Pal CLI.
-    def configure_cache_warm_deadline(
-        self,
-        call: IntrospectionCall,
-    ) -> IntrospectionResult:
-        try:
-            snapshot = self.core.cache_warm_deadline.configure(
-                enabled=(
-                    bool(call.args["enabled"])
-                    if call.args.get("enabled") is not None
-                    else None
-                ),
-                lead_seconds=(
-                    int(call.args["lead_seconds"])
-                    if call.args.get("lead_seconds") is not None
-                    else None
-                ),
-                min_prefix_tokens=(
-                    int(call.args["min_prefix_tokens"])
-                    if call.args.get("min_prefix_tokens") is not None
-                    else None
-                ),
-            )
-        except (RuntimeError, TypeError, ValueError) as exc:
-            return IntrospectionResult(
-                status=RuntimeStatus.INVALID,
-                text=str(exc),
-                llm_text=str(exc),
-            )
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="cache warm deadline configuration updated",
-            structured=snapshot,
-            llm_text=render_titled_structured_for_llm(
-                "Cache warm deadline configuration updated",
-                snapshot,
-            ),
-        )
-
 
 def inspect_core(provider: CoreIntrospectionProvider) -> CoreSnapshot:
     core = provider.core
@@ -154,6 +101,8 @@ def inspect_core(provider: CoreIntrospectionProvider) -> CoreSnapshot:
 
 
 def register_with_core(core: PalCore) -> ModuleHandle:
+    from pal.core.commands import action_handlers, command_specs, interaction_specs
+    from pal.control.runtime_contracts import CORE_CONTROL
     from pal.core.control_handler import CoreControlActionHandler
     from pal.core.prompt import MinimalOperatingRulesPromptFragmentProvider
     from pal.core.turn_handler import TurnEventHandler
@@ -166,15 +115,15 @@ def register_with_core(core: PalCore) -> ModuleHandle:
         detachable=False,
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
-        control_action_handlers={
-            "cache_warm_deadline_ignore": core.handle_cache_warm_deadline_ignore,
-            "cache_warm_deadline_disable": core.handle_cache_warm_deadline_disable,
-        },
-        ports={"core": core},
+        control_action_handlers=action_handlers(core),
+        control_commands=command_specs(),
+        control_interactions=interaction_specs(),
+        ports={"core": core, "control": core.control_runtime},
+        port_contracts=(CORE_CONTROL,),
         shutdown_sync=core.close,
     )
     core.context.register_module(handle)
     core.context.prompt_fragment_registry.register(prompt_provider)
-    core.context.event_handler_registry.register(EventKind.USER_MESSAGE, TurnEventHandler(core=core))
-    core.context.event_handler_registry.register(EventKind.CONTROL_ACTION, CoreControlActionHandler(core=core))
+    core.context.event_handler_registry.register(EventKind.USER_MESSAGE, TurnEventHandler(core=core), owner=handle)
+    core.context.event_handler_registry.register(EventKind.CONTROL_ACTION, CoreControlActionHandler(core=core), owner=handle)
     return handle

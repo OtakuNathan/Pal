@@ -3,8 +3,10 @@ from tests.llm_fakes import NonStreamingLLM
 
 from pal.bunshin.runner_components.results import Results
 
+import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -22,6 +24,8 @@ from pal.memory.dreaming.service import DreamingService
 from pal.memory.dreaming.runtime import DreamingEventSource
 from pal.memory.embedding import HashingEmbedder
 from pal.memory.service import MemoryService
+from pal.memory.swap_store import SwapStore
+from pal.shared.maintenance import MaintenanceToken
 from pal.memory.storage import MemoryStorage
 from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
 
@@ -87,6 +91,39 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM generations").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT count(*) FROM archive_records").fetchone()[0], 0)
 
+    async def test_repeated_cancel_joins_candidate_worker_and_releases_its_repository(self):
+        service = DreamingService(storage=self.storage, provider=self.provider,
+                                  llm=ReviewingLLM(), config=DreamingConfig())
+        copying, release = threading.Event(), threading.Event()
+        candidates = []
+        original = self.storage.candidate
+        def capture(source):
+            candidate = original(source)
+            candidates.append(candidate)
+            copying.set()
+            if not release.wait(10):
+                raise TimeoutError("candidate worker was not released")
+            return candidate
+        with patch.object(self.storage, "candidate", side_effect=capture):
+            service.start()
+            stopping = None
+            try:
+                self.assertTrue(await asyncio.to_thread(copying.wait, 5))
+                stopping = asyncio.create_task(service.shutdown())
+                await asyncio.sleep(0.01)
+                service.task.cancel()
+                await asyncio.sleep(0.01)
+                self.assertFalse(stopping.done(), "shutdown returned while the candidate worker was still running")
+            finally:
+                release.set()
+                if stopping is not None:
+                    await stopping
+                else:
+                    await service.shutdown()
+        self.assertIsNone(candidates[0].connection_lease)
+        self.assertFalse(self.provider.repository.frozen)
+        self.assertEqual(self.storage.current(), self.head)
+
     async def test_bucket_merges_small_batches_into_reviewed_parents_before_one_publication(self):
         for i in range(3):
             self.refs.append(self.provider.commit(L3CommitRequest(kind="fact", title=f"API preference {i}",
@@ -101,7 +138,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 return await super().respond(request)
         llm = ObservingLLM()
         service = DreamingService(storage=self.storage, provider=self.provider, llm=llm, config=DreamingConfig())
-        with patch.object(self.storage, "publish", wraps=self.storage.publish) as publish:
+        with patch.object(SwapStore, "publish", autospec=True, side_effect=SwapStore.publish) as publish:
             result = await service.run()
         self.assertEqual(result["status"], "completed", result)
         self.assertEqual(result["report"]["merge_level"], 3)
@@ -450,7 +487,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
             reader.close()
 
     async def test_failure_before_publication_leaves_current_and_archive_unchanged(self):
-        with patch.object(self.storage, "publish", side_effect=OSError("before catalog commit")):
+        with patch.object(SwapStore, "publish", side_effect=OSError("before catalog commit")):
             result, _ = await self.run_dream()
         self.assertEqual(result["status"], "failed")
         self.assertEqual(self.storage.current(), self.head)
@@ -461,42 +498,42 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         current = self.storage.open()
         def admit():
             self.provider.repository = current
-            return True
+            return MaintenanceToken()
         core = SimpleNamespace(try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
             leave_memory_maintenance_async=AsyncMock(), begin_memory_sleep=Mock())
         service = DreamingService(storage=self.storage, provider=self.provider,
-            llm=ReviewingLLM(merge=False), core=core)
+            llm=ReviewingLLM(merge=False), host=core)
         try:
             with patch.object(service, "_resolve_main_provider"), patch.object(previous, "freeze", side_effect=AssertionError("retired repository")), patch.object(current, "freeze", wraps=current.freeze) as freeze:
                 result = await service.run()
             self.assertEqual(result["status"], "completed", result)
             freeze.assert_called_once_with()
-            core.leave_memory_maintenance_async.assert_awaited_once_with()
+            core.leave_memory_maintenance_async.assert_awaited_once()
         finally:
             previous.close()
 
     async def test_freeze_failure_releases_core_admission_barrier(self):
-        core = SimpleNamespace(try_enter_memory_maintenance_async=AsyncMock(return_value=True),
+        core = SimpleNamespace(try_enter_memory_maintenance_async=AsyncMock(return_value=MaintenanceToken()),
             leave_memory_maintenance_async=AsyncMock(), begin_memory_sleep=Mock())
-        service = DreamingService(storage=self.storage, provider=self.provider, llm=ReviewingLLM(), core=core)
+        service = DreamingService(storage=self.storage, provider=self.provider, llm=ReviewingLLM(), host=core)
         with patch.object(service, "_resolve_main_provider"), patch.object(self.provider.repository, "freeze", side_effect=OSError("write fence unavailable")):
             result = await service.run()
         self.assertEqual(result["status"], "failed")
         core.try_enter_memory_maintenance_async.assert_awaited_once_with()
-        core.leave_memory_maintenance_async.assert_awaited_once_with()
+        core.leave_memory_maintenance_async.assert_awaited_once()
         core.begin_memory_sleep.assert_not_called()
         self.assertFalse(self.provider.repository.frozen)
 
     async def test_committed_publication_with_mount_failure_keeps_ingress_closed(self):
         def admit():
-            return True
+            return MaintenanceToken()
         core = SimpleNamespace(try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
             memory_notification_route=lambda: "fixed-route", deliver_memory_notice_async=AsyncMock(return_value=True),
             leave_memory_maintenance_async=AsyncMock(), begin_memory_sleep=Mock())
-        service = DreamingService(storage=self.storage, provider=self.provider, llm=ReviewingLLM(), core=core)
+        service = DreamingService(storage=self.storage, provider=self.provider, llm=ReviewingLLM(), host=core)
         original_open = self.storage.open
         def open_generation(generation_id=None, **kwargs):
-            if generation_id is None and self.storage.current() != self.head:
+            if (generation_id or self.storage.current()) == self.storage.current() and self.storage.current() != self.head:
                 raise OSError("new connection unavailable")
             return original_open(generation_id, **kwargs)
         with patch.object(service, "_resolve_main_provider"), patch.object(self.storage, "open", side_effect=open_generation):
@@ -513,17 +550,17 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         for notice_delivered in (False, True):
             with self.subTest(notice_delivered=notice_delivered):
                 def admit():
-                    return True
+                    return MaintenanceToken()
                 states = []
                 core = SimpleNamespace(
                     try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
                     memory_notification_route=lambda: "fixed-route",
                     deliver_memory_notice_async=AsyncMock(return_value=notice_delivered),
-                    begin_memory_sleep=lambda: states.append("sleeping"),
-                    leave_memory_maintenance_async=AsyncMock(side_effect=lambda: states.append("awake")),
+                    begin_memory_sleep=lambda token, **kwargs: states.append("sleeping"),
+                    leave_memory_maintenance_async=AsyncMock(side_effect=lambda token: states.append("awake")),
                 )
                 service = DreamingService(storage=self.storage, provider=self.provider,
-                    llm=ReviewingLLM(fail_review=True), core=core)
+                    llm=ReviewingLLM(fail_review=True), host=core)
                 with patch.object(service, "_resolve_main_provider"):
                     result = await service.run()
                 self.assertEqual(result["status"], "failed")
@@ -533,7 +570,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_sleep_does_not_require_a_user_route(self):
         def admit():
-            return True
+            return MaintenanceToken()
         core = SimpleNamespace(
             try_enter_memory_maintenance_async=AsyncMock(side_effect=admit),
             memory_notification_route=Mock(side_effect=AssertionError("silent sleep must not resolve a route")),
@@ -541,7 +578,7 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
             begin_memory_sleep=Mock(), leave_memory_maintenance_async=AsyncMock(),
         )
         service = DreamingService(storage=self.storage, provider=self.provider,
-            llm=ReviewingLLM(merge=False), core=core)
+            llm=ReviewingLLM(merge=False), host=core)
         with patch.object(service, "_resolve_main_provider"):
             result = await service.run()
         self.assertEqual(result["status"], "completed", result)
@@ -551,11 +588,11 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
         core.deliver_memory_notice_async.assert_not_awaited()
 
     async def test_lost_commit_acknowledgement_recovers_the_published_generation(self):
-        publish = self.storage.publish
+        publish = SwapStore.publish
         def publish_then_fail(*args, **kwargs):
             publish(*args, **kwargs)
             raise OSError("lost acknowledgement")
-        with patch.object(self.storage, "publish", side_effect=publish_then_fail):
+        with patch.object(SwapStore, "publish", new=publish_then_fail):
             result, _ = await self.run_dream()
         self.assertEqual(result["status"], "completed", result)
         self.assertNotEqual(self.storage.current(), self.head)
@@ -599,7 +636,8 @@ class DreamingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bundle.memory_generation_id, self.head)
                 provider = bundle.memory_service._resolve_l3_provider()
                 self.assertIsNotNone(provider.repository.get_document(self.refs[0]))
-                self.assertTrue(provider.repository.read_only)
+                self.assertTrue(provider.read_only)
+                self.assertFalse(provider.indexes_writable)
                 document = provider.repository.get_document(self.refs[0])
                 bundle.memory_service.project_l2_entries([provider._project_entry(document, source_kind="l3_recall", candidate_state="stable")], touch=True)
                 memory = MemoryResults(run_id="workflow")

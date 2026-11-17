@@ -136,7 +136,7 @@ def test_full_public_failure_and_long_recovery_are_redacted_without_truncation(r
 
 
 def test_typed_error_stays_redacted_in_the_failure_prompt(runtime):
-    from pal.core.turns import _render_failure_primary_input
+    from pal.failure.presentation import _render_failure_primary_input
     from pal.failure import FailureSignal
     from pal.failure.runtime import FailureRuntime
 
@@ -179,7 +179,8 @@ def test_repeated_diagnostic_redaction_is_idempotent(text):
 @pytest.mark.parametrize("scheme", ["Basic", "Bearer", "CustomScheme"])
 def test_nested_authorization_is_redacted_in_every_failure_prompt_source(header, scheme):
     from copy import deepcopy
-    from pal.core.turns import ToolObservation, _render_failure_primary_input
+    from pal.core.turns import ToolObservation
+    from pal.failure.presentation import _render_failure_primary_input
     from pal.failure import FailureDraft
 
     evidence = {"request": {"headers": [{header: f"{scheme} {CANARY}",

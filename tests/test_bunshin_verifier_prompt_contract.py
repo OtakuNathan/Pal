@@ -5,6 +5,7 @@ TLC coverage. They use the live reference, mode-fragment, playbook, scaffold,
 and PromptIR paths rather than inspecting only the generic TOML text.
 """
 from __future__ import annotations
+from pal.execution.runtime import ExecutionRuntime
 from pal.shared.ports import PortRegistry
 
 import asyncio
@@ -110,7 +111,7 @@ def _render(pack, root):
     registry = PromptFragmentRegistry()
     registry.register(provider)
     compiler = PromptCompiler(SimpleNamespace(
-        prompt_fragment_registry=registry, execution_runtime=None, port_registry=PortRegistry({}),
+        prompt_fragment_registry=registry, execution_runtime=ExecutionRuntime(), port_registry=PortRegistry({}),
         require_port=lambda key: (_ for _ in ()).throw(KeyError(key)),
     ))
     ir = compiler.build_prompt_ir(PromptAssemblyContext(metadata={"memory_pack": None}))

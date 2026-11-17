@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
@@ -26,7 +26,7 @@ class CompactionPhase(str, Enum):
     RELEASED = "released"
 
 
-class CompactionTrigger(str, Enum):
+class CompactionTrigger(StrEnum):
     MODEL_SWITCH = "model_switch"
     MANUAL = "manual"
     MANUAL_HOT = "manual_hot"
@@ -37,7 +37,7 @@ class CompactionTrigger(str, Enum):
 class CompactionTicket:
     scope: str
     op_id: str = field(default_factory=lambda: uuid4().hex)
-    trigger: CompactionTrigger = CompactionTrigger.MANUAL
+    trigger: str = CompactionTrigger.MANUAL
     phase: CompactionPhase = CompactionPhase.CLAIMED
     cancelled: bool = False
     cancel_reason: str = ""
@@ -49,7 +49,9 @@ class CompactionTicket:
         if not self.scope:
             raise ValueError("compaction ticket requires a scope")
         object.__setattr__(self, "op_id", str(self.op_id or "").strip() or uuid4().hex)
-        object.__setattr__(self, "trigger", CompactionTrigger(self.trigger))
+        object.__setattr__(self, "trigger", str(self.trigger).strip())
+        if not self.trigger:
+            raise ValueError("context change trigger is required")
         object.__setattr__(self, "phase", CompactionPhase(self.phase))
         object.__setattr__(self, "cancelled", bool(self.cancelled))
         object.__setattr__(self, "cancel_reason", str(self.cancel_reason or ""))
@@ -140,7 +142,7 @@ class CompactionGate:
         self,
         scope: str,
         *,
-        trigger: CompactionTrigger | str,
+        trigger: str,
         deadline_seconds: float = 180.0,
     ) -> CompactionTicket | None:
         """Claim the scope's single admission slot; None when already held."""
@@ -160,7 +162,7 @@ class CompactionGate:
             self._publish_barrier(current, False)
         ticket = CompactionTicket(
             scope=scope_key,
-            trigger=CompactionTrigger(trigger),
+            trigger=trigger,
             deadline_seconds=deadline_seconds,
         )
         tickets[scope_key] = ticket

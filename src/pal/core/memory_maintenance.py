@@ -1,13 +1,9 @@
 """Core-owned admission boundary for resident memory maintenance."""
 from __future__ import annotations
 
-import json
-from dataclasses import asdict
-
 from pal.control import ControlDelivery
 from pal.core.core_events import MEMORY_SLEEP
-from pal.memory.dreaming.contracts import DreamingFailureNotice
-from pal.shared.proactive_protocol import SILENT_ONCE_SCHEDULER
+from pal.shared.maintenance import MaintenanceToken, owns_maintenance
 
 
 SLEEP_REPLY = "Pal is sleeping. This message was not accepted or queued; please try again after it wakes."
@@ -24,56 +20,45 @@ class MemoryMaintenanceMixin:
                     or self.turn_manager.latest_active_turn_id() is not None
                     or any(not task.done() for task in self.state.turn_tasks.values()))
 
-    async def try_enter_memory_maintenance_async(self) -> bool:
+    async def try_enter_memory_maintenance_async(self) -> MaintenanceToken | None:
         async with self.state.channel_turn_transition_lock:
             self.state.memory_maintenance_changed.clear()
             if self.memory_maintenance_busy():
-                return False
+                return None
+            token = MaintenanceToken()
             self.state.memory_maintenance = True
-            return True
+            self.state.memory_maintenance_token = token
+            self.state.memory_maintenance_component = "maintenance"
+            return token
 
     async def wait_for_memory_maintenance_async(self) -> None:
         await self.state.memory_maintenance_changed.wait()
 
-    def begin_memory_sleep(self) -> None:
+    def begin_memory_sleep(self, token: MaintenanceToken, *, component: str = "maintenance") -> None:
         """Publish sleep after maintenance admission without a channel notice."""
-        if not self.state.memory_maintenance:
-            raise RuntimeError("memory sleep requires maintenance admission")
+        if not owns_maintenance(self.state.memory_maintenance_token, token):
+            raise RuntimeError("memory sleep requires the current maintenance owner")
+        self.state.memory_maintenance_component = component
         self.context.core_event_bus.emit(MEMORY_SLEEP, {
-            "subsystem": "memory", "component": "dreaming", "sleeping": True,
+            "subsystem": "memory", "component": component, "sleeping": True,
         })
 
-    async def leave_memory_maintenance_async(self) -> None:
+    async def leave_memory_maintenance_async(self, token: MaintenanceToken) -> bool:
         async with self.state.channel_turn_transition_lock:
+            if not owns_maintenance(self.state.memory_maintenance_token, token):
+                return False
             self.state.memory_maintenance = False
+            self.state.memory_maintenance_token = None
             self.context.core_event_bus.emit(MEMORY_SLEEP, {
-                "subsystem": "memory", "component": "dreaming", "sleeping": False,
+                "subsystem": "memory", "component": self.state.memory_maintenance_component, "sleeping": False,
             })
             self.state.memory_maintenance_changed.set()
         self.notify_ready()
+        return True
 
     def memory_notification_route(self):
         channel = self.context.port_registry.get("channel:channel")
         return channel.last_user_route() if channel is not None else None
-
-    def schedule_memory_failure_reminder(self, notice: DreamingFailureNotice) -> str | None:
-        scheduler = self.context.port_registry.optional(SILENT_ONCE_SCHEDULER)
-        if scheduler is None:
-            return None
-        return scheduler.ensure_silent_once(
-            proactive_id=f"memory-dreaming-failure-{notice.run_id}",
-            goal="Record this dreaming failure as a pending user notice in shared L1.",
-            method=(
-                "The user has NOT been notified. Produce a short handoff note, in the user's "
-                "language, for the next ordinary user conversation to mention before answering "
-                "their message. Include the run id, failure summary and diagnostic log path. "
-                "These are facts at the time of failure, not a claim about the current runtime. "
-                "Output is intentionally discarded by the null channel; your turn remains in L1. "
-                "Do not call tools, send a message, retry dreaming or change configuration. "
-                "Do not claim the user has already been told. Failure facts: "
-                + json.dumps(asdict(notice), ensure_ascii=False)
-            ),
-        )
 
     async def deliver_memory_notice_async(self, route, text, *, require_provider=True) -> bool:
         if not require_provider:

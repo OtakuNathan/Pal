@@ -272,6 +272,7 @@ def _skill_name_args(raw: dict[str, object]) -> dict[str, object]:
 
 def register_with_core(context: "MainContext", service: SkillService) -> ModuleHandle:
     from pal.skill.prompt import SkillPromptFragmentProvider
+    from pal.skill.publication import DeclaredSkillProjection
 
     service.execution_runtime = service.execution_runtime or context.execution_runtime
     provider = SkillIntrospectionProvider(service=service)
@@ -283,6 +284,7 @@ def register_with_core(context: "MainContext", service: SkillService) -> ModuleH
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         ports={"skill": service},
+        module_observer=DeclaredSkillProjection(service),
     )
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)

@@ -89,8 +89,8 @@ def test_failed_attach_revokes_calls_even_if_registry_withdrawal_fails(live_plug
     assert host.detach("demo")["status"] == "ok"
     events.clear()
     captured = []
-    name = "_publish_module_capabilities" if phase == "publication" else "_replay_optional_contributions"
-    original = getattr(host, name)
+    target, name = (host, "_publish_module_capabilities") if phase == "publication" else (core.context, "publish_module_observer")
+    original = getattr(target, name)
     unmount = runtime.unmount_subtree
 
     def fail_publication(*args):
@@ -104,7 +104,7 @@ def test_failed_attach_revokes_calls_even_if_registry_withdrawal_fails(live_plug
         return unmount(handle)
 
     with monkeypatch.context() as patch:
-        patch.setattr(host, name, fail_publication)
+        patch.setattr(target, name, fail_publication)
         patch.setattr(runtime, "unmount_subtree", fail_withdrawal)
         assert host.attach("demo")["status"] == "error"
         assert "cleanup" not in events
@@ -288,7 +288,7 @@ def test_failed_writer_entry_restores_untouched_generation(live_plugin, monkeypa
         assert runtime.get_tool_spec('demo_read') is None
         raise RuntimeError('writer admission failed')
         yield
-    monkeypatch.setattr(activation, 'gate', fail_gate)
+    monkeypatch.setattr(activation.owner, 'gate', fail_gate)
     with pytest.raises(RuntimeError, match='writer admission failed'):
         with activation.switch_gate('plugin', 'demo'):
             pytest.fail('gate body entered')

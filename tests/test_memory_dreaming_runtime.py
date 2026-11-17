@@ -8,10 +8,11 @@ from unittest.mock import AsyncMock, Mock
 
 from pal.channel.runtime import ChannelRuntime
 from pal.channel.capabilities import subscribe_core_state
-from pal.control import ControlAction, ControlRoute
+from pal.control import ControlAction, ControlRoute, ControlDelivery
 from pal.core.runtime import PalCore
 from pal.foundation import EventEnvelope
 from pal.shared import EventKind
+from pal.shared.maintenance import MaintenanceToken
 
 
 class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
@@ -29,17 +30,18 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
         broken = SimpleNamespace(on_runtime_state=Mock(side_effect=RuntimeError("UI offline")))
         self.channel.endpoint_registry.endpoints.update(first=first, broken=broken)
         with self.assertRaises(RuntimeError):
-            self.core.begin_memory_sleep()
-        self.assertTrue(await self.core.try_enter_memory_maintenance_async())
+            self.core.begin_memory_sleep(MaintenanceToken())
+        token = await self.core.try_enter_memory_maintenance_async()
+        self.assertIsNotNone(token)
         first.on_runtime_state.assert_not_called()
         with self.assertLogs("pal.channel.runtime", level="ERROR"):
-            self.core.begin_memory_sleep()
+            self.core.begin_memory_sleep(token)
         first.on_runtime_state.assert_called_once_with({"sleeping": True, "failures": [], "safe_modes": [], "turns": []})
         replacement = SimpleNamespace(endpoint=SimpleNamespace(endpoint_id="replacement"), on_runtime_state=Mock())
         self.channel._bind_endpoint_ready(replacement)
         replacement.on_runtime_state.assert_called_once_with({"sleeping": True, "failures": [], "safe_modes": [], "turns": []})
         with self.assertLogs("pal.channel.runtime", level="ERROR"):
-            await self.core.leave_memory_maintenance_async()
+            await self.core.leave_memory_maintenance_async(token)
         first.on_runtime_state.assert_called_with({"sleeping": False, "failures": [], "safe_modes": [], "turns": []})
         self.assertEqual(self.channel.runtime_state, {"sleeping": False, "failures": [], "safe_modes": [], "turns": []})
 
@@ -88,8 +90,9 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admission_does_not_wait_for_bunshin_processes(self):
         self.core.context.port_registry["bunshin:bunshin"] = SimpleNamespace(active_runs=["long-running-worker"])
-        self.assertTrue(await self.core.try_enter_memory_maintenance_async())
-        await self.core.leave_memory_maintenance_async()
+        token = await self.core.try_enter_memory_maintenance_async()
+        self.assertIsNotNone(token)
+        await self.core.leave_memory_maintenance_async(token)
         self.assertFalse(self.core.state.memory_maintenance)
 
     async def test_sleep_blocks_mutating_controls(self):
@@ -115,5 +118,41 @@ class DreamingAdmissionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             self.assertFalse(waiter.done())
             self.channel.mailbox.put(EventEnvelope(event_kind=event_kind, source_kind="channel", payload={"reply_id": "notice"}))
+            self.assertEqual(await waiter, expected)
+            self.channel.mailbox.drain()
+
+    async def test_stale_or_copied_token_cannot_change_the_current_maintenance(self):
+        first = await self.core.try_enter_memory_maintenance_async()
+        self.assertIsNotNone(first)
+        copied = MaintenanceToken(token_id=first.token_id)
+        self.assertFalse(await self.core.leave_memory_maintenance_async(copied))
+        with self.assertRaisesRegex(RuntimeError, "current maintenance owner"):
+            self.core.begin_memory_sleep(copied)
+        self.assertTrue(await self.core.leave_memory_maintenance_async(first))
+        second = await self.core.try_enter_memory_maintenance_async()
+        self.core.begin_memory_sleep(second, component="second")
+        self.core.state.memory_maintenance_changed.clear()
+        self.assertFalse(await self.core.leave_memory_maintenance_async(first))
+        with self.assertRaisesRegex(RuntimeError, "current maintenance owner"):
+            self.core.begin_memory_sleep(first, component="stale")
+        self.assertTrue(self.core.state.memory_maintenance)
+        self.assertFalse(self.core.state.memory_maintenance_changed.is_set())
+        self.assertIs(self.core.control_runtime.snapshot().memory_maintenance_token, second)
+        self.assertEqual(self.core.state.memory_maintenance_component, "second")
+        self.assertTrue(await self.core.leave_memory_maintenance_async(second))
+
+    async def test_control_delivery_waits_for_the_channel_receipt(self):
+        self.core._route_to_channel_envelope = Mock(return_value=object())
+        self.core._delivery_binding_for_envelope = Mock(return_value=object())
+        for event_kind, expected in ((EventKind.REPLY_DELIVERED, True), (EventKind.REPLY_FAILED, False)):
+            reply_id = str(event_kind)
+            self.channel.queue_reply = Mock(return_value=reply_id)
+            waiter = asyncio.create_task(self.core.control_runtime.deliver(
+                ControlDelivery(delivery_kind="reply", route=self.route, text="Pal will sleep"),
+                require_provider=True, wait=True))
+            await asyncio.sleep(0)
+            self.assertFalse(waiter.done())
+            self.channel.mailbox.put(EventEnvelope(event_kind=event_kind, source_kind="channel",
+                                                   payload={"reply_id": reply_id}))
             self.assertEqual(await waiter, expected)
             self.channel.mailbox.drain()

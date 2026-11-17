@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import ExitStack
 from pathlib import Path
 
 from pal.core.runtime_config import RuntimeConfig
@@ -18,6 +19,10 @@ class SQLiteVecL3BuiltinBundle:
     version: str = "0.1.0"
 
     def start(self, scope):
+        with ExitStack() as cleanup:
+            return self._start(scope, cleanup)
+
+    def _start(self, scope, cleanup):
         memory_service: MemoryService = scope.core_context.require_port("memory:memory")
         config = RuntimeConfig.load(self.runtime_root) if self.runtime_root is not None else RuntimeConfig.defaults()
         repository_args = {}
@@ -25,19 +30,17 @@ class SQLiteVecL3BuiltinBundle:
             storage = MemoryStorage(self.runtime_root)
             legacy = self.runtime_root / "pal.sqlite3"
             storage.migrate(legacy) if legacy.exists() else storage.create_initial()
-            from pal.bunshin.memory_binding import initialize_existing_workflow_pins
-            initialize_existing_workflow_pins(self.runtime_root, storage)
+            storage.recover_abandoned_fence()
             repository_args["repository"] = storage.open()
+            cleanup.callback(repository_args["repository"].close)
         plugin = SQLiteVecL3Plugin(
             service=memory_service,
             embedding_provider=build_ollama_embedding_provider_from_config(config),
             **repository_args,
         )
         if repository_args:
-            scope.defer(lambda: plugin.repository.close())
-        previous_provider_id = memory_service.l3_selector.active_provider_id
-        memory_service.l3_selector.active_provider_id = plugin.provider_id
-        scope.defer(lambda: setattr(memory_service.l3_selector, "active_provider_id", previous_provider_id))
+            scope.defer(plugin.close)
+        cleanup.pop_all()
         return register_l3_with_core(scope.context, plugin)
 
 

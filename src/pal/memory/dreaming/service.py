@@ -5,14 +5,21 @@ import json
 import hashlib
 import math
 from dataclasses import asdict, replace
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
+from pal.control.runtime_contracts import ControlRuntimePort
 from pal.foundation import utc_now
 from pal.foundation.diagnostics import exception_report
+from pal.foundation.sqlite_database import OwnedSqliteDatabase
 from pal.memory.service import MemoryService
-from pal.memory.storage import MemoryStorage, MemoryDatabase
+from pal.memory.storage import MemoryStorage
 from pal.memory.repository import MemoryDurableRepository
+from pal.memory.generation_maintenance import GenerationMaintenance
+from pal.memory.swap_store import SwapStore
+from pal.memory.swap_state import binding_ready
+from pal.foundation.workers import join_owned_task, run_worker
 from pal.memory.dreaming.clustering import MergeTree, discover_clusters, semantic_document
 from pal.memory.dreaming.contracts import DreamingConfig, DreamingFailureNotice
 from pal.memory.persistence.checkpoint import atomic_json
@@ -21,12 +28,13 @@ from pal.memory.dreaming.pipeline import DreamingPipeline, apply_merges
 
 
 class DreamingService:
-    def __init__(self, *, storage, provider, llm, config=None, core=None):
+    def __init__(self, *, storage, provider, llm, config=None, host: ControlRuntimePort | None = None, memory: MemoryService | None = None):
         self.storage = storage
         self.provider = provider
         self.llm = llm
         self.config = config or DreamingConfig()
-        self.core = core
+        self.host = host
+        self.memory = memory
         self.task = None
         self.active_config = None
         self.run_id = None
@@ -111,7 +119,7 @@ class DreamingService:
                 db.execute("UPDATE dreaming_runs SET report_json=? WHERE run_id=?", (json.dumps(report), run_id))
 
     def reconcile_failure_reminders(self):
-        if self.core is None:
+        if self.host is None:
             return
         with self.storage.connection() as db:
             rows = db.execute("SELECT run_id,status,report_json FROM dreaming_runs "
@@ -126,7 +134,8 @@ class DreamingService:
                 published=row["status"] == "completed", service_ready=not bool(self.activation_error),
             )
             try:
-                task_id = self.core.schedule_memory_failure_reminder(notice)
+                from pal.memory.dreaming.failure_reminders import schedule_failure_reminder
+                task_id = schedule_failure_reminder(self.host, notice)
                 if task_id is None:
                     continue  # Optional proactive plugin may be attached later.
                 report["failure_reminder"] = {"scheduled": True, "proactive_id": task_id}
@@ -145,17 +154,7 @@ class DreamingService:
             self._record_failure(row["run_id"], report)
 
     async def _work(self, function, *args, **kwargs):
-        # Cancelling an asyncio waiter does not stop its worker thread. Join it
-        # before closing connections or deciding whether publication committed.
-        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as cancelled:
-            try:
-                await task
-            except Exception as exc:
-                raise cancelled from exc
-            raise
+        return await run_worker(partial(function, *args, **kwargs))
 
     def create_run(self, *, slot=None):
         with self.storage.connection(write=True) as connection:
@@ -221,16 +220,17 @@ class DreamingService:
     def _prepare(self, run_id, review_scope, config=None):
         source_path = self.storage.root / "runs" / run_id / "source.sqlite3"
         self.storage.snapshot(self.provider.repository, source_path)
-        db = MemoryDatabase(str(source_path), check_same_thread=False)
-        repo = MemoryDurableRepository(db)
-        # This is a private backup, not another writer to the source
-        # generation. Snapshot deletion state; final inputs are rebuilt after
-        # admission and candidate validation checks catalog tombstones again.
-        repo.excluded_refs = self.storage.deleted_refs()
-        repo.generation_id = self.provider.repository.generation_id
-        repo.ensure_schema()
-        prepared_provider = replace(self.provider, repository=repo, service=MemoryService(), read_only=False)
+        db = OwnedSqliteDatabase(str(source_path))
         try:
+            db.execute_sql("UPDATE memory_generation_guard SET writable=1 WHERE singleton=1")
+            repo = MemoryDurableRepository(db)
+            # This is a private backup, not another writer to the source
+            # generation. Snapshot deletion state; final inputs are rebuilt after
+            # admission and candidate validation checks catalog tombstones again.
+            repo.excluded_refs = self.storage.deleted_refs()
+            repo.generation_id = self.provider.repository.generation_id
+            repo.ensure_schema()
+            prepared_provider = replace(self.provider, repository=repo, service=MemoryService(), read_only=False)
             # Index preparation is program work. Provider outages can fall back
             # to existing lexical/topic discovery, without sleeping the host.
             while repo.list_pending_embeddings(limit=8):
@@ -241,7 +241,7 @@ class DreamingService:
                     break
             return discover_clusters(repo, config or self.config, storage=self.storage, review_scope=review_scope)
         finally:
-            repo.close()
+            db.close_all()
 
     def _source_matches(self, clusters):
         expected = {doc["document_id"]: semantic_document(doc) for cluster in clusters for doc in cluster.members}
@@ -254,14 +254,34 @@ class DreamingService:
         return actual == expected
 
     def _resolve_main_provider(self):
-        if self.core is None:
+        if self.memory is None:
             return
-        memory = self.core.context.require_port("memory:memory")
-        provider = memory._resolve_l3_provider()
-        catalog = getattr(getattr(provider, "repository", None), "catalog", None)
-        if catalog is None or catalog.catalog_path != self.storage.catalog_path or not provider.mounted:
+        provider = self.memory._resolve_l3_provider()
+        port = provider.generation_port
+        if (not provider.mounted or port is None or not port.repository.writable
+                or port.storage.catalog_path != self.storage.catalog_path):
             raise RuntimeError("the active L3 provider does not own this dreaming storage")
         self.provider = provider
+
+    def _source_for_admission(self):
+        self._resolve_main_provider()
+        return self.provider.repository
+
+    def _bind_current_generation(self):
+        if self.memory is not None:
+            self.memory.adopt_l3_generation(self.storage.active_provider_id(), self.storage.current())
+            return
+        port = self.provider.generation_port
+        if port is None:
+            raise RuntimeError("Dreaming requires a managed generation backend")
+        port.bind_generation(self.storage.current())
+
+    def _current_generation_bound(self):
+        if self.memory is not None:
+            return self.memory.is_l3_generation_bound(self.storage.active_provider_id(), self.storage.current())
+        port = self.provider.generation_port
+        return port is not None and binding_ready(port.repository.generation_id == self.storage.current(),
+                                                  port.generation_is_bound(self.storage.current()), True)
 
     async def run(self, run_id=None, *, config=None):
         config = config or self.config
@@ -269,8 +289,7 @@ class DreamingService:
         if self.status(run_id).get("run_id") != run_id:
             raise ValueError("unknown dreaming run")
         self.run_id = run_id
-        acquired = False
-        admitted = False
+        maintenance = None
         source = self.provider.repository
         candidate = None
         pipeline = None
@@ -288,16 +307,13 @@ class DreamingService:
             self._phase(run_id, "preprocessing", report)
             clusters = await self._work(self._prepare, run_id, pipeline.config_fingerprint, config)
             self._phase(run_id, "waiting_idle")
-            if self.core is not None:
-                while True:
-                    self._resolve_main_provider()
-                    if await self.core.try_enter_memory_maintenance_async():
-                        admitted = True
-                        break
-                    await self.core.wait_for_memory_maintenance_async()
             source = self.provider.repository
-            source.freeze()
-            acquired = True
+            maintenance = GenerationMaintenance(storage=self.storage, source=source, host=self.host,
+                bind=self._bind_current_generation,
+                bound=self._current_generation_bound,
+                component=f"dreaming:{run_id}", select_source=self._source_for_admission,
+                retain_source=self.memory is not None)
+            await maintenance.enter()
             # Rebuild affected input after the write fence, including additions
             # and deletions since preprocessing. Cached semantic work is keyed
             # by the full input/configuration fingerprint.
@@ -306,8 +322,6 @@ class DreamingService:
                 clusters = await self._work(self._prepare, run_id, pipeline.config_fingerprint, config)
             with self.storage.connection(write=True) as connection:
                 connection.execute("UPDATE dreaming_runs SET source_generation=? WHERE run_id=?", (source.generation_id, run_id))
-            if self.core is not None:
-                self.core.begin_memory_sleep()
             self._phase(run_id, "sleeping")
             report.update({"input_records": sum(len(item.members) for item in clusters), "groups": len(clusters),
                            "endpoints": pipeline.endpoints, "config_fingerprint": pipeline.config_fingerprint})
@@ -331,7 +345,10 @@ class DreamingService:
                 stage_replacements = []
                 if stage_merges:
                     if candidate is None:
-                        candidate = await self._work(self.storage.candidate, source)
+                        def capture_candidate():
+                            nonlocal candidate
+                            candidate = self.storage.candidate(source)
+                        await self._work(capture_candidate)
                         private_provider = replace(self.provider, repository=candidate, service=MemoryService(), read_only=False)
                     stage_replacements = await self._work(apply_merges, private_provider, stage_clusters, results)
                     replacements.extend(stage_replacements)
@@ -349,13 +366,11 @@ class DreamingService:
             pipeline.assert_configuration()
             report.update(outcome="merged", replacements=replacements, generation_id=candidate.generation_id)
             self._phase(run_id, "publishing", report)
-            # Publication is one catalog transaction. No ordinary reader can
-            # bind the candidate until this commits with completed.
-            await self._work(self.storage.publish, candidate, source_generation=source.generation_id, run_id=run_id, report=report)
-            source.close()
-            self.provider.repository = self.storage.open()
-            from pal.bunshin.memory_binding import release_retired_workflow_pins
-            await self._work(release_retired_workflow_pins, self.storage.root.parent, self.storage)
+            store = SwapStore(self.storage)
+            job = await self._work(store.adopt_reviewed_candidate, source, candidate, run_id=run_id, report=report)
+            await maintenance.publish(store, job, candidate)
+            if self.provider.service.on_generation_work is not None:
+                self.provider.service.on_generation_work()
             await self._work(self.storage.collect, retention_days=config.retention_days)
             return self.status(run_id)
         except BaseException as exc:
@@ -371,28 +386,28 @@ class DreamingService:
                 published_report = dict(status["report"])
                 published_report["post_publish_error"] = exception_report(exc)
                 self._record_failure(run_id, published_report)
-                if self.provider.repository.generation_id != self.storage.current():
-                    self.provider.repository.close()
-                    self.provider.repository = self.storage.open()
             if isinstance(exc, asyncio.CancelledError):
                 raise
             return self.status(run_id)
         finally:
-            if candidate is not None:
-                candidate.close()
-            if admitted and not acquired:
-                await self.core.leave_memory_maintenance_async()
-            if acquired:
-                source.thaw()
-                self.provider.repository.thaw()
-                if self.provider.repository.generation_id != self.storage.current():
-                    self.activation_error = "Published memory generation could not be mounted; external restart required."
-                else:
-                    self.activation_error = ""
-                    self.provider.service.clear_generation_projection()
-                    if self.core is not None:
-                        await self.core.leave_memory_maintenance_async()
-            self.reconcile_failure_reminders()
+            async def finish():
+                try:
+                    if candidate is not None:
+                        candidate.close()
+                finally:
+                    if maintenance is not None:
+                        try:
+                            await maintenance.close()
+                        finally:
+                            if self.provider.repository.generation_id != self.storage.current():
+                                self.activation_error = "Published memory generation could not be mounted; Pal remains asleep."
+                            else:
+                                self.activation_error = ""
+                                self.provider.service.clear_generation_projection()
+                                if self.provider.service.on_generation_work is not None:
+                                    self.provider.service.on_generation_work()
+                self.reconcile_failure_reminders()
+            await join_owned_task(asyncio.create_task(finish()))
 
     def _verify(self, provider, clusters, replacements):
         repo = provider.repository

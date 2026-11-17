@@ -21,6 +21,7 @@ from pal.execution.tool_facade import (
     rejection,
 )
 from pal.shared import ToolExecutionResult
+from pal.execution.runtime import ExecutionRuntime
 from pal.bunshin import (
     ActionEnvelope,
     AggregateType,
@@ -82,8 +83,9 @@ from pal.bunshin.semantic_orchestration.verification_workspace import _semantic_
 from pal.bunshin.semantic_orchestration.role_inputs import _verifier_reference_refs
 
 
-class _FakeExecutionAdapter:
+class _FakeExecutionAdapter(ExecutionRuntime):
     def __init__(self) -> None:
+        super().__init__()
         self.calls: list[ToolCallIR] = []
         self.lsp_structured: dict[str, object] = {
             "status": "ok",
@@ -140,6 +142,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         self.lease_index = 0
 
     def tearDown(self) -> None:
+        self.adapter.shutdown()
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
     def test_verifier_instruction_keeps_transient_builds_out_of_worktree(self) -> None:

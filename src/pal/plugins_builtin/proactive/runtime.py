@@ -13,15 +13,8 @@ class ProactivePlugin:
         runner = ProactiveRunner(repository=repository)
         for stored in repository.list_definitions():
             manager.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
-        handle = register_with_core(scope.context, manager, runner)
-        for handlers in handle.event_handlers.values():
-            for handler in handlers:
-                if hasattr(handler, "lifecycle_gate"):
-                    handler.lifecycle_gate = scope.core_context.execution_runtime.lifecycle_gate
-                tasks = getattr(handler, "tasks", None)
-                if tasks is not None:
-                    scope.defer(lambda tasks=tasks: [task.cancel() for task in tuple(tasks) if not task.done()])
-        return handle
+        return register_with_core(scope.context, manager, runner)
+
 
 
 def build_plugin(context: PluginBuildContext) -> ProactivePlugin:

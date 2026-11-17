@@ -83,6 +83,7 @@ class _L3ProviderCapabilityMixin:
 
     provider_id: str
     mounted: bool
+    generation_port = None
 
     @property
     def module_id(self) -> str:

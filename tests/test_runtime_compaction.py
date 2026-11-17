@@ -1,5 +1,6 @@
 from __future__ import annotations
 from tests.core_factory import build_core
+from tests.cache_reminder_factory import attach_cache_reminder
 
 from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
 
@@ -953,11 +954,12 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         ) -> None:
             statuses.append((kind, payload))
 
-        core.cache_warm_deadline.claim_compaction = claim_once
+        manager = attach_cache_reminder(core)
+        manager.claim_compaction = claim_once
         core._status_to_route_async = capture_status
         action = ControlAction(
-            action_kind="compact_memory",
-            target_scope="memory",
+            action_kind="cache_warm_deadline_compact",
+            target_scope="cache_reminder",
             route=ControlRoute(
                 endpoint_id="telegram_main",
                 channel_kind="telegram",
@@ -972,8 +974,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         )
 
         async def run_duplicate_clicks() -> None:
-            await core._handle_compact_memory_async(action)
-            await core._handle_compact_memory_async(action)
+            await core.handle_control_action_async(action)
+            await core.handle_control_action_async(action)
 
         asyncio.run(run_duplicate_clicks())
 
@@ -985,8 +987,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(claimed_epochs, ["epoch-a", "epoch-a"])
         self.assertEqual(len(compaction_requests), 1)
-        self.assertEqual(statuses[0][0], "interactive_update")
-        pending_spec = statuses[0][1]["spec"]
+        progress = next(payload for kind, payload in statuses if kind == "interactive_update")
+        pending_spec = progress["spec"]
         self.assertEqual(pending_spec.buttons, ())
         self.assertIn("Compacting with the warm cache", pending_spec.text)
         candidate_notices = [
@@ -1037,7 +1039,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         register_memory_with_core(core.context, service)
         core.context.port_registry["llm:llm"] = _PurposeAwareLLM()
         scheduled_deadlines: list[dict[str, object]] = []
-        core.cache_warm_deadline.schedule_after_turn_commit = (
+        manager = attach_cache_reminder(core)
+        manager.schedule_after_turn_commit = (
             lambda **kwargs: scheduled_deadlines.append(dict(kwargs)) or True
         )
 
@@ -1121,7 +1124,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         def fail_schedule(**_kwargs):
             raise RuntimeError("timer unavailable")
 
-        core.cache_warm_deadline.schedule_after_turn_commit = fail_schedule
+        manager = attach_cache_reminder(core)
+        manager.schedule_after_turn_commit = fail_schedule
         envelope = ChannelEnvelope(
             event=EventEnvelope(
                 event_kind=EventKind.USER_MESSAGE,
@@ -1142,7 +1146,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         self.assertEqual(outcome.turn_id, "timer-failure-turn")
         self.assertTrue(
             any(
-                item.get("kind") == "cache_warm_deadline.schedule_failed"
+                item.get("kind") == "control.observer.failed"
+                and item.get("module") == "cache_reminder"
                 for item in core.state.diagnostics
             )
         )
@@ -1159,7 +1164,8 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
                 TURN_END,
                 lambda _topic, _event: order.append("turn_end"),
             )
-            core.cache_warm_deadline.schedule_after_turn_commit = (
+            manager = attach_cache_reminder(core)
+            manager.schedule_after_turn_commit = (
                 lambda **_kwargs: order.append("deadline") or True
             )
             envelope = ChannelEnvelope(

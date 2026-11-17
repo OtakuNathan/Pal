@@ -17,10 +17,8 @@ def register_with_core(context: MainContext, plugin: L3ProviderPort) -> ModuleHa
         mounted=True,
         detachable=True,
         introspection_provider=plugin,
-        provider_refs=[plugin.provider_id],
         l3_provider=plugin,
         ports={f"provider:{plugin.provider_id}": plugin},
     )
-    context.execution_runtime.register_provider_ref(plugin.provider_id, plugin)
     context.register_module(handle)
     return handle

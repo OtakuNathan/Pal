@@ -594,7 +594,8 @@ class OwnerPortWiringTests(unittest.TestCase):
         llm = _runtime(transport)
         session = llm.endpoint_projection_session("pal:resident")
         self.assertFalse(session.retired)
-        core.context.port_registry["memory:memory"] = MemoryService()
+        from pal.memory.capabilities import register_with_core as register_memory
+        register_memory(core.context, MemoryService())
         core.context.port_registry["llm:llm"] = llm
         applied = asyncio.run(core._execute_soft_reset_async(SimpleNamespace()))
         self.assertTrue(applied)

@@ -26,3 +26,11 @@ receipt independently of its validation diagnostic. Execution renders those
 fields as guidance metadata outside the normal-output budget.
 
 Service consumers subscribe with `PortRegistry.observe(key)`. `ServiceRef` caches the published value; publication pushes replacements and withdrawal clears the slot. Consumers capture an instance for one operation; owners drain its work before closing resources.
+
+`registration.py` owns qualified `(domain, name)` identities and the pure
+identity-based claim/release reducer shared by registration owners and generated
+formal relations.
+
+`maintenance.py` declares the opaque maintenance owner token and the identity
+predicate used by Core admission and generated Memory ownership models. Absence
+is never ownership, and copying a token's diagnostic identifier grants no authority.

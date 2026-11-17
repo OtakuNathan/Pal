@@ -212,7 +212,7 @@ def test_provider_package_activation_uses_plugin_cleanup_owner(setup):
     assert setup.manager.runtime_provider_handles['demo_runtime'] is handle
     blocked = False
     state = activation.before('provider', 'demo_runtime')
-    assert state['plugin_owned']
+    assert state.existed and not state.attached
     # A failed cleanup logically detached the old generation. File replacement
     # must not quietly reactivate it; explicit attach/reload can do so afterward.
     assert activation.after('provider', 'demo_runtime', state) == 'installed_inactive'

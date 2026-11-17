@@ -109,7 +109,8 @@ class EndpointFallbackRemovalTests(unittest.TestCase):
     def test_fallback_setter_and_commands_are_removed(self) -> None:
         runtime = _runtime(_SwitchSettingsRepository(), active="alpha")
         self.assertFalse(hasattr(runtime, "set_llm_endpoint_fallback"))
-        plane = ControlPlane()
+        from tests.control_factory import build_control_plane
+        plane = build_control_plane()
         names = {item.name for item in plane.list_panel_commands()}
         self.assertNotIn("llm_fallback", names)
         self.assertNotIn("fallback", names)

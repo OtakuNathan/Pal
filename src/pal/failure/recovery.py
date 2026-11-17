@@ -1,66 +1,52 @@
 from __future__ import annotations
-from pal.llm.contracts import collect_generation
 
 from pal.memory.contracts import MEMORY
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import asyncio
 import json
-from typing import Any, Callable
+from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 from pal.core.core_events import (
     FAILURE_STARTED, FAILURE_FINISHED, SAFE_MODE_STARTED, SAFE_MODE_FINISHED,
-    TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_TOOL_CALL_FAILED,
 )
-from pal.core.turns import EffectResult, FailureFlowOutcome, LLMRequestEffect, ToolCallEffect, failure_turn_program
-from pal.execution.contracts import CapabilityCall
-from pal.failure import (
+from pal.core.turns import EffectResult, LLMRequestEffect, ToolCallEffect
+from pal.core.tool_surface import ToolSurface
+from pal.control.runtime_contracts import CORE_CONTROL
+from pal.failure.contracts import FailureFlowOutcome, FailureHandlingResult
+from pal.failure.flow import failure_turn_program
+from pal.failure.tools import select_failure_descriptors
+from pal.failure.runtime import FailureRuntime
+from pal.failure.contracts import (
     FAILURE_VERIFICATION_DEGRADED,
     FAILURE_VERIFICATION_FAILED,
     FAILURE_VERIFICATION_OK,
     FailureDraft,
-    FailureReport,
-    FailureRuntime,
     FailureSignal,
-    FailureUserFeedback,
     RepairResolutionRecord,
-    RepairWorkOrderDraft,
     VerificationResult,
 )
-from pal.foundation import utc_now
 from pal.shared.diagnostics import exception_reason
 from pal.llm.conversions import request_ir_from_prompt
 from pal.llm.ir import LLMRequestIR
-from pal.memory.contracts import L2Entry
-from pal.shared import LLMResponseMode, RuntimeStatus, ToolExecutionResult
+from pal.memory.contracts import MemoryCase, L3MutationResult
+from pal.shared import LLMResponseMode, RuntimeStatus
+
+
+if TYPE_CHECKING:
+    from pal.core.main_context import MainContext
 
 
 _SAFE_MODE_LLM_TIMEOUT_SECONDS = 45.0
 
 
-@dataclass(frozen=True)
-class FailureHandlingResult:
-    verification: VerificationResult
-    user_feedback: FailureUserFeedback
-    report: FailureReport | None = None
-    repair_resolution: RepairResolutionRecord | None = None
-    repair_work_order: RepairWorkOrderDraft | None = None
-
-
-class FailureOrchestrator:
-    def __init__(
-        self,
-        context,
-        *,
-        build_canonical_prompt: Callable[..., Any],
-        debug_log_prompt: Callable[[LLMRequestIR], None],
-        tool_surface,
-    ) -> None:
+class FailureRecovery:
+    def __init__(self, context: MainContext, runtime: FailureRuntime) -> None:
         self.context = context
-        self._build_canonical_prompt = build_canonical_prompt
-        self._debug_log_prompt = debug_log_prompt
-        self.tool_surface = tool_surface
+        self.runtime = runtime
+        self.host = context.port_registry.observe(CORE_CONTROL)
+        self.tool_surface = ToolSurface(context)
 
     async def handle_failure_async(
         self,
@@ -94,7 +80,7 @@ class FailureOrchestrator:
         self, signal: FailureSignal, *, origin: str, route: str | None,
         conversation_context: dict[str, Any] | None, failure_event: dict[str, Any],
     ) -> FailureHandlingResult:
-        failure_runtime = self.failure_runtime()
+        failure_runtime = self.runtime
         draft = failure_runtime.begin_draft(signal)
         failure_runtime.record_document_checked(draft, f"origin:{origin}")
         if route:
@@ -170,7 +156,7 @@ class FailureOrchestrator:
             return FailureHandlingResult(verification=verification, user_feedback=feedback, report=report)
 
         try:
-            allowed_descriptors = self.tool_surface.select_failure_descriptors(signal)
+            allowed_descriptors = select_failure_descriptors(self.context, signal)
             allowed_tools = self.tool_surface.build_tool_contracts_from_descriptors(allowed_descriptors)
             bus = self.context.core_event_bus
             # LLM/persistence reports above do not enter safe mode.
@@ -188,8 +174,13 @@ class FailureOrchestrator:
         failure_runtime.record_verification(draft, verification)
         if verification.status == FAILURE_VERIFICATION_OK:
             resolution = failure_runtime.build_repair_resolution_record(draft, verification=verification)
-            await self._persist_repair_resolution_async(resolution)
+            persistence = self._persist_repair_resolution(resolution)
             feedback = failure_runtime.render_user_feedback(draft, verification=verification)
+            feedback = replace(feedback, details={**feedback.details, "repair_memory": {
+                "status": persistence.status, "document_id": persistence.document_id, **persistence.metadata}})
+            if persistence.status != RuntimeStatus.OK:
+                feedback = replace(feedback, next_step="Recovery succeeded, but the repair case could not be saved to memory.")
+                self.host.current.record_diagnostic("failure.repair_memory.failed", dict(feedback.details["repair_memory"]))
             return FailureHandlingResult(
                 verification=verification,
                 user_feedback=feedback,
@@ -238,9 +229,8 @@ class FailureOrchestrator:
                     effect,
                     logical_scope_id=safe_mode_scope_id,
                 )
-                self._debug_log_prompt(request)
                 try:
-                    outcome = await collect_generation(llm_runtime.generate(request))
+                    outcome = await self.host.current.generate(request)
                 except Exception as exc:
                     diagnostic = exception_reason(exc)
                     return FailureFlowOutcome(
@@ -259,23 +249,10 @@ class FailureOrchestrator:
                 continue
             if isinstance(effect, ToolCallEffect):
                 call = effect.tool_call
-                component = call.args.get("name", call.name) if call.name == "call_tool" else call.name
-                tool_event = {
-                    "subsystem": "execution", "component": str(component),
-                    "tool_name": call.name, "call_id": call.call_id,
-                    "scope_id": safe_mode_scope_id, "phase": "safe_mode",
-                    **({"turn_id": draft.related_ids["turn_id"]} if draft.related_ids.get("turn_id") else {}),
-                }
-                bus = self.context.core_event_bus
-                bus.emit(TURN_TOOL_CALL_BEFORE, tool_event)
-                try:
-                    tool_result = await self.context.execution_runtime.execute_tool_async(effect.tool_call, allow_tools=True)
-                except Exception as exc:
-                    tool_result = self.context.execution_runtime.tool_call_failed_result(effect.tool_call, exc)
-                if not tool_result.ok:
-                    bus.emit(TURN_TOOL_CALL_FAILED, {**tool_event, "ok": False})
-                bus.emit(TURN_TOOL_CALL_AFTER, {**tool_event, "ok": tool_result.ok})
-                self.failure_runtime().absorb_maintenance_outcome(
+                tool_result = await self.host.current.execute_local_tool(call,
+                    scope_id=safe_mode_scope_id, phase="safe_mode",
+                    turn_id=draft.related_ids.get("turn_id", ""))
+                self.runtime.absorb_maintenance_outcome(
                     draft,
                     action_name=effect.tool_call.name,
                     status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
@@ -290,7 +267,7 @@ class FailureOrchestrator:
                     text=tool_result.text,
                 )
                 continue
-            effect_kind = str(getattr(effect, "kind", "") or type(effect).__name__)
+            effect_kind = type(effect).__name__
             return FailureFlowOutcome(
                 verification=VerificationResult(
                     status=FAILURE_VERIFICATION_FAILED,
@@ -342,74 +319,21 @@ class FailureOrchestrator:
         )
         return replace(request, logical_scope_id=logical_scope_id)
 
-    async def _persist_repair_resolution_async(self, record: RepairResolutionRecord) -> None:
+    def _persist_repair_resolution(self, record: RepairResolutionRecord) -> L3MutationResult:
+        memory = self.context.port_registry.optional(MEMORY)
+        if memory is None:
+            return L3MutationResult(status="unavailable", document_id="", metadata={"reason": "Memory is not mounted"})
         try:
-            memory_service = self.context.require_port(MEMORY)
-        except KeyError:
-            return
-        active_provider_id = str(memory_service.l3_selector.active_provider_id or "").strip()
-        if not active_provider_id:
-            return
-        title = f"{record.subsystem}:{record.failure_kind} repair"
-        search_text = (
-            f"Situation: {record.situation_text}\n"
-            f"Task: {record.task_text}\n"
-            f"Action: {record.action_text}\n"
-            f"Result: {record.result_text}"
-        )
-        call_args = {
-            "target_id": active_provider_id,
-            "kind": "case",
-            "scope": "system",
-            "title": title,
-            "summary": record.result_text,
-            "search_text": search_text,
-            "topics": [record.subsystem, record.component, "self_healing"],
-            "canonical_key": f"repair:{record.subsystem}:{record.component}:{record.failure_kind}",
-            "situation_text": record.situation_text,
-            "task_text": record.task_text,
-            "action_text": record.action_text,
-            "result_text": record.result_text,
-        }
-        await self.context.execution_runtime.execute_async(CapabilityCall(name='op_memory_write', args=call_args))
-        memory_service.upsert_l2_entries(
-            [
-                L2Entry(
-                    entry_id=f"repair_case:{record.subsystem}:{record.component}:{record.failure_kind}",
-                    kind="case",
-                    scope="system",
-                    title=title,
-                    summary=record.result_text,
-                    source_kind="repair_resolution",
-                    source_ref=call_args["canonical_key"],
-                    candidate_state="stable",
-                    touched_at=utc_now(),
-                    rendered=search_text,
-                    payload={
-                        "subsystem": record.subsystem,
-                        "component": record.component,
-                        "failure_kind": record.failure_kind,
-                        "situation_text": record.situation_text,
-                        "task_text": record.task_text,
-                        "action_text": record.action_text,
-                        "result_text": record.result_text,
-                        "related_ids": dict(record.related_ids),
-                    },
-                )
-            ],
-            touch=True,
-        )
-
-    def failure_runtime(self) -> FailureRuntime:
-        return self.context.require_port("failure:failure")
-
-    def render_failure_feedback_text(self, feedback: FailureUserFeedback) -> str:
-        parts = [feedback.summary.strip()]
-        if feedback.blocker.strip():
-            parts.append(f"Blocker: {feedback.blocker.strip()}")
-        if feedback.next_step.strip():
-            parts.append(f"Next step: {feedback.next_step.strip()}")
-        return "\n".join(part for part in parts if part)
+            return memory.remember_case(MemoryCase(
+                canonical_key=f"repair:{record.subsystem}:{record.component}:{record.failure_kind}",
+                title=f"{record.subsystem}:{record.failure_kind} repair",
+                situation=record.situation_text, task=record.task_text,
+                action=record.action_text, result=record.result_text,
+                topics=(record.subsystem, record.component, "self_healing"),
+                metadata={"subsystem": record.subsystem, "component": record.component,
+                          "failure_kind": record.failure_kind, "related_ids": dict(record.related_ids)}))
+        except Exception as exc:
+            return L3MutationResult(status="error", document_id="", metadata={"reason": exception_reason(exc)})
 
 
 def _failure_flow_exception_outcome(exc: Exception, *, phase: str) -> FailureFlowOutcome:

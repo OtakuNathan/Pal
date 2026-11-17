@@ -192,13 +192,12 @@ class MemoryIntrospectionProvider:
         # their former all-at-once Accept must never grant new write authority.
         if "memory_candidates" in action.args:
             state = reviews.stage_payload({**action.args, "candidate_batch_id": action.target_id}, action.route, legacy=True)
-            core = self.context.port_registry.get("core:core")
+            from pal.control.runtime_contracts import CORE_CONTROL
+            core = self.context.port_registry.optional(CORE_CONTROL)
             if core is not None:
                 old = InteractionMessageSpec(f"memory_candidate_{action.target_id}",
                     "memory_candidate_approval", action.route, "The legacy proposal has moved to per-candidate review.")
-                await core.handle_control_action_async(ControlAction("interactive_resolve", "interaction",
-                    target_id=old.interaction_id, route=action.route,
-                    delivery=delivery_for_interaction(action.route, "interactive_resolve", old)))
+                await core.deliver(delivery_for_interaction(action.route, "interactive_resolve", old))
             return {"delivery": reviews.delivery(state, action.route, opening=True,
                 banner="Legacy proposal imported. Review each candidate, then submit the batch.")}
         try:
@@ -563,29 +562,6 @@ class MemoryIntrospectionProvider:
             llm_failure_details={},
         )
 
-    def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider_id = str(call.args.get("name") or "").strip()
-        if not provider_id:
-            return IntrospectionResult(
-                status=RuntimeStatus.INVALID,
-                text="name is required",
-                llm_text="name is required",
-            )
-        if self.service.providers.get(provider_id) is None:
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="unknown l3 provider",
-                structured={"active_provider_id": provider_id},
-                llm_text="unknown l3 provider",
-            )
-        self.service.l3_selector.active_provider_id = provider_id
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="memory active l3 provider updated",
-            structured={"active_provider_id": provider_id},
-            llm_text=render_diagnostic_record_for_llm("Memory active L3 provider updated", {"active_provider_id": provider_id}),
-        )
-
 
 def inspect_memory(provider: MemoryIntrospectionProvider) -> MemorySnapshot:
     service = provider.service
@@ -606,9 +582,30 @@ def register_with_core(
     _ = config
     from pal.memory.prompt import MemoryPromptFragmentProvider
     from pal.memory.runtime_state import MemoryRuntimeStatePort
+    from pal.memory.commands import command_specs
+    from pal.control.runtime_contracts import CORE_CONTROL
+    from pal.core.control_action_registry import ControlActionSpec
 
+    from pal.memory.maintenance import MemoryBackendOwner
+
+    backend_owner = MemoryBackendOwner(context, service)
     provider = MemoryIntrospectionProvider(service=service, context=context)
     prompt_provider = MemoryPromptFragmentProvider()
+    controls = context.port_registry.observe(CORE_CONTROL)
+
+    async def review_open(action: ControlAction) -> None:
+        result = await provider.handle_memory_review_open_async(action)
+        if "delivery" in result:
+            await controls.current.deliver(result["delivery"])
+        else:
+            await controls.current.reply(action, result["message"])
+
+    async def review_decision(action: ControlAction) -> None:
+        result = await provider.handle_memory_candidate_decision_async(action)
+        if "delivery" in result:
+            await controls.current.deliver(result["delivery"])
+        else:
+            await controls.current.reply(action, result["message"])
     handle = ModuleHandle(
         module_id="memory",
         tier=MODULE_TIER_CORE_FOUNDATION,
@@ -616,12 +613,16 @@ def register_with_core(
         introspection_provider=provider,
         prompt_fragment_providers=[prompt_provider],
         control_action_handlers={
-            "memory_candidate_decision": provider.handle_memory_candidate_decision_async,
-            "memory_review_open": provider.handle_memory_review_open_async,
+            "memory_candidate_decision": ControlActionSpec(review_decision),
+            "memory_review_open": ControlActionSpec(review_open),
         },
+        control_commands=command_specs(),
+        configuration_handlers=backend_owner.configuration_handlers(),
         ports={"memory": service},
         port_contracts=(MEMORY,),
         runtime_state_port=MemoryRuntimeStatePort(service),
+        quiesce_async=backend_owner.close,
+        shutdown_async=backend_owner.close,
     )
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)

@@ -195,3 +195,15 @@ reinstallation must use package installation to replace the removal record.
 
 These host/configuration changes require an external complete Pal restart for
 activation. Copying files or attaching a plugin alone does not load resident code.
+
+Package completion events capture the initiating delivery binding through Core's
+public query interface. Core admits the background continuation, initializes L1,
+and releases the turn on success, failure or cancellation. The package owner
+retains observation deduplication and committed-result consumption, without
+modifying Core's turn registry.
+
+Runtime file replacement and uninstall ask `PluginHost.package_lifecycle` for
+activation and cleanup facts. PluginHost owns provider generations as well as
+ordinary plugin generations; the package layer has no separate legacy Channel
+stop/unload path. A failed writer admission restores untouched tool entries,
+while cleanup that has begun remains owned and unavailable until retry.

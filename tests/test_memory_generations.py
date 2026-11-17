@@ -4,16 +4,19 @@ import tempfile
 import unittest
 import sqlite3
 from dataclasses import replace
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from peewee import SqliteDatabase
+from peewee import OperationalError, SqliteDatabase
 
 from pal.memory.contracts import L3CommitRequest, L3CorrectRequest, L3DeleteRequest, MemoryQuery
 from pal.memory.embedding import HashingEmbedder
-from pal.memory.repository import MemoryDurableRepository
+from pal.memory.repository import MemoryDurableRepository, serialize_vector
 from pal.memory.service import MemoryService
+from pal.memory.embedding_space import read_space
+from pal.memory.schema import ensure_sqlite_vec_loaded
 from pal.memory.storage import MemoryStorage
 from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
 
@@ -33,6 +36,101 @@ class MemoryGenerationTests(unittest.TestCase):
 
     def fact(self, **values):
         return L3CommitRequest(kind="fact", title="API preference", summary="Explicit APIs", search_text="explicit interfaces", **values)
+
+    def require_native_vector_index(self):
+        status = ensure_sqlite_vec_loaded(self.repo.database)
+        if not status.available:
+            self.skipTest(status.detail)
+
+    def recall_as_read_only(self, query):
+        with closing(self.storage.open(read_only=True)) as repo:
+            provider = SQLiteVecL3Plugin(service=MemoryService(), repository=repo,
+                                         read_only=True, embedder=HashingEmbedder())
+            return provider.recall(MemoryQuery(queries=[query]))
+
+    def test_new_vector_is_searchable_by_a_read_only_reader_without_repair(self):
+        self.require_native_vector_index()
+        saved = self.provider.commit(self.fact())
+        self.assertEqual(self.provider.refresh_indexes()["refreshed"], 1)
+        found = self.recall_as_read_only("explicit interfaces")
+        self.assertIn("vector", found.metadata["retrieval_mode"])
+        self.assertIn(saved.document_id, {hit["document_id"] for hit in found.hits})
+
+    def test_correction_replaces_index_members_when_ready_count_is_unchanged(self):
+        self.require_native_vector_index()
+        old = self.provider.commit(self.fact())
+        self.provider.refresh_indexes()
+        self.provider.recall(MemoryQuery(queries=["explicit interfaces"]))
+        updated = self.provider.correct(L3CorrectRequest(document_id=old.document_id,
+            summary="Updated preference", search_text="gamma delta updated interfaces"))
+        self.assertEqual(self.provider.refresh_indexes()["refreshed"], 1)
+        self.assertEqual(self.repo.inventory()["ready_embeddings"], 1)
+        found = self.recall_as_read_only("gamma delta updated interfaces")
+        self.assertIn("vector", found.metadata["retrieval_mode"])
+        self.assertEqual({hit["document_id"] for hit in found.hits}, {updated.document_id})
+        self.assertIsNotNone(self.repo.get_vector_blob(old.document_id + ":primary"))
+        for (name,) in self.repo.database.execute_sql("SELECT name FROM sqlite_master WHERE sql LIKE '%USING vec0%'"):
+            rows = self.repo.database.execute_sql(f'SELECT rowid FROM "{name}"').fetchall()
+            self.assertNotIn((self.repo._get_vector_rowid(old.document_id + ":primary"),), rows)
+
+    def test_failed_index_insert_rolls_back_vector_and_ready_state(self):
+        self.require_native_vector_index()
+        saved = self.provider.commit(self.fact())
+        execute = self.repo.database.execute_sql
+        def fail_index(sql, *args, **kwargs):
+            if sql.startswith("INSERT INTO memory_vec_idx_"):
+                raise OperationalError("vector index insert failed")
+            return execute(sql, *args, **kwargs)
+        with patch.object(self.repo.database, "execute_sql", side_effect=fail_index):
+            with self.assertRaisesRegex(OperationalError, "vector index insert failed"):
+                self.provider.refresh_indexes()
+        self.assertIsNone(self.repo.get_vector_blob(saved.document_id + ":primary"))
+        self.assertEqual(self.repo.get_embedding(saved.document_id + ":primary").index_status, "pending")
+        self.assertIsNone(read_space(self.repo.database.connection()).dimension)
+        self.assertEqual(self.provider.refresh_indexes()["refreshed"], 1)
+        self.assertIn("vector", self.recall_as_read_only("explicit interfaces").metadata["retrieval_mode"])
+
+    def test_failed_retirement_index_delete_rolls_back_the_correction(self):
+        self.require_native_vector_index()
+        old = self.provider.commit(self.fact())
+        self.provider.refresh_indexes()
+        self.provider.recall(MemoryQuery(queries=["explicit interfaces"]))
+        execute = self.repo.database.execute_sql
+        def fail_index(sql, *args, **kwargs):
+            if sql.startswith("DELETE FROM memory_vec_idx_"):
+                raise OperationalError("vector index delete failed")
+            return execute(sql, *args, **kwargs)
+        request = L3CorrectRequest(document_id=old.document_id, summary="Changed preference")
+        with patch.object(self.repo.database, "execute_sql", side_effect=fail_index):
+            with self.assertRaisesRegex(OperationalError, "vector index delete failed"):
+                self.provider.correct(request)
+        self.assertIsNotNone(self.repo.get_document(old.document_id))
+        self.assertEqual(self.repo.Fact.select().count(), 1)
+        self.assertEqual(self.repo.get_embedding(old.document_id + ":primary").index_status, "ready")
+        self.assertEqual(self.storage.history(old.document_id, repo=self.repo), [])
+        self.assertIn("vector", self.recall_as_read_only("explicit interfaces").metadata["retrieval_mode"])
+        self.assertEqual(self.provider.correct(request).status, "ok")
+
+    def test_failed_vector_replacement_restores_the_deleted_native_index_entry(self):
+        self.require_native_vector_index()
+        saved = self.provider.commit(self.fact())
+        self.provider.refresh_indexes()
+        self.provider.recall(MemoryQuery(queries=["explicit interfaces"]))
+        embedding_id = saved.document_id + ":primary"
+        original = self.repo.get_vector_blob(embedding_id)
+        execute = self.repo.database.execute_sql
+        def fail_index(sql, *args, **kwargs):
+            if sql.startswith("INSERT INTO memory_vec_idx_"):
+                raise OperationalError("replacement index insert failed")
+            return execute(sql, *args, **kwargs)
+        with patch.object(self.repo.database, "execute_sql", side_effect=fail_index):
+            with self.assertRaisesRegex(OperationalError, "replacement index insert failed"):
+                self.repo.upsert_vector_blob(embedding_id=embedding_id,
+                    vector_blob=serialize_vector([1.0] * 32), dimension=32, profile=self.provider.migration_identity)
+        self.assertEqual(self.repo.get_vector_blob(embedding_id), original)
+        found = self.recall_as_read_only("explicit interfaces")
+        self.assertIn("vector", found.metadata["retrieval_mode"])
+        self.assertIn(saved.document_id, {hit["document_id"] for hit in found.hits})
 
     def test_exact_recall_reads_durable_state_without_index_refresh(self):
         first = self.provider.commit(self.fact())
@@ -144,6 +242,20 @@ class MemoryGenerationTests(unittest.TestCase):
         with patch.object(self.repo.database, "execute_sql", side_effect=execute):
             with self.assertRaisesRegex(RuntimeError, "checkpoint did not complete"):
                 self.storage.seal(self.repo)
+
+    def test_sealing_validates_committed_fts_after_another_connection_writes(self):
+        self.provider.commit(self.fact())
+        self.repo.database.execute_sql("SELECT * FROM memories_fts").fetchall()
+        other = self.storage.open()
+        try:
+            provider = SQLiteVecL3Plugin(service=MemoryService(), repository=other, embedder=HashingEmbedder())
+            provider.commit(replace(self.fact(), summary="Written by another connection"))
+            self.storage.seal(self.repo)
+            with sqlite3.connect(self.storage.path(self.storage.current())) as checker:
+                self.assertEqual(checker.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
+                self.assertEqual(checker.execute("SELECT count(*) FROM memories_fts").fetchone()[0], 2)
+        finally:
+            other.close()
 
     def test_setup_upgrade_splits_memory_once_and_preserves_legacy_and_configuration(self):
         from pal.wizard.cli import run_setup_upgrade

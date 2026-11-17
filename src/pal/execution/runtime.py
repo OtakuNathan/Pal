@@ -9,6 +9,7 @@ import hashlib
 from pal.execution.result_snapshots import ResultSnapshotStore, head_tail, render_snapshot_hint
 
 from pal.shared.tool_protocol import ToolCallIR, ToolContextMessageIR
+from pal.shared.registration import RegistrationKey, OwnerRelation, OwnershipEvent, owner_relation, reduce_ownership
 
 from pal.shared.tool_protocol import new_tool_call
 
@@ -243,6 +244,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def observe_tool_delivery(self, call, result):
         """Record coverage proven by a durably committed tool result."""
 
+    async def acknowledge_tool_result_async(self, call_id: str, turn_id: str) -> None:
+        """Execution extensions acknowledge owner-produced results after delivery."""
+
     def stagnation_payload(self, call, result):
         return {"ok": result.ok, "text": result.text, "structured": result.structured}
 
@@ -304,13 +308,36 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def turn_io(self) -> TurnIOPort | None:
         return cast(TurnIOPort | None, self.provider_registry.get(TURN_IO.name))
 
-    def register_provider_ref(self, provider_id: str, provider: Any) -> None:
+    def validate_provider_ref(self, provider_id: str, provider: Any, *, owner_id: str) -> None:
+        key = RegistrationKey.parse(provider_id)
+        if key.domain != owner_id:
+            raise ValueError(f"Provider {provider_id} does not belong to module {owner_id}")
         if provider_id == TURN_IO.name:
             TURN_IO.validate(provider)
-        self.provider_registry[provider_id] = provider
+        reduce_ownership(owner_relation(self.provider_registry.get(provider_id), provider), OwnershipEvent.CLAIM)
 
-    def unregister_provider_ref(self, provider_id: str) -> None:
-        self.provider_registry.pop(provider_id, None)
+    def register_provider_ref(self, provider_id: str, provider: Any, *, owner_id: str) -> None:
+        with self._registry_lock:
+            self.validate_provider_ref(provider_id, provider, owner_id=owner_id)
+            self.provider_registry[provider_id] = provider
+
+    def replace_provider_ref(self, provider_id: str, provider: Any, *, owner_id: str, expected: object) -> None:
+        with self._registry_lock:
+            if self.provider_registry.get(provider_id) is not expected:
+                raise ValueError(f"Provider replacement source changed: {provider_id}")
+            key = RegistrationKey.parse(provider_id)
+            if key.domain != owner_id:
+                raise ValueError(f"Provider {provider_id} does not belong to module {owner_id}")
+            if provider_id == TURN_IO.name:
+                TURN_IO.validate(provider)
+            self.provider_registry[provider_id] = provider
+
+    def unregister_provider_ref(self, provider_id: str, *, expected: object) -> None:
+        with self._registry_lock:
+            relation = owner_relation(self.provider_registry.get(provider_id), expected)
+            target = reduce_ownership(relation, OwnershipEvent.RELEASE)
+            if relation is OwnerRelation.SELF and target is OwnerRelation.VACANT:
+                self.provider_registry.pop(provider_id)
 
     def begin_tool_result_turn(
         self,

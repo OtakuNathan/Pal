@@ -19,12 +19,12 @@ import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from weakref import WeakValueDictionary
 
 from pal.execution.runtime import ExecutionRuntime
 from pydantic import Field, create_model
-from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
+from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult, ExecutionRuntimePort
 from pal.execution.tool_facade import (
     CompleteResult,
     EffectKind,
@@ -108,8 +108,10 @@ from pal.shared import (
     MountedSubtreeHandle,
     RuntimeStatus,
     SINGLETON_TARGET,
-    default_tool_result_text,
 )
+
+if TYPE_CHECKING:
+    from pal.execution.session_state import LogicalExecutionContext
 
 
 class BunshinMemoryCandidatesInput(StrictToolModel):
@@ -278,7 +280,7 @@ def _workflow_capability(
         tool_call = new_tool_call(
             name=name,
             args=dict(call.args),
-            call_id=str(getattr(provider_call, "call_id", "") or "") or None,
+            call_id=provider_call.call_id if provider_call is not None else None,
         )
         result = handler(tool_call, meta)
         if inspect.isawaitable(result):
@@ -301,7 +303,7 @@ def _workflow_capability(
                     snapshot_refs=result.snapshot_refs, context_messages=result.context_messages,
                 )
             payload = dict(result.structured if result.structured is not None else {"text": result.text})
-            llm_text = default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")
+            llm_text = result.llm_text
             return CapabilityResult(
                 status=RuntimeStatus.OK, text=result.text, llm_text=llm_text,
                 structured={"payload": payload},
@@ -515,7 +517,7 @@ async def _execute_legacy_finding(runtime: "BunshinScopedExecutionRuntime", call
                                   *, budget: Any, turn_id: str) -> ToolExecutionResult:
     alias = str(ADD_FINDING_TOOL_SPEC["alias"])
     provider_call = new_tool_call(name=alias, args=dict(call.args or {}), call_id=call.call_id)
-    execution = runtime.base_runtime.runtime
+    execution = runtime._execution.runtime
     invocation = await execution.invoke_direct_tool_async(provider_call, allow_tools=True,
         budget=budget, turn_id=turn_id, generation=runtime._legacy_finding_generation)
     return execution._canonical_result_from_invocation(alias, call.call_id, invocation)
@@ -524,7 +526,7 @@ async def _execute_legacy_finding(runtime: "BunshinScopedExecutionRuntime", call
 class _ExecutionOverlay:
     def __init__(
         self,
-        delegate: Any,
+        delegate: ExecutionRuntimePort,
         allowed_capabilities: list[str],
         *,
         guidance_overrides: dict[str, dict[str, str]],
@@ -533,22 +535,16 @@ class _ExecutionOverlay:
         self.delegate = delegate
         self.verifier_authoring = verifier_authoring
         self.runtime = ExecutionRuntime(
-            runtime_root=getattr(delegate, "runtime_root", None),
-            sync_executor=getattr(delegate, "sync_executor", None),
+            runtime_root=delegate.runtime_root,
+            sync_executor=delegate.sync_executor,
         )
         # The overlay changes only the immutable registry view. Output snapshots,
         # file delivery grants, and the user-turn clock belong to the same
         # logical role session as the delegate runtime.
-        delegate_sessions = getattr(delegate, "execution_sessions", None)
-        delegate_state = getattr(delegate, "logical_state", None)
-        if delegate_sessions is not None:
-            self.runtime.execution_sessions = delegate_sessions
-            self.runtime.result_snapshots = delegate.result_snapshots
-        if delegate_state is not None:
-            self.runtime.logical_state = delegate_state
-        project = getattr(delegate, "project_execution_view", None)
-        if project is not None:
-            self.runtime = project(self.runtime)
+        self.runtime.execution_sessions = delegate.execution_sessions
+        self.runtime.result_snapshots = delegate.result_snapshots
+        self.runtime.logical_state = delegate.logical_state
+        self.runtime = delegate.project_execution_view(self.runtime)
         self._mount_allowed_generation(
             allowed_capabilities,
             guidance_overrides=guidance_overrides,
@@ -560,9 +556,7 @@ class _ExecutionOverlay:
         *,
         guidance_overrides: dict[str, dict[str, str]],
     ) -> None:
-        generation = getattr(self.delegate, "registry_generation", None)
-        if generation is None:
-            return
+        generation = self.delegate.registry_generation
         allowed = set(allowed_capabilities)
         subtree = MountedSubtreeHandle(module_id="bunshin_allowed")
         for record in (*generation.direct_aliases.values(), *generation.indirect_aliases.values()):
@@ -578,7 +572,7 @@ class _ExecutionOverlay:
                 record.binding.descriptor,
                 guidance_overrides=guidance_overrides,
             )
-            descriptor = getattr(self.delegate, "project_role_descriptor", lambda d: d)(descriptor)
+            descriptor = self.delegate.project_role_descriptor(descriptor)
             if self.verifier_authoring and (
                 record.canonical_path == "op_exec_shell"
                 or descriptor.execution.effect_kind in {EffectKind.LOCAL_WRITE, EffectKind.EXTERNAL_WRITE}
@@ -604,8 +598,7 @@ class _ExecutionOverlay:
         local = self.runtime.resolve_capability_address(raw)
         if local != raw or self.runtime.has_registered_capability(local):
             return local
-        resolver = getattr(self.delegate, "resolve_capability_address", None)
-        return str(resolver(raw) if callable(resolver) else raw)
+        return self.delegate.resolve_capability_address(raw)
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
         return [dict(item) for item in self.runtime.list_capability_specs()]
@@ -627,19 +620,14 @@ class _ExecutionOverlay:
                 budget=kwargs.get("budget"),
                 turn_id=kwargs.get("turn_id"),
             )
-        execute = getattr(self.delegate, "execute_tool_async", None)
-        if callable(execute):
-            facade_call = _manager_call_to_facade(
-                self.delegate,
-                new_tool_call(name=canonical, args=dict(call.args or {}), call_id=call.call_id),
-            )
-            return await execute(facade_call, **_supported_kwargs(execute, kwargs))
-        return _error_result(call, "unknown tool", "unknown_tool")
+        facade_call = _manager_call_to_facade(
+            self.delegate,
+            new_tool_call(name=canonical, args=dict(call.args or {}), call_id=call.call_id),
+        )
+        return await self.delegate.execute_tool_async(facade_call, **kwargs)
 
-    def begin_tool_result_turn(self, **kwargs: Any) -> None:
-        begin = getattr(self.delegate, "begin_tool_result_turn", None)
-        if callable(begin):
-            begin(**kwargs)
+    def begin_tool_result_turn(self, **kwargs: Any) -> LogicalExecutionContext:
+        return self.delegate.begin_tool_result_turn(**kwargs)
 
 
 class _OriginalAdapter:
@@ -652,7 +640,7 @@ class _OriginalAdapter:
 
 @dataclass
 class BunshinScopedExecutionRuntime:
-    base_runtime: Any
+    base_runtime: ExecutionRuntimePort
     allowed_capabilities: list[str]
     workspace: dict[str, Any] = field(default_factory=dict)
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
@@ -662,17 +650,20 @@ class BunshinScopedExecutionRuntime:
     capability_policy: dict[str, Any] = field(default_factory=dict)
     role_execution_sessions: Any | None = None
     check_cancel: Any | None = None
-    _original_runtime: Any = field(default=None, init=False, repr=False)
+    _execution: _ExecutionOverlay = field(init=False, repr=False)
     _direct_turn_id: str = field(default="", init=False, repr=False)
     _authoring_lock: asyncio.Lock = field(init=False, repr=False)
     _legacy_finding_generation: Any = field(default=None, init=False, repr=False)
+
+    @property
+    def lifecycle_gate(self):
+        return self.base_runtime.lifecycle_gate
 
     @staticmethod
     def tool_call_failed_result(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
         return ExecutionRuntime.tool_call_failed_result(call, exc)
 
     def __post_init__(self) -> None:
-        self._original_runtime = self.base_runtime if callable(getattr(self.base_runtime, "execute_tool_async", None)) else ExecutionRuntime()
         lifetime_id = str(
             self.workspace.get("invocation_id")
             or self.workspace.get("run_id")
@@ -688,9 +679,7 @@ class BunshinScopedExecutionRuntime:
                                and _profile_allows_capability(ADD_FINDING_CAPABILITY, self.capability_policy))
         finding_permissions = [name for name in _FINDING_EDIT_CAPABILITIES
                                if bound_verifier and (name in self.allowed_capabilities or legacy_finding_grant)]
-        expand = getattr(self._original_runtime, "role_capabilities", None)
-        if expand is not None:
-            self.allowed_capabilities = expand(self.allowed_capabilities)
+        self.allowed_capabilities = self.base_runtime.role_capabilities(self.allowed_capabilities)
         # Resumed packs retain their immutable allowed list and prompt identity.
         # Hydrate compatible tools only in the consumed runtime projection.
         self.allowed_capabilities = filter_bunshin_allowed_capabilities([
@@ -724,8 +713,8 @@ class BunshinScopedExecutionRuntime:
             self.capability_guidance_overrides,
             verification_contract.get("guidance_overrides"),
         )
-        self.base_runtime = _ExecutionOverlay(
-            self._original_runtime,
+        self._execution = _ExecutionOverlay(
+            self.base_runtime,
             self.allowed_capabilities,
             guidance_overrides=self.capability_guidance_overrides,
             verifier_authoring=_bound_verifier_context(self.workspace) is not None,
@@ -762,15 +751,15 @@ class BunshinScopedExecutionRuntime:
                 destination.bound_action_keys.append((action.canonical_path, action.target_id))
                 destination.search_record_ids.append(descriptor.name)
         if subtree.descriptors:
-            self.base_runtime.runtime.mount_subtree(
+            self._execution.runtime.mount_subtree(
                 SimpleNamespace(mounted_subtree=subtree)
             )
         if legacy.descriptors:
-            self._legacy_finding_generation = _capture_legacy_finding_generation(self.base_runtime.runtime, legacy)
+            self._legacy_finding_generation = _capture_legacy_finding_generation(self._execution.runtime, legacy)
 
     @property
     def registry_generation(self):
-        return self.base_runtime.runtime.registry_generation
+        return self._execution.runtime.registry_generation
 
     def project_llm_text(self, value: object) -> str:
         return self.registry_generation.project_llm_text(value)
@@ -843,98 +832,70 @@ class BunshinScopedExecutionRuntime:
     async def _execute_original(self, call: ToolCallIR, **kwargs: Any) -> ToolExecutionResult:
         # Semantic execution is awaited by its scoped handler under the outer
         # authoring lock. Reacquiring here would deadlock that nested call.
-        delegate = _verifier_execution_delegate(self, call.name, self._original_runtime)
+        delegate = _verifier_execution_delegate(self, call.name, self.base_runtime)
         execute = delegate.execute_tool_async
-        facade_call = _manager_call_to_facade(self._original_runtime, call)
-        result = await execute(facade_call, **_supported_kwargs(execute, kwargs))
-        complete = getattr(self._original_runtime, "complete_evidence", None)
-        if complete is not None:
-            result = await complete(call, result, **kwargs)
-        return result
+        facade_call = _manager_call_to_facade(self.base_runtime, call)
+        result = await execute(facade_call, **kwargs)
+        return await self.base_runtime.complete_evidence(call, result, **kwargs)
 
-    def begin_tool_result_turn(self, **kwargs: Any) -> None:
-        self.base_runtime.begin_tool_result_turn(**kwargs)
+    def begin_tool_result_turn(self, **kwargs: Any) -> LogicalExecutionContext:
+        return self._execution.begin_tool_result_turn(**kwargs)
 
     def prepare_prompt_context(self, memory, continuation, *, context_view=None, include_live=True):
-        self._original_runtime.prepare_prompt_context(memory, continuation,
+        self.base_runtime.prepare_prompt_context(memory, continuation,
             context_view=context_view, include_live=include_live)
 
     def prepare_model_context(self, memory, continuation, *, context_view=None):
-        hook = getattr(self._original_runtime, "prepare_model_context", None)
-        if hook is not None:
-            hook(memory, continuation, context_view=context_view)
+        self.base_runtime.prepare_model_context(memory, continuation, context_view=context_view)
 
     def model_response_received(self, continuation):
-        hook = getattr(self._original_runtime, "model_response_received", None)
-        if hook is not None:
-            hook(continuation)
+        self.base_runtime.model_response_received(continuation)
 
     def observe_tool_delivery(self, call, result):
-        hook = getattr(self._original_runtime, "observe_tool_delivery", None)
-        if hook is not None:
-            hook(call, result)
+        self.base_runtime.observe_tool_delivery(call, result)
 
     def stagnation_payload(self, call, result):
-        hook = getattr(self._original_runtime, "stagnation_payload", None)
-        return hook(call, result) if hook else {"ok": result.ok, "text": result.text, "structured": result.structured}
+        return self.base_runtime.stagnation_payload(call, result)
 
     def advance_tool_result_clock(self, **kwargs: Any) -> Any:
-        advance = getattr(self._original_runtime, "advance_tool_result_clock", None)
-        return advance(**kwargs) if callable(advance) else None
+        return self.base_runtime.advance_tool_result_clock(**kwargs)
 
     def retire_tool_results(self, **kwargs: Any) -> tuple[str, ...]:
         """Retire result-owned authority in the underlying role lifetime."""
 
-        retire = getattr(self._original_runtime, "retire_tool_results", None)
-        if not callable(retire):
-            return ()
-        return tuple(retire(**kwargs) or ())
+        return self.base_runtime.retire_tool_results(**kwargs)
 
     @property
     def result_snapshots(self):
-        return self._original_runtime.result_snapshots
+        return self.base_runtime.result_snapshots
 
     def bind_result_history(self, memory_service):
-        return self._original_runtime.bind_result_history(memory_service)
+        return self.base_runtime.bind_result_history(memory_service)
 
     def logical_context_for_turn(self, turn_id):
-        return self._original_runtime.logical_context_for_turn(turn_id)
+        return self.base_runtime.logical_context_for_turn(turn_id)
 
     def commit_tool_delivery(self, **kwargs: Any) -> Any:
-        commit = getattr(
-            self._original_runtime,
-            "commit_tool_delivery",
-            None,
-        )
-        return commit(**kwargs) if callable(commit) else None
+        return self.base_runtime.commit_tool_delivery(**kwargs)
 
     async def acknowledge_tool_result_async(self, call_id: str, turn_id: str) -> None:
-        acknowledge = getattr(self._original_runtime, "acknowledge_tool_result_async", None)
-        if callable(acknowledge):
-            await acknowledge(call_id, turn_id)
+        await self.base_runtime.acknowledge_tool_result_async(call_id, turn_id)
 
     async def interrupt_turn(self, turn_id: str) -> None:
-        interrupt = getattr(self._original_runtime, "interrupt_turn", None)
-        if callable(interrupt):
-            await interrupt(turn_id)
+        await self.base_runtime.interrupt_turn(turn_id)
 
     def discard_uncommitted_tool_delivery(self, **kwargs: Any) -> Any:
-        discard = getattr(
-            self._original_runtime,
-            "discard_uncommitted_tool_delivery",
-            None,
-        )
-        return discard(**kwargs) if callable(discard) else None
+        return self.base_runtime.discard_uncommitted_tool_delivery(**kwargs)
 
     def resolve_capability_address(self, name: object) -> str:
         if self._legacy_finding_generation is not None and str(name) == ADD_FINDING_TOOL_SPEC["alias"]:
             return ADD_FINDING_CAPABILITY
-        return self.base_runtime.resolve_capability_address(name)
+        return self._execution.resolve_capability_address(name)
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
         allowed = set(self.allowed_capabilities)
         result = []
-        for spec in self.base_runtime.list_capability_specs():
+        for spec in self._execution.list_capability_specs():
             canonical = str(spec.get("canonical_path") or spec.get("name") or "")
             if canonical in allowed and not is_bunshin_capability_denied(canonical):
                 result.append(
@@ -946,7 +907,7 @@ class BunshinScopedExecutionRuntime:
         canonical = self.resolve_capability_address(name)
         if canonical not in set(self.allowed_capabilities) or is_bunshin_capability_denied(canonical):
             return None
-        spec = self.base_runtime.get_capability_spec(canonical)
+        spec = self._execution.get_capability_spec(canonical)
         return (
             _scrub_spec(spec)
             if spec
@@ -1033,7 +994,7 @@ class BunshinScopedExecutionRuntime:
         direct_execution = target_name == "op_exec_shell" or target_name.startswith("op_lsp_")
         before = verification_corpus_snapshot(self.workspace) if direct_execution else None
         result = await self._execute_admitted(call, budget=budget, turn_id=turn_id,
-            delegate=_verifier_execution_delegate(self, target_name, self.base_runtime))
+            delegate=_verifier_execution_delegate(self, target_name, self._execution))
         if before is not None:
             record_verification_execution(self.workspace, new_tool_call(
                 name=target_name, args=effective_bunshin_tool_args(call), call_id=call.call_id,
@@ -1045,9 +1006,9 @@ class BunshinScopedExecutionRuntime:
     ) -> ToolExecutionResult:
         if call.name == ADD_FINDING_CAPABILITY and self._legacy_finding_generation is not None:
             return await _execute_legacy_finding(self, call, budget=budget, turn_id=turn_id)
-        dispatch_call = (_manager_call_to_facade(self.base_runtime.runtime, call)
+        dispatch_call = (_manager_call_to_facade(self._execution.runtime, call)
                          if delegate is not None else call)
-        result = await (delegate or self.base_runtime).execute_tool_async(
+        result = await (delegate or self._execution).execute_tool_async(
             dispatch_call,
             allow_tools=True,
             budget=budget,
@@ -1058,16 +1019,6 @@ class BunshinScopedExecutionRuntime:
             if artifact:
                 _append_unique_artifact(self.produced_artifacts, artifact)
         return result
-
-
-def _supported_kwargs(callable_obj: Any, values: dict[str, Any]) -> dict[str, Any]:
-    try:
-        signature = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return dict(values)
-    if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values()):
-        return dict(values)
-    return {key: value for key, value in values.items() if key in signature.parameters}
 
 
 _SCOPED_FILE_MUTATIONS = frozenset(
@@ -1240,7 +1191,7 @@ def _scope_descriptor(
     )
 
 
-def _manager_call_to_facade(runtime: Any, call: ToolCallIR) -> ToolCallIR:
+def _manager_call_to_facade(runtime: ExecutionRuntimePort, call: ToolCallIR) -> ToolCallIR:
     """Translate Manager-internal canonical addressing at the facade boundary.
 
     Bunshin policy and workspace handlers intentionally keep canonical paths as
@@ -1249,9 +1200,7 @@ def _manager_call_to_facade(runtime: Any, call: ToolCallIR) -> ToolCallIR:
     single alias, and uses ``call_tool`` for an indirect record.
     """
 
-    generation = getattr(runtime, "registry_generation", None)
-    if generation is None:
-        return call
+    generation = runtime.registry_generation
     if call.name in {"op_tool_call", "call_tool", "op_tool_read", "read_tool"}:
         args = dict(call.args or {})
         target = str(args.get("name") or "")

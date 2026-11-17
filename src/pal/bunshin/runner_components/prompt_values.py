@@ -2,9 +2,9 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 from typing import Any
 from pal.foundation import EventEnvelope
-from pal.bunshin.scoped_execution import _effective_capability_name
+from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime, _effective_capability_name
 from pal.bunshin.prompt_adapter import bunshin_role
-from pal.shared import PromptAssemblyContext, ToolExecutionResult, BunshinInvocationPack, default_tool_result_text
+from pal.shared import PromptAssemblyContext, ToolExecutionResult, BunshinInvocationPack
 
 
 def _bunshin_prompt_context(
@@ -29,16 +29,13 @@ def _bunshin_prompt_context(
 
 
 def _llm_tools_for_allowed(
-    execution_runtime: Any,
+    execution_runtime: BunshinScopedExecutionRuntime,
     allowed_capabilities: list[str],
 ) -> list[dict[str, Any]]:
     _ = allowed_capabilities
-    build = getattr(execution_runtime, "build_llm_tool_contracts", None)
-    if not callable(build):
-        raise TypeError("Bunshin execution runtime must expose immutable generation tool contracts")
     # The scoped registry already enforces this role's authority. Output length
     # is not evidence that investigation is complete or a mutation is appropriate.
-    return list(build())
+    return execution_runtime.build_llm_tool_contracts()
 
 
 def _provider_call_with_effective_args(
@@ -61,7 +58,7 @@ def _provider_call_with_effective_args(
 
 
 def _tool_result_text(result: ToolExecutionResult) -> str:
-    return default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")
+    return result.llm_text
 
 
 def _is_truncation_finish_reason(value: str) -> bool:

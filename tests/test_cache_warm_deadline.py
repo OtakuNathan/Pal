@@ -5,50 +5,46 @@ import asyncio
 from dataclasses import dataclass, field
 
 from pal.control.contracts import ControlRoute, InteractionResult
-from pal.control.interactions import (
+from pal.cache_reminder.presentation import (
     cache_warm_deadline_delivery,
     cache_warm_deadline_expire_delivery,
 )
-from pal.control.service import ControlPlane
-from pal.core.cache_warm_deadline import CacheWarmDeadlineManager
-from pal.core.capabilities import CoreIntrospectionProvider
-from pal.core.runtime import PalCore
-from pal.shared import IntrospectionCall, RuntimeStatus
+from tests.control_factory import build_control_plane
+from pal.cache_reminder.cache_warm_deadline import CacheWarmDeadlineManager
+
+
+from tests.cache_reminder_factory import _Settings, attach_cache_reminder
 
 
 @dataclass
-class _Settings:
-    values: dict[str, str] = field(
-        default_factory=lambda: {
-            "cache_warm_deadline_enabled": "true",
-            "cache_warm_deadline_lead_seconds": "30",
-            "cache_warm_deadline_min_prefix_tokens": "1024",
-        }
-    )
+class _Timer:
+    callback: object
+    pending: bool = True
 
-    def get(self, key: str) -> str | None:
-        return self.values.get(key)
-
-    def set(self, key: str, value: str) -> str:
-        self.values[key] = value
-        return value
+    def cancel(self):
+        self.pending = False
 
 
 @dataclass
-class _ControlledSleep:
+class _ControlledTimers:
     calls: list[float] = field(default_factory=list)
-    gates: list[asyncio.Event] = field(default_factory=list)
+    handles: list[_Timer] = field(default_factory=list)
 
-    async def __call__(self, seconds: float) -> None:
+    def schedule(self, seconds, callback):
         self.calls.append(seconds)
-        gate = asyncio.Event()
-        self.gates.append(gate)
-        await gate.wait()
+        timer = _Timer(callback)
+        self.handles.append(timer)
+        return timer
 
-    async def release(self, index: int) -> None:
-        self.gates[index].set()
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+    def close(self):
+        for timer in self.handles:
+            timer.cancel()
+
+    async def release(self, index):
+        timer = self.handles[index]
+        if timer.pending:
+            timer.pending = False
+            await timer.callback()
 
 
 def _route() -> ControlRoute:
@@ -78,7 +74,7 @@ def test_deadline_uses_anchor_ttl_then_expires_and_deletes_notice() -> None:
 
 async def _deadline_uses_anchor_ttl_then_expires_and_deletes_notice() -> None:
     settings = _Settings()
-    sleep = _ControlledSleep()
+    sleep = _ControlledTimers()
     delivered = []
     expired = []
     manager = CacheWarmDeadlineManager(
@@ -87,12 +83,12 @@ async def _deadline_uses_anchor_ttl_then_expires_and_deletes_notice() -> None:
         has_active_turn=lambda: False,
         deliver_notice=lambda notice: _capture(delivered, notice),
         expire_notice=lambda notice: _capture(expired, notice),
-        sleep=sleep,
+        timers=sleep,
     )
 
     assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
     await asyncio.sleep(0)
-    assert sleep.calls == [60]
+    assert sleep.calls == [60, 90]
 
     await sleep.release(0)
     assert len(delivered) == 1
@@ -112,7 +108,7 @@ def test_new_user_activity_removes_notice_and_allows_same_epoch_again() -> None:
 
 async def _new_user_activity_removes_notice_and_allows_same_epoch_again() -> None:
     settings = _Settings()
-    sleep = _ControlledSleep()
+    sleep = _ControlledTimers()
     delivered = []
     expired = []
     manager = CacheWarmDeadlineManager(
@@ -121,7 +117,7 @@ async def _new_user_activity_removes_notice_and_allows_same_epoch_again() -> Non
         has_active_turn=lambda: False,
         deliver_notice=lambda notice: _capture(delivered, notice),
         expire_notice=lambda notice: _capture(expired, notice),
-        sleep=sleep,
+        timers=sleep,
     )
     assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
     await asyncio.sleep(0)
@@ -139,7 +135,7 @@ def test_compaction_removes_visible_notice_without_rearming_epoch() -> None:
 
 
 async def _compaction_removes_visible_notice_without_rearming_epoch() -> None:
-    sleep = _ControlledSleep()
+    sleep = _ControlledTimers()
     delivered = []
     expired = []
     manager = CacheWarmDeadlineManager(
@@ -148,7 +144,7 @@ async def _compaction_removes_visible_notice_without_rearming_epoch() -> None:
         has_active_turn=lambda: False,
         deliver_notice=lambda notice: _capture(delivered, notice),
         expire_notice=lambda notice: _capture(expired, notice),
-        sleep=sleep,
+        timers=sleep,
     )
     assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
     await asyncio.sleep(0)
@@ -168,7 +164,7 @@ def test_reminder_compaction_claim_is_one_shot_and_leaves_ui_to_action() -> None
 
 
 async def _reminder_compaction_claim_is_one_shot_and_leaves_ui_to_action() -> None:
-    sleep = _ControlledSleep()
+    sleep = _ControlledTimers()
     delivered = []
     expired = []
     manager = CacheWarmDeadlineManager(
@@ -177,7 +173,7 @@ async def _reminder_compaction_claim_is_one_shot_and_leaves_ui_to_action() -> No
         has_active_turn=lambda: False,
         deliver_notice=lambda notice: _capture(delivered, notice),
         expire_notice=lambda notice: _capture(expired, notice),
-        sleep=sleep,
+        timers=sleep,
     )
     assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
     await asyncio.sleep(0)
@@ -198,7 +194,7 @@ def test_active_turn_defers_notice_instead_of_dropping_it() -> None:
 
 async def _active_turn_defers_notice_instead_of_dropping_it() -> None:
     settings = _Settings()
-    sleep = _ControlledSleep()
+    sleep = _ControlledTimers()
     active = [True]
     delivered = []
     manager = CacheWarmDeadlineManager(
@@ -207,17 +203,17 @@ async def _active_turn_defers_notice_instead_of_dropping_it() -> None:
         has_active_turn=lambda: active[0],
         deliver_notice=lambda notice: _capture(delivered, notice),
         expire_notice=_discard,
-        sleep=sleep,
+        timers=sleep,
     )
     assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
     await asyncio.sleep(0)
 
     await sleep.release(0)
     assert delivered == []
-    assert sleep.calls[1] == 5.0
+    assert sleep.calls[2] == 5.0
 
     active[0] = False
-    await sleep.release(1)
+    await sleep.release(2)
     assert len(delivered) == 1
     manager.close()
 
@@ -225,6 +221,7 @@ async def _active_turn_defers_notice_instead_of_dropping_it() -> None:
 def test_configuration_is_persistent_but_timer_state_is_not() -> None:
     settings = _Settings()
     manager = CacheWarmDeadlineManager(
+        timers=_ControlledTimers(),
         cache_snapshot=_snapshot,
         settings_provider=lambda: settings,
         has_active_turn=lambda: False,
@@ -251,6 +248,7 @@ def test_expired_anchor_remaining_ttl_does_not_fall_back_to_full_ttl() -> None:
         "anchor_remaining_ttl_seconds": 0,
     }
     manager = CacheWarmDeadlineManager(
+        timers=_ControlledTimers(),
         cache_snapshot=lambda: snapshot,
         settings_provider=lambda: _Settings(),
         has_active_turn=lambda: False,
@@ -271,14 +269,14 @@ def test_disabling_from_capability_worker_cancels_timer_on_owner_loop() -> None:
 
 async def _disabling_from_capability_worker_cancels_timer_on_owner_loop() -> None:
     settings = _Settings()
-    sleep = _ControlledSleep()
+    sleep = _ControlledTimers()
     manager = CacheWarmDeadlineManager(
         cache_snapshot=_snapshot,
         settings_provider=lambda: settings,
         has_active_turn=lambda: False,
         deliver_notice=_discard,
         expire_notice=_discard,
-        sleep=sleep,
+        timers=sleep,
     )
     assert manager.schedule_after_turn_commit(route=_route(), turn_id="turn-1")
     await asyncio.sleep(0)
@@ -307,13 +305,13 @@ def test_interaction_has_control_actions_and_delete_expiration() -> None:
         "Dismiss this reminder",
         "Disable reminders",
     ]
-    assert buttons[0].action_key == "control.compact.run"
+    assert buttons[0].action_key == "control.action.dispatch"
 
     expired = cache_warm_deadline_expire_delivery(_route(), epoch="epoch-a")
     assert expired.delivery_kind == "interactive_expire"
     assert expired.payload == {"delete": True}
 
-    plane = ControlPlane()
+    plane = build_control_plane()
     ignore = plane.handle_interaction(
         InteractionResult(
             interaction_id=delivery.interaction.interaction_id,
@@ -337,46 +335,22 @@ def test_interaction_has_control_actions_and_delete_expiration() -> None:
         )
     )
     assert compact is not None
-    assert compact.action_kind == "compact_memory"
+    assert compact.action_kind == "cache_warm_deadline_compact"
     assert compact.args["cache_epoch"] == "epoch-a"
 
 
-def test_core_capabilities_inspect_and_persist_deadline_configuration() -> None:
+def test_feature_inspection_and_persistent_deadline_configuration() -> None:
     settings = _Settings()
     core = build_core()
-
-    from tests.llm_fakes import NonStreamingLLM
-
-    class _LLMRuntime(NonStreamingLLM):
-        settings_repository = settings
-
-        @staticmethod
-        def prompt_cache_warm_deadline_snapshot():
-            return _snapshot()
-
-    core.context.port_registry["llm:llm"] = _LLMRuntime()
-    provider = CoreIntrospectionProvider(core=core)
-
-    configured = provider.configure_cache_warm_deadline(
-        IntrospectionCall(
-            name="configure_core_cache_warm_deadline",
-            args={
-                "enabled": True,
-                "lead_seconds": 180,
-                "min_prefix_tokens": 48_000,
-            },
-        )
-    )
-    observed = provider.observe(
-        IntrospectionCall(name="observe_core")
-    )
-
-    assert configured.status == RuntimeStatus.OK
-    assert observed.status == RuntimeStatus.OK
-    assert observed.structured is not None
-    assert observed.structured["cache_reminder"]["enabled"] is True
-    assert observed.structured["cache_reminder"]["lead_seconds"] == 180
-    assert observed.structured["cache_reminder"]["min_prefix_tokens"] == 48_000
+    manager = attach_cache_reminder(core, settings)
+    operations = core.context.configuration_operations
+    configured = asyncio.run(operations["cache_reminder.configure"][1]({
+        "enabled": True, "lead_seconds": 180, "min_prefix_tokens": 48_000}))["state"]
+    observed = asyncio.run(operations["cache_reminder.inspect"][1]({}))["state"]
+    assert configured["enabled"] is True
+    assert observed["lead_seconds"] == 180
+    assert observed["min_prefix_tokens"] == 48_000
+    assert not hasattr(core, "cache_warm_deadline")
     core.close()
 
 

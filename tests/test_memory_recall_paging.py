@@ -28,7 +28,6 @@ def test_long_memory_can_be_read_completely_from_snapshot(view, explicit_provide
         register_memory(core.context, memory)
         provider = MockL3Plugin(records=[record])
         register_l3(core.context, provider)
-        memory.l3_selector.active_provider_id = provider.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(provider.module_id)
         runtime.begin_tool_result_turn(turn_id="read-memory", scope_key="paging-test")
@@ -71,7 +70,6 @@ def test_all_selected_hits_remain_available_in_snapshot(explicit_provider):
         register_memory(core.context, memory)
         provider = MockL3Plugin(records=records)
         register_l3(core.context, provider)
-        memory.l3_selector.active_provider_id = provider.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(provider.module_id)
         runtime.begin_tool_result_turn(turn_id="many", scope_key="many")

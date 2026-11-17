@@ -9,7 +9,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, BinaryIO
 
 from peewee import Value
 
@@ -23,15 +23,24 @@ from pal.memory.models import (
     memory_model_set,
 )
 from pal.memory.schema import ensure_memory_schema, ensure_sqlite_vec_loaded
+from pal.memory.embedding_space import read_space, require_vector
 
 from pal.memory.contracts import L3ProviderPort, L3ProviderResolver
 from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text, normalize_search_text
 
 
-@dataclass
 class L3ProviderSelector:
-    resolver: L3ProviderResolver
-    active_provider_id: str = "null_l3"
+    def __init__(self, resolver: L3ProviderResolver, active_provider_id: str = "null_l3"):
+        self.resolver = resolver
+        self._active_provider_id = active_provider_id
+
+    @property
+    def active_provider_id(self) -> str:
+        return self._active_provider_id
+
+    def _adopt(self, provider_id: str) -> None:
+        """Memory installs a startup binding or a committed catalog identity."""
+        self._active_provider_id = provider_id
 
     def resolve(self) -> L3ProviderPort:
         return self.resolver(self.active_provider_id)
@@ -48,10 +57,16 @@ class MemoryDurableRepository:
         self.write_lock = threading.RLock()
         self._frozen = False
         self._frozen_writer = None
+        self.connection_lease: BinaryIO | None = None
 
     @property
     def frozen(self) -> bool:
         return self._frozen or bool(self.catalog is not None and self.catalog.is_frozen(self.generation_id))
+
+    @property
+    def writable(self) -> bool:
+        return not (self.read_only or self.frozen or
+                    (self.catalog is not None and self.catalog.is_retired(self.generation_id)))
 
     @contextmanager
     def write_transaction(self):
@@ -80,30 +95,41 @@ class MemoryDurableRepository:
             if self.catalog is not None:
                 self._frozen_writer = self.catalog.writer_lock(self.generation_id)
                 try:
+                    with self.database.atomic():
+                        self.database.execute_sql("UPDATE memory_generation_guard SET writable=0 WHERE singleton=1")
                     self.catalog.set_frozen(self.generation_id, True)
                 except BaseException:
-                    self._frozen_writer.close()
-                    self._frozen_writer = None
+                    try:
+                        with self.database.atomic():
+                            self.database.execute_sql("UPDATE memory_generation_guard SET writable=1 WHERE singleton=1")
+                    finally:
+                        self._frozen_writer.close()
+                        self._frozen_writer = None
                     raise
             self._frozen = True
 
     def thaw(self) -> None:
         with self.write_lock:
-            if self.catalog is not None:
-                self.catalog.set_frozen(self.generation_id, False)
-            self._frozen = False
-            if self._frozen_writer is not None:
-                self._frozen_writer.close()
-                self._frozen_writer = None
+            try:
+                if self.catalog is not None:
+                    if not self.catalog.is_retired(self.generation_id):
+                        with self.database.atomic():
+                            self.database.execute_sql("UPDATE memory_generation_guard SET writable=1 WHERE singleton=1")
+                    self.catalog.set_frozen(self.generation_id, False)
+            finally:
+                self._frozen = False
+                if self._frozen_writer is not None:
+                    self._frozen_writer.close()
+                    self._frozen_writer = None
+
+    @property
+    def owns_write_fence(self) -> bool:
+        return self._frozen and self._frozen_writer is not None
 
     def close(self) -> None:
-        if hasattr(self.database, "close_all"):
-            self.database.close_all()
-        elif not self.database.is_closed():
-            self.database.close()
-        lease = getattr(self, "connection_lease", None)
-        if lease is not None:
-            lease.close()
+        self.database.close_all()
+        if self.connection_lease is not None:
+            self.connection_lease.close()
             self.connection_lease = None
 
     def ensure_schema(self) -> None:
@@ -316,14 +342,25 @@ class MemoryDurableRepository:
         if not rowids:
             return
         db = self.Vector._meta.database
-        cursor = db.execute_sql("SELECT name FROM sqlite_master WHERE sql LIKE '%USING vec0%'")
+        cursor = db.execute_sql("SELECT name FROM sqlite_master WHERE type='table' "
+                                "AND name GLOB 'memory_vec_idx_*' AND sql LIKE '%USING vec0%'")
         table_names = [str(row[0]) for row in cursor.fetchall()]
+        if table_names:
+            status = ensure_sqlite_vec_loaded(self.database)
+            if not status.available:
+                raise RuntimeError(f"Cannot maintain existing memory vector indexes: {status.detail}")
         for table_name in table_names:
-            try:
-                for rowid in rowids:
-                    db.execute_sql(f"DELETE FROM {table_name} WHERE rowid = ?", (int(rowid),))
-            except sqlite3.OperationalError:
-                continue
+            for rowid in rowids:
+                db.execute_sql(f"DELETE FROM {table_name} WHERE rowid = ?", (int(rowid),))
+
+    def retire_document_embeddings(self, document_id: str) -> None:
+        """Withdraw search entries while retaining vectors for revision history."""
+        with self.write_transaction():
+            rowids = [int(row[0]) for row in self.database.execute_sql(
+                "SELECT rowid FROM memory_embedding_vec WHERE embedding_id IN "
+                "(SELECT embedding_id FROM memory_embeddings WHERE document_id=?)", (document_id,))]
+            self._delete_vec_index_rows(rowids)
+            self.Embedding.update(index_status="stale").where(self.Embedding.document_id == document_id).execute()
 
     def _insert_fts_row(self, table_name: str, row: dict[str, Any]) -> None:
         db = self.Fact._meta.database
@@ -369,6 +406,7 @@ class MemoryDurableRepository:
         *,
         document_id: str,
         source_text: str,
+        space_profile: dict[str, str | None],
         provider_id: str,
         model_name: str,
         embedding_kind: str = "primary",
@@ -377,6 +415,12 @@ class MemoryDurableRepository:
         model_revision: str | None = None,
         text_processing_version: str = "search_text_v1",
     ) -> MemoryEmbeddingModel:
+        space = read_space(self.database.connection())
+        metadata_profile = dict(provider_id=provider_id, model_name=model_name, model_revision=model_revision,
+                                text_processing_version=text_processing_version)
+        if (space is None or space.profile != space_profile
+                or any(space.profile[key] != value for key, value in metadata_profile.items())):
+            raise RuntimeError("Embedding metadata requires this generation's declared space")
         embedding_id = f"{document_id}:{embedding_kind}"
         source_text_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
         now = utc_now()
@@ -409,35 +453,6 @@ class MemoryDurableRepository:
         instance.updated_at = now
         instance.save()
         return instance
-
-    def retarget_embeddings(
-        self,
-        *,
-        provider_id: str,
-        model_name: str,
-        embedding_kind: str = "primary",
-        model_revision: str | None = None,
-        text_processing_version: str = "search_text_v1",
-    ) -> int:
-        now = utc_now()
-        query = self.Embedding.select().where(self.Embedding.embedding_kind == embedding_kind)
-        updated = 0
-        for instance in query:
-            current_provider_id = str(getattr(instance, "provider_id", "") or "").strip()
-            current_model_name = str(instance.model_name or "").strip()
-            if (current_provider_id == provider_id and current_model_name == model_name
-                    and instance.model_revision == model_revision and instance.text_processing_version == text_processing_version):
-                continue
-            instance.provider_id = provider_id
-            instance.model_name = model_name
-            instance.model_revision = model_revision
-            instance.text_processing_version = text_processing_version
-            instance.index_status = "stale"
-            instance.last_error = None
-            instance.updated_at = now
-            instance.save()
-            updated += 1
-        return updated
 
     def _active_embedding_condition(self):
         return (self.Embedding.document_id.in_(self.Fact.select(Value("fact:").concat(self.Fact.fact_id)).where(self.Fact.lifecycle == "active"))
@@ -504,30 +519,33 @@ class MemoryDurableRepository:
             return None
         return int(row[0])
 
-    def upsert_vector_blob(self, *, embedding_id: str, vector_blob: bytes, dimension: int) -> None:
-        now = utc_now()
-        instance = self.Vector.get_or_none(self.Vector.embedding_id == embedding_id)
-        if instance is None:
-            self.Vector.create(
-                embedding_id=embedding_id,
-                vector_blob=vector_blob,
-                dimension=dimension,
-                updated_at=now,
-            )
-            return
-        instance.vector_blob = vector_blob
-        instance.dimension = dimension
-        instance.updated_at = now
-        instance.save()
-        metadata = self.get_embedding(embedding_id)
-        if metadata is not None:
-            self._sync_vec_index_row(
-                embedding_id=embedding_id,
-                provider_id=str(getattr(metadata, "provider_id", "") or ""),
-                model_name=str(metadata.model_name or ""),
-                dimension=dimension,
-                vector_blob=vector_blob,
-            )
+    def upsert_vector_blob(self, *, embedding_id: str, vector_blob: bytes, dimension: int,
+                           profile: dict[str, str | None]) -> None:
+        with self.write_transaction():
+            require_vector(self.database.connection(), profile, dimension)
+            now = utc_now()
+            instance = self.Vector.get_or_none(self.Vector.embedding_id == embedding_id)
+            if instance is None:
+                self.Vector.create(
+                    embedding_id=embedding_id,
+                    vector_blob=vector_blob,
+                    dimension=dimension,
+                    updated_at=now,
+                )
+            else:
+                instance.vector_blob = vector_blob
+                instance.dimension = dimension
+                instance.updated_at = now
+                instance.save()
+            metadata = self.get_embedding(embedding_id)
+            if metadata is not None:
+                self._sync_vec_index_row(
+                    embedding_id=embedding_id,
+                    provider_id=metadata.provider_id,
+                    model_name=metadata.model_name,
+                    dimension=dimension,
+                    vector_blob=vector_blob,
+                )
 
     def mark_embedding_ready(self, *, embedding_id: str, norm: float) -> None:
         instance = self.get_embedding(embedding_id)
@@ -792,7 +810,13 @@ class MemoryDurableRepository:
         vector_blob: bytes,
     ) -> None:
         sqlite_vec_status = ensure_sqlite_vec_loaded(self.database)
-        if not sqlite_vec_status.available or dimension <= 0:
+        if not sqlite_vec_status.available:
+            existing = self.database.execute_sql("SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name GLOB 'memory_vec_idx_*' AND sql LIKE '%USING vec0%' LIMIT 1").fetchone()
+            if existing:
+                raise RuntimeError(f"Cannot maintain existing memory vector indexes: {sqlite_vec_status.detail}")
+            return
+        if dimension <= 0:
             return
         rowid = self._get_vector_rowid(embedding_id)
         if rowid is None:
@@ -800,14 +824,11 @@ class MemoryDurableRepository:
         table_name = self._vec_index_table_name(provider_id=provider_id, model_name=model_name, dimension=dimension)
         self._ensure_vec_index_table(table_name=table_name, dimension=dimension)
         db = self.Vector._meta.database
-        try:
-            db.execute_sql(f"DELETE FROM {table_name} WHERE rowid = ?", (rowid,))
-            db.execute_sql(
-                f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
-                (rowid, bytes(vector_blob).decode("utf-8")),
-            )
-        except sqlite3.OperationalError:
-            return
+        db.execute_sql(f"DELETE FROM {table_name} WHERE rowid = ?", (rowid,))
+        db.execute_sql(
+            f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+            (rowid, bytes(vector_blob).decode("utf-8")),
+        )
 
     def _ensure_vec_index_table(self, *, table_name: str, dimension: int) -> None:
         db = self.Vector._meta.database
@@ -876,7 +897,7 @@ class MemoryDurableRepository:
         return rows
 
     def bump_usage(self, document_ids: list[str]) -> None:
-        if self.read_only or self.frozen:
+        if not self.writable:
             return
         with self.write_lock:
             if self.read_only or self.frozen:

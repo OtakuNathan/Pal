@@ -93,15 +93,18 @@ def test_provider_attach_preserves_original_failed_result(channel_env, monkeypat
 
 
 def make_handler(repository=None):
+    from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
     manager = ProactiveManager(repository=repository)
     # Hydrate rather than persist; repository faults below concern execution.
     manager.hydrate(ProactiveDefinition(proactive_id="job", goal="run check"))
     runner = ProactiveRunner(repository=repository)
     handler = ProactiveTriggerHandler(manager, runner)
+    handler.owner = ModuleHandle("proactive", MODULE_TIER_DETACHABLE, detachable=True)
     core = SimpleNamespace(state=SimpleNamespace(diagnostics=[]),
-        can_start_proactive_turn=lambda: True,
-        turn_manager=SimpleNamespace(cleanup_interrupted=Mock()),
-        run_turn_continuation_async=AsyncMock())
+        can_start_background_turn=lambda: True,
+        finish_interrupted_turn=Mock(),
+        run_turn=AsyncMock())
+    core.record_diagnostic = lambda kind, payload: core.state.diagnostics.append({"kind": kind, **payload})
     continuation = SimpleNamespace(turn_id="job-turn")
     trigger = ProactiveTriggerEvent(proactive_id="job", trigger_kind="manual")
     return handler, core, trigger, continuation
@@ -113,8 +116,8 @@ def test_proactive_failure_retains_cause_in_read_latest_run(env):
     handler, core, trigger, continuation = make_handler(manager.repository)
     async def run(_):
         fail_with_cause("proactive execution failed")
-    core.run_turn_continuation_async = run
-    assert asyncio.run(handler._run_trigger_guarded_async(core, trigger, continuation)) == "failed"
+    core.run_turn = run
+    assert asyncio.run(handler._run_trigger_async(core, trigger, continuation)) == "failed"
     result = proactive_invoke(runtime, "read_proactive_task", {"name": "job"})
     assert result.ok
     assert "transport root cause" in result.llm_text
@@ -128,8 +131,8 @@ def test_proactive_recording_failures_are_observable(stage):
         fail_run=Mock(), update_schedule_state=Mock())
     getattr(repository, stage).side_effect = lambda *a, **k: fail_with_cause(f"{stage} failed")
     handler, core, trigger, continuation = make_handler(repository)
-    core.run_turn_continuation_async.return_value = SimpleNamespace(turn_id="job-turn", final_reply="done", reply_texts=())
-    result = asyncio.run(handler._run_trigger_guarded_async(core, trigger, continuation))
+    core.run_turn.return_value = SimpleNamespace(turn_id="job-turn", final_reply="done", reply_texts=())
+    result = asyncio.run(handler._run_trigger_async(core, trigger, continuation))
     assert result == "failed"
     assert stage in core.state.diagnostics[-1]["error"]
     assert "transport root cause" in core.state.diagnostics[-1]["error"]
@@ -140,9 +143,9 @@ def test_proactive_cleanup_and_failure_storage_do_not_replace_original_failure()
     repository = SimpleNamespace(begin_run=Mock(return_value="run-id"), fail_run=Mock(
         side_effect=lambda *a, **k: fail_with_cause("failure storage failed")))
     handler, core, trigger, continuation = make_handler(repository)
-    core.run_turn_continuation_async.side_effect = lambda *a: fail_with_cause("original run failure")
-    core.turn_manager.cleanup_interrupted.side_effect = lambda *a, **k: fail_with_cause("cleanup failed")
-    assert asyncio.run(handler._run_trigger_guarded_async(core, trigger, continuation)) == "failed"
+    core.run_turn.side_effect = lambda *a: fail_with_cause("original run failure")
+    core.finish_interrupted_turn.side_effect = lambda *a, **k: fail_with_cause("cleanup failed")
+    assert asyncio.run(handler._run_trigger_async(core, trigger, continuation)) == "failed"
     diagnostic = core.state.diagnostics[-1]["error"]
     assert all(text in diagnostic for text in ("original run failure", "cleanup failed", "failure storage failed"))
 
@@ -171,7 +174,7 @@ def test_unresolved_proactive_output_is_recorded_as_failure(destination):
     core.turn_execution_options = lambda: {}
     event = EventEnvelope(event_kind=EventKind.PROACTIVE_TRIGGER, source_kind="proactive", payload=trigger)
     assert handler.handle(event, core.context) == []
-    core.run_turn_continuation_async.assert_not_called()
+    core.run_turn.assert_not_called()
     assert "Proactive output channel 'out'" in repository.fail_run.call_args.kwargs["error_text"]
 
 
@@ -185,7 +188,7 @@ def test_history_inspection_exposes_failure_when_begin_run_cannot_be_saved(env, 
     from pal.proactive import register_with_core as register_proactive
     handler, core, trigger, continuation = make_handler(manager.repository)
     monkeypatch.setattr(manager.repository, "begin_run", lambda *a: fail_with_cause("begin run storage unavailable"))
-    assert asyncio.run(handler._run_trigger_guarded_async(core, trigger, continuation)) == "failed"
+    assert asyncio.run(handler._run_trigger_async(core, trigger, continuation)) == "failed"
     model_core = build_core()
     register_execution(model_core.context)
     register_proactive(model_core.context, manager, handler.runner)
@@ -225,10 +228,10 @@ def test_proactive_persistence_failure_preserves_registered_task(env, monkeypatc
 
 def test_cancellation_survives_secondary_cleanup_failure():
     handler, core, trigger, continuation = make_handler()
-    core.run_turn_continuation_async.side_effect = asyncio.CancelledError("shutdown requested")
-    core.turn_manager.cleanup_interrupted.side_effect = lambda *a, **k: fail_with_cause("cleanup failed")
+    core.run_turn.side_effect = asyncio.CancelledError("shutdown requested")
+    core.finish_interrupted_turn.side_effect = lambda *a, **k: fail_with_cause("cleanup failed")
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(handler._run_trigger_guarded_async(core, trigger, continuation))
+        asyncio.run(handler._run_trigger_async(core, trigger, continuation))
     assert "shutdown requested" in core.state.diagnostics[-1]["error"]
     assert "cleanup failed" in core.state.diagnostics[-1]["error"]
 

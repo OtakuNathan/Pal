@@ -49,7 +49,9 @@ def test_candidate_plugin_receives_nothing_until_published_and_close_discards():
     context.core_event_bus.emit(MEMORY_SLEEP, {"sleeping": True})
     with pytest.raises(Empty):
         sub.get(timeout=0)
-    scope.published = True
+    from pal.core.registration_state import RegistrationEvent
+    scope.registration.advance(RegistrationEvent.CLAIM, owns_registration=True)
+    scope.registration.advance(RegistrationEvent.PUBLISH, owns_registration=True)
     scope.publish_core_subscriptions()
     assert sub.get(timeout=0)[1]["sleeping"]
     context.core_event_bus.emit(MEMORY_SLEEP, {"sleeping": False})
@@ -61,12 +63,13 @@ def test_candidate_plugin_receives_nothing_until_published_and_close_discards():
 def test_dreaming_state_is_visible_without_any_channel():
     async def run():
         core = build_core()
-        core.state.memory_maintenance = True
+        token = await core.try_enter_memory_maintenance_async()
+        assert token is not None
         sub = core.context.core_event_bus.open_subscription({MEMORY_SLEEP})
         sub.get(timeout=0)
-        core.begin_memory_sleep()
+        core.begin_memory_sleep(token, component="dreaming")
         assert sub.get(timeout=0)[1] == {"subsystem": "memory", "component": "dreaming", "sleeping": True}
-        await core.leave_memory_maintenance_async()
+        await core.leave_memory_maintenance_async(token)
         assert not sub.get(timeout=0)[1]["sleeping"]
     asyncio.run(run())
 

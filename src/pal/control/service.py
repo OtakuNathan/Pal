@@ -10,6 +10,7 @@ from pal.control.contracts import (
     ControlAction,
     ControlCommandInvocation,
     ControlCommandSpec,
+    ControlInteractionSpec,
     ControlEvent,
     ControlRoute,
     InteractionResult,
@@ -88,10 +89,16 @@ class InstalledControlCommands:
     registry: ControlCommandRegistry
     owned: dict[str, ControlCommandSpec]
     changed: Callable[[], None]
+    interaction_handlers: dict[str, ControlInteractionSpec]
+    owned_interactions: dict[str, ControlInteractionSpec]
 
     def close(self) -> None:
         removed = False
         with self.registry.lock:
+            for name, spec in self.owned_interactions.items():
+                if self.interaction_handlers.get(name) is spec:
+                    self.interaction_handlers.pop(name)
+                    removed = True
             for name, spec in self.owned.items():
                 if self.registry.commands.get(name) is spec:
                     self.registry.unregister(name)
@@ -105,19 +112,8 @@ class ControlPlane(ControlPlanePort):
     registry: ControlCommandRegistry = field(default_factory=ControlCommandRegistry)
     catalog_revision: int = 0
     on_ready: Callable[[], None] | None = field(default=None, repr=False)
+    interaction_handlers: dict[str, ControlInteractionSpec] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        self._register_builtins()
-
-    def register_command(self, spec: ControlCommandSpec) -> None:
-        with self.registry.lock:
-            self.registry.register(spec)
-        self._catalog_changed()
-
-    def unregister_command(self, name: str) -> None:
-        with self.registry.lock:
-            self.registry.unregister(name)
-        self._catalog_changed()
 
     def _catalog_changed(self) -> None:
         with self.registry.lock:
@@ -126,13 +122,23 @@ class ControlPlane(ControlPlanePort):
         if ready is not None:
             ready()
 
-    def install_commands(self, owner: str, specs: tuple[ControlCommandSpec, ...]) -> InstalledControlCommands:
+    def install_commands(self, owner: str, specs: tuple[ControlCommandSpec, ...], *,
+                         interactions: tuple[ControlInteractionSpec, ...] = ()) -> InstalledControlCommands:
         """Validate the entire contribution before publishing any command."""
         if not owner or not isinstance(specs, tuple):
             raise ValueError("slash commands require an owner and an immutable declaration")
         with self.registry.lock:
             candidate = ControlCommandRegistry(dict(self.registry.commands), dict(self.registry.aliases))
             owned = {}
+            owned_interactions = {}
+            for spec in interactions:
+                if not isinstance(spec, ControlInteractionSpec) or not callable(spec.handler):
+                    raise TypeError("control interactions require ControlInteractionSpec with a callable parser")
+                if spec.action_key in {"control.command.run", "control.action.dispatch"}:
+                    raise ValueError(f"reserved control interaction: {spec.action_key}")
+                if not spec.action_key or spec.action_key in self.interaction_handlers or spec.action_key in owned_interactions:
+                    raise ValueError(f"control interaction already registered: {spec.action_key}")
+                owned_interactions[spec.action_key] = spec
             for spec in specs:
                 if not isinstance(spec, ControlCommandSpec) or not callable(spec.handler):
                     raise TypeError("plugin slash commands require ControlCommandSpec with a callable handler")
@@ -145,9 +151,11 @@ class ControlPlane(ControlPlanePort):
                 owned[spec.name] = candidate.commands[spec.name]
             self.registry.commands = candidate.commands
             self.registry.aliases = candidate.aliases
-        if owned:
+            self.interaction_handlers.update(owned_interactions)
+        if owned or owned_interactions:
             self._catalog_changed()
-        return InstalledControlCommands(self.registry, owned, self._catalog_changed)
+        return InstalledControlCommands(self.registry, owned, self._catalog_changed,
+                                        self.interaction_handlers, owned_interactions)
 
     def list_panel_commands(self) -> list[ControlCommandSpec]:
         return self.registry.list_panel_commands()
@@ -199,213 +207,27 @@ class ControlPlane(ControlPlanePort):
         )
 
     def handle_interaction(self, result: InteractionResult) -> ControlAction | None:
-        action_key = str(result.action_key or "").strip()
-        if not action_key:
-            return _with_interaction_context(
-                ControlAction(
-                    action_kind="invalid_command",
-                    target_scope="control",
-                    route=result.route,
-                    args={"reason": "empty interaction action"},
-                    notes="Unsupported interaction action.",
-                ),
-                result,
-            )
-        if action_key in {"control.panel.show", "control.panel.back"}:
-            action = ControlAction(
-                action_kind="show_panel",
-                target_scope="control",
-                route=result.route,
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.think.open":
-            action = ControlAction(
-                action_kind="show_think",
-                target_scope="runtime",
-                route=result.route,
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.model.open":
-            action = ControlAction(
-                action_kind="show_model",
-                target_scope="runtime",
-                route=result.route,
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.log.open":
-            action = ControlAction(
-                action_kind="show_log",
-                target_scope="runtime",
-                route=result.route,
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.think.set":
-            requested = str(result.action_args.get("think_level") or "").strip().lower()
-            if not requested:
-                action = ControlAction(
-                    action_kind="invalid_command",
-                    target_scope="control",
-                    route=result.route,
-                    args={"reason": "invalid think level"},
-                    notes="Think level is required.",
-                )
-                return _with_interaction_context(action, result)
-            action = ControlAction(
-                action_kind="set_think",
-                target_scope="runtime",
-                route=result.route,
-                args={"think_level": requested},
-            )
-            return _with_interaction_context(action, result)
-        if action_key in {"control.model.confirm", "control.model.think", "control.model.cancel"}:
-            action = ControlAction(
-                action_kind="model_switch_step", target_scope="runtime", route=result.route,
-                args={"operation": action_key.rsplit(".", 1)[-1],
-                      "request_id": str(result.action_args.get("request_id") or ""),
-                      "think_level": str(result.action_args.get("think_level") or "")},
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.model.set":
-            requested_endpoint_id = str(result.action_args.get("endpoint_id") or "").strip()
-            if not requested_endpoint_id:
-                action = ControlAction(
-                    action_kind="invalid_command",
-                    target_scope="control",
-                    route=result.route,
-                    args={"reason": "missing model endpoint id"},
-                    notes="Model endpoint id is required.",
-                )
-                return _with_interaction_context(action, result)
-            action = ControlAction(
-                action_kind="set_model",
-                target_scope="runtime",
-                route=result.route,
-                args={"endpoint_id": requested_endpoint_id},
-            )
-            return _with_interaction_context(action, result)
-        if action_key in {"control.log.start", "control.log.end"}:
-            enabled = action_key == "control.log.start"
-            action = ControlAction(
-                action_kind="set_log",
-                target_scope="runtime",
-                route=result.route,
-                args={"prompt_log_enabled": enabled},
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.interrupt.run":
-            action = ControlAction(
-                action_kind="interrupt_turn",
-                target_scope="runtime",
-                route=result.route,
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.compact.run":
-            cache_epoch = str(
-                result.action_args.get("cache_epoch") or ""
-            ).strip()
-            action = ControlAction(
-                action_kind="compact_memory",
-                target_scope="memory",
-                route=result.route,
-                args={"cache_epoch": cache_epoch} if cache_epoch else {},
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.reset.open":
-            action = ControlAction(
-                action_kind="open_reset_confirm",
-                target_scope="memory",
-                route=result.route,
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.reset.confirm":
-            request_id = str(result.action_args.get("request_id") or result.interaction_id).strip()
-            action = ControlAction(
-                action_kind="reset_memory",
-                target_scope="memory",
-                route=result.route,
-                args={"request_id": request_id},
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.reset.cancel":
-            request_id = str(result.action_args.get("request_id") or result.interaction_id).strip()
-            action = ControlAction(
-                action_kind="cancel_reset_confirm",
-                target_scope="memory",
-                route=result.route,
-                args={"request_id": request_id},
-            )
-            return _with_interaction_context(action, result)
-        if action_key == "control.command.run":
+        key = result.action_key.strip()
+        spec = self.interaction_handlers.get(key)
+        if spec is not None:
+            action = spec.handler(result)
+            return _with_interaction_context(action, result) if action is not None else None
+        if key == "control.command.run":
             command_name = _normalize_command_name(str(result.action_args.get("command_name") or ""))
-            if not command_name:
-                return _with_interaction_context(
-                    ControlAction(
-                        action_kind="invalid_command",
-                        target_scope="control",
-                        route=result.route,
-                        args={"reason": "missing command_name"},
-                        notes="Missing control command target.",
-                    ),
-                    result,
-                )
-            spec = self.registry.resolve(command_name)
-            if spec is None:
-                action = ControlAction(
-                    action_kind="unknown_command",
-                    target_scope="control",
-                    route=result.route,
-                    args={"command_name": command_name},
-                    notes=f"Unknown command: /{command_name}",
-                )
+            command = self.registry.resolve(command_name)
+            action = command.handler(ControlCommandInvocation(
+                command_name=command_name, argv=tuple(result.action_args.get("argv") or ()),
+                route=result.route, source_kind="interaction")) if command is not None else None
+            if action is not None:
                 return _with_interaction_context(action, result)
-            invocation = ControlCommandInvocation(
-                command_name=spec.name,
-                argv=(),
-                raw_text=f"/{spec.name}",
-                route=result.route,
-                source_kind="interaction",
-                origin_event_id=result.interaction_id,
-            )
-            handled_action = spec.handler(invocation)
-            if handled_action is None:
-                return _with_interaction_context(
-                    ControlAction(
-                        action_kind="invalid_command",
-                        target_scope="control",
-                        route=result.route,
-                        args={"reason": "interaction handler returned no action", "command_name": command_name},
-                        notes=f"Control command /{command_name} did not produce an action.",
-                    ),
-                    result,
-                )
-            return _with_interaction_context(handled_action, result)
-        if action_key == "control.action.dispatch":
-            dispatched_action = _action_from_payload(
-                result.action_args,
-                route=result.route,
-            )
-            if dispatched_action is None:
-                return _with_interaction_context(
-                    ControlAction(
-                        action_kind="invalid_command",
-                        target_scope="control",
-                        route=result.route,
-                        args={"reason": "invalid dispatched action"},
-                        notes="Unsupported interaction action.",
-                    ),
-                    result,
-                )
-            return _with_interaction_context(dispatched_action, result)
-        return _with_interaction_context(
-            ControlAction(
-                action_kind="invalid_command",
-                target_scope="control",
-                route=result.route,
-                args={"reason": "unsupported interaction action", "action_key": action_key},
-                notes=f"Unsupported interaction action: {action_key}",
-            ),
-            result,
-        )
+        if key == "control.action.dispatch":
+            action = _action_from_payload(dict(result.action_args), route=result.route)
+            if action is not None:
+                return _with_interaction_context(action, result)
+        return _with_interaction_context(ControlAction(
+            action_kind="invalid_command", target_scope="control", route=result.route,
+            args={"reason": "unsupported interaction action", "action_key": key},
+            notes=f"Unsupported interaction action: {key}"), result)
 
     def _parse_invocation(self, event: ControlEvent) -> ControlCommandInvocation | None:
         payload = dict(event.payload or {})
@@ -443,327 +265,6 @@ class ControlPlane(ControlPlanePort):
             source_kind=event.source_kind,
             origin_event_id=event.event_id,
         )
-
-    def _register_builtins(self) -> None:
-        self.register_command(ControlCommandSpec(
-            name="btw", handler=self._handle_btw,
-            description="Ask a temporary read-only side question without adding to conversation history.",
-            usage="/btw <question>", show_in_panel=True,
-        ))
-        self.register_command(ControlCommandSpec(name="memory_review",
-            handler=lambda invocation: ControlAction(action_kind="memory_review_open", target_scope="memory",
-                route=invocation.route, args={"batch_id": invocation.argv[0] if invocation.argv else ""}),
-            description="Review or resume a memory proposal batch.", usage="/memory_review [batch_id]",
-            show_in_panel=True, panel_button=True, panel_label="Memory proposals"))
-        self.register_command(
-            ControlCommandSpec(
-                name="control",
-                handler=self._handle_control,
-                description="Show the control panel and command help.",
-                usage="/control",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=False,
-                panel_label="Control",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
-                name="think",
-                handler=self._handle_think,
-                description="Show or update the think level for future turns.",
-                usage="/think [level]",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Think",
-                interaction_action_key="control.think.open",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
-                name="model",
-                handler=self._handle_model,
-                description="Show or update the active LLM model for future turns.",
-                usage="/model [endpoint_id]",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Model",
-                interaction_action_key="control.model.open",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
-                name="status",
-                handler=self._handle_status,
-                description="Show Pal activity, queued messages, active LLM, and usage statistics.",
-                usage="/status",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Pal Status",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
-                name="interrupt",
-                handler=self._handle_interrupt,
-                description="Interrupt the current active turn in this scope.",
-                usage="/interrupt",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Interrupt",
-                interaction_action_key="control.interrupt.run",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
-                name="log",
-                handler=self._handle_log,
-                description="Show or update prompt debug logging for future turns.",
-                usage="/log [start|end]",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Log",
-                interaction_action_key="control.log.open",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
-                name="compact",
-                handler=self._handle_compact,
-                description="Manually trigger memory compaction.",
-                usage="/compact",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Compact",
-                interaction_action_key="control.compact.run",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
-                name="refresh_llm_endpoint",
-                handler=self._handle_refresh_llm_endpoint,
-                aliases=("refresh_llm_endpoints", "llm_refresh"),
-                description="Refresh LLM endpoint topology from the local database for future turns.",
-                usage="/refresh_llm_endpoint",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Refresh LLM",
-            )
-        )
-        self.register_command(
-            ControlCommandSpec(
-                name="reset",
-                handler=self._handle_reset,
-                description="Open memory reset confirmation for this scope.",
-                usage="/reset",
-                show_in_panel=True,
-                panel_group="builtin",
-                panel_button=True,
-                panel_label="Reset Memory",
-                interaction_action_key="control.reset.open",
-                confirm_policy="confirm",
-            )
-        )
-        for legacy in ("pause", "resume", "cancel", "approve"):
-            self.register_command(
-                ControlCommandSpec(
-                    name=legacy,
-                    handler=self._make_legacy_handler(legacy),
-                    description=f"Legacy control command: {legacy}.",
-                    usage=f"/{legacy}",
-                    show_in_panel=False,
-                )
-            )
-
-    def _handle_btw(self, invocation: ControlCommandInvocation) -> ControlAction:
-        # argv has shell-style tokenization; side questions must retain their
-        # original quotes, whitespace and newlines instead.
-        parts = invocation.raw_text.lstrip().split(maxsplit=1)
-        text = parts[1] if len(parts) == 2 else ""
-        if not text.strip():
-            return ControlAction(action_kind="invalid_command", target_scope="control",
-                                 route=invocation.route, notes="Use /btw <question>.")
-        return ControlAction(action_kind="start_btw", target_scope="runtime",
-                             route=invocation.route,
-                             args={"text": text, "input_id": invocation.origin_event_id})
-
-    def _handle_control(self, invocation: ControlCommandInvocation) -> ControlAction:
-        return ControlAction(
-            action_kind="show_panel",
-            target_scope="control",
-            route=invocation.route,
-        )
-
-    def _handle_status(self, invocation: ControlCommandInvocation) -> ControlAction:
-        return ControlAction(
-            action_kind="show_status",
-            target_scope="runtime",
-            route=invocation.route,
-        )
-
-    def _handle_think(self, invocation: ControlCommandInvocation) -> ControlAction:
-        if not invocation.argv:
-            return ControlAction(
-                action_kind="show_think",
-                target_scope="runtime",
-                route=invocation.route,
-            )
-        requested = str(invocation.argv[0] or "").strip().lower()
-        if not requested:
-            return ControlAction(
-                action_kind="invalid_command",
-                target_scope="control",
-                route=invocation.route,
-                args={
-                    "command_name": invocation.command_name,
-                    "reason": "invalid think level",
-                },
-                notes="Think level is required.",
-            )
-        return ControlAction(
-            action_kind="set_think",
-            target_scope="runtime",
-            route=invocation.route,
-            args={"think_level": requested},
-        )
-
-    def _handle_model(self, invocation: ControlCommandInvocation) -> ControlAction:
-        if not invocation.argv:
-            return ControlAction(
-                action_kind="show_model",
-                target_scope="runtime",
-                route=invocation.route,
-            )
-        operation = invocation.argv[0].lower()
-        if operation in {"confirm", "think", "cancel"} and len(invocation.argv) > 1:
-            expected = 3 if operation == "think" else 2
-            if len(invocation.argv) != expected:
-                return ControlAction(action_kind="invalid_command", target_scope="control", route=invocation.route,
-                                     notes="Use /model confirm|cancel <request_id> or /model think <request_id> <level>.")
-            return ControlAction(
-                action_kind="model_switch_step", target_scope="runtime", route=invocation.route,
-                args={"operation": operation, "request_id": invocation.argv[1],
-                      "think_level": invocation.argv[2] if operation == "think" else ""},
-            )
-        endpoint_id = str(invocation.argv[0] or "").strip()
-        if not endpoint_id:
-            return ControlAction(
-                action_kind="invalid_command",
-                target_scope="control",
-                route=invocation.route,
-                args={
-                    "command_name": invocation.command_name,
-                    "reason": "missing model endpoint id",
-                },
-                notes="Use /model <endpoint_id>.",
-            )
-        return ControlAction(
-            action_kind="set_model",
-            target_scope="runtime",
-            route=invocation.route,
-            args={"endpoint_id": endpoint_id},
-        )
-
-    def _handle_log(self, invocation: ControlCommandInvocation) -> ControlAction:
-        if not invocation.argv:
-            return ControlAction(
-                action_kind="show_log",
-                target_scope="runtime",
-                route=invocation.route,
-            )
-        subcommand = str(invocation.argv[0] or "").strip().lower()
-        if subcommand not in {"start", "end"}:
-            return ControlAction(
-                action_kind="invalid_command",
-                target_scope="control",
-                route=invocation.route,
-                args={
-                    "command_name": invocation.command_name,
-                    "reason": "invalid log subcommand",
-                },
-                notes="Use /log start or /log end.",
-            )
-        return ControlAction(
-            action_kind="set_log",
-            target_scope="runtime",
-            route=invocation.route,
-            args={"prompt_log_enabled": subcommand == "start"},
-        )
-
-    def _handle_interrupt(self, invocation: ControlCommandInvocation) -> ControlAction:
-        return ControlAction(
-            action_kind="interrupt_turn",
-            target_scope="runtime",
-            route=invocation.route,
-        )
-
-    def _handle_compact(self, invocation: ControlCommandInvocation) -> ControlAction:
-        return ControlAction(
-            action_kind="compact_memory",
-            target_scope="memory",
-            route=invocation.route,
-        )
-
-    def _handle_refresh_llm_endpoint(self, invocation: ControlCommandInvocation) -> ControlAction:
-        return ControlAction(
-            action_kind="refresh_llm_endpoint",
-            target_scope="runtime",
-            route=invocation.route,
-        )
-
-    def _handle_reset(self, invocation: ControlCommandInvocation) -> ControlAction:
-        if not invocation.argv:
-            return ControlAction(
-                action_kind="open_reset_confirm",
-                target_scope="memory",
-                route=invocation.route,
-            )
-        if invocation.argv[0].lower() != "confirm":
-            return ControlAction(
-                action_kind="invalid_command",
-                target_scope="control",
-                route=invocation.route,
-                args={
-                    "command_name": invocation.command_name,
-                    "reason": "invalid reset subcommand",
-                },
-                notes="Use /reset or /reset confirm <request_id>.",
-            )
-        request_id = str(invocation.argv[1]).strip() if len(invocation.argv) > 1 else ""
-        if not request_id:
-            return ControlAction(
-                action_kind="invalid_command",
-                target_scope="control",
-                route=invocation.route,
-                args={
-                    "command_name": invocation.command_name,
-                    "reason": "missing reset request id",
-                },
-                notes="Use /reset confirm <request_id>.",
-            )
-        return ControlAction(
-            action_kind="reset_memory",
-            target_scope="memory",
-            route=invocation.route,
-            args={"request_id": request_id},
-        )
-
-    def _make_legacy_handler(self, name: str):
-        def _handler(invocation: ControlCommandInvocation) -> ControlAction:
-            return ControlAction(
-                action_kind=name,
-                target_scope="pal",
-                route=invocation.route,
-            )
-
-        return _handler
 
 
 def _normalize_command_name(value: str) -> str:

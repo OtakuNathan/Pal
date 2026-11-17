@@ -5,7 +5,7 @@ from pal.core.compaction_operation import CompactionOperation
 from pal.llm.contracts import LLM_RUNTIME
 from pal.memory.contracts import MEMORY
 
-from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+from pal.shared.tool_protocol import CompleteResult, ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
 from pal.shared.diagnostics import exception_summary, exception_reason
 
@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timezone
 from dataclasses import replace
 from functools import singledispatchmethod
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pal.execution.contracts import ToolCallBudget
 from pal.llm.compaction_contracts import CompactionService
@@ -37,6 +37,7 @@ from pal.core.turns import (
     MemoryCompactEffect,
     ToolCallEffect,
     ToolObservation,
+    TurnContinuation,
 )
 from pal.core.core_events import TURN_TOOL_CALL_FAILED, TURN_TOOL_RESULT_COMMITTED
 from pal.failure import FailureSignal
@@ -65,12 +66,15 @@ from pal.shared import (
     ChannelStreamUpdateKind,
     RuntimeStatus,
     ToolExecutionResult,
-    default_tool_result_text,
 )
 from pal.shared.payloads import extract_text_from_payload
 from pal.shared.agent_io import ChannelMessage, ChannelStreamUpdate
 
 LOGGER = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from pal.core.main_context import MainContext
+    from pal.shared import PromptAssemblyContext
 
 
 def _format_elapsed_seconds(value: float) -> str:
@@ -98,7 +102,7 @@ class TurnExecutor:
 
     def __init__(
         self,
-        context,
+        context: MainContext,
         state,
         turn_manager,
         *,
@@ -166,7 +170,7 @@ class TurnExecutor:
                 binding = continuation.delivery_binding
                 if output is not None and binding is not None and history.take_degraded_notice():
                     try:
-                        await self._call_output_port_async(output, "queue_status", binding, "history_persistence_degraded",
+                        await self._call_output_port_async(output.queue_status, binding, "history_persistence_degraded",
                             payload={"text": "Conversation storage is temporarily unavailable. Recovery or searchable "
                                      "history may be incomplete; Pal will retry saving at the next round boundary."})
                     except Exception:
@@ -180,7 +184,7 @@ class TurnExecutor:
 
     @_dispatch_effect.register(LLMPreflightEffect)
     async def _handle_llm_preflight(self, effect, continuation):
-        await self._ensure_l1_turn_async(
+        self._begin_l1_turn(
             continuation,
             effect.assembly_context,
         )
@@ -278,15 +282,14 @@ class TurnExecutor:
             _note("memory_service_unavailable")
             return False
         turn_id = str(continuation.turn_id)
-        active_turn_reader = (memory_service.active_l1_turn if memory_service is not None else None)
-        turn = active_turn_reader(turn_id) if callable(active_turn_reader) else None
+        turn = memory_service.active_l1_turn(turn_id)
         if turn is None:
             _note("no_active_l1_turn")
             return False
         calls: set[str] = set()
         results: set[str] = set()
         for message in turn.messages:
-            message_state = str(getattr(message, "state", "") or "")
+            message_state = str(message.state)
             if message_state in {"in_progress", "incomplete"}:
                 _note(f"open_message:{message_state}")
                 return False
@@ -311,19 +314,10 @@ class TurnExecutor:
                 "This proactive run exceeds its independent context budget. "
                 "Stopping with its work recorded; resident conversation history was not compacted."
             ))
-        settled = await self._ensure_l1_turn_async(
+        self._begin_l1_turn(
             continuation,
             effect.assembly_context,
         )
-        if not settled:
-            return EffectResult(
-                status=RuntimeStatus.ERROR,
-                text=(
-                    "Memory compaction requires a fully committed L1 working "
-                    "set; the current input or closed tool protocol could not "
-                    "be committed."
-                ),
-            )
         round_reasons: list[str] = []
         if not self._round_safe_for_compaction(
             continuation, reasons=round_reasons,
@@ -428,8 +422,7 @@ class TurnExecutor:
                 touch_artifacts,
             )
 
-            turns_reader = (memory_service.history if memory_service is not None else None)
-            turns = getattr(turns_reader, "turns", None) if turns_reader is not None else None
+            turns = memory_service.history.turns
             if turns:
                 live_ids = artifact_ids_from_l1_turns(list(turns or ()))
                 if live_ids:
@@ -480,7 +473,7 @@ class TurnExecutor:
                 "failure_context": self._llm_failure_context(continuation),
             },
         )
-        snapshot_store = getattr(getattr(self.context, "execution_runtime", None), "result_snapshots", None)
+        snapshot_store = self.context.execution_runtime.result_snapshots
         memory = self.memory.optional
         history = (memory.history if memory is not None else None)
         if snapshot_store is not None and history is not None:
@@ -517,9 +510,8 @@ class TurnExecutor:
             # still holds THIS attempt's draft.
             self.projection.abandon(projection_pack)
         self._debug_log_outcome(continuation, outcome)
-        refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
-        if refresh is not None and self.include_live_execution_context:
-            refresh(continuation)
+        if self.include_live_execution_context:
+            self.context.execution_runtime.model_response_received(continuation)
         preferred_endpoint_id = str(outcome.preferred_endpoint_id or "").strip() or None
         preferred_model_id = str(outcome.preferred_model_id or "").strip() or None
         continuation.preferred_llm_endpoint_id = preferred_endpoint_id or continuation.preferred_llm_endpoint_id
@@ -608,7 +600,7 @@ class TurnExecutor:
         if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED and (
             outcome.tool_calls or not outcome.text.strip()
         ):
-            await self._discard_l1_assistant_async(
+            self._discard_l1_assistant(
                 continuation,
                 outcome.response.message.message_id,
             )
@@ -623,7 +615,7 @@ class TurnExecutor:
             )
             if send_receipt is not None:
                 outcome = replace(outcome, projection_receipt=send_receipt)
-            await self._upsert_l1_assistant_async(
+            self._upsert_l1_assistant(
                 continuation,
                 outcome.response.message,
             )
@@ -641,10 +633,12 @@ class TurnExecutor:
     async def _handle_tool_call(self, effect, continuation):
         self._ensure_not_interrupted(continuation)
         execution_call = effect.tool_call
-        if not str(getattr(execution_call, "call_id", "") or "").strip() and continuation.pending_tool_call_batch:
+        if execution_call is None and continuation.pending_tool_call_batch:
             pending_index = len(continuation.pending_tool_results)
             if 0 <= pending_index < len(continuation.pending_tool_call_batch):
                 execution_call = continuation.pending_tool_call_batch[pending_index]
+        if execution_call is None:
+            raise ValueError("ToolCallEffect requires a tool call")
         tool_budget = self._build_tool_call_budget(continuation, execution_call=execution_call)
         self._log_tool_call_start(continuation, execution_call)
         observed_name = execution_call.name
@@ -652,7 +646,7 @@ class TurnExecutor:
             observed_name = str(execution_call.args.get("name") or observed_name)
         tool_event = {
             "turn_id": continuation.turn_id,
-            "call_id": getattr(execution_call, "call_id", ""),
+            "call_id": execution_call.call_id,
             "tool_name": execution_call.name,
             "subsystem": "execution", "component": observed_name,
         }
@@ -708,7 +702,7 @@ class TurnExecutor:
                     **dict(tool_result.structured or {}),
                     **failure_metadata,
                 },
-                call_id=getattr(execution_call, "call_id", None),
+                call_id=execution_call.call_id,
                 llm_text=f"{tool_result.llm_text or tool_result.text}\n\n{feedback_text}",
                 snapshot_refs=tool_result.snapshot_refs,
                 replay_result_ref=tool_result.replay_result_ref,
@@ -733,8 +727,6 @@ class TurnExecutor:
             tool_signature_hash=canonical_tool_signature_hash(execution_call.name, execution_call.args),
             result_fingerprint=canonical_result_fingerprint(
                 self.context.execution_runtime.stagnation_payload(execution_call, tool_result)
-                if callable(getattr(self.context.execution_runtime, "stagnation_payload", None))
-                else {"ok": tool_result.ok, "text": tool_result.text, "structured": tool_result.structured}
             ),
         )
         continuation.tool_batch_count += 1
@@ -776,9 +768,8 @@ class TurnExecutor:
                 if self._after_tool_batch is not None:
                     await self._after_tool_batch(continuation)
                 await self._checkpoint_resident_async(continuation.turn_id, "round", continuation)
-                refresh = getattr(getattr(self.context, "execution_runtime", None), "model_response_received", None)
-                if refresh is not None and self.include_live_execution_context:
-                    refresh(continuation)
+                if self.include_live_execution_context:
+                    self.context.execution_runtime.model_response_received(continuation)
         return EffectResult(
             status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
             payload=tool_result,
@@ -821,7 +812,7 @@ class TurnExecutor:
         message = ChannelMessage(text=markdown, tag=tag, payload=payload)
         dedupe_key = (
             str(declaration.get("dedupe_key") or "").strip()
-            or f"{getattr(tool_call, 'name', '')}:{getattr(tool_call, 'call_id', None) or ''}"
+            or f"{tool_call.name}:{tool_call.call_id}"
         )
         if not dedupe_key:
             return
@@ -852,32 +843,38 @@ class TurnExecutor:
                 MailboxReplyEffect(text=message.text, message=message, terminal=False),
             )
 
-    def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
+    def _log_tool_call_start(self, continuation, tool_call: ToolCallIR) -> None:
+        if not LOGGER.isEnabledFor(logging.DEBUG):
+            return
         LOGGER.debug(
             "[tool call] turn_id=%s name=%s call_id=%s args=%s",
             continuation.turn_id,
-            getattr(tool_call, "name", ""),
-            str(getattr(tool_call, "call_id", "") or ""),
-            self._log_preview(getattr(tool_call, "args", {}), max_chars=1200),
+            tool_call.name,
+            tool_call.call_id,
+            self._log_preview(tool_call.args, max_chars=1200),
         )
 
-    def _log_tool_call_result(self, continuation, tool_call: Any, tool_result: ToolExecutionResult) -> None:
+    def _log_tool_call_result(self, continuation, tool_call: ToolCallIR, tool_result: ToolExecutionResult) -> None:
+        if not LOGGER.isEnabledFor(logging.DEBUG):
+            return
         LOGGER.debug(
             "[tool result] turn_id=%s name=%s call_id=%s ok=%s status=%s text=%s",
             continuation.turn_id,
-            getattr(tool_call, "name", ""),
-            str(getattr(tool_call, "call_id", "") or ""),
-            bool(getattr(tool_result, "ok", False)),
-            str(getattr(tool_result, "status", "") or ""),
-            self._log_preview(getattr(tool_result, "text", "") or getattr(tool_result, "llm_text", ""), max_chars=1200),
+            tool_call.name,
+            tool_call.call_id,
+            tool_result.ok,
+            tool_result.status,
+            self._log_preview(tool_result.text or tool_result.llm_text, max_chars=1200),
         )
 
-    def _log_tool_call_exception(self, continuation, tool_call: Any, exc: Exception) -> None:
+    def _log_tool_call_exception(self, continuation, tool_call: ToolCallIR, exc: Exception) -> None:
+        if not LOGGER.isEnabledFor(logging.DEBUG):
+            return
         LOGGER.debug(
             "[tool result] turn_id=%s name=%s call_id=%s ok=False exception=%s text=%s",
             continuation.turn_id,
-            getattr(tool_call, "name", ""),
-            str(getattr(tool_call, "call_id", "") or ""),
+            tool_call.name,
+            tool_call.call_id,
             type(exc).__name__,
             self._log_preview(str(exc), max_chars=1200),
         )
@@ -934,7 +931,7 @@ class TurnExecutor:
                     reply_target=reply_target,
                 ),
             )
-        reply_id = await self._call_output_port_async(output_port, "queue_reply", binding, message)
+        reply_id = await self._call_output_port_async(output_port.queue_reply, binding, message)
         text = str(message.text or "").strip()
         if text:
             continuation.emitted_reply_texts.append(text)
@@ -955,8 +952,7 @@ class TurnExecutor:
         if binding is None:
             return EffectResult(status=RuntimeStatus.SKIPPED)
         update_id = await self._call_output_port_async(
-            output_port,
-            "queue_stream_update",
+            output_port.queue_stream_update,
             binding,
             effect.update,
         )
@@ -971,16 +967,11 @@ class TurnExecutor:
     def _channel_supports_stream_delivery(self, continuation: Any) -> bool:
         output_port = self._agent_output_port()
         binding = continuation.delivery_binding
-        supports = getattr(output_port, "supports_stream_delivery", None)
-        if binding is None or not callable(supports):
+        if output_port is None or binding is None:
             return False
-        try:
-            return bool(supports(binding))
-        except Exception:
-            return False
+        return output_port.supports_stream_delivery(binding)
 
-    async def _call_output_port_async(self, output_port, method_name: str, *args, **kwargs):
-        method = getattr(output_port, method_name)
+    async def _call_output_port_async(self, method: Callable[..., Any], *args, **kwargs):
         result = method(*args, **kwargs)
         if inspect.isawaitable(result):
             return await result
@@ -1067,11 +1058,7 @@ class TurnExecutor:
         return completion if completion is not None else LLMGenerationResult(response=final_response)
 
     def _llm_wait_status_schedule(self) -> tuple[float, ...]:
-        raw = getattr(
-            self._config,
-            "llm_wait_status_seconds",
-            (120.0, 300.0, 600.0, 1_200.0),
-        )
+        raw = self._config.llm_wait_status_seconds
         schedule: list[float] = []
         for item in tuple(raw or ()):
             try:
@@ -1094,8 +1081,7 @@ class TurnExecutor:
             return
         elapsed = _format_elapsed_seconds(elapsed_seconds)
         await self._call_output_port_async(
-            output_port,
-            "queue_status",
+            output_port.queue_status,
             binding,
             "llm_waiting",
             payload={
@@ -1117,12 +1103,12 @@ class TurnExecutor:
             and update.response.finish_reason == LLMFinishReason.ERROR
         )
         if terminal_error:
-            await self._discard_l1_assistant_async(
+            self._discard_l1_assistant(
                 continuation,
                 update.response.message.message_id,
             )
         else:
-            await self._upsert_l1_assistant_async(continuation, update.response.message)
+            self._upsert_l1_assistant(continuation, update.response.message)
         channel_update: ChannelStreamUpdate | None = None
         if update.delta_kind == LLMResponseDeltaKind.TEXT and update.text_delta:
             channel_update = ChannelStreamUpdate(
@@ -1273,15 +1259,8 @@ class TurnExecutor:
                             include_l1_recent_context=False,
                             task_id=assembly_context.task_id,
                             work_order_id=assembly_context.work_order_id,
-                            active_input_id=str(
-                                getattr(
-                                    getattr(assembly_context, "event", None),
-                                    "event_id",
-                                    "",
-                                )
-                                or ""
-                            )
-                            or None,
+                            active_input_id=assembly_context.event.event_id
+                                if assembly_context.event is not None else None,
                         )
                     )
                 except Exception as exc:
@@ -1530,7 +1509,7 @@ class TurnExecutor:
     def _build_tool_call_budget(self, continuation, *, execution_call=None) -> ToolCallBudget:
         cfg = self._config
         token_limit = cfg.max_tool_result_tokens
-        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() in {"op_exec_shell", "run_shell"}:
+        if execution_call is not None and execution_call.name in {"op_exec_shell", "run_shell"}:
             token_limit = min(cfg.max_tool_result_tokens, cfg.default_max_output_tokens)
         max_output_chars = min(
             cfg.default_max_result_size_chars,
@@ -1592,11 +1571,10 @@ class TurnExecutor:
         if not refs:
             return message
         manager = self.context.port_registry.get("artifact:artifact")
-        select = getattr(manager, "select_prompt_exposure", None)
         exposure = None
-        if callable(select):
+        if manager is not None:
             try:
-                exposure = select(
+                exposure = manager.select_prompt_exposure(
                     str(scope_key or "pal:resident"),
                     str(turn_id),
                     message.text,
@@ -1608,11 +1586,9 @@ class TurnExecutor:
         replacement: list[Any] = []
         if exposure is not None:
             for inline in exposure.inline_parts:
-                source = str(getattr(inline, "source_url", "") or "")
+                source = inline.source_url
                 if not source:
-                    resolver = getattr(manager, "to_data_url", None)
-                    if callable(resolver):
-                        source = str(resolver(inline.representation_id) or "")
+                    source = manager.to_data_url(inline.representation_id) or ""
                 if source:
                     replacement.append(ImagePartIR(source=source, media_type=inline.mime_type or None))
             if str(exposure.text or "").strip():
@@ -1654,11 +1630,7 @@ class TurnExecutor:
         continuation.pending_tool_results = []
 
     def _render_tool_result_content(self, tool_call: ToolCallIR, result: ToolExecutionResult) -> str:
-        if isinstance(getattr(result, "context_delivery", None), dict):
-            return str(result.llm_text or "")
-        if str(result.llm_text or ""):
-            return str(result.llm_text)
-        return default_tool_result_text(result)
+        return result.llm_text
 
     # ── response / temperature helpers ───────────────────────────────────
 
@@ -1697,14 +1669,12 @@ class TurnExecutor:
             response_mode=response_mode,
         )
 
-    async def _upsert_l1_assistant_async(
+    def _upsert_l1_assistant(
         self,
         continuation: Any,
         message: LLMMessageIR,
     ) -> None:
-        memory_service = self.memory.optional
-        if memory_service is None:
-            return
+        memory_service = self.memory.current
         if not message.semantic_kind:
             message = replace(
                 message,
@@ -1716,22 +1686,19 @@ class TurnExecutor:
             )
         memory_service.stream_l1_assistant(str(continuation.turn_id), message)
 
-    async def _discard_l1_assistant_async(
+    def _discard_l1_assistant(
         self,
         continuation: Any,
         message_id: str,
     ) -> None:
-        memory_service = self.memory.optional
-        if memory_service is None:
+        memory_service = self.memory.current
+        active = memory_service.active_l1_turn(str(continuation.turn_id))
+        if active is None or not any(
+            item.role == MessageRole.ASSISTANT
+            and str(item.message_id or "") == str(message_id)
+            for item in active.messages
+        ):
             return
-        if memory_service is not None:
-            active = memory_service.active_l1_turn(str(continuation.turn_id))
-            if active is None or not any(
-                item.role == MessageRole.ASSISTANT
-                and str(item.message_id or "") == str(message_id)
-                for item in active.messages
-            ):
-                return
         memory_service.discard_l1_assistant(str(continuation.turn_id), str(message_id))
 
     def select_turn_temperature(self, response_mode: str) -> float:
@@ -1745,48 +1712,39 @@ class TurnExecutor:
 
     # ── L1 working-set settlement ───────────────────────────────────────
 
-    async def _ensure_l1_turn_async(
+    def _begin_l1_turn(
         self,
-        continuation: Any,
-        assembly_context: Any,
-    ) -> bool:
-        memory_service = self.memory.optional
-        if memory_service is None:
-            return False
-        bind = getattr(self.context.execution_runtime, "bind_result_history", None)
-        if callable(bind):
-            bind(memory_service)
-        event = getattr(assembly_context, "event", None)
-        event_payload = getattr(event, "payload", None)
+        continuation: TurnContinuation,
+        assembly_context: PromptAssemblyContext,
+    ) -> None:
+        memory_service = self.memory.current
+        self.context.execution_runtime.bind_result_history(memory_service)
+        event = assembly_context.event
+        event_payload = event.payload if event is not None else None
         user_message = event_payload if isinstance(event_payload, LLMMessageIR) else None
         text = "" if user_message is not None else extract_text_from_payload(event_payload).strip()
         if not text:
-            text = str(dict(getattr(assembly_context, "metadata", {}) or {}).get("proactive_input") or "").strip()
-        try:
-            method = memory_service.begin_l1_turn
-            turn_metadata = {"_pal_input_id": self._active_input_id(continuation, assembly_context)}
-            if self.context.port_registry.get(RESIDENT_HISTORY.name) is not None:
-                origin = "proactive" if (assembly_context.turn_kind == "proactive_trigger"
-                    or assembly_context.metadata.get("proactive_input")) else "user"
-                if user_message is None and text:
-                    user_message = LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR(text),),
-                                               semantic_kind="user_request")
-                    text = ""
-                if user_message is not None:
-                    user_message = replace(user_message, semantic_kind=user_message.semantic_kind or "user_request",
-                        metadata={**thaw_json(user_message.metadata),
-                        "conversation_origin": origin,
-                        "conversation_timestamp": event.created_at if event is not None else datetime.now(timezone.utc).isoformat()})
-                turn_metadata.update(conversation_tracking=True, conversation_input_kind=origin)
-            method(
-                str(continuation.turn_id),
-                user_text=text,
-                user_message=user_message,
-                metadata=turn_metadata,
-            )
-            return True
-        except Exception:
-            return False
+            text = str(assembly_context.metadata.get("proactive_input") or "").strip()
+        turn_metadata = {"_pal_input_id": self._active_input_id(continuation, assembly_context)}
+        if self.context.port_registry.get(RESIDENT_HISTORY.name) is not None:
+            origin = "proactive" if (assembly_context.turn_kind == "proactive_trigger"
+                or assembly_context.metadata.get("proactive_input")) else "user"
+            if user_message is None and text:
+                user_message = LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR(text),),
+                                           semantic_kind="user_request")
+                text = ""
+            if user_message is not None:
+                user_message = replace(user_message, semantic_kind=user_message.semantic_kind or "user_request",
+                    metadata={**thaw_json(user_message.metadata),
+                    "conversation_origin": origin,
+                    "conversation_timestamp": event.created_at if event is not None else datetime.now(timezone.utc).isoformat()})
+            turn_metadata.update(conversation_tracking=True, conversation_input_kind=origin)
+        memory_service.begin_l1_turn(
+            str(continuation.turn_id),
+            user_text=text,
+            user_message=user_message,
+            metadata=turn_metadata,
+        )
 
     async def _append_l1_tool_result_async(
         self,
@@ -1798,9 +1756,8 @@ class TurnExecutor:
         if memory_service is None:
             self._discard_uncommitted_tool_delivery(str(continuation.turn_id), call.call_id)
             return
-        bind = getattr(self.context.execution_runtime, "bind_result_history", None)
-        if callable(bind):
-            bind(memory_service)
+        execution = self.context.execution_runtime
+        execution.bind_result_history(memory_service)
         content = self._render_tool_result_content(call, result)
         turn_id = str(continuation.turn_id)
         previous = memory_service.active_l1_turn(
@@ -1829,26 +1786,20 @@ class TurnExecutor:
                 call.call_id,
             )
             raise
-        delivery = getattr(result, "context_delivery", None)
-        commit = getattr(
-            getattr(self.context, "execution_runtime", None),
-            "commit_tool_delivery",
-            None,
-        )
-        if isinstance(delivery, dict) and callable(commit):
+        delivery = result.context_delivery
+        if delivery is not None:
             try:
-                commit(
+                execution.commit_tool_delivery(
                     turn_id=str(continuation.turn_id),
                     context_delivery=dict(delivery),
                     result_id=call.call_id,
                 )
             except Exception:
-                rollback = (memory_service.rollback_l1_tool_result if memory_service is not None else None)
-                if previous is None or not callable(rollback):
+                if previous is None:
                     raise RuntimeError(
                         "tool delivery commit failed and L1 cannot be rolled back"
                     )
-                rollback(
+                memory_service.rollback_l1_tool_result(
                     turn_id,
                     previous=previous,
                     call_id=call.call_id,
@@ -1859,22 +1810,18 @@ class TurnExecutor:
                 )
                 raise
 
-        snapshots = getattr(self.context.execution_runtime, "result_snapshots", None)
-        if snapshots is not None:
-            scope = self.context.execution_runtime.logical_context_for_turn(turn_id)
-            snapshots.finish_delivery(lifetime=scope.execution_lifetime_id, call_id=call.call_id)
-            snapshots.finish_references(result.snapshot_refs)
-        observe = getattr(self.context.execution_runtime, "observe_tool_delivery", None)
-        if callable(observe):
-            observe(call, result)
+        snapshots = execution.result_snapshots
+        scope = execution.logical_context_for_turn(turn_id)
+        snapshots.finish_delivery(lifetime=scope.execution_lifetime_id, call_id=call.call_id)
+        snapshots.finish_references(result.snapshot_refs)
+        execution.observe_tool_delivery(call, result)
         self.context.core_event_bus.emit(TURN_TOOL_RESULT_COMMITTED, {
             "turn_id": turn_id, "call_id": call.call_id,
             "complete": bool(result.ok and not result.snapshot_refs
-                             and not getattr(result.invocation_result, "output_error", None)),
+                             and not (isinstance(result.invocation_result, CompleteResult)
+                                      and result.invocation_result.output_error)),
         })
-        acknowledge = getattr(self.context.execution_runtime, "acknowledge_tool_result_async", None)
-        if callable(acknowledge):
-            await acknowledge(call.call_id, turn_id)
+        await execution.acknowledge_tool_result_async(call.call_id, turn_id)
 
     async def _append_l1_tool_context_messages_async(
         self,
@@ -1914,37 +1861,29 @@ class TurnExecutor:
         turn_id: str,
         result_ref: str,
     ) -> None:
-        discard = getattr(
-            getattr(self.context, "execution_runtime", None),
-            "discard_uncommitted_tool_delivery",
-            None,
-        )
-        if callable(discard):
-            discard(turn_id=str(turn_id), result_ref=str(result_ref or ""))
+        self.context.execution_runtime.discard_uncommitted_tool_delivery(
+            turn_id=str(turn_id), result_ref=str(result_ref or ""))
 
     @staticmethod
     def _active_input_id(
         continuation: Any,
         assembly_context: Any | None,
     ) -> str:
-        event = getattr(assembly_context, "event", None)
+        event = assembly_context.event if assembly_context is not None else None
         if event is None:
             event = continuation.opening_event
         return (
-            str(getattr(event, "event_id", "") or "").strip()
+            str(event.event_id if event is not None else "").strip()
             or str(continuation.turn_id or "").strip()
         )
 
     # ── post-turn commit ─────────────────────────────────────────────────
 
     async def schedule_post_turn_commit_async(self, outcome) -> Any:
-        snapshots = getattr(self.context.execution_runtime, "result_snapshots", None)
-        if snapshots is not None:
-            snapshots.finish_turn(str(outcome.commit_payload.turn_id))
+        self.context.execution_runtime.result_snapshots.finish_turn(str(outcome.commit_payload.turn_id))
         llm = self.llm.optional
-        close_cache = getattr(llm, "end_prompt_cache_turn", None)
-        if callable(close_cache):
-            close_cache(str(outcome.commit_payload.turn_id))
+        if llm is not None:
+            llm.end_prompt_cache_turn(str(outcome.commit_payload.turn_id))
         memory_service = self.memory.optional
         result = None
         if memory_service is not None:
@@ -1974,11 +1913,10 @@ class TurnExecutor:
 
     def _reap_expired_artifacts(self) -> None:
         service = self.context.port_registry.get("artifact:artifact")
-        reap = getattr(service, "reap_expired", None)
-        if not callable(reap):
+        if service is None:
             return
         try:
-            reap()
+            service.reap_expired()
         except Exception as exc:
             self.state.diagnostics.append(
                 {

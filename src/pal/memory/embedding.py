@@ -27,6 +27,9 @@ class EmbeddingProviderPort(Protocol):
     model_name: str
     transport: str
 
+    @property
+    def configuration_fingerprint(self) -> str: ...
+
     def embed_query(self, text: str) -> list[float]:
         ...
 
@@ -60,6 +63,11 @@ class OllamaEmbeddingProvider:
     transport: str = "http"
     model_revision: str | None = None
     text_processing_version: str = "search_text_v1"
+
+    @property
+    def configuration_fingerprint(self) -> str:
+        return hashlib.sha256(json.dumps((self.provider_id, self.model_name, self.base_url,
+            self.model_revision, self.text_processing_version)).encode()).hexdigest()
 
     def embed_query(self, text: str) -> list[float]:
         vectors = self.embed_documents([text])
@@ -169,6 +177,11 @@ class OllamaFallbackEmbeddingProvider:
     _failed_until: dict[int, float] = field(default_factory=dict)
     _last_provider_index: int | None = None
     _last_errors: list[str] = field(default_factory=list)
+
+    @property
+    def configuration_fingerprint(self) -> str:
+        return hashlib.sha256(json.dumps((self.provider_id, self.model_name, self.model_revision,
+            self.text_processing_version, tuple(p.configuration_fingerprint for p in self.providers))).encode()).hexdigest()
 
     def embed_query(self, text: str) -> list[float]:
         return self._call("embed_query", text)
@@ -364,6 +377,10 @@ class InProcBGEEmbeddingProvider:
     _model: object | None = None
     transport: str = "inproc"
 
+    @property
+    def configuration_fingerprint(self) -> str:
+        return hashlib.sha256(json.dumps((self.provider_id, self.model_name, self.transport)).encode()).hexdigest()
+
     def _load_model(self):
         if self._model is None:
             try:
@@ -410,6 +427,10 @@ class HashingEmbedder:
     model_name: str = "hashing-test-embedder"
     dimension: int = 32
     transport: str = "test"
+
+    @property
+    def configuration_fingerprint(self) -> str:
+        return hashlib.sha256(json.dumps((self.provider_id, self.model_name, self.dimension, 1)).encode()).hexdigest()
 
     def _encode(self, text: str) -> list[float]:
         buckets = [0.0] * self.dimension

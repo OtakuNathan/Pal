@@ -91,7 +91,15 @@ tools; this control tool takes no operation-specific extra parameters.
 The stable shared `SilentOnceSchedulerPort` publishes
 `ensure_silent_once(proactive_id, goal, method)`. It persists an immediately due
 `once` definition targeting `null`; existing ids are preserved, including completed
-or intentionally disabled tasks. Core uses this for failed dreaming handoffs. The
+or intentionally disabled tasks. Dreaming uses Core’s generic silent-task facility for failed dreaming handoffs. The
 ordinary task execution writes shared L1, whose existing resident persistence owns
 recovery and subsequent conversational visibility. Task definitions/cursors remain
 in the existing proactive repository. This port's identity survives plugin reload.
+
+The event source owns a timer scope and translates its next schedule deadline
+into a one-shot Core timer. Maintenance pauses this timer; wakeup rechecks due
+work and resident admission. An active run retains its module generation; finish
+or interrupt that run before unloading. Successful unload cancels pending timers
+and drains remaining task bookkeeping.
+Handlers use the public Core control port, without accessing Core state or its
+turn manager.

@@ -7,6 +7,50 @@ import pytest
 from pal.foundation.lifecycle_gate import WriterPreferredRWGate
 
 
+def test_nested_async_reader_can_finish_while_lifecycle_writer_waits(monkeypatch):
+    gate = WriterPreferredRWGate()
+    waiting = threading.Event()
+    acquire = gate._acquire_write
+    def write():
+        waiting.set()
+        acquire()
+    monkeypatch.setattr(gate, "_acquire_write", write)
+
+    async def scenario():
+        async def retire():
+            async with gate.write_async():
+                return "retired"
+        async with gate.read_async():
+            writer = asyncio.create_task(retire())
+            assert await asyncio.to_thread(waiting.wait, 2)
+            async with gate.read_async():
+                assert not writer.done()
+        assert await writer == "retired"
+        async with gate.write_async():
+            pass
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+def test_child_reader_retains_its_own_lease_after_parent_exits():
+    gate = WriterPreferredRWGate()
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def child():
+            async with gate.read_async():
+                entered.set()
+                await release.wait()
+        async with gate.read_async():
+            task = asyncio.create_task(child())
+            await entered.wait()
+        assert gate._readers == 1
+        release.set()
+        await task
+        async with gate.write_async():
+            pass
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
 @pytest.mark.parametrize("mode", ["read", "write"])
 def test_repeated_cancel_before_acquisition_drains_and_balances(mode, monkeypatch):
     gate = WriterPreferredRWGate()

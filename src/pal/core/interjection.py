@@ -41,7 +41,7 @@ async def inject_pending_interjection_async(
         batch = []
         messages = []
         for envelope in snapshot:
-            payload = getattr(getattr(envelope, "event", None), "payload", None)
+            payload = envelope.event.payload
             if isinstance(payload, LLMMessageIR):
                 message = replace(payload, semantic_kind="user_interjection")
             else:
@@ -51,7 +51,7 @@ async def inject_pending_interjection_async(
                 message = LLMMessageIR(
                     role=MessageRole.USER,
                     parts=(TextPartIR(text),),
-                    message_id=str(getattr(getattr(envelope, "event", None), "event_id", "") or "interjection"),
+                    message_id=envelope.event.event_id,
                     semantic_kind="user_interjection",
                 )
             # Leave unsupported entries and their successors for normal queue
@@ -177,8 +177,8 @@ async def _acknowledge_cross_scope_interjection_async(
 ) -> None:
     """Finish a consumed request whose reply authority belongs to another scope."""
 
-    source_binding = getattr(envelope, "opening_delivery_binding", None)
-    active_binding = getattr(continuation, "delivery_binding", None)
+    source_binding = envelope.opening_delivery_binding
+    active_binding = continuation.delivery_binding
     if source_binding is None or active_binding is None:
         return
     if str(source_binding.control_scope_key) == str(active_binding.control_scope_key):
@@ -186,11 +186,10 @@ async def _acknowledge_cross_scope_interjection_async(
     output_port = context.port_registry.get("agent_io:output") or context.port_registry.get(
         "channel:channel"
     )
-    queue_reply = getattr(output_port, "queue_reply", None)
-    if not callable(queue_reply):
+    if output_port is None:
         return
     try:
-        result = queue_reply(
+        result = output_port.queue_reply(
             source_binding,
             "Message added to the active conversation; its response will be delivered there.",
         )

@@ -20,7 +20,11 @@ from pal.foundation import PalV2Database
 from pal.foundation.sidecar import SidecarRpcClient
 from pal.lsp import build_lsp_plugin
 from pal.lsp.plugin import LspManagerPluginProvider
+from contextlib import closing
+from pal.memory.embedding import HashingEmbedder
+from pal.memory.service import MemoryService
 from pal.memory.storage import MemoryStorage
+from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
 from pal.web_fetch.browser_service import BrowserServiceManager
 from pal.wizard.runtime import ALL_MODELS
 
@@ -209,6 +213,8 @@ def test_all_slim_runtime_modes_query_and_close_without_owning_lsp(
     database.close()
     storage = MemoryStorage(tmp_path)
     storage.create_initial()
+    with closing(storage.open()) as repository:
+        SQLiteVecL3Plugin(service=MemoryService(), repository=repository, embedding_provider=HashingEmbedder())
     storage.pin("synthetic-workflow")
     monkeypatch.setenv(BUNSHIN_RUNTIME_DB_PATH_ENV, str(tmp_path / "pal.sqlite3"))
     monkeypatch.setenv("PAL_BUNSHIN_WEB_BROKER", "0")

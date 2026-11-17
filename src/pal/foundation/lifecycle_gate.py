@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 
 class WriterPreferredRWGate:
     """One process-wide lifecycle fence shared by sync and async tool calls."""
@@ -13,6 +14,8 @@ class WriterPreferredRWGate:
         self._readers = 0
         self._writer = False
         self._waiting_writers = 0
+        self._async_reader: ContextVar[asyncio.Task | None] = ContextVar("lifecycle_reader", default=None)
+        self._async_writer: ContextVar[asyncio.Task | None] = ContextVar("lifecycle_writer", default=None)
 
     @contextmanager
     def read(self):
@@ -47,6 +50,12 @@ class WriterPreferredRWGate:
 
     @asynccontextmanager
     async def read_async(self):
+        task = asyncio.current_task()
+        if self._async_reader.get() is task or self._async_writer.get() is task:
+            # An admitted callback can await another shared operation even
+            # after a writer queues. Child tasks acquire their own leases.
+            yield
+            return
         acquired = asyncio.create_task(asyncio.to_thread(self._acquire_read))
         try:
             await asyncio.shield(acquired)
@@ -54,13 +63,21 @@ class WriterPreferredRWGate:
             await self._drain_acquisition(acquired)
             self._release_read()
             raise
+        token = self._async_reader.set(task)
         try:
             yield
         finally:
+            self._async_reader.reset(token)
             self._release_read()
 
     @asynccontextmanager
     async def write_async(self):
+        task = asyncio.current_task()
+        if self._async_writer.get() is task:
+            yield
+            return
+        if self._async_reader.get() is task:
+            raise RuntimeError("A shared lifecycle call cannot acquire exclusive access")
         acquired = asyncio.create_task(asyncio.to_thread(self._acquire_write))
         try:
             await asyncio.shield(acquired)
@@ -68,9 +85,11 @@ class WriterPreferredRWGate:
             await self._drain_acquisition(acquired)
             self._release_write()
             raise
+        token = self._async_writer.set(task)
         try:
             yield
         finally:
+            self._async_writer.reset(token)
             self._release_write()
 
     @staticmethod

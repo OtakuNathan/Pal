@@ -19,6 +19,7 @@ from pal.execution.tool_facade import StrictToolModel
 from pal.foundation import utc_now
 from pal.memory.embedding import build_ollama_embedding_provider_from_config
 from pal.memory.repository import deserialize_vector
+from pal.memory.embedding_space import read_space
 from pal.memory.storage import MemoryStorage
 from pal.packages.process import atomic_json
 
@@ -80,7 +81,8 @@ def _identity(config):
     provider = build_ollama_embedding_provider_from_config(config)
     return {"provider_id": provider.provider_id, "model_name": provider.model_name,
             "model_revision": getattr(provider, "model_revision", None),
-            "text_processing_version": getattr(provider, "text_processing_version", "search_text_v1")}
+            "text_processing_version": getattr(provider, "text_processing_version", "search_text_v1"),
+            "configuration_fingerprint": provider.configuration_fingerprint}
 
 
 def _storage(root, *, read_only=False):
@@ -226,12 +228,15 @@ def _resume(root, state, batch_size):
             from pal.memory.service import MemoryService
             provider = SQLiteVecL3Plugin(service=MemoryService(), repository=repo,
                 embedding_provider=build_ollama_embedding_provider_from_config(_target_config(root, state["patch"])))
-            identity = state["target_identity"]
-            with repo.write_transaction():
-                repo.retarget_embeddings(**identity)
-                for (ref,) in repo.database.execute_sql("SELECT document_id FROM memory_document_projection").fetchall():
-                    if repo.get_embedding(ref + ":primary") is None:
-                        provider._mark_document_pending(ref)
+            if provider.migration_identity != state["target_identity"]:
+                raise RuntimeError("Target embedding identity changed since migration was planned")
+            space = read_space(repo.database.connection())
+            if space is None or space.profile != provider.migration_identity:
+                provider.prepare_generation(repo)
+            missing = [ref for (ref,) in repo.database.execute_sql("SELECT document_id FROM memory_document_projection")
+                       if repo.get_embedding(ref + ":primary") is None]
+            if missing:
+                provider.prepare_generation(repo, missing)
             while repo.inventory()["retryable_embeddings"]:
                 result = provider.refresh_indexes(limit=batch_size, retry_failed=True)
                 state["refreshed"] += result.get("refreshed", 0)
@@ -243,7 +248,7 @@ def _resume(root, state, batch_size):
             state["stage"] = "publishing"
             state["verification"] = "documents_unchanged_vectors_complete_self_retrieval_checked"
             _save(root, state)
-            storage.publish_reindexed(repo, source_generation=source)
+            storage.publish_reindexed(repo, source_generation=source, profile=provider.migration_identity)
         state["stage"] = "configuring"
         _save(root, state)
         _write_config(root, state["patch"])

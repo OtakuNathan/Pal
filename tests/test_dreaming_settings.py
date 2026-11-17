@@ -86,16 +86,23 @@ def test_sleep_control_preserves_raw_json_and_avoids_llm(tmp_path, storage):
     from pal.control import ControlCommandInvocation
     from pal.memory.dreaming.runtime import register_dreaming
     core = build_core()
-    commands = {}
-    core.context.port_registry['control:control'] = SimpleNamespace(register_command=lambda spec: commands.update({spec.name: spec}))
-    service = register_dreaming(core, SimpleNamespace(repository=SimpleNamespace(catalog=storage)), None, tmp_path)
+    from pal.core.capabilities import register_with_core as register_core
+    from pal.control import ControlPlane, register_with_core as register_control
+    register_core(core)
+    plane = ControlPlane()
+    register_control(core.context, plane)
+    core._deliver_control_delivery_async = AsyncMock(return_value=True)
+    from pal.memory import MemoryService, register_with_core as register_memory
+    register_memory(core.context, MemoryService())
+    handle = register_dreaming(core.context, SimpleNamespace(repository=SimpleNamespace(catalog=storage)), None, tmp_path)
+    service = handle.ports["dreaming"]
     core.state.memory_maintenance = True
     raw = '/dreaming configure {"enabled": true, "input_tokens": 8000}'
     invocation = ControlCommandInvocation(command_name='dreaming', argv=tuple(shlex.split(raw)[1:]), raw_text=raw)
-    action = commands['dreaming'].handler(invocation)
-    handle = core.context.module_registry.get('memory.dreaming')
-    result = handle.control_action_handlers['memory_dreaming'](action)
-    assert json.loads(result['message'])['enabled'] is True
+    action = plane.registry.resolve('dreaming').handler(invocation)
+    asyncio.run(core.handle_control_action_async(action))
+    reply = core._deliver_control_delivery_async.await_args.args[0]
+    assert json.loads(reply.text)['enabled'] is True
     assert service.config.input_tokens == 8000
 
 

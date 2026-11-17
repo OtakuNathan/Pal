@@ -47,8 +47,9 @@ def modern_bill():
     }
 
 
-class RecordedCommands:
+class RecordedCommands(ExecutionRuntime):
     def __init__(self):
+        super().__init__()
         self.calls = []
 
     async def execute_tool_async(self, call, **_kwargs):
@@ -215,7 +216,7 @@ def test_evidence_provider_discovery_and_admission_match_bound_contract(view):
             assert not result.ok
             assert result.structured["reason"] == "capability_not_allowed"
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
 
 
 def test_node_evidence_guidance_reaches_provider_without_erasing_other_profile_fields():
@@ -234,7 +235,7 @@ def test_node_evidence_guidance_reaches_provider_without_erasing_other_profile_f
         assert "before submit_verification" not in description
         assert "bound verification outcome tool" in description
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
 
 
 def test_scoped_projection_does_not_silently_rewrite_a_pinned_contract():
@@ -248,8 +249,8 @@ def test_scoped_projection_does_not_silently_rewrite_a_pinned_contract():
         assert HISTORICAL_ALIAS not in providers(resumed)
         assert HISTORICAL_ALIAS in providers(new_assignment)
     finally:
-        resumed.base_runtime.runtime.shutdown()
-        new_assignment.base_runtime.runtime.shutdown()
+        resumed._execution.runtime.shutdown()
+        new_assignment._execution.runtime.shutdown()
 
 
 def test_roles_without_a_node_contract_keep_their_existing_surface():
@@ -257,7 +258,7 @@ def test_roles_without_a_node_contract_keep_their_existing_surface():
     try:
         assert HISTORICAL_ALIAS in providers(runtime)
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
 
 
 def test_rebuilding_corrected_history_policy_changes_semantic_input_identity(tmp_path):

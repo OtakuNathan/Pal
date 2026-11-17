@@ -5,6 +5,9 @@ import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from pal.control.configuration_contracts import ConfigurationOperations
+from pal.foundation.lifecycle_gate import WriterPreferredRWGate
+from pal.foundation.workers import join_owned_task
 
 from pal.foundation.sidecar import (
     SidecarEndpoint, cleanup_sidecar_endpoint, dispatch_sidecar_request,
@@ -20,13 +23,12 @@ def configuration_endpoint(runtime_root: Path) -> SidecarEndpoint:
 @dataclass
 class CoreConfigurationService:
     runtime_root: Path
-    cache_reminder: Any
-    identity_service: Any = None
-    control_plane: Any = None
-    memory_owner: Any = None
+    lifecycle_gate: WriterPreferredRWGate
+    operations: ConfigurationOperations = field(default_factory=dict)
     _server: Any = field(default=None, init=False, repr=False)
     _clients: dict[asyncio.Task, asyncio.StreamWriter] = field(default_factory=dict, init=False, repr=False)
     _closing: bool = field(default=True, init=False)
+    _stop_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.runtime_root = Path(self.runtime_root).expanduser().resolve()
@@ -35,14 +37,20 @@ class CoreConfigurationService:
         if self._server is not None:
             return
         self._server, _ = await start_sidecar_server(configuration_endpoint(self.runtime_root), self._handle_client)
+        self._stop_task = None
         self._closing = False
 
     async def stop_async(self) -> None:
         self._closing = True
+        if (self._stop_task is None or (self._stop_task.done()
+                and (self._stop_task.cancelled() or self._stop_task.exception() is not None))):
+            self._stop_task = asyncio.create_task(self._stop(), name="configuration-stop")
+        await join_owned_task(self._stop_task)
+
+    async def _stop(self) -> None:
         server = self._server
         if server is None:
             return
-        self._server = None
         server.close()
         clients = dict(self._clients)
         for writer in clients.values():
@@ -50,56 +58,25 @@ class CoreConfigurationService:
         # Some event loops wait for accepted TCP transports in wait_closed().
         # Close idle clients first so they cannot keep server shutdown pending.
         await server.wait_closed()
-        # No await occurs inside configure: writes finish on the owner loop
-        # before shutdown can enter. Idle readers are woken by closing writers.
+        # Join in-flight owner operations before dependency teardown. Closing
+        # writers wakes idle readers without cancelling a provider worker.
         if clients:
             await asyncio.gather(*clients, return_exceptions=True)
         await cleanup_sidecar_endpoint(configuration_endpoint(self.runtime_root))
+        self._server = None
 
     async def _call_method(self, method: str, params: dict) -> dict:
         if self._closing:
             raise RuntimeError("Core configuration service is stopping")
-        if method.startswith("memory."):
-            if self.memory_owner is None:
-                raise RuntimeError("Memory maintenance owner is unavailable")
-            return await self.memory_owner.dispatch(method.removeprefix("memory."), params)
-        if method in {"identity.inspect", "identity.refresh", "control.inspect"}:
-            if params:
-                raise ValueError("inspection and refresh take no arguments")
-            if method == "control.inspect":
-                if self.control_plane is None:
-                    raise RuntimeError("Control owner is unavailable")
-                registry = self.control_plane.registry
-                state = {"command_count": len(registry.commands), "alias_count": len(registry.aliases),
-                         "commands": sorted(registry.commands), "source": "resident_control_registry"}
-            else:
-                if self.identity_service is None:
-                    raise RuntimeError("Identity owner is unavailable")
-                from dataclasses import asdict
-                if method == "identity.refresh":
-                    persona, preferences = self.identity_service.refresh_projection()
-                else:
-                    persona = self.identity_service.get_persona()
-                    preferences = self.identity_service.get_preferences()
-                state = {"has_persona": persona is not None, "has_preferences": preferences is not None,
-                         "persona": asdict(persona) if persona is not None else None,
-                         "preferences": asdict(preferences) if preferences is not None else None}
-            result = {"status": "ok", "activation": "live", "state": state}
-            if method.startswith("identity."):
-                result.update(refresh_scope="resident_projection", startup_pinned_fields=["display_name", "core_policy"])
-            return result
-        if method == "cache_reminder.inspect":
-            if params:
-                raise ValueError("inspect takes no arguments")
-            return {"status": "ok", "activation": "live", "state": self.cache_reminder.inspect()}
-        if method != "cache_reminder.configure":
-            raise ValueError("Unknown core configuration operation")
-        from pal.execution.generated_tool_models import CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput
-        model = CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput.model_validate(params)
-        patch = model.model_dump(exclude_unset=True)
-        if not patch:
-            raise ValueError("configure requires at least one setting")
-        return {"status": "ok", "activation": "live", "state": self.cache_reminder.configure(**patch)}
+        operation = self.operations.get(method)
+        if operation is None:
+            raise ValueError("Unknown configuration operation")
+        async with self.lifecycle_gate.read_async():
+            if self._closing:
+                raise RuntimeError("Core configuration service is stopping")
+            if self.operations.get(method) is not operation:
+                raise ValueError("Configuration operation was withdrawn")
+            return await operation[1](params)
 
     async def _handle_client(self, reader, writer) -> None:
         task = asyncio.current_task()

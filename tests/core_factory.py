@@ -13,7 +13,10 @@ def build_context(**options):
 def build_core(**options):
     if "context" not in options:
         options["context"] = build_context()
-    return PalCore(**options)
+    core = PalCore(**options)
+    from pal.control.runtime_contracts import CORE_CONTROL
+    core.context.port_registry.register(CORE_CONTROL, core.control_runtime)
+    return core
 
 
 def mount_l3_provider(context, provider):

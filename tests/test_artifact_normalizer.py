@@ -121,7 +121,7 @@ def test_four_public_tools_no_old_read_grep_select_or_list(manager):
     for module in ('execution', 'artifact'):
         core.publish_module_capabilities(module)
     runtime = core.context.execution_runtime
-    runtime.register_provider_ref('core:turn_io', TurnIOFixture(scope='scope'))
+    runtime.replace_provider_ref('core:turn_io', TurnIOFixture(scope='scope'), owner_id="core", expected=runtime.turn_io)
     try:
         generation = runtime.registry_generation
         assert {name for name, record in generation.search_records.items() if record['module_id'] == 'artifact'} == {

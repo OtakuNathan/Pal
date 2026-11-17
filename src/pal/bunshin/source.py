@@ -2,27 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pal.control import ControlAction, ControlDelivery, ControlRoute
+from pal.control import ControlDelivery, ControlRoute
+from pal.control.runtime_contracts import ControlRuntimePort
 from pal.control.interactions import delivery_for_reply, terminal_delivery_for_interaction
 from pal.core.events import EventHandler, EventSource
 from pal.foundation import EventEnvelope
+from pal.foundation.diagnostics import exception_reason
+from pal.bunshin.event_contracts import BunshinEventPort
 from pal.bunshin.interactions import bunshin_approval_delivery, bunshin_architecture_review_delivery, bunshin_question_delivery
+from pal.memory.contracts import MEMORY
 from pal.shared import EventKind, SourceKind
 
 
 @dataclass
 class BunshinEventSource(EventSource):
-    provider: object
+    provider: BunshinEventPort
     source_id: str = "bunshin.manager"
     drain_limit: int = 20
 
     def prepare(self, context) -> bool:
-        _ = context
-        return bool(getattr(self.provider, "has_pending_events", lambda: False)())
+        return self.provider.has_pending_events()
 
     def drain(self, context) -> list[EventEnvelope]:
-        _ = context
-        payload = getattr(self.provider, "drain_events_sync", lambda **_kwargs: {"events": []})(limit=self.drain_limit)
+        payload = self.provider.drain_events_sync(limit=self.drain_limit)
         result = []
         for item in list(payload.get("events") or []):
             if not isinstance(item, dict):
@@ -34,7 +36,8 @@ class BunshinEventSource(EventSource):
 
 @dataclass
 class BunshinControlEventHandler(EventHandler):
-    provider: object | None = None
+    provider: BunshinEventPort
+    controls: ControlRuntimePort
 
     def can_handle(self, event_kind: str) -> bool:
         return event_kind in {
@@ -51,181 +54,78 @@ class BunshinControlEventHandler(EventHandler):
         payload = dict(event.payload or {})
         route = _route(payload.get("route"))
         if route is None:
-            if self.provider is not None:
-                settle = getattr(self.provider, "settle_event", None)
-                if callable(settle):
-                    settle(payload, accepted=False, error="bunshin event has no delivery route")
+            self.provider.settle_event(payload, accepted=False, error="bunshin event has no delivery route")
             return []
         if event.event_kind == EventKind.APPROVAL_REQUEST:
             delivery = bunshin_approval_delivery(payload, route)
-            action_kind = "interactive_open"
         elif event.event_kind == EventKind.BUNSHIN_CLARIFICATION_REQUEST:
             delivery = bunshin_question_delivery(payload, route)
-            action_kind = "interactive_open"
         elif event.event_kind == EventKind.BUNSHIN_CLARIFICATION_RESOLVED:
             clarification_id = str(payload.get("clarification_id") or "").strip()
-            delivery = (
-                terminal_delivery_for_interaction(
-                    route,
-                    interaction_id=clarification_id,
-                    interaction_kind="bunshin_clarification",
-                    text=str(payload.get("summary") or "Bunshin clarification recorded."),
-                )
-                if clarification_id
-                else None
-            )
-            action_kind = "interactive_resolve"
+            delivery = (terminal_delivery_for_interaction(
+                route, interaction_id=clarification_id, interaction_kind="bunshin_clarification",
+                text=str(payload.get("summary") or "Bunshin clarification recorded.")) if clarification_id else None)
         elif event.event_kind == EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING:
             delivery = bunshin_architecture_review_delivery(payload, route)
-            action_kind = "interactive_open"
         elif event.event_kind == EventKind.BUNSHIN_ARCHITECTURE_REVIEW_RESOLVED:
             revision_id = str(payload.get("architecture_revision_id") or "").strip()
-            delivery = (
-                terminal_delivery_for_interaction(
-                    route,
-                    interaction_id=f"bunshin_v2_architecture_{revision_id}",
-                    interaction_kind="bunshin_v2_architecture_review",
-                    text=str(
-                        payload.get("summary")
-                        or "Bunshin architecture decision recorded."
-                    ),
-                )
-                if revision_id
-                else None
-            )
-            action_kind = "interactive_resolve"
+            delivery = (terminal_delivery_for_interaction(
+                route, interaction_id=f"bunshin_v2_architecture_{revision_id}",
+                interaction_kind="bunshin_v2_architecture_review",
+                text=str(payload.get("summary") or "Bunshin architecture decision recorded.")) if revision_id else None)
         else:
             text = str(payload.get("summary") or payload.get("status") or "Bunshin workflow completed.")
             delivery = delivery_for_reply(route, text)
-            action_kind = "route_reply"
         if delivery is None:
-            if self.provider is not None:
-                settle = getattr(self.provider, "settle_event", None)
-                if callable(settle):
-                    settle(payload, accepted=False, error="bunshin event has no delivery")
+            self.provider.settle_event(payload, accepted=False, error="bunshin event has no delivery")
             return []
-        deliveries: list[tuple[str, ControlAction]] = []
+        deliveries: list[tuple[str, ControlDelivery]] = []
         if event.event_kind == EventKind.BUNSHIN_TERMINAL:
             for index, raw in enumerate(list(payload.get("resolved_interactions") or [])):
                 item = dict(raw or {})
                 interaction_id = str(item.get("interaction_id") or "").strip()
                 interaction_kind = str(item.get("interaction_kind") or "").strip()
-                if not interaction_id or not interaction_kind:
-                    continue
-                deliveries.append(
-                    (
-                        f"interaction:{index}",
-                        ControlAction(
-                            action_kind="interactive_resolve",
-                            target_scope="interaction",
-                            target_id=interaction_id,
-                            route=route,
-                            delivery=terminal_delivery_for_interaction(
-                                route,
-                                interaction_id=interaction_id,
-                                interaction_kind=interaction_kind,
-                                text=str(
-                                    payload.get("summary")
-                                    or payload.get("status")
-                                    or "Bunshin workflow completed."
-                                ),
-                            ),
-                            notes="bunshin terminal interaction cleanup",
-                        ),
-                    )
-                )
-        if event.event_kind in {
-            EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING,
-            EventKind.BUNSHIN_TERMINAL,
-        }:
+                if interaction_id and interaction_kind:
+                    deliveries.append((f"interaction:{index}", terminal_delivery_for_interaction(
+                        route, interaction_id=interaction_id, interaction_kind=interaction_kind,
+                        text=str(payload.get("summary") or payload.get("status") or "Bunshin workflow completed."))))
+        if event.event_kind in {EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING, EventKind.BUNSHIN_TERMINAL}:
             for index, attachment in enumerate(list(payload.get("attachments") or [])):
                 item = dict(attachment or {})
-                if not str(item.get("path") or "").strip():
+                if str(item.get("path") or "").strip():
+                    deliveries.append((f"attachment:{index}", ControlDelivery(
+                        delivery_kind="attachment", route=route, payload=item)))
+        deliveries.append(("primary", delivery))
+        accepted = True
+        error = ""
+        try:
+            completed_parts = self.provider.delivered_event_parts(payload)
+            if event.event_kind == EventKind.BUNSHIN_TERMINAL and payload.get("memory_candidates") and "memory_proposals" not in completed_parts:
+                memory = context.port_registry.optional(MEMORY)
+                if memory is None:
+                    raise RuntimeError("host memory review service is unavailable")
+                from pal.memory.mutations import content_hash
+                proposal = {**payload, "source_kind": "bunshin", "source_label": "Bunshin",
+                    "source_ref": str(payload.get("invocation_id") or payload.get("run_id") or payload.get("workflow_id")),
+                    "candidate_batch_id": "bunshin:" + content_hash({
+                        "invocation": payload.get("invocation_id") or payload.get("run_id"),
+                        "workflow": payload.get("workflow_id"), "candidates": payload["memory_candidates"]})}
+                deliveries.append(("memory_proposals", memory.stage_memory_proposal(proposal, route)))
+            for part_key, part_delivery in deliveries:
+                if part_key in completed_parts:
                     continue
-                deliveries.append(
-                    (
-                        f"attachment:{index}",
-                        ControlAction(
-                            action_kind="route_attachment",
-                            target_scope="channel",
-                            target_id=str(payload.get("workflow_id") or ""),
-                            route=route,
-                            delivery=ControlDelivery(
-                                delivery_kind="attachment",
-                                route=route,
-                                payload=item,
-                            ),
-                            notes="bunshin V2 durable attachment",
-                        ),
-                    )
-                )
-        deliveries.append(
-            (
-                "primary",
-                ControlAction(
-                    action_kind=action_kind,
-                    target_scope="interaction" if action_kind.startswith("interactive_") else "channel",
-                    target_id=str(payload.get("workflow_id") or payload.get("run_id") or ""),
-                    route=route,
-                    delivery=delivery,
-                    notes="bunshin V2 event",
-                ),
-            )
-        )
-        core = context.port_registry.get("core:core")
-        accepted = core is not None
-        error = "core control port is unavailable"
-        if accepted:
-            try:
-                completed_parts: set[str] = set()
-                if self.provider is not None:
-                    read_parts = getattr(self.provider, "delivered_event_parts", None)
-                    if callable(read_parts):
-                        completed_parts = set(read_parts(payload))
-                if event.event_kind == EventKind.BUNSHIN_TERMINAL and payload.get("memory_candidates") and "memory_proposals" not in completed_parts:
-                    memory = context.port_registry.get("memory:memory")
-                    if memory is None:
-                        raise RuntimeError("host memory review service is unavailable")
-                    from pal.memory.mutations import content_hash
-                    proposal = {**payload, "source_kind": "bunshin", "source_label": "Bunshin",
-                        "source_ref": str(payload.get("invocation_id") or payload.get("run_id") or payload.get("workflow_id")),
-                        "candidate_batch_id": "bunshin:" + content_hash({
-                            "invocation": payload.get("invocation_id") or payload.get("run_id"),
-                            "workflow": payload.get("workflow_id"),
-                            "candidates": payload["memory_candidates"]})}
-                    proposal_delivery = memory.stage_memory_proposal(proposal, route)
-                    deliveries.append(("memory_proposals", ControlAction(
-                        action_kind=proposal_delivery.delivery_kind, target_scope="interaction",
-                        route=route, delivery=proposal_delivery, notes="Bunshin memory proposal review")))
-                for part_key, action in deliveries:
-                    if part_key in completed_parts:
-                        continue
-                    accepted = bool(
-                        await core.handle_control_action_async(
-                            action,
-                            require_provider=True,
-                        )
-                    ) and accepted
-                    if not accepted:
-                        error = "channel provider did not accept bunshin delivery"
-                        break
-                    if self.provider is not None:
-                        settle_part = getattr(self.provider, "settle_event_part", None)
-                        if callable(settle_part) and not bool(
-                            settle_part(payload, part_key)
-                        ):
-                            accepted = False
-                            error = "manager did not acknowledge bunshin delivery part"
-                            break
-                else:
-                    error = ""
-            except Exception as exc:
-                accepted = False
-                error = f"{exc.__class__.__name__}: {exc}"
-        if self.provider is not None:
-            settle = getattr(self.provider, "settle_event", None)
-            if callable(settle):
-                settle(payload, accepted=accepted, error=error)
+                if not await self.controls.deliver(part_delivery, require_provider=True):
+                    accepted = False
+                    error = "channel provider did not accept bunshin delivery"
+                    break
+                if not self.provider.settle_event_part(payload, part_key):
+                    accepted = False
+                    error = "manager did not acknowledge bunshin delivery part"
+                    break
+        except Exception as exc:
+            accepted = False
+            error = exception_reason(exc)
+        self.provider.settle_event(payload, accepted=accepted, error=error)
         return []
 
 

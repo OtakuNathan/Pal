@@ -102,6 +102,9 @@ class _ChannelRecorder:
         self.statuses: list[tuple[str, dict]] = []
         self.replies: list[str] = []
 
+    def supports_stream_delivery(self, binding):
+        return False
+
     def queue_status(self, binding, kind, payload=None):
         self.statuses.append((str(kind), dict(payload or {})))
 

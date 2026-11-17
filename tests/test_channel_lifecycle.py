@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -257,39 +256,71 @@ def test_visibility_projection_failure_cannot_half_apply_lifecycle_state() -> No
     assert hub.last_error == "original failure"
 
 
-def test_capability_republication_swaps_registry_generation_without_unmount_gap() -> None:
-    previous = SimpleNamespace(mounted=True)
-    replacement = SimpleNamespace(mounted=False)
-    handle = SimpleNamespace(
-        mounted_subtree=previous,
-        published_capabilities=["old"],
-    )
+def test_capability_republication_swaps_registry_generation_without_unmount_gap(monkeypatch) -> None:
+    from pal.channel import register_with_core
+    from tests.core_factory import build_core
 
-    class _ExecutionRuntime:
-        def unmount_subtree(self, _handle) -> None:
-            raise AssertionError("republish must not expose an empty registry generation")
+    core = build_core()
+    handle = register_with_core(core.context, ChannelRuntime())
+    core.publish_module_capabilities("channel")
+    runtime = core.context.execution_runtime
+    previous = handle.mounted_subtree
+    generation = runtime.registry_generation
+    def reject_unmount(_handle):
+        raise AssertionError("republish must not expose an empty registry generation")
+    monkeypatch.setattr(runtime.implementation, "unmount_subtree", reject_unmount)
+    try:
+        published = handle.introspection_provider._republish_capabilities()
+        assert published == handle.published_capabilities
+        assert runtime.registry_generation is not generation
+        replacement = handle.mounted_subtree
+        assert replacement is not previous and replacement.mounted
+        assert runtime.registry_generation.mounted_subtrees["channel"].admission is replacement.admission
+        assert replacement.admission.live
+        assert not previous.mounted and not previous.admission.live
+    finally:
+        core.close()
+        runtime.shutdown()
 
-        def hydrate_module_handle(self, target) -> None:
-            target.mounted_subtree = replacement
 
-        def mount_subtree(self, target) -> list[str]:
-            assert previous.mounted
-            target.mounted_subtree.mounted = True
-            return ["new"]
+def test_failed_skill_projection_refresh_restores_callable_channel(monkeypatch) -> None:
+    from pal.channel import register_with_core
+    from pal.execution.contracts import CapabilityCall
+    from pal.skill.capabilities import register_with_core as register_skill
+    from pal.skill.repository import ReadOnlySkillRepository
+    from pal.skill.service import SkillService
+    from tests.core_factory import build_core
 
-    context = SimpleNamespace(
-        module_registry=SimpleNamespace(get=lambda _module_id: handle),
-        execution_runtime=_ExecutionRuntime(),
-    )
-    provider = ChannelIntrospectionProvider(
-        runtime=ChannelRuntime(),
-        repository=object(),
-        provider_manager=object(),
-        main_context=context,
-    )
-
-    assert provider._republish_capabilities() == ["new"]
-    assert handle.mounted_subtree is replacement
-    assert replacement.mounted
-    assert not previous.mounted
-    assert handle.published_capabilities == ["new"]
+    core = build_core()
+    repository = ReadOnlySkillRepository()
+    register_skill(core.context, SkillService(repository=repository))
+    handle = register_with_core(core.context, ChannelRuntime())
+    core.publish_module_capabilities("channel")
+    runtime = core.context.execution_runtime
+    previous = handle.mounted_subtree
+    old_names = set(handle.published_capabilities)
+    delete = repository.delete_declared_skills_for_module
+    attempts = 0
+    def fail_once(module_id):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("transient skill storage error")
+        return delete(module_id)
+    monkeypatch.setattr(repository, "delete_declared_skills_for_module", fail_once)
+    try:
+        with pytest.raises(OSError, match="transient skill storage error"):
+            handle.introspection_provider._republish_capabilities()
+        restored = handle.mounted_subtree
+        assert restored is not previous and restored.mounted
+        assert restored.admission.live and not previous.admission.live
+        assert runtime.registry_generation.mounted_subtrees["channel"].admission is restored.admission
+        assert set(handle.published_capabilities) == old_names
+        result = runtime.call_registered(CapabilityCall(name="list_channel_endpoints", args={}))
+        assert result.status == "ok", result
+        core.publish_module_capabilities("channel")
+        assert "channel" in runtime.registry_generation.mounted_subtrees
+        assert core.context.module_publications.handles["channel"] is handle
+    finally:
+        core.close()
+        runtime.shutdown()

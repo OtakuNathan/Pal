@@ -5,5 +5,5 @@ enabled_by_default = true
 lifecycle_protocol = "raii.v1"
 module_id = "proactive"
 requires_plugins = []
-requires_ports = []
+requires_ports = ["core:control"]
 reload_modules = ["pal.proactive"]

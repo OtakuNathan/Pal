@@ -462,17 +462,8 @@ class McpManagerPluginBundle:
             handle = context.module_registry.get("mcp")
             if handle is None or not handle.mounted:
                 return
-            if handle.mounted_subtree is not None and handle.mounted_subtree.mounted:
-                context.execution_runtime.unmount_subtree(handle)
-            skill = context.port_registry.get("skill:skill")
-            unregister = getattr(skill, "unregister_declared_module", None)
-            if callable(unregister):
-                unregister("mcp")
-            context.execution_runtime.hydrate_module_handle(handle)
-            handle.published_capabilities = context.execution_runtime.mount_subtree(handle)
-            register = getattr(skill, "register_declared_module", None)
-            if callable(register):
-                register(handle)
+            context.withdraw_module_capabilities(handle)
+            context.publish_module_capabilities(handle)
 
         provider = McpManagerPluginProvider(runtime_root=self.runtime_root, core_context=context, refresh_capabilities=refresh_capabilities)
         provider_ref["provider"] = provider

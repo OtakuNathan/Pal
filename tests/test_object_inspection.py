@@ -160,10 +160,17 @@ def test_identity_cli_refreshes_projection_and_reports_startup_pins(tmp_path, ca
     service.ensure_defaults()
     prompt = IdentityPromptFragmentProvider(service)
     original_system = prompt._system_identity_content
-    PalPersonaModel.update(language="new language", tone="new tone").execute()
-    assert service.get_persona().language != "new language"
     async def run():
-        owner = CoreConfigurationService(tmp_path, SimpleNamespace(), identity_service=service, control_plane=ControlPlane())
+        from tests.core_factory import build_context
+        from pal.identity.capabilities import register_with_core as register_identity
+        from pal.control.capabilities import register_with_core as register_control
+        context = build_context()
+        register_identity(context, service)
+        plane = ControlPlane()
+        register_control(context, plane)
+        PalPersonaModel.update(language="new language", tone="new tone").execute()
+        assert service.get_persona().language != "new language"
+        owner = CoreConfigurationService(tmp_path, context.execution_runtime.lifecycle_gate, context.configuration_operations)
         with runtime_lease(tmp_path):
             await owner.start_async()
             try:
@@ -176,7 +183,7 @@ def test_identity_cli_refreshes_projection_and_reports_startup_pins(tmp_path, ca
                 assert service.get_persona().tone == "new tone"
                 assert prompt._system_identity_content == original_system
                 control = await SidecarRpcClient(configuration_endpoint(tmp_path)).request("control.inspect", {})
-                assert control["state"]["command_count"] == len(owner.control_plane.registry.commands)
+                assert control["state"]["command_count"] == len(plane.registry.commands)
                 with pytest.raises(Exception):
                     await SidecarRpcClient(configuration_endpoint(tmp_path)).request("identity.refresh", {"name": "other"})
             finally:

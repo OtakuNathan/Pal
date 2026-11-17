@@ -141,7 +141,7 @@ class BunshinWebBrokerTests(unittest.TestCase):
                 async def bundle():
                     return SimpleNamespace(execution_runtime=Runtime())
 
-                manager._host_tool_runtime_bundle = bundle  # type: ignore[method-assign]
+                manager._admitted_host_tool_runtime_bundle = bundle  # type: ignore[method-assign]
                 result = await manager.web_broker_search(
                     {
                         "run_id": "run-web",

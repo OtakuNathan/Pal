@@ -55,5 +55,5 @@ def test_worker_routes_only_through_its_actual_surface(indirect):
         assert ('read_tool' in routing) is indirect
         assert 'search_tools' not in routing
     finally:
-        scoped.base_runtime.runtime.shutdown()
+        scoped._execution.runtime.shutdown()
         runtime.shutdown()

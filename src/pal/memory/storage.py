@@ -9,18 +9,19 @@ import json
 import os
 import shutil
 import sqlite3
-import threading
 import fcntl
 from functools import wraps
 from contextlib import ExitStack, closing, contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
-
-from peewee import SqliteDatabase
+from typing import BinaryIO
 
 from pal.foundation import utc_now
+from pal.foundation.sqlite_database import OwnedSqliteDatabase
 from pal.memory.repository import MemoryDurableRepository
+from pal.memory.embedding_space import read_space, verify_space
 
 
 CATALOG_SCHEMA = """
@@ -29,9 +30,17 @@ CREATE TABLE IF NOT EXISTS generations (
  published_at TEXT, retired_at TEXT, collected INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS memory_head (singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS generation_bindings (
+ generation_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, profile_json TEXT NOT NULL DEFAULT '{}'
+);
+INSERT OR IGNORE INTO generation_bindings(generation_id,provider_id)
+ SELECT generation_id,'sqlite_vec_l3' FROM generations WHERE published_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS workflow_pins (
  workflow_id TEXT PRIMARY KEY, generation_id TEXT NOT NULL,
  released INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workflow_memory_owners (
+ workflow_id TEXT PRIMARY KEY
 );
 CREATE TABLE IF NOT EXISTS deleted_memories (document_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS archive_records (
@@ -62,33 +71,6 @@ CREATE TABLE IF NOT EXISTS dreaming_pairs (
 """
 
 
-class MemoryDatabase(SqliteDatabase):
-    """Track worker-thread connections so provider detach really closes them."""
-    def __init__(self, *args, **kwargs):
-        self._owned_connections = set()
-        self._connections_lock = threading.Lock()
-        super().__init__(*args, **kwargs)
-
-    def _connect(self):
-        connection = super()._connect()
-        with self._connections_lock:
-            self._owned_connections.add(connection)
-        return connection
-
-    def _close(self, connection):
-        with self._connections_lock:
-            self._owned_connections.discard(connection)
-        return super()._close(connection)
-
-    def close_all(self):
-        with self._connections_lock:
-            connections = tuple(self._owned_connections)
-            self._owned_connections.clear()
-        for connection in connections:
-            connection.close()
-        self._state.reset()
-
-
 def serialized_initialization(method):
     @wraps(method)
     def invoke(self, *args, **kwargs):
@@ -104,7 +86,7 @@ class MemoryStorage:
         self.root = Path(runtime_root) / "memory"
         self.catalog_path = self.root / "archive.sqlite3"
         self.read_only = read_only
-        self.deletion_source = None
+        self.deletion_source: MemoryStorage | None = None
 
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -113,7 +95,7 @@ class MemoryStorage:
             connection.executescript(CATALOG_SCHEMA)
 
     @contextmanager
-    def connection(self, *, write=False):
+    def connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         if write and self.read_only:
             raise PermissionError("memory catalog is read-only")
         connection = sqlite3.connect(f"file:{self.catalog_path}?mode=ro" if self.read_only else self.catalog_path,
@@ -138,10 +120,61 @@ class MemoryStorage:
                 raise RuntimeError("memory storage has not been initialized or migrated")
             return str(row[0])
 
-    def is_frozen(self, generation_id):
+    def is_frozen(self, generation_id: str) -> bool:
         with self.connection() as connection:
             row = connection.execute("SELECT value FROM memory_settings WHERE key='frozen_generation'").fetchone()
         return bool(row and row[0] == generation_id)
+
+    def is_retired(self, generation_id: str) -> bool:
+        with self.connection() as connection:
+            row = connection.execute("SELECT retired_at FROM generations WHERE generation_id=?", (generation_id,)).fetchone()
+        return bool(row and row[0])
+
+    def is_published(self, generation_id: str) -> bool:
+        with self.connection() as connection:
+            row = connection.execute("SELECT published_at FROM generations WHERE generation_id=?", (generation_id,)).fetchone()
+        return bool(row and row[0])
+
+    def active_provider_id(self) -> str:
+        return self.provider_for_generation(self.current())
+
+    def provider_for_generation(self, generation_id: str) -> str:
+        with self.connection() as connection:
+            row = connection.execute("SELECT provider_id FROM generation_bindings WHERE generation_id=?", (generation_id,)).fetchone()
+        return str(row[0]) if row else "sqlite_vec_l3"
+
+    def generation_profile(self, generation_id: str) -> dict[str, str | None]:
+        with self.connection() as connection:
+            row = connection.execute("SELECT profile_json FROM generation_bindings WHERE generation_id=?", (generation_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def claim_generation_profile(self, generation_id: str, provider_id: str,
+                                 profile: dict[str, str | None]) -> dict[str, str | None] | None:
+        """Record a proven local space once; private candidates stay unpublished."""
+        with self.connection(write=True) as connection:
+            row = connection.execute("SELECT provider_id,profile_json FROM generation_bindings WHERE generation_id=?", (generation_id,)).fetchone()
+            if row is None:
+                return None
+            if row[0] != provider_id:
+                return json.loads(row[1])
+            if row[1] == "{}":
+                connection.execute("UPDATE generation_bindings SET profile_json=? WHERE generation_id=?",
+                                   (json.dumps(profile, sort_keys=True), generation_id))
+                return dict(profile)
+            return json.loads(row[1])
+
+    @staticmethod
+    def inherit_binding(connection, source_generation: str, generation_id: str) -> None:
+        row = connection.execute("SELECT provider_id,profile_json FROM generation_bindings WHERE generation_id=?", (source_generation,)).fetchone()
+        connection.execute("INSERT INTO generation_bindings VALUES (?,?,?)", (
+            generation_id, row[0] if row else "sqlite_vec_l3", row[1] if row else "{}"))
+
+    def indexing_pending(self, generation_id: str) -> bool:
+        with self.connection() as connection:
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE name='memory_swap_jobs'").fetchone():
+                return False
+            return connection.execute("SELECT 1 FROM memory_swap_jobs WHERE candidate_generation=? AND phase IN ('committed','indexing') AND NOT COALESCE(json_extract(state_json,'$.indexes_ready'),0)",
+                                      (generation_id,)).fetchone() is not None
 
     def set_frozen(self, generation_id, frozen):
         with self.connection(write=True) as connection:
@@ -150,7 +183,7 @@ class MemoryStorage:
             else:
                 connection.execute("DELETE FROM memory_settings WHERE key='frozen_generation' AND value=?", (generation_id,))
 
-    def writer_lock(self, generation_id):
+    def writer_lock(self, generation_id: str) -> BinaryIO:
         handle = (self.path(generation_id).parent / "writer.lock").open("a+b")
         fcntl.flock(handle, fcntl.LOCK_EX)
         return handle
@@ -158,14 +191,17 @@ class MemoryStorage:
     def recover_abandoned_fence(self):
         with self.connection() as connection:
             row = connection.execute("SELECT value FROM memory_settings WHERE key='frozen_generation'").fetchone()
-        if not row:
-            return
-        with (self.path(row[0]).parent / "writer.lock").open("a+b") as handle:
+        generation = str(row[0]) if row else self.current()
+        with (self.path(generation).parent / "writer.lock").open("a+b") as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise RuntimeError("memory maintenance is still owned by a running process") from exc
-            self.set_frozen(row[0], False)
+            if not self.is_retired(generation):
+                with closing(sqlite3.connect(self.path(generation))) as database, database:
+                    if database.execute("SELECT 1 FROM sqlite_master WHERE name='memory_generation_guard'").fetchone():
+                        database.execute("UPDATE memory_generation_guard SET writable=1 WHERE singleton=1")
+            self.set_frozen(generation, False)
 
     def path(self, generation_id: str) -> Path:
         if not generation_id or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in generation_id):
@@ -179,22 +215,24 @@ class MemoryStorage:
             raise FileNotFoundError(path)
         if not read_only:
             path.parent.mkdir(parents=True, exist_ok=True)
-        db = MemoryDatabase(
+        db = OwnedSqliteDatabase(
             f"file:{path}?mode=ro" if read_only else str(path),
-            uri=read_only, check_same_thread=False,
+            uri=read_only,
             pragmas={"foreign_keys": 1, "query_only": 1} if read_only else {"foreign_keys": 1, "journal_mode": "wal"},
         )
         repo = MemoryDurableRepository(db, read_only=read_only)
         repo.generation_id = generation_id
         repo.catalog = self
-        lease = (path.parent / "readers.lock").open("rb" if read_only else "a+b")
-        fcntl.flock(lease, fcntl.LOCK_SH)
-        repo.connection_lease = lease
-        if not read_only:
-            if self.is_frozen(generation_id):
-                repo.close()
-                raise PermissionError("cannot reopen a frozen generation for writing")
-            repo.ensure_schema()
+        try:
+            repo.connection_lease = (path.parent / "readers.lock").open("rb" if read_only else "a+b")
+            fcntl.flock(repo.connection_lease, fcntl.LOCK_SH)
+            if not read_only:
+                if self.is_frozen(generation_id) or self.is_retired(generation_id):
+                    raise PermissionError("cannot reopen a frozen or retired generation for writing")
+                repo.ensure_schema()
+        except BaseException:
+            repo.close()
+            raise
         return repo
 
     @serialized_initialization
@@ -205,10 +243,14 @@ class MemoryStorage:
                 return self.current()
         generation = "initial"
         repo = self.open(generation)
-        self.seal(repo)
+        try:
+            self.seal(repo)
+        finally:
+            repo.close()
         with self.connection(write=True) as connection:
             connection.execute("INSERT OR IGNORE INTO generations VALUES (?,?,?,NULL,0)", (generation, utc_now(), utc_now()))
             connection.execute("INSERT OR IGNORE INTO memory_head VALUES (1,?)", (generation,))
+            connection.execute("INSERT OR IGNORE INTO generation_bindings VALUES (?, 'sqlite_vec_l3', '{}')", (generation,))
         return self.current()
 
     @serialized_initialization
@@ -224,7 +266,17 @@ class MemoryStorage:
         source = sqlite3.connect(f"file:{Path(legacy_path)}?mode=ro", uri=True)
         try:
             with destination.database.atomic():
-                for model in (destination.Fact, destination.Case, destination.Topic, destination.Embedding, destination.Vector):
+                source_space = read_space(source)
+                models = (destination.Fact, destination.Case, destination.Topic)
+                if source_space is not None:
+                    models += (destination.Embedding, destination.Vector)
+                else:
+                    # Unknown vector provenance cannot be imported as the new
+                    # runtime's space. Canonical content remains authoritative.
+                    destination.Vector.delete().execute()
+                    destination.Embedding.delete().execute()
+                    destination.database.execute_sql("DELETE FROM memory_embedding_space")
+                for model in models:
                     table = model._meta.table_name
                     exists = source.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()
                     if not exists:
@@ -259,6 +311,12 @@ class MemoryStorage:
                         if rows:
                             destination.database.connection().executemany(
                                 f'INSERT INTO "{table}" VALUES ({",".join("?" for _ in rows[0])})', rows)
+                if source_space is not None:
+                    destination.database.execute_sql("INSERT OR REPLACE INTO memory_embedding_space VALUES (1,?,?)",
+                        (json.dumps(source_space.profile, sort_keys=True), source_space.dimension))
+                    if source.execute("SELECT 1 FROM sqlite_master WHERE name='memory_embedding_configuration'").fetchone():
+                        for row in source.execute("SELECT * FROM memory_embedding_configuration"):
+                            destination.database.execute_sql("INSERT OR REPLACE INTO memory_embedding_configuration VALUES (?,?)", row)
             destination.rebuild_fts_indexes()
             self.seal(destination)
         finally:
@@ -267,6 +325,7 @@ class MemoryStorage:
         with self.connection(write=True) as connection:
             connection.execute("INSERT OR IGNORE INTO generations VALUES (?,?,?,NULL,0)", (generation, utc_now(), utc_now()))
             connection.execute("INSERT INTO memory_head VALUES (1,?)", (generation,))
+            connection.execute("INSERT OR IGNORE INTO generation_bindings VALUES (?, 'sqlite_vec_l3', '{}')", (generation,))
             connection.execute("INSERT OR REPLACE INTO memory_settings VALUES ('migration_source',?)", (str(legacy_path),))
         return generation
 
@@ -282,20 +341,34 @@ class MemoryStorage:
 
     def candidate(self, source: MemoryDurableRepository) -> MemoryDurableRepository:
         generation = f"gen_{uuid4().hex}"
-        self.snapshot(source, self.path(generation))
-        repo = self.open(generation)
+        # Reserve ownership before writing files so interrupted construction
+        # remains visible to retention/collection instead of orphaning a copy.
         with self.connection(write=True) as connection:
             connection.execute("INSERT INTO generations VALUES (?,?,NULL,NULL,0)", (generation, utc_now()))
+        self.snapshot(source, self.path(generation))
+        with closing(sqlite3.connect(self.path(generation))) as database, database:
+            database.execute("UPDATE memory_generation_guard SET writable=1 WHERE singleton=1")
+        repo = self.open(generation)
         return repo
 
     @staticmethod
     def seal(repo: MemoryDurableRepository) -> None:
-        if repo.database.execute_sql("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise RuntimeError("memory database integrity check failed")
+        if repo.catalog is not None:
+            with repo.catalog.connection() as connection:
+                head = connection.execute("SELECT generation_id FROM memory_head WHERE singleton=1").fetchone()
+            if head is None or head[0] != repo.generation_id:
+                repo.database.execute_sql("DELETE FROM memory_change_log")
+        path = Path(repo.database.database)
+        # Validate committed bytes with a fresh reader. A worker connection's
+        # FTS5 cache can retain counts from before another connection's writes.
+        with closing(sqlite3.connect(path, timeout=30)) as checker:
+            verify_space(checker)
+            integrity = [row[0] for row in checker.execute("PRAGMA integrity_check").fetchall()]
+        if integrity != ["ok"]:
+            raise RuntimeError(f"memory database integrity check failed: {'; '.join(integrity)}")
         checkpoint = repo.database.execute_sql("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if checkpoint is None or checkpoint[0] != 0 or checkpoint[1] != checkpoint[2]:
             raise RuntimeError("memory database checkpoint did not complete")
-        path = Path(repo.database.database)
         repo.close()
         with path.open("rb") as handle:
             os.fsync(handle.fileno())
@@ -306,10 +379,12 @@ class MemoryStorage:
             finally:
                 os.close(descriptor)
 
-    def pin(self, workflow_id: str) -> str:
+    def pin(self, workflow_id: str, *, managed: bool = False) -> str:
         if not workflow_id:
             raise ValueError("workflow identity is required for a generation pin")
         with self.connection(write=True) as connection:
+            if managed:
+                connection.execute("INSERT OR IGNORE INTO workflow_memory_owners VALUES (?)", (workflow_id,))
             existing = connection.execute("SELECT generation_id,released FROM workflow_pins WHERE workflow_id=?", (workflow_id,)).fetchone()
             if existing:
                 if existing[1]:
@@ -404,24 +479,7 @@ class MemoryStorage:
             for row in rows:
                 repo.database.execute_sql("UPDATE memory_revisions SET archived=1 WHERE document_id=?", (row[0],))
 
-    def publish(self, repo: MemoryDurableRepository, *, source_generation: str, run_id: str, report: dict) -> None:
-        rows = repo.database.execute_sql("SELECT document_id,revision,document_json,successors_json,reason FROM memory_revisions WHERE archived=0").fetchall()
-        generation = repo.generation_id
-        self.seal(repo)
-        with self.connection(write=True) as connection:
-            head = connection.execute("SELECT generation_id FROM memory_head WHERE singleton=1").fetchone()[0]
-            if head != source_generation:
-                raise RuntimeError("memory publication source is no longer current")
-            if connection.execute("SELECT 1 FROM dreaming_runs WHERE run_id=? AND status='publishing'", (run_id,)).fetchone() is None:
-                raise RuntimeError("dreaming run is not authorized to publish")
-            self._archive_rows(connection, rows)
-            now = utc_now()
-            connection.execute("UPDATE generations SET published_at=? WHERE generation_id=?", (now, generation))
-            connection.execute("UPDATE generations SET retired_at=? WHERE generation_id=?", (now, source_generation))
-            connection.execute("UPDATE memory_head SET generation_id=? WHERE singleton=1", (generation,))
-            connection.execute("UPDATE dreaming_runs SET status='completed',report_json=?,updated_at=? WHERE run_id=?", (json.dumps(report), now, run_id))
-
-    def publish_reindexed(self, repo: MemoryDurableRepository, *, source_generation: str) -> None:
+    def publish_reindexed(self, repo: MemoryDurableRepository, *, source_generation: str, profile: dict[str, str | None]) -> None:
         """Publish a verified embedding-only candidate under the offline CLI lease.
 
         Content and reference checks belong to embedding_migration before this
@@ -430,6 +488,9 @@ class MemoryStorage:
         generation = repo.generation_id
         if generation == source_generation:
             raise ValueError("Embedding publication requires a distinct candidate")
+        space = read_space(repo.database.connection())
+        if space is None or space.profile != profile:
+            raise RuntimeError("Embedding publication profile differs from the candidate database")
         self.seal(repo)
         with self.connection(write=True) as connection:
             head = connection.execute("SELECT generation_id FROM memory_head WHERE singleton=1").fetchone()[0]
@@ -442,6 +503,8 @@ class MemoryStorage:
             connection.execute("UPDATE generations SET published_at=? WHERE generation_id=?", (now, generation))
             connection.execute("UPDATE generations SET retired_at=? WHERE generation_id=?", (now, source_generation))
             connection.execute("UPDATE memory_head SET generation_id=? WHERE singleton=1", (generation,))
+            self.inherit_binding(connection, source_generation, generation)
+            connection.execute("UPDATE generation_bindings SET profile_json=? WHERE generation_id=?", (json.dumps(profile, sort_keys=True), generation))
 
     def history(self, ref: str, *, repo=None) -> list[dict]:
         if self.is_deleted(ref):
@@ -547,14 +610,20 @@ class MemoryStorage:
         now = now or datetime.now(timezone.utc)
         collected = []
         with self.connection(write=True) as connection:
+            migrating = set()
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='memory_swap_jobs'").fetchone():
+                for row in connection.execute("SELECT source_generation,candidate_generation FROM memory_swap_jobs WHERE phase NOT IN ('complete','superseded')"):
+                    migrating.update(row)
             head = connection.execute("SELECT generation_id FROM memory_head").fetchone()[0]
-            rows = connection.execute("SELECT * FROM generations WHERE published_at IS NOT NULL ORDER BY published_at DESC").fetchall()
+            published = connection.execute("SELECT * FROM generations WHERE published_at IS NOT NULL ORDER BY published_at DESC").fetchall()
+            private = connection.execute("SELECT * FROM generations WHERE published_at IS NULL").fetchall()
             # Always retain current and the immediately preceding published version.
-            for row in rows[2:]:
+            for row in [*published[2:], *private]:
                 generation = row["generation_id"]
-                if generation == head or row["collected"] or not row["retired_at"]:
+                if generation == head or generation in migrating or row["collected"]:
                     continue
-                if datetime.fromisoformat(row["retired_at"]) + timedelta(days=retention_days) > now:
+                retired_at = row["retired_at"] or (row["created_at"] if row["published_at"] is None else None)
+                if retired_at is None or datetime.fromisoformat(retired_at) + timedelta(days=retention_days) > now:
                     continue
                 if connection.execute("SELECT 1 FROM workflow_pins WHERE generation_id=? AND released=0", (generation,)).fetchone():
                     continue

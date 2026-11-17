@@ -1,5 +1,5 @@
 from pal.shared.ports import PortRegistry
-from tests.core_factory import build_core
+from tests.core_factory import build_context, build_core
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -18,10 +18,7 @@ from pal.shared import PromptAssemblyContext
 @pytest.mark.parametrize("error_type", [OSError, KeyError])
 def test_compiler_exposes_redacted_memory_load_failure(error_type):
     memory = SimpleNamespace(build_pack=Mock(side_effect=error_type("history unavailable token=private-value")))
-    compiler = PromptCompiler(SimpleNamespace(
-        prompt_fragment_registry=PromptFragmentRegistry(), execution_runtime=None,
-        require_port=lambda _: memory, port_registry=PortRegistry({}),
-    ))
+    compiler = PromptCompiler(build_context(port_registry=PortRegistry({"memory:memory": memory})))
     request = compiler.build_canonical_prompt(PromptAssemblyContext())
     text = request.metadata["runtime_reminder_text"]
     assert "Memory context loading failed" in text
@@ -32,10 +29,7 @@ def test_compiler_exposes_redacted_memory_load_failure(error_type):
 
 
 def test_host_without_memory_service_does_not_report_a_failed_load():
-    compiler = PromptCompiler(SimpleNamespace(
-        prompt_fragment_registry=PromptFragmentRegistry(), execution_runtime=None,
-        require_port=Mock(side_effect=KeyError("memory:memory")), port_registry=PortRegistry({}),
-    ))
+    compiler = PromptCompiler(build_context())
     assert compiler.build_canonical_prompt(PromptAssemblyContext()).metadata["runtime_reminder_text"] == ""
 
 
@@ -50,10 +44,7 @@ def test_memory_failure_keeps_deep_root_cause_without_stack_frames(implicit):
             wrapper.__cause__ = error
         error = wrapper
     memory = SimpleNamespace(build_pack=Mock(side_effect=error))
-    compiler = PromptCompiler(SimpleNamespace(
-        prompt_fragment_registry=PromptFragmentRegistry(), execution_runtime=None,
-        require_port=lambda _: memory, port_registry=PortRegistry({}),
-    ))
+    compiler = PromptCompiler(build_context(port_registry=PortRegistry({"memory:memory": memory})))
     text = compiler.build_canonical_prompt(PromptAssemblyContext()).metadata["runtime_reminder_text"]
     if implicit:
         assert "RuntimeError: memory layer 4" in text

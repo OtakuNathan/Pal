@@ -45,7 +45,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     from pal.web_search.cli import configure_web_search_parser
     configure_web_search_parser(subparsers.add_parser("web-search", help="Configure web search backends"))
-    from pal.core.cli import configure_core_parser
+    from pal.cache_reminder.cli import configure_core_parser
     configure_core_parser(subparsers.add_parser("core", help="Configure resident core settings"))
     from pal.memory.cli import configure_memory_parser
     configure_memory_parser(subparsers.add_parser("memory", help="Maintain memory backends and embedding indexes"))
@@ -127,7 +127,7 @@ async def _run_async(args: argparse.Namespace) -> int:
         from pal.control.cli import run_control_cli_async
         return await run_control_cli_async(args)
     if args.command == "core":
-        from pal.core.cli import run_core_cli_async
+        from pal.cache_reminder.cli import run_core_cli_async
         return await run_core_cli_async(args)
     if args.command == "bunshin" and args.bunshin_command in {"catalog", "profile", "family"}:
         from pal.bunshin.config_cli import run_bunshin_config_cli_async

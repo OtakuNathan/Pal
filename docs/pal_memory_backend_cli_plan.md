@@ -3,6 +3,11 @@
 Date: 2026-10-15
 Status: Implemented into source code per the confirmed scope; see the [implementation record](pal_tool_consolidation_implementation.md) for targeted verification. Not yet installed or activated.
 
+Follow-up: online `select` has been removed in favor of the
+[managed generation swap](pal_memory_swap.md). The current CLI uses
+`swap`, `swap-status`, `swap-cancel` and `swap-resume`; the historical command
+scope below describes the original plan.
+
 ## Confirmed Direction
 
 Memory backend maintenance is no longer provided as model tools; it is uniformly performed through the official Pal CLI. Changing the embedding provider involves upgrade scripts, vector space compatibility, and index rebuilds, and should be handled as a managed migration rather than a hot backend switch during ordinary conversation.

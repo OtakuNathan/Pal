@@ -177,7 +177,6 @@ class ArtifactIntrospectionProvider:
 def register_with_core(context: "MainContext", service: ArtifactManager) -> ModuleHandle:
     from pal.artifact.prompt import ArtifactPromptFragmentProvider
 
-    context.execution_runtime.register_provider_ref("artifact:artifact", service)
     provider = ArtifactIntrospectionProvider(service=service, execution_runtime=context.execution_runtime)
     prompt_provider = ArtifactPromptFragmentProvider(service=service)
     handle = ModuleHandle(

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import contextmanager
 from pal.llm.contracts import collect_generation
 from tests.core_factory import build_core
 
@@ -64,6 +65,16 @@ class _MemorySettingsRepository:
     def __init__(self, active: str | None = None) -> None:
         self.think_levels: dict[str, str] = {}
         self.active_endpoint_id: str | None = active
+
+    def get(self, setting_key):
+        return None
+
+    def set(self, setting_key, setting_value):
+        return setting_value
+
+    @contextmanager
+    def selection_transaction(self):
+        yield
 
     def get_think_level(self, endpoint_id: str) -> str | None:
         return self.think_levels.get(endpoint_id)

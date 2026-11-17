@@ -230,7 +230,7 @@ class BunshinSandboxTests(unittest.TestCase):
 
     def test_bunshin_output_budget_uses_endpoint_limit_without_profile_override(self) -> None:
         class Runtime:
-            def resolve_max_output_tokens(self, **_kwargs):
+            def resolve_output_budget(self, **_kwargs):
                 return 12_288
 
         pack = BunshinInvocationPack(invocation_id="endpoint-output-budget", goal="g")

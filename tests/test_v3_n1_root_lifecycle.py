@@ -9,6 +9,7 @@ logs_n1_prefix_red.txt; recovery details and checksums are recorded in
 docs/archive/session_compaction/test_log_summary.md).
 """
 from __future__ import annotations
+from pal.execution.runtime import ExecutionRuntime
 from tests.llm_fakes import NonStreamingLLM
 
 from tests.turn_fakes import continuation as make_continuation, require_port as require_test_port
@@ -66,7 +67,7 @@ def executor(memory: MemoryService, llm) -> TurnExecutor:
     ports = PortRegistry({'memory:memory': memory, 'llm:llm': llm})
     return TurnExecutor(
         SimpleNamespace(port_registry=ports, require_port=lambda key: require_test_port(ports, key),
-                        execution_runtime=None),
+                        execution_runtime=ExecutionRuntime()),
         SimpleNamespace(diagnostics=[]), None,
          build_canonical_prompt=None,
         debug_log_prompt=lambda *a: None, debug_log_outcome=lambda *a: None,
@@ -278,7 +279,7 @@ class ExecutorFailureTests(unittest.TestCase):
             ex = TurnExecutor(
                 SimpleNamespace(port_registry=ports,
                                 require_port=lambda key: require_test_port(ports, key),
-                                execution_runtime=None),
+                                execution_runtime=ExecutionRuntime()),
                 SimpleNamespace(diagnostics=[]), None,
                  build_canonical_prompt=None,
                 debug_log_prompt=lambda *a: None,

@@ -14,9 +14,10 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from pal.control import interactions as control_interactions
+from pal.core import control_presentation as core_interactions
 from pal.control.contracts import ControlAction, ControlDelivery, ControlRoute
 from pal.core.memory_maintenance import MemoryMaintenanceMixin, SLEEP_REPLY
-from pal.core.model_switch import ModelSwitchMixin
+from pal.core.control_runtime import CoreControlRuntime
 from pal.core.compaction_coordinator import (
     CompactionGate,
     CompactionPhase,
@@ -31,18 +32,17 @@ from pal.memory.contracts import MemoryCompactResult
 RESIDENT_COMPACTION_SCOPE = "pal:resident"
 from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
 from pal.core.agent_turn_runtime import AgentTurnRuntime
-from pal.core.cache_warm_deadline import (
-    CacheWarmDeadlineManager,
-    CacheWarmDeadlineNotice,
-)
 from pal.core.contracts import CoreRuntimeState
 from pal.core.scheduling import (
     CoreTurnPhase, ResidentTurnKind, SchedulingEvent, TurnLease, admission_reason,
 )
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.dispatcher import EventDispatcher
-from pal.core.failure_orchestrator import FailureHandlingResult, FailureOrchestrator
+from pal.failure.contracts import FAILURE_RECOVERY, FailureHandlingResult, FailureRecoveryPort
+from pal.failure.presentation import render_failure_feedback_text
+from pal.shared.ports import ServiceRef
 from pal.core.main_context import MainContext
+from pal.core.timers import TIMER_EVENT, TimerScheduler
 from pal.core.module_lifecycle import ModuleLifecycle
 from pal.core.prompt_debug_log import (
     append_prompt_debug_log,
@@ -67,7 +67,7 @@ from pal.foundation.log_paths import pal_log_path
 from pal.foundation.diagnostics import exception_report, exception_reason
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import LLMGenerationResult
-from pal.llm.ir import LLMRequestIR
+from pal.llm.ir import LLMRequestIR, LLMMessageIR
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
 from pal.memory.compact import coerce_memory_candidate_list, memory_candidates_from_compact_result, compact_normalization_diagnostics
 from pal.memory.mutations import content_hash
@@ -78,11 +78,21 @@ from pal.shared.payloads import extract_text_from_payload
 
 
 @dataclass
+class PendingTurnClose:
+    continuation: TurnContinuation
+    state: str
+    reason: str
+    context_messages: tuple[LLMMessageIR, ...] = ()
+    last_error: str = ""
+
+
+@dataclass
 class TurnManager:
     context: MainContext
     state: CoreRuntimeState
     guard: ToolStagnationGuardProcess = field(default_factory=ToolStagnationGuardProcess)
     config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
+    pending_closures: dict[str, PendingTurnClose] = field(default_factory=dict)
 
     def start(
         self,
@@ -128,8 +138,7 @@ class TurnManager:
         llm_runtime = self.context.port_registry.optional(LLM_RUNTIME)
         if llm_runtime is None:
             return self.config.fallback_max_output_tokens
-        result = llm_runtime.resolve_max_output_tokens(preferred_endpoint_id=preferred_endpoint_id)
-        return self.config.fallback_max_output_tokens if result is None else result
+        return llm_runtime.resolve_output_budget(preferred_endpoint_id=preferred_endpoint_id)
 
     def resume(
         self,
@@ -207,11 +216,7 @@ class TurnManager:
                         "error": f"{exc.__class__.__name__}: {exc}",
                     })
             try:
-                execution_runtime = getattr(self.context, "execution_runtime", None)
-                if execution_runtime is not None:
-                    interrupt_turn = getattr(execution_runtime, "interrupt_turn", None)
-                    if callable(interrupt_turn):
-                        await interrupt_turn(turn_id)
+                await self.context.execution_runtime.interrupt_turn(turn_id)
             finally:
                 task = self.state.turn_tasks.get(turn_id)
                 if task is not None and not task.done():
@@ -224,26 +229,59 @@ class TurnManager:
                     if self.state.resident_interrupting_turn_id == turn_id:
                         self.state.resident_interrupting_turn_id = None
 
-    def cleanup_interrupted(self, turn_id: str, *, reason: str = "interrupted") -> None:
-        snapshots = getattr(self.context.execution_runtime, "result_snapshots", None)
+    def cleanup_interrupted(self, turn_id: str, *, reason: str = "interrupted") -> bool:
+        snapshots = self.context.execution_runtime.result_snapshots
         if snapshots is not None:
             snapshots.finish_turn(turn_id)
-        continuation = self.state.active_turns.pop(turn_id, None)
+        self.context.execution_runtime.execution_sessions.clear_visible_results(turn_id)
+        self.guard.clear(turn_id)
+        continuation = self.state.active_turns.get(turn_id)
         if isinstance(continuation, TurnContinuation):
             continuation.interrupted = True
             continuation.interrupt_reason = reason
-            memory_service = self.context.port_registry.get("memory:memory")
-            close = getattr(memory_service, "interrupt_l1_turn", None)
-            if callable(close):
-                try:
-                    close(
-                        continuation.turn_id,
-                        reason=reason,
-                    )
-                except Exception:
-                    pass
+            request = self.pending_closures.get(turn_id) or PendingTurnClose(continuation, "interrupted", reason)
+            if not self._close_memory_turn(request):
+                return False
+        self.state.active_turns.pop(turn_id, None)
+        self.pending_closures.pop(turn_id, None)
         self.guard.clear(turn_id)
         self._mark_turn_exited(turn_id)
+        return True
+
+    def _close_memory_turn(self, request: PendingTurnClose) -> bool:
+        turn_id = request.continuation.turn_id
+        try:
+            memory = self.context.port_registry.optional(MEMORY)
+            if memory is not None and memory.active_l1_turn(turn_id) is not None:
+                if request.state == "aborted":
+                    memory.abort_l1_turn(turn_id, reason=request.reason, context_messages=request.context_messages)
+                else:
+                    memory.interrupt_l1_turn(turn_id, reason=request.reason, context_messages=request.context_messages)
+        except Exception as exc:
+            error = exception_report(exc)
+            if request.last_error != error:
+                self.state.diagnostics.append({"kind": f"memory.turn.{request.state}_failed",
+                    "turn_id": turn_id, "error": error, "cleanup_pending": True})
+                request.last_error = error
+            self.pending_closures[turn_id] = request
+            self.state.active_turns.setdefault(turn_id, request.continuation)
+            return False
+        self.pending_closures.pop(turn_id, None)
+        return True
+
+    def retry_pending_closures(self) -> None:
+        for turn_id, request in tuple(self.pending_closures.items()):
+            if self._close_memory_turn(request):
+                self.state.active_turns.pop(turn_id, None)
+                self.guard.clear(turn_id)
+                self._mark_turn_exited(turn_id)
+
+    def discard_pending_closures_after_reset(self) -> None:
+        for turn_id in tuple(self.pending_closures):
+            self.state.active_turns.pop(turn_id, None)
+            self.guard.clear(turn_id)
+            self._mark_turn_exited(turn_id)
+        self.pending_closures.clear()
 
     async def commit_l1_exit_checkpoint_async(
         self,
@@ -263,66 +301,39 @@ class TurnManager:
         state: str,
         reason: str,
     ) -> None:
-        memory_service = self.context.port_registry.get("memory:memory")
-        llm = self.context.port_registry.get("llm:llm")
-        close_cache = getattr(llm, "end_prompt_cache_turn", None)
-        if callable(close_cache):
-            close_cache(str(continuation.turn_id))
-        method_name = {
-            "interrupted": "interrupt_l1_turn",
-            "aborted": "abort_l1_turn",
-        }.get(state)
-        method = getattr(memory_service, method_name or "", None)
-        if not callable(method):
-            return
+        llm = self.context.port_registry.optional(LLM_RUNTIME)
+        if llm is not None:
+            try:
+                llm.end_prompt_cache_turn(continuation.turn_id)
+            except Exception as exc:
+                self.state.diagnostics.append({"kind": "llm.turn.close_failed",
+                    "turn_id": continuation.turn_id, "error": exception_report(exc)})
+        memory = self.context.port_registry.optional(MEMORY)
+        history = self.context.port_registry.get(RESIDENT_HISTORY.name)
+        request = PendingTurnClose(continuation, state, reason)
         try:
-            history = self.context.port_registry.get(RESIDENT_HISTORY.name)
             if history is not None:
                 history.finish_partial_stream(continuation.turn_id)
             from pal.memory.prompt_context import completed_tool_contexts
-            reader = getattr(memory_service, "active_l1_turn", None)
-            active = reader(continuation.turn_id) if callable(reader) else None
-            contexts = completed_tool_contexts(continuation, active) if active is not None else ()
-            value = method(
-                continuation.turn_id,
-                reason=reason,
-                **({"context_messages": contexts} if contexts else {}),
-            )
-            if inspect.isawaitable(value):
-                await value
-            if history is not None:
-                await history.checkpoint_async("interrupted")
+            active = memory.active_l1_turn(continuation.turn_id) if memory is not None else None
+            request.context_messages = completed_tool_contexts(continuation, active) if active is not None else ()
         except Exception as exc:
-            self.state.diagnostics.append(
-                {
-                    "kind": f"memory.turn.{state}_failed",
-                    "turn_id": continuation.turn_id,
-                    "error": f"{exc.__class__.__name__}: {exc}",
-                }
-            )
+            self.state.diagnostics.append({"kind": f"memory.turn.{state}_context_failed",
+                "turn_id": continuation.turn_id, "error": exception_report(exc)})
+        if not self._close_memory_turn(request):
+            return
+        if history is not None:
+            try:
+                if not await history.checkpoint_async(state):
+                    raise RuntimeError("Interrupted history checkpoint was not saved")
+            except Exception as exc:
+                self.state.diagnostics.append({"kind": "resident.history.close_failed",
+                    "turn_id": continuation.turn_id, "error": exception_report(exc)})
 
     def _build_turn_settings_snapshot(self) -> dict[str, Any]:
-        llm_runtime = self.context.port_registry.get("llm:llm")
-        think_levels: dict[str, str] = {}
-        if llm_runtime is not None:
-            refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
-            if callable(refresh):
-                try:
-                    refresh()
-                except Exception:
-                    pass
-            snapshot = getattr(llm_runtime, "thinking_levels_snapshot", None)
-            if callable(snapshot):
-                try:
-                    think_levels = dict(snapshot())
-                except Exception:
-                    think_levels = {}
-        cache_snapshot = getattr(llm_runtime, "cache_policy_snapshot", None)
-        return {
-            **({"cache_policy_snapshot": cache_snapshot()} if callable(cache_snapshot) else {}),
-            "think_levels": think_levels,
-            "prompt_log_enabled": bool(self.state.prompt_log_enabled),
-        }
+        llm = self.context.port_registry.optional(LLM_RUNTIME)
+        settings = llm.snapshot_turn_settings().to_payload() if llm is not None else {}
+        return {**settings, "prompt_log_enabled": self.state.prompt_log_enabled}
 
     def latest_active_turn_id(self) -> str | None:
         lease = self.state.scheduler.state.owner
@@ -363,8 +374,12 @@ class MainLoop:
     queue: deque[EventEnvelope] = field(default_factory=deque)
     dispatcher: EventDispatcher = field(default_factory=EventDispatcher)
     schedule_pending: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
+    timers: TimerScheduler = field(init=False, repr=False)
     _wakeup_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _wakeup_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.timers = TimerScheduler(self.notify_ready)
 
     def enqueue(self, envelope: EventEnvelope) -> None:
         self.queue.append(envelope)
@@ -391,6 +406,9 @@ class MainLoop:
 
     async def wait_for_ready_async(self, *, timeout: float | None = None) -> None:
         self.bind_async_loop()
+        timer_delay = self.timers.next_delay()
+        if timer_delay is not None:
+            timeout = timer_delay if timeout is None else min(timeout, timer_delay)
         event = self._wakeup_event
         if event is None:
             return
@@ -422,11 +440,8 @@ class MainLoop:
 
     async def run_once_async(self, context: MainContext, state: CoreRuntimeState) -> EventEnvelope | None:
         core_port = context.port_registry.get("core:core")
-        expire = getattr(core_port, "expire_pending_control_requests_async", None)
-        if callable(expire):
-            result = expire()
-            if inspect.isawaitable(result):
-                await result
+        for event in self.timers.drain_due():
+            self.enqueue(event)
         self.drain_ready_sources(context)
         # Completion callbacks only release ownership and wake the pump. Queue
         # admission is a core action, never an asynchronous task's finally.
@@ -435,8 +450,17 @@ class MainLoop:
         envelope = self.pop()
         if envelope is None:
             return None
-        for derived in await self.dispatcher.dispatch_async(envelope, context):
-            self.enqueue(derived)
+        if envelope.event_kind == TIMER_EVENT:
+            try:
+                await envelope.payload.fire()
+            except Exception as exc:
+                state.diagnostics.append({
+                    "kind": "runtime.timer.failed", "event_id": envelope.event_id,
+                    "error": exception_report(exc),
+                })
+        else:
+            for derived in await self.dispatcher.dispatch_async(envelope, context):
+                self.enqueue(derived)
         if core_port is not None:
             core_port.state.memory_maintenance_changed.set()
         return envelope
@@ -518,7 +542,7 @@ class CoreTurnIOPort:
 
 
 @dataclass
-class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
+class PalCore(MemoryMaintenanceMixin):
     context: MainContext
     state: CoreRuntimeState = field(default_factory=CoreRuntimeState)
     config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
@@ -526,14 +550,15 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     turn_manager: TurnManager = field(init=False)
     prompt_compiler: PromptCompiler = field(init=False)
     tool_surface: ToolSurface = field(init=False)
-    failure_orchestrator: FailureOrchestrator = field(init=False)
+    failure_recovery: ServiceRef[FailureRecoveryPort] = field(init=False)
     agent_turn_runtime: AgentTurnRuntime = field(init=False)
     turn_executor: TurnExecutor = field(init=False)
     module_lifecycle: ModuleLifecycle = field(init=False)
-    cache_warm_deadline: CacheWarmDeadlineManager = field(init=False)
+    control_runtime: CoreControlRuntime = field(init=False)
     _btw_turn: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.control_runtime = CoreControlRuntime(self)
         self.main_loop.schedule_pending = self._start_next_queued_turn_async
         self.turn_manager = TurnManager(
             context=self.context,
@@ -544,12 +569,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         self.tool_surface = ToolSurface(self.context)
         self.module_lifecycle = ModuleLifecycle(self.context, self.state)
         self.context.execution_runtime.lifecycle_controller = self
-        self.failure_orchestrator = FailureOrchestrator(
-            self.context,
-            build_canonical_prompt=self.build_canonical_prompt,
-            debug_log_prompt=self._debug_log_prompt,
-            tool_surface=self.tool_surface,
-        )
+        self.failure_recovery = self.context.port_registry.observe(FAILURE_RECOVERY)
         self.agent_turn_runtime = AgentTurnRuntime.build(
             context=self.context,
             config=self.config,
@@ -570,68 +590,14 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         )
         self.prompt_compiler = self.agent_turn_runtime.prompt_compiler
         self.turn_executor = self.agent_turn_runtime.executor
-        self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
-        self.cache_warm_deadline = CacheWarmDeadlineManager(
-            cache_snapshot=self._prompt_cache_warm_deadline_snapshot,
-            settings_provider=self._runtime_settings_repository,
-            has_active_turn=lambda: bool(
-                self.state.active_turn_id or self.state.active_turns
-            ),
-            deliver_notice=self._deliver_cache_warm_deadline_notice_async,
-            expire_notice=self._expire_cache_warm_deadline_notice_async,
-        )
+        self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self), owner_id="core")
 
     def close(self) -> None:
-        self.cache_warm_deadline.close()
+        self.control_runtime.requests.close()
+        self.main_loop.timers.close()
         btw = self._btw_turn
         if btw is not None and btw.task is not None:
             btw.task.cancel()
-
-    def _runtime_settings_repository(self) -> Any | None:
-        llm_runtime = self.context.port_registry.get("llm:llm")
-        return getattr(llm_runtime, "settings_repository", None)
-
-    def _prompt_cache_warm_deadline_snapshot(self) -> dict[str, Any]:
-        llm_runtime = self.context.port_registry.get("llm:llm")
-        reminder = getattr(llm_runtime, "prompt_cache_reminder_snapshot", None)
-        if callable(reminder):
-            return dict(reminder() or {})
-        snapshot = getattr(
-            llm_runtime,
-            "prompt_cache_warm_deadline_snapshot",
-            None,
-        )
-        return dict(snapshot() or {}) if callable(snapshot) else {}
-
-    async def _deliver_cache_warm_deadline_notice_async(
-        self,
-        notice: CacheWarmDeadlineNotice,
-    ) -> bool:
-        delivery = control_interactions.cache_warm_deadline_delivery(
-            notice.route,
-            epoch=notice.epoch,
-            prefix_tokens=notice.prefix_tokens,
-            lead_seconds=notice.lead_seconds,
-            expires_at=notice.expires_at,
-            estimated=notice.estimated,
-        )
-        return await self._deliver_control_delivery_async(
-            delivery,
-            require_provider=True,
-        )
-
-    async def _expire_cache_warm_deadline_notice_async(
-        self,
-        notice: CacheWarmDeadlineNotice,
-    ) -> bool:
-        delivery = control_interactions.cache_warm_deadline_expire_delivery(
-            notice.route,
-            epoch=notice.epoch,
-        )
-        return await self._deliver_control_delivery_async(
-            delivery,
-            require_provider=True,
-        )
 
     async def _after_tool_batch_async(self, continuation: TurnContinuation) -> None:
         # Ordering (P1): batch results are already committed to L1 when this
@@ -688,41 +654,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         channel_runtime = self.context.port_registry.get("channel:channel")
         if channel_runtime is not None and hasattr(channel_runtime, "on_ready"):
             channel_runtime.on_ready = self.notify_ready
-        proactive_manager = self.context.port_registry.get("proactive:proactive_manager")
-        if proactive_manager is not None and hasattr(proactive_manager, "on_ready"):
-            proactive_manager.on_ready = self.notify_ready
-
     async def wait_for_ready_async(self, *, timeout: float | None = None) -> None:
         await self.main_loop.wait_for_ready_async(timeout=timeout)
 
     def next_wakeup_timeout_seconds(self) -> float | None:
-        candidates: list[float] = []
-        proactive_manager = self.context.port_registry.get("proactive:proactive_manager")
-        seconds_until_next_due = getattr(proactive_manager, "seconds_until_next_due", None)
-        if callable(seconds_until_next_due) and not self.state.memory_maintenance:
-            service_timeout = seconds_until_next_due()
-            if service_timeout is not None:
-                candidates.append(float(service_timeout))
-        for source in self.context.event_source_registry.iter_sources():
-            deadline = getattr(source, "seconds_until_next_due", None)
-            if callable(deadline):
-                timeout = deadline()
-                if timeout is not None:
-                    candidates.append(float(timeout))
-        control_timeout = self._seconds_until_next_control_request_expiry()
-        if control_timeout is not None:
-            candidates.append(control_timeout)
-        return min(candidates) if candidates else None
-
-    def _seconds_until_next_control_request_expiry(self) -> float | None:
-        now = datetime.now(timezone.utc)
-        nearest: float | None = None
-        for scope_state in self.state.control_scopes.values():
-            for request in getattr(scope_state, "pending_requests", {}).values():
-                expires_at = _parse_utc_timestamp(getattr(request, "expires_at", ""))
-                delay = max(0.0, (expires_at - now).total_seconds())
-                nearest = delay if nearest is None else min(nearest, delay)
-        return nearest
+        return self.main_loop.timers.next_delay()
 
     def drain_once(self) -> EventEnvelope | None:
         return asyncio.run(self.drain_once_async())
@@ -887,6 +823,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         )
 
     def _resident_other_work(self) -> bool:
+        self.turn_manager.retry_pending_closures()
         # /btw reads a captured L in its own branch; it is not a resident
         # writer. Legacy/stub hosts with live records still fail admission.
         return bool(
@@ -940,17 +877,34 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
 
     def start_background_turn(
         self, continuation: TurnContinuation, run: Callable, *,
+        owner: ModuleHandle | None,
         kind: ResidentTurnKind = ResidentTurnKind.PROACTIVE,
     ) -> asyncio.Task | None:
         """Reserve before starting any asynchronous producer or opening L1."""
-        lease = self._admit_resident_turn(continuation.turn_id, kind)
+        ownership = None
+        if owner is not None:
+            if not self.context.module_registry.is_current(owner):
+                return None
+            ownership = owner.background_work.acquire()
+            if ownership is None:
+                return None
+        try:
+            lease = self._admit_resident_turn(continuation.turn_id, kind)
+        except BaseException:
+            if ownership is not None:
+                ownership.close()
+            raise
         if lease is None:
+            if ownership is not None:
+                ownership.close()
             return None
         coroutine = None
         task = None
         try:
             coroutine = run()
             task = asyncio.create_task(coroutine)
+            if ownership is not None:
+                task.add_done_callback(lambda _, retained=ownership: retained.close())
             self.track_turn_task(continuation, task, lease=lease)
             return task
         except BaseException:
@@ -964,6 +918,8 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 coroutine.close()
             if task is None:
                 self._finish_resident_turn(lease)
+                if ownership is not None:
+                    ownership.close()
             raise
 
     def _start_channel_turn_task_locked(
@@ -1036,7 +992,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     async def _schedule_admitted_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
         # Any new user activity makes the old idle-cache deadline irrelevant,
         # even if this turn must queue behind the current one.
-        await self.cache_warm_deadline.clear_for_user_activity()
+        await self.control_runtime.user_activity()
         channel_envelope = await self._prepare_channel_turn_async(channel_envelope)
         turn_id = channel_envelope.event.event_id
         async with self.state.channel_turn_transition_lock:
@@ -1105,7 +1061,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     async def _process_admitted_channel_turn_async(
         self, channel_envelope: ChannelEnvelope,
     ) -> TurnOutcome:
-        await self.cache_warm_deadline.clear_for_user_activity()
+        await self.control_runtime.user_activity()
         channel_envelope = await self._prepare_channel_turn_async(channel_envelope)
         # The hot path is: start turn -> interpret yielded effects -> resume
         # until the generator returns a TurnOutcome.
@@ -1119,7 +1075,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         )
         return await self._run_turn_continuation_async(
             continuation,
-            schedule_deadline=(
+            notify_settled=(
                 background_task is None
                 or background_task is not asyncio.current_task()
             ),
@@ -1251,13 +1207,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 await self._start_next_queued_turn_async()
 
     def _begin_tool_result_turn(self, continuation: TurnContinuation) -> None:
-        bind = getattr(self.context.execution_runtime, "bind_result_history", None)
-        if callable(bind):
-            bind(self.context.port_registry.get("memory:memory"))
-        begin = getattr(self.context.execution_runtime, "begin_tool_result_turn", None)
-        if not callable(begin):
-            return
-        begin(
+        execution = self.context.execution_runtime
+        execution.bind_result_history(self.context.require_port(MEMORY))
+        execution.begin_tool_result_turn(
             turn_id=continuation.turn_id,
             scope_key=self.state.resident_execution_lifetime_id,
             input_id=continuation.turn_id,
@@ -1299,15 +1251,19 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 "reply_target": dict(channel_envelope.response_handle.reply_target),
                 "status": turn_status,
             })
+            # This producer completed its presentation teardown even if Memory
+            # still owns a pending close. The done callback only covers tasks
+            # cancelled before this coroutine gets its first step.
+            self.state.turn_scopes.pop(turn_id, None)
             if (
                 turn_status == "success"
                 and outcome is not None
             ):
-                self._schedule_cache_warm_deadline_after_turn_success(
+                await self._notify_turn_settled_async(
                     outcome,
                     event=channel_envelope.event,
                     delivery_binding=delivery_binding,
-                    schedule_timer=not self.state.pending_channel_turns,
+                    notify_observers=not self.state.pending_channel_turns,
                 )
             self._queue_channel_status(channel_envelope, "working_stop", {"typing_owner": f"turn:{turn_id}"})
             # The done callback releases the lease AFTER this finally exits.
@@ -1345,7 +1301,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         self.notify_ready()
 
     async def handle_control_action_async(self, action: ControlAction, *, require_provider: bool = False) -> bool | None:
-        if self.state.memory_maintenance and action.delivery is None and action.action_kind not in {"memory_dreaming", "show_status", "show_llm_status", "route_reply", "show_panel"}:
+        spec = self.context.control_action_registry.resolve(action.action_kind)
+        if (self.state.memory_maintenance and action.delivery is None
+                and (spec is None or not spec.allow_during_maintenance)):
             await self.deliver_memory_notice_async(action.route, SLEEP_REPLY, require_provider=False)
             return False
         if not self.state.memory_maintenance and action.delivery is None and action.route is not None:
@@ -1361,12 +1319,8 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             self.state.memory_maintenance_changed.set()
 
     async def _handle_admitted_control_action_async(
-        self,
-        action: ControlAction,
-        *,
-        require_provider: bool = False,
+        self, action: ControlAction, *, require_provider: bool = False,
     ) -> bool | None:
-        await self.expire_pending_control_requests_async()
         status_route = action.route or (action.delivery.route if action.delivery is not None else None)
         typing_payload = {"typing_owner": f"control:{uuid4().hex}"}
         with contextlib.suppress(Exception):
@@ -1374,97 +1328,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         try:
             if action.delivery is not None:
                 return await self._deliver_control_delivery_async(
-                    action.delivery,
-                    fallback_route=action.route,
-                    require_provider=require_provider,
-                )
-            if action.action_kind == "publish_control_catalog":
-                await self.publish_control_catalog_async()
-                return True
-            if action.action_kind == "show_panel":
-                await self._handle_show_panel_async(action)
-                return
-            if action.action_kind == "start_btw":
-                from pal.core.btw import start_btw
-
-                await start_btw(self, action)
-                return
-            if action.action_kind == "show_status":
-                await self._handle_show_status_async(action)
-                return
-            if action.action_kind == "show_think":
-                await self._handle_show_think_async(action)
-                return
-            if action.action_kind == "set_think":
-                await self._handle_set_think_async(action)
-                return
-            if action.action_kind == "model_switch_step":
-                await self._handle_model_switch_action_async(action)
-                return
-            if action.action_kind == "show_model":
-                await self._handle_show_model_async(action)
-                return
-            if action.action_kind == "set_model":
-                await self._handle_set_model_async(action)
-                return
-            if action.action_kind == "show_log":
-                await self._handle_show_log_async(action)
-                return
-            if action.action_kind == "set_log":
-                await self._handle_set_log_async(action)
-                return
-            if action.action_kind == "interrupt_turn":
-                await self._handle_interrupt_turn_async(action)
-                return
-            if action.action_kind == "open_reset_confirm":
-                await self._handle_open_reset_confirm_async(action)
-                return
-            if action.action_kind == "cancel_reset_confirm":
-                await self._handle_cancel_reset_confirm_async(action)
-                return
-            if action.action_kind == "reset_memory":
-                await self._handle_reset_memory_async(action)
-                return
-            if action.action_kind == "compact_memory":
-                await self._handle_compact_memory_async(action)
-                return
-            if action.action_kind == "refresh_llm_endpoint":
-                await self._handle_refresh_llm_endpoint_async(action)
-                return
-            if action.action_kind == "route_reply":
-                await self._handle_route_reply_async(action)
-                return
-            if action.action_kind == "invoke_capability":
-                await self._handle_invoke_capability_async(action)
-                return
-            handled = await self.context.control_action_registry.handle(action)
-            if handled.handled:
-                delivery = handled.structured.get("delivery") if isinstance(handled.structured, dict) else None
-                if isinstance(delivery, ControlDelivery):
-                    await self._deliver_control_delivery_async(delivery, fallback_route=action.route)
-                    return
-                message = handled.message.strip()
-                if message:
-                    await self._deliver_control_delivery_async(
-                        control_interactions.terminal_delivery_for_action(action, message)
-                    )
-                return
-            if action.action_kind == "invalid_command":
-                await self._deliver_control_delivery_async(
-                    control_interactions.terminal_delivery_for_action(action, action.notes or "Invalid command.")
-                )
-                return
-            if action.action_kind == "unknown_command":
-                command_name = str(action.args.get("command_name") or "").strip()
-                text = f"Unknown command: /{command_name}" if command_name else "Unknown command."
-                await self._deliver_control_delivery_async(control_interactions.terminal_delivery_for_action(action, text))
-                return
-            await self._deliver_control_delivery_async(
-                control_interactions.terminal_delivery_for_action(
-                    action,
-                    f"Control action '{action.action_kind}' is not wired yet.",
-                )
-            )
+                    action.delivery, fallback_route=action.route, require_provider=require_provider)
+            if not await self.context.control_action_registry.handle(action):
+                await self.control_runtime.reply(action, f"Control action '{action.action_kind}' is not registered.")
         finally:
             with contextlib.suppress(Exception):
                 await self._status_to_route_async(status_route, "working_stop", typing_payload)
@@ -1487,32 +1353,6 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             await self._deliver_control_delivery_async(
                 control_interactions.control_catalog_delivery(control_plane, endpoint.endpoint.endpoint_id)
             )
-
-    async def expire_pending_control_requests_async(self) -> None:
-        now = datetime.now(timezone.utc)
-        for scope_state in list(self.state.control_scopes.values()):
-            expired: list[Any] = []
-            for request_kind, request in list(scope_state.pending_requests.items()):
-                if request.payload.get("stage") != "executing" and _parse_utc_timestamp(request.expires_at) <= now:
-                    expired.append((request_kind, request))
-                    scope_state.pending_requests.pop(request_kind, None)
-            for _, request in expired:
-                await self._notify_expired_request_async(request)
-
-    def _ensure_scope_state(self, control_scope_key: str):
-        scope_state = self.state.control_scopes.get(control_scope_key)
-        if scope_state is None:
-            from pal.core.contracts import ControlScopeState
-
-            scope_state = ControlScopeState()
-            self.state.control_scopes[control_scope_key] = scope_state
-        return scope_state
-
-    async def _handle_show_panel_async(self, action: ControlAction) -> None:
-        control_plane = self.context.require_port("control:control")
-        if action.route is not None:
-            await self.publish_control_catalog_async(endpoint_id=action.route.endpoint_id)
-        await self._deliver_control_delivery_async(control_interactions.control_panel_delivery(control_plane, action.route))
 
     async def _handle_show_status_async(self, action: ControlAction) -> None:
         active_turns = len(self.state.active_turns)
@@ -1537,168 +1377,17 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             f"Active turns: {active_turns}",
             f"Queued messages: {queued_messages}",
         ]
-        llm_status = await self.context.control_action_registry.handle(
-            ControlAction(action_kind="show_llm_status", target_scope="llm", route=action.route)
-        )
-        if llm_status.handled and llm_status.message.strip():
-            lines.extend(("", llm_status.message.strip()))
-        else:
-            lines.extend(("", "LLM statistics unavailable."))
+        for owner, status in tuple(self.context.control_action_registry.status_providers.items()):
+            try:
+                text = status().strip()
+            except Exception as exc:
+                text = f"{owner} status unavailable: {exception_reason(exc)}"
+            if text:
+                lines.extend(("", text))
         await self._deliver_control_delivery_async(
             control_interactions.terminal_delivery_for_action(action, "\n".join(lines))
         )
 
-    async def _handle_show_think_async(self, action: ControlAction) -> None:
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
-        refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
-        if callable(refresh):
-            refresh()
-        status_builder = getattr(llm_runtime, "thinking_status", None)
-        think_status = status_builder() if callable(status_builder) else {
-            "available": False,
-            "endpoint_id": getattr(llm_runtime, "active_endpoint_id", None),
-            "current": None,
-            "choices": [],
-        }
-        await self._deliver_control_delivery_async(
-            control_interactions.think_panel_delivery(action.route, think_status)
-        )
-
-    async def _handle_set_think_async(self, action: ControlAction) -> None:
-        requested = str(action.args.get("think_level") or "").strip()
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
-        setter = getattr(llm_runtime, "set_think_level", None)
-        if not callable(setter):
-            await self._complete_action_reply_async(action, "Think-level configuration is unavailable.")
-            return
-        try:
-            resolved = setter(requested)
-        except ValueError as exc:
-            await self._complete_action_reply_async(action, exception_reason(exc))
-            return
-        status_builder = getattr(llm_runtime, "thinking_status", None)
-        status = status_builder() if callable(status_builder) else {}
-        endpoint_id = str(status.get("endpoint_id") or getattr(llm_runtime, "active_endpoint_id", "") or "")
-        await self._complete_action_reply_async(
-            action,
-            f"Think level for {endpoint_id or 'the active endpoint'} updated to {resolved}. "
-            "This applies to new turns only.",
-        )
-
-    async def _handle_show_model_async(self, action: ControlAction) -> None:
-        if action.route is not None:
-            self._discard_model_selection_draft(action.route.control_scope_key)
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
-        self._refresh_llm_runtime_settings(llm_runtime)
-        endpoints = self._llm_model_endpoints(llm_runtime)
-        active_endpoint_id = self._effective_llm_endpoint_id(llm_runtime, endpoints)
-        await self._deliver_control_delivery_async(
-            control_interactions.model_panel_delivery(action.route, endpoints, active_endpoint_id)
-        )
-
-    async def _handle_refresh_llm_endpoint_async(self, action: ControlAction) -> None:
-        # A confirmed endpoint/settings switch revokes any live
-        # compaction ticket's commit eligibility first, so a warm generate
-        # candidate can never install onto — or carry native cache
-        # toward — the new endpoint (X07).
-        async with self.state.channel_turn_transition_lock:
-            self._invalidate_model_selections()
-            self._compaction_gate().cancel_all(reason="llm_endpoint_refresh")
-        llm_runtime = self.context.require_port(LLM_RUNTIME)
-        refresh = getattr(llm_runtime, "refresh_llm_endpoints", None)
-        if callable(refresh):
-            payload = refresh()
-        else:
-            settings_refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
-            if callable(settings_refresh):
-                settings_refresh()
-            payload = {"enabled_count": None, "primary_endpoint_id": getattr(llm_runtime, "active_endpoint_id", None)}
-        dependent_refreshes: dict[str, dict[str, Any]] = {}
-        dependent_refresh_errors: dict[str, str] = {}
-        refreshed_ports: set[int] = {id(llm_runtime)}
-        for port_name, port in self.context.port_registry.items():
-            if id(port) in refreshed_ports:
-                continue
-            refresh_dependent = getattr(port, "refresh_llm_endpoints", None)
-            if not callable(refresh_dependent):
-                continue
-            refreshed_ports.add(id(port))
-            try:
-                result = refresh_dependent()
-                if inspect.isawaitable(result):
-                    result = await result
-                if isinstance(result, dict):
-                    dependent_refreshes[port_name] = dict(result)
-            except Exception as exc:
-                dependent_refresh_errors[port_name] = exception_reason(exc)
-        enabled_count = payload.get("enabled_count")
-        primary = payload.get("primary_endpoint_id") or "-"
-        active = payload.get("active_endpoint_id") or "-"
-        configured = payload.get("configured_active_endpoint_id") or "-"
-        added = list(payload.get("added_endpoint_ids") or [])
-        removed = list(payload.get("removed_endpoint_ids") or [])
-        lines = [
-            "LLM endpoints refreshed.",
-            f"Enabled endpoints: {enabled_count if enabled_count is not None else '-'}",
-            f"Primary endpoint for future turns: {primary}",
-            f"Active endpoint setting: {configured}",
-        ]
-        if configured != active:
-            lines.append(f"Runtime active endpoint: {active}")
-        if added:
-            lines.append(f"Added: {', '.join(str(item) for item in added)}")
-        if removed:
-            lines.append(f"Removed/disabled: {', '.join(str(item) for item in removed)}")
-        refreshed_dependents = [
-            name
-            for name, result in dependent_refreshes.items()
-            if bool(result.get("refreshed"))
-        ]
-        cold_dependents = [
-            name
-            for name, result in dependent_refreshes.items()
-            if not bool(result.get("refreshed"))
-        ]
-        if refreshed_dependents:
-            lines.append(f"Dependent LLM runtimes refreshed: {', '.join(refreshed_dependents)}")
-        if cold_dependents:
-            lines.append(
-                "Dependent LLM runtimes not loaded yet: "
-                + ", ".join(cold_dependents)
-            )
-        for port_name, error in dependent_refresh_errors.items():
-            lines.append(f"Dependent LLM runtime refresh failed ({port_name}): {error}")
-        await self._complete_action_reply_async(action, "\n".join(lines))
-
-    @staticmethod
-    def _refresh_llm_runtime_settings(llm_runtime: Any) -> None:
-        refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
-        if callable(refresh):
-            refresh()
-
-    @staticmethod
-    def _llm_model_endpoints(llm_runtime: Any) -> list[Any]:
-        resolver = getattr(llm_runtime, "endpoint_resolver", None)
-        enabled = getattr(resolver, "enabled", None)
-        if callable(enabled):
-            endpoints = list(enabled())
-        else:
-            endpoints = list(getattr(resolver, "endpoints", ()) or [])
-        return [endpoint for endpoint in endpoints if PalCore._llm_endpoint_field(endpoint, "endpoint_id")]
-
-    @staticmethod
-    def _effective_llm_endpoint_id(llm_runtime: Any, endpoints: list[Any]) -> str:
-        return str(getattr(llm_runtime, "active_endpoint_id", "") or "").strip()
-
-    @staticmethod
-    def _llm_endpoint_field(endpoint: Any, field_name: str) -> str:
-        if endpoint is None:
-            return ""
-        if isinstance(endpoint, dict):
-            value = endpoint.get(field_name)
-        else:
-            value = getattr(endpoint, field_name, None)
-        return str(value or "").strip()
 
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
         normalized = str(turn_id or "").strip()
@@ -1747,48 +1436,22 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
 
     async def _handle_show_log_async(self, action: ControlAction) -> None:
         await self._deliver_control_delivery_async(
-            control_interactions.log_panel_delivery(action.route, bool(self.state.prompt_log_enabled))
+            core_interactions.log_panel_delivery(action.route, bool(self.state.prompt_log_enabled))
         )
 
     async def _handle_set_log_async(self, action: ControlAction) -> None:
         enabled = bool(action.args.get("prompt_log_enabled"))
         self.state.prompt_log_enabled = enabled
-        updated_ports: set[int] = set()
-        update_errors: list[str] = []
-        for port_name, port in self.context.port_registry.items():
-            if id(port) in updated_ports:
-                continue
-            setter = getattr(port, "set_prompt_log_enabled", None)
-            if not callable(setter):
-                continue
-            updated_ports.add(id(port))
-            try:
-                result = setter(enabled)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception as exc:
-                error = exception_report(exc)
-                update_errors.append(f"{port_name}: {exception_reason(exc)}")
-                self.state.diagnostics.append(
-                    {
-                        "kind": "runtime.prompt_log.dependent_update_failed",
-                        "port": str(port_name),
-                        "enabled": enabled,
-                        "error": error,
-                    }
-                )
-        message = (
-            "Debug logging enabled for new turns and Bunshin role runs."
-            if enabled
-            else "Debug logging disabled for new turns and Bunshin role runs."
-        )
-        if update_errors:
+        errors = await self.control_runtime.notify("core.prompt_log.changed", {"enabled": enabled})
+        message = ("Debug logging enabled for new turns and Bunshin role runs." if enabled
+                   else "Debug logging disabled for new turns and Bunshin role runs.")
+        if errors:
             message = (
                 f"Core debug logging {'enabled' if enabled else 'disabled'} for new turns. "
                 "Some dependent runtimes did not confirm the update; their state may differ.\n"
-                + "\n".join(update_errors)
+                + "\n".join(f"{owner}: {error}" for owner, error in errors.items())
             )
-        await self._complete_action_reply_async(action, message)
+        await self.control_runtime.reply(action, message)
 
     async def _handle_interrupt_turn_async(self, action: ControlAction) -> None:
         route = action.route
@@ -1797,6 +1460,9 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         active_turn_id = self.turn_manager.latest_active_turn_id()
         interrupted = await self.turn_manager.interrupt_active_turn(reason="interrupted")
         message = "Interrupted the current turn." if interrupted else "No active turn to interrupt."
+        if self.turn_manager.pending_closures:
+            message = ("The turn stopped, but its conversation state could not be finalized. "
+                       "New turns will wait for memory recovery; see diagnostics for the cause.")
         # Two-segment admission: /interrupt arbitrates against the compact
         # run on the history OWNER.  An idle manual run has no parent turn
         # and is never fake-cancelled (X03); a run whose parent turn was
@@ -1814,10 +1480,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             return
         from pal.core.contracts import PendingControlRequest
 
-        scope_state = self._ensure_scope_state(route.control_scope_key)
-        existing = scope_state.pending_requests.get("reset_confirm")
+        requests = self.control_runtime.requests
+        existing = requests.get(route.control_scope_key, "reset_confirm")
         if existing is not None:
-            existing.expires_at = _utc_after_seconds(60)
+            existing.expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
+            requests.put(existing)
             await self._render_reset_prompt_async(existing)
             return
         request = PendingControlRequest(
@@ -1825,10 +1492,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             request_kind="reset_confirm",
             control_scope_key=route.control_scope_key,
             route=route,
-            expires_at=_utc_after_seconds(60),
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
             payload={},
         )
-        scope_state.pending_requests["reset_confirm"] = request
+        requests.put(request)
         await self._render_reset_prompt_async(request)
 
     async def _handle_cancel_reset_confirm_async(self, action: ControlAction) -> None:
@@ -1836,10 +1503,10 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         if route is None:
             return
         request_id = str(action.args.get("request_id") or action.args.get("interaction_id") or "").strip()
-        scope_state = self._ensure_scope_state(route.control_scope_key)
-        request = scope_state.pending_requests.get("reset_confirm")
+        requests = self.control_runtime.requests
+        request = requests.get(route.control_scope_key, "reset_confirm")
         if request is not None and request.request_id == request_id:
-            scope_state.pending_requests.pop("reset_confirm", None)
+            requests.remove(route.control_scope_key, "reset_confirm")
         await self._complete_action_reply_async(action, "Reset cancelled.")
 
     async def _handle_reset_memory_async(self, action: ControlAction) -> None:
@@ -1847,17 +1514,16 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         if route is None:
             return
         request_id = str(action.args.get("request_id") or "").strip()
-        scope_state = self._ensure_scope_state(route.control_scope_key)
-        request = scope_state.pending_requests.get("reset_confirm")
+        requests = self.control_runtime.requests
+        request = requests.get(route.control_scope_key, "reset_confirm")
         if request is None or request.request_id != request_id:
             await self._complete_action_reply_async(action, "Reset request is missing, expired, or already consumed.")
             return
-        if _parse_utc_timestamp(request.expires_at) <= datetime.now(timezone.utc):
-            scope_state.pending_requests.pop("reset_confirm", None)
-            await self._notify_expired_request_async(request)
+        if request.expired:
+            await requests.expire(request)
             return
         reset_applied = await self._execute_soft_reset_async(request)
-        scope_state.pending_requests.pop("reset_confirm", None)
+        requests.remove(route.control_scope_key, "reset_confirm")
         await self._complete_action_reply_async(
             action,
             (
@@ -1875,26 +1541,29 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         leave its runtime state intact and let its own exit path resume the
         queued turn later.
         """
-        async with self.state.channel_turn_transition_lock:
-            if self.state.resident_quiescing:
-                return False
-            reset_barrier = "quiescing:reset:" + uuid4().hex
-            self.state.scheduler.set_barrier(reset_barrier, True)
-            self._invalidate_model_selections()
-            # Two-segment admission: a confirmed reset seizes the history
-            # root's live run first (X04/X05); the owner cancels it before
-            # any history is cleared, so a late summary cannot publish into
-            # the new session.
-            self.context.require_port(
-                "memory:memory"
-            ).cancel_active_compaction(reason="reset")
-            self.state.resident_drained_event = asyncio.Event()
-            current_turn_id = self.turn_manager.latest_active_turn_id()
-            if current_turn_id is None:
-                self.state.resident_drained_event.set()
-        from pal.core.btw import cancel_btw
-
+        reset_barrier = "quiescing:reset:" + uuid4().hex
+        claimed = False
         try:
+            async with self.state.channel_turn_transition_lock:
+                if self.state.resident_quiescing:
+                    return False
+                self.state.scheduler.set_barrier(reset_barrier, True)
+                claimed = True
+                self.control_runtime.requests.invalidate_context()
+                # Two-segment admission: a confirmed reset seizes the history
+                # root's live run first (X04/X05); the owner cancels it before
+                # any history is cleared, so a late summary cannot publish into
+                # the new session.
+                self.context.require_port(
+                    "memory:memory"
+                ).cancel_active_compaction(reason="reset")
+                self.state.resident_drained_event = asyncio.Event()
+                current_turn_id = self.turn_manager.latest_active_turn_id()
+                if current_turn_id is None:
+                    self.state.resident_drained_event.set()
+            await self.control_runtime.notify("core.context_change.started", {"trigger": "reset"})
+            from pal.core.btw import cancel_btw
+
             if current_turn_id is not None:
                 await self.turn_manager.interrupt_active_turn(reason="reset")
             await cancel_btw(self)
@@ -1915,48 +1584,50 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 except Exception:
                     self.state.diagnostics.append({"kind": "resident.history.reset_failed"})
                     return False
-            elif any(
-                handle.runtime_state_port is not None
-                for handle in self.context.module_registry.modules.values()
-            ):
-                await coordinator.reset("soft_reset")
             else:
-                memory_service = self.context.require_port(MEMORY)
-                soft_reset = getattr(memory_service, "asoft_reset", None)
-                if callable(soft_reset):
-                    await soft_reset()
-                else:
-                    sync_reset = getattr(memory_service, "soft_reset", None)
-                    if callable(sync_reset):
-                        await asyncio.to_thread(sync_reset)
+                await coordinator.reset("soft_reset")
+            self.turn_manager.discard_pending_closures_after_reset()
             # F6 (review af51d74): the LLM runtime's hosted projection
             # lineages must not outlive the history authority they were
             # frozen from — retire them with the rolled incarnation.
             llm_runtime = self.context.require_port(LLM_RUNTIME)
-            retire = getattr(llm_runtime, "retire_projection_sessions", None)
-            if callable(retire):
-                retire()
+            projection = llm_runtime.projection_port
+            if projection is not None:
+                projection.retire_projection_sessions()
             return True
         finally:
-            async with self.state.channel_turn_transition_lock:
-                self.state.scheduler.set_barrier(reset_barrier, False)
-                self.state.resident_drained_event.set()
-            await self._start_next_queued_turn_async()
+            if claimed:
+                async def finish_reset() -> None:
+                    async with self.state.channel_turn_transition_lock:
+                        self.state.scheduler.set_barrier(reset_barrier, False)
+                        self.state.resident_drained_event.set()
+                    await self._start_next_queued_turn_async()
+
+                cleanup = asyncio.create_task(finish_reset())
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    # Repeated cancellation must not strand the admission
+                    # barrier while its cleanup waits for the transition lock.
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            continue
+                    cleanup.result()
+                    raise
 
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
             return
-        cache_epoch = str(action.args.get("cache_epoch") or "").strip()
-        hot_cache_epoch = ""
         gate = self._compaction_gate()
         busy_reply: str | None = None
         ticket = None
         # Admission is one critical section: no active turn, no unfinished
         # turn teardown, no earlier pending input, no other quiesce owner,
-        # and the hot-cache epoch claim all precede the ticket claim. The
+        # all precede the ticket claim. The
         # manual intent is never scheduled for later (A06/A08/A10).
         async with self.state.channel_turn_transition_lock:
-            estimated_notice = self.cache_warm_deadline.is_estimated_notice(cache_epoch)
             if self.turn_manager.latest_active_turn_id() is not None:
                 busy_reply = (
                     "Compaction is unavailable while a conversation turn is active. "
@@ -1977,20 +1648,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     "Compaction is unavailable while the runtime is quiescing "
                     "or dreaming."
                 )
-            elif cache_epoch and not self.cache_warm_deadline.claim_compaction(cache_epoch):
-                busy_reply = "This cache compaction reminder has already been handled or has expired."
             else:
-                hot_cache_epoch = cache_epoch if not estimated_notice else ""
                 ticket = gate.claim(
                     RESIDENT_COMPACTION_SCOPE,
-                    deadline_seconds=self.turn_executor.compaction.deadline_seconds(
-                        max_attempts=3 if hot_cache_epoch else None,
-                    ),
-                    trigger=(
-                        CompactionTrigger.MANUAL_HOT
-                        if hot_cache_epoch
-                        else CompactionTrigger.MANUAL
-                    ),
+                    deadline_seconds=self.turn_executor.compaction.deadline_seconds(),
+                    trigger=CompactionTrigger.MANUAL,
                 )
                 if ticket is None:
                     busy_reply = "A context compaction is already in progress."
@@ -2000,24 +1662,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             )
             return
         try:
-            if cache_epoch:
-                try:
-                    await self._deliver_control_delivery_async(
-                        control_interactions.terminal_delivery_for_action(
-                            action,
-                            "Compacting with the warm cache..." if hot_cache_epoch else "Compacting...",
-                            delivery_kind="interactive_update",
-                        )
-                    )
-                    await self._flush_control_status_async(action.route)
-                except Exception as exc:
-                    # A presentation failure must not release the gate or
-                    # authorize a second claim (X08).
-                    self.state.diagnostics.append(
-                        {"kind": "compact.status_delivery_failed", "error": exception_report(exc)}
-                    )
-            else:
-                await self.cache_warm_deadline.clear_for_compaction()
+            await self.control_runtime.notify("core.context_change.started", {"trigger": "manual"})
             memory_service = self.context.require_port(MEMORY)
             l1_items = list(
                 memory_service.settled_transcripts() if memory_service is not None else ()
@@ -2027,7 +1672,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                 await self._complete_compact_reply_async(action, "Nothing to compact - memory is already minimal.")
                 return
             run_result = await self._run_control_compaction_async(
-                ticket, max_attempts=3 if hot_cache_epoch else None, cache_epoch=hot_cache_epoch,
+                ticket,
             )
         finally:
             # Identity-checked: this ticket can never release a successor's
@@ -2048,13 +1693,6 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                     "and tools) already exceeds the context window by "
                     "itself. Reduce the base or switch to a larger endpoint; "
                     "history was left unchanged."
-                )
-            elif hot_cache_epoch:
-                message = (
-                    "The warm cache has expired or cannot be reused. Automatic attempts have stopped. "
-                    "The original context is preserved; run /compact manually if needed."
-                    if run_result.status == "hot_cache_unavailable"
-                    else f"Compaction did not complete after {run_result.attempts} attempts. Review the error details before deciding whether to retry."
                 )
             if run_result.user_notice:
                 message += "\n" + run_result.user_notice
@@ -2078,7 +1716,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
     async def _run_control_compaction_async(
         self, ticket: CompactionTicket, *, target_input_budget: int = 0,
         reserved_output_tokens: int = 0, preferred_endpoint_id: str | None = None,
-        max_attempts: int | None = None, cache_epoch: str = "",
+        max_attempts: int | None = None, replay_guard: Callable[[], bool] | None = None,
         commit_guard: Callable[[], bool] | None = None,
         force_semantic: bool = False,
     ) -> CompactionRunResult:
@@ -2097,7 +1735,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             self.context.require_port(MEMORY), target_input_budget=target_input_budget,
             reserved_output_tokens=reserved_output_tokens,
             preferred_endpoint_id=preferred_endpoint_id,
-            max_attempts=max_attempts, cache_epoch=cache_epoch, commit_guard=eligible,
+            max_attempts=max_attempts, replay_guard=replay_guard, commit_guard=eligible,
             **({"force_semantic": True} if force_semantic else {}),
         )
         if run_result.success:
@@ -2126,40 +1764,6 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             if delivery is not None:
                 await self._deliver_control_delivery_async(delivery, fallback_route=action.route)
 
-    async def handle_cache_warm_deadline_ignore(
-        self,
-        action: ControlAction,
-    ) -> dict[str, Any]:
-        epoch = str(action.args.get("cache_epoch") or "").strip()
-        ignored = self.cache_warm_deadline.ignore(epoch)
-        message = (
-            "Dismissed this warm cache compaction reminder."
-            if ignored
-            else "This warm cache reminder has expired."
-        )
-        return {
-            "delivery": control_interactions.terminal_delivery_for_action(
-                action,
-                message,
-            )
-        }
-
-    async def handle_cache_warm_deadline_disable(
-        self,
-        action: ControlAction,
-    ) -> dict[str, Any]:
-        try:
-            self.cache_warm_deadline.configure(enabled=False)
-            message = "Compaction reminders before cache expiry are disabled."
-        except Exception as exc:
-            message = f"Could not disable cache reminders: {exception_reason(exc)}"
-        return {
-            "delivery": control_interactions.terminal_delivery_for_action(
-                action,
-                message,
-            )
-        }
-
     async def _handle_route_reply_async(self, action: ControlAction) -> None:
         route = action.route
         if route is None:
@@ -2179,22 +1783,13 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         await self._complete_action_reply_async(action, result.user_text)
 
     async def _render_reset_prompt_async(self, request) -> None:
+        request.expired_delivery = control_interactions.terminal_delivery_for_interaction(
+            request.route, interaction_id=request.request_id, interaction_kind="reset_confirm",
+            text="This reset request expired.", delivery_kind="interactive_expire")
         already_opened = bool(request.payload.get("opened"))
         request.payload["opened"] = True
         await self._deliver_control_delivery_async(
-            control_interactions.reset_confirm_delivery(request, already_opened=already_opened)
-        )
-
-    async def _notify_expired_request_async(self, request) -> None:
-        await self._deliver_control_delivery_async(
-            control_interactions.terminal_delivery_for_interaction(
-                request.route,
-                interaction_id=(control_interactions.control_panel_interaction_id(request.route)
-                                if request.request_kind == "model_switch" else request.request_id),
-                interaction_kind="control_panel" if request.request_kind == "model_switch" else "reset_confirm",
-                text="This model selection expired." if request.request_kind == "model_switch" else "This reset request expired.",
-                delivery_kind="interactive_expire",
-            )
+            core_interactions.reset_confirm_delivery(request, already_opened=already_opened)
         )
 
     async def _complete_compact_reply_async(self, action: ControlAction, text: str) -> None:
@@ -2317,6 +1912,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         text: str,
         *,
         require_provider: bool = False,
+        wait: bool = False,
     ) -> bool:
         envelope = self._route_to_channel_envelope(
             route,
@@ -2325,10 +1921,12 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         if envelope is None:
             return False
         channel_runtime = self.context.require_port("channel:channel")
-        channel_runtime.queue_reply(
+        reply_id = channel_runtime.queue_reply(
             self._delivery_binding_for_envelope(envelope),
             text,
         )
+        if wait:
+            return bool(await channel_runtime.wait_for_reply(reply_id))
         return True
 
     async def _status_to_route_async(
@@ -2407,11 +2005,11 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         self,
         continuation: TurnContinuation,
         *,
-        schedule_deadline: bool = True,
+        notify_settled: bool = True,
     ) -> TurnOutcome:
         current: EffectResult | None = None
         try:
-            await self.turn_executor._ensure_l1_turn_async(
+            self.turn_executor._begin_l1_turn(
                 continuation,
                 PromptAssemblyContext(
                     event=continuation.opening_event,
@@ -2428,12 +2026,12 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
                         outcome,
                         event=continuation.opening_event,
                         delivery_binding=continuation.delivery_binding,
-                        schedule_deadline=False,
+                        notify_settled=False,
                     )
                     await self._deliver_pending_compact_memory_candidates_async(continuation)
                     self.turn_executor.clear_execution_cursors(continuation)
-                    if schedule_deadline:
-                        self._schedule_cache_warm_deadline_after_turn_success(
+                    if notify_settled:
+                        await self._notify_turn_settled_async(
                             outcome,
                             event=continuation.opening_event,
                             delivery_binding=continuation.delivery_binding,
@@ -2452,7 +2050,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             raise
 
     async def _deliver_pending_compact_memory_candidates_async(self, continuation: TurnContinuation) -> None:
-        batches = list(getattr(continuation, "pending_compact_memory_candidate_batches", []) or [])
+        batches = list(continuation.pending_compact_memory_candidate_batches)
         if not batches:
             return
         binding = continuation.delivery_binding
@@ -2546,7 +2144,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         route: str | None = None,
         conversation_context: dict[str, Any] | None = None,
     ) -> FailureHandlingResult:
-        return await self.failure_orchestrator.handle_failure_async(
+        return await self.failure_recovery.current.handle_failure_async(
             signal,
             origin=origin,
             route=route,
@@ -2554,7 +2152,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         )
 
     def _render_failure_feedback_text(self, feedback: FailureUserFeedback) -> str:
-        return self.failure_orchestrator.render_failure_feedback_text(feedback)
+        return render_failure_feedback_text(feedback)
 
     def _should_enter_failure_flow_for_tool_result(self, tool_result: ToolExecutionResult) -> bool:
         if tool_result.ok:
@@ -2607,7 +2205,7 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         return bool(self.state.prompt_log_enabled)
 
     def _append_prompt_log(self, text: str) -> None:
-        root = getattr(self.config, "runtime_root", None)
+        root = self.config.runtime_root
         if root is None:
             print(text)
             return
@@ -2620,37 +2218,37 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
         *,
         event: EventEnvelope | None = None,
         delivery_binding: TurnDeliveryBinding | None = None,
-        schedule_deadline: bool = True,
+        notify_settled: bool = True,
     ) -> None:
         result = await self.turn_executor.schedule_post_turn_commit_async(outcome)
         if (
             self.context.port_registry.get("memory:memory") is not None
-            and str(getattr(result, "state", "")) != "settled"
+            and (result is None or result.state != "settled")
         ):
             raise RuntimeError(
                 "Pal L1 working-set settlement failed; refusing to complete "
                 "the logical turn"
             )
-        if schedule_deadline:
-            self._schedule_cache_warm_deadline_after_turn_success(
+        if notify_settled:
+            await self._notify_turn_settled_async(
                 outcome,
                 event=event,
                 delivery_binding=delivery_binding,
                 settled_result=result,
             )
 
-    def _schedule_cache_warm_deadline_after_turn_success(
+    async def _notify_turn_settled_async(
         self,
         outcome: TurnOutcome,
         *,
         event: EventEnvelope | None,
         delivery_binding: TurnDeliveryBinding | None,
         settled_result: Any | None = None,
-        schedule_timer: bool = True,
+        notify_observers: bool = True,
     ) -> None:
         if (
             settled_result is not None
-            and str(getattr(settled_result, "state", "")) != "settled"
+            and settled_result.state != "settled"
         ):
             return
         if (
@@ -2659,44 +2257,19 @@ class PalCore(ModelSwitchMixin, MemoryMaintenanceMixin):
             and str(event.source_kind or "") == SourceKind.CHANNEL
         ):
             self.state.compaction_user_turn_count += 1
-            if schedule_timer and delivery_binding is not None:
-                try:
-                    self.cache_warm_deadline.schedule_after_turn_commit(
-                        route=ControlRoute(
-                            endpoint_id=delivery_binding.endpoint.endpoint_id,
-                            channel_kind=delivery_binding.endpoint.channel_kind,
-                            reply_target=dict(
-                                delivery_binding.response_handle.reply_target
-                            ),
-                            control_scope_key=delivery_binding.control_scope_key,
-                            correlation_id=delivery_binding.correlation_id,
-                        ),
-                        turn_id=str(outcome.commit_payload.turn_id),
-                    )
-                except Exception as exc:
-                    self.state.diagnostics.append(
-                        {
-                            "kind": "cache_warm_deadline.schedule_failed",
-                            "turn_id": str(outcome.commit_payload.turn_id),
-                            "error": f"{exc.__class__.__name__}: {exc}",
-                        }
-                    )
-
-def _utc_after_seconds(seconds: int) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
-
-
-def _parse_utc_timestamp(value: str) -> datetime:
-    raw = str(value or "").strip()
-    if not raw:
-        return datetime.now(timezone.utc)
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return datetime.now(timezone.utc)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        if notify_observers and delivery_binding is not None:
+            await self.control_runtime.notify("core.turn.settled", {
+                "turn_id": outcome.commit_payload.turn_id,
+                "event_kind": event.event_kind if event is not None else "",
+                "source_kind": event.source_kind if event is not None else "",
+                "route": ControlRoute(
+                    endpoint_id=delivery_binding.endpoint.endpoint_id,
+                    channel_kind=delivery_binding.endpoint.channel_kind,
+                    reply_target=dict(delivery_binding.response_handle.reply_target),
+                    control_scope_key=delivery_binding.control_scope_key,
+                    correlation_id=delivery_binding.correlation_id,
+                ),
+            })
 
 
 def _last_arg_of_type(args: tuple[Any, ...], expected_type):

@@ -33,7 +33,7 @@ def env(tmp_path):
     core.context.port_registry["channel:channel"] = channel
     binding = {"channel_id": "telegram_main", "reply_target": {"chat_id": "42", "thread_id": "7"}}
     from tests.turn_fakes import TurnIOFixture
-    core.context.execution_runtime.register_provider_ref("core:turn_io", TurnIOFixture(binding=binding))
+    core.context.execution_runtime.replace_provider_ref("core:turn_io", TurnIOFixture(binding=binding), owner_id="core", expected=core.context.execution_runtime.turn_io)
     manager = ProactiveManager(repository=ProactiveRepository())
     register_proactive(core.context, manager)
     core.publish_module_capabilities("proactive")

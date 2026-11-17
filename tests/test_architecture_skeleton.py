@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pal.failure.tools import select_failure_descriptors
+
 from tests.core_factory import mount_l3_provider
 from tests.core_factory import build_core
 
@@ -33,6 +35,7 @@ from pal.channel import (
     register_with_core as register_channel_with_core,
 )
 from pal.channel.contracts import ChannelDeliveryError
+from pal.core.control_action_registry import ControlActionSpec
 from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.control.prompt import ControlPromptFragmentProvider
 from pal.llm.compaction_engine import CompactionClockKind, CompactionSnapshot
@@ -98,12 +101,6 @@ from pal.bunshin import register_with_core as register_bunshin_with_core
 ROOT = Path(__file__).resolve().parents[1]
 
 
-
-def _select_memory_backend(core, service, arguments):
-    from pal.memory.maintenance import MemoryBackendOwner
-    from types import SimpleNamespace
-    result = asyncio.run(MemoryBackendOwner(core, service).dispatch("select", arguments))
-    return SimpleNamespace(status=result["status"], structured=result["state"])
 
 class RecordingAdapter(ChannelAdapter):
     channel_kind = "stdio"
@@ -655,7 +652,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         plugin = MockL3Plugin(records=[{"document_id": "fact:1", "title": "Redis"}])
         selector = L3ProviderSelector(resolver={plugin.provider_id: plugin}.get)  # type: ignore[arg-type]
         service = MemoryService(l3_selector=selector)
-        service.l3_selector.active_provider_id = "mock_l3"
+        service.l3_selector._adopt("mock_l3")
 
         recall_result = plugin.recall(MemoryQuery(level="deep", queries=["redis"]))
 
@@ -844,18 +841,21 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
     def test_module_registration_conflict_does_not_leak_partial_projections(self) -> None:
         core = build_core()
+        async def handle_action(_action):
+            pass
+
         first = ModuleHandle(
             module_id="first",
             tier=MODULE_TIER_DETACHABLE,
             ports={"service": object()},
-            control_action_handlers={"shared.action": lambda _action: None},
+            control_action_handlers={"shared.action": ControlActionSpec(handle_action)},
         )
         second_port = object()
         second = ModuleHandle(
             module_id="second",
             tier=MODULE_TIER_DETACHABLE,
             ports={"service": second_port},
-            control_action_handlers={"shared.action": lambda _action: None},
+            control_action_handlers={"shared.action": ControlActionSpec(handle_action)},
         )
         core.context.register_module(first)
 
@@ -864,7 +864,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertIsNone(core.context.module_registry.get("second"))
         self.assertNotIn("second:service", core.context.port_registry)
-        self.assertNotIn("second", core.context.control_action_registry.by_module)
+        self.assertEqual(core.context.control_action_registry.handlers["shared.action"][0], "first")
         self.assertIs(core.context.module_registry.get("first"), first)
 
     def test_duplicate_module_registration_preserves_original_handle(self) -> None:
@@ -1335,7 +1335,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_memory_with_core(core.context, memory_service)
             l3_plugin = MockL3Plugin()
             mount_l3_provider(core.context, l3_plugin)
-            memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
             core.publish_module_capabilities("identity")
             core.publish_module_capabilities("llm")
             core.publish_module_capabilities("memory")
@@ -1452,7 +1451,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         l3_plugin = RecordingL3Plugin()
         mount_l3_provider(core.context, l3_plugin)
-        memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(l3_plugin.module_id)
 
@@ -1476,7 +1474,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         l3_plugin = MockL3Plugin()
         mount_l3_provider(core.context, l3_plugin)
-        memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(l3_plugin.module_id)
 
@@ -1522,7 +1519,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         l3_plugin = MockL3Plugin()
         mount_l3_provider(core.context, l3_plugin)
-        memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
         for module_id in ("execution", "failure", "memory", l3_plugin.module_id):
             core.publish_module_capabilities(module_id)
         scripted_llm = ScriptedLLMRuntime(
@@ -1572,7 +1568,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         for module_id in ("execution", "channel"):
             core.publish_module_capabilities(module_id)
 
-        descriptors = core.tool_surface.select_failure_descriptors(
+        descriptors = select_failure_descriptors(core.context,
             FailureSignal(
                 subsystem="channel",
                 component="telegram_main",
@@ -2078,7 +2074,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         (emitted_topic, dict(event))
                     ),
                 )
-            task = core.start_background_turn(continuation, lambda: asyncio.sleep(60))
+            task = core.start_background_turn(continuation, lambda: asyncio.sleep(60), owner=None)
             self.assertIsNotNone(task)
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -2288,6 +2284,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
     def test_main_loop_drains_channel_proactive_and_bunshin_sources(self) -> None:
         core = build_core()
+        from pal.core.capabilities import register_with_core as register_core
+        register_core(core)
         channel_runtime = ChannelRuntime()
         proactive_manager = ProactiveManager()
 
@@ -2301,7 +2299,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 event=EventEnvelope(
                     event_kind="slash_command",
                     source_kind="channel",
-                    payload={"command": "/pause"},
+                    payload={"command": "/status"},
                 ),
                 endpoint=EndpointConfig(endpoint_id="stdio", channel_kind="stdio", binding_key="stdin"),
                 response_handle=ResponseHandle(endpoint_id="stdio"),
@@ -2401,7 +2399,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 with contextlib.suppress(Exception):
                     core.detach_module("bunshin")
 
-    def test_memory_can_switch_active_l3_provider_via_cli_owner(self) -> None:
+    def test_memory_initial_binding_uses_the_registered_l3_provider(self) -> None:
         core = build_core()
         memory_service = MemoryService()
         mock_l3 = MockL3Plugin(records=[{"document_id": "fact:1", "title": "Redis"}])
@@ -2411,10 +2409,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
 
-        configured = _select_memory_backend(core, memory_service, {"name": "mock_l3"})
         recall_result = mock_l3.recall(MemoryQuery(level="deep", queries=["redis"]))
 
-        self.assertEqual(configured.status, "ok")
+        self.assertEqual(memory_service.l3_selector.active_provider_id, "mock_l3")
         self.assertEqual(recall_result.hits, [{"document_id": "fact:1", "title": "Redis"}])
 
     def test_memory_bootstraps_its_default_l3_provider(self) -> None:
@@ -2423,7 +2420,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core = build_core()
         self.assertNotIn("null_l3", core.context.execution_runtime.provider_registry)
 
-    def test_memory_can_fallback_to_stub_provider(self) -> None:
+    def test_memory_withdrawal_preserves_committed_logical_identity(self) -> None:
         core = build_core()
         memory_service = MemoryService()
         mock_l3 = MockL3Plugin(records=[{"document_id": "fact:1", "title": "Redis"}])
@@ -2433,11 +2430,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
 
-        _select_memory_backend(core, memory_service, {"name": "mock_l3"})
-        fallback = _select_memory_backend(core, memory_service, {"name": "null_l3"})
-
-        self.assertEqual(fallback.status, "ok")
-        self.assertEqual(memory_service.l3_selector.active_provider_id, "null_l3")
+        memory_service.unregister_l3_provider(mock_l3)
+        self.assertEqual(memory_service.l3_selector.active_provider_id, "mock_l3")
+        with self.assertRaises(KeyError):
+            memory_service.l3_selector.resolve()
 
     def test_detachable_l3_provider_can_detach_and_reattach(self) -> None:
         core = build_core()
@@ -2476,7 +2472,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             ]
         )
         mount_l3_provider(core.context, mock_l3)
-        memory_service.l3_selector.active_provider_id = mock_l3.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
 
@@ -2532,7 +2527,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             ]
         )
         mount_l3_provider(core.context, mock_l3)
-        memory_service.l3_selector.active_provider_id = mock_l3.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
 
@@ -2566,7 +2560,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         mock_l3 = MockL3Plugin()
         mount_l3_provider(core.context, mock_l3)
-        memory_service.l3_selector.active_provider_id = mock_l3.provider_id
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)
@@ -2587,7 +2580,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         mock_l3 = MockL3Plugin()
         mount_l3_provider(core.context, mock_l3)
-        memory_service.l3_selector.active_provider_id = mock_l3.provider_id
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(mock_l3.module_id)

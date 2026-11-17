@@ -15,6 +15,7 @@ from pal.core.runtime import PalCore
 from pal.foundation import PalV2Database, EventEnvelope
 from pal.memory import MemoryService
 from pal.memory.contracts import L3CommitRequest
+from pal.memory.dreaming.failure_reminders import schedule_failure_reminder
 from pal.memory.dreaming.contracts import DreamingConfig
 from pal.memory.dreaming.runtime import DreamingEventSource
 from pal.memory.dreaming.service import DreamingService
@@ -40,7 +41,7 @@ def env(tmp_path):
     core = build_core()
     manager = ProactiveManager(repository=ProactiveRepository())
     core.context.port_registry.register(SILENT_ONCE_SCHEDULER, manager)
-    service = DreamingService(storage=storage, provider=provider, llm=ReviewingLLM(fail_review=True), core=core)
+    service = DreamingService(storage=storage, provider=provider, llm=ReviewingLLM(fail_review=True), host=core.control_runtime)
     yield core, manager, service
     provider.repository.close()
     core.context.execution_runtime.shutdown()
@@ -92,7 +93,7 @@ def test_restart_recovers_logged_failure_when_scheduler_was_unavailable(env):
     assert service.status()["report"]["failure_reminder"] == {"scheduled": False}
     restarted_manager = ProactiveManager(repository=ProactiveRepository())
     core.context.port_registry.register(SILENT_ONCE_SCHEDULER, restarted_manager)
-    restarted = DreamingService(storage=service.storage, provider=service.provider, llm=service.llm, core=core)
+    restarted = DreamingService(storage=service.storage, provider=service.provider, llm=service.llm, host=core.control_runtime)
     # The automatic dreaming schedule is disabled, but pending failure handoff
     # still reconciles through the same registered event source.
     assert restarted.config.enabled is False
@@ -167,11 +168,12 @@ def test_silent_proactive_result_survives_l1_restore_and_enters_next_chat(tmp_pa
         channel.register_endpoint(sink)
         core.context.port_registry['channel:channel'] = channel
         manager = ProactiveManager()
-        register_proactive(core.context, manager)
+        handle = register_proactive(core.context, manager)
         notice = DreamingFailureNotice('dream-fixture', '2026-11-01T00:00:00+00:00',
                                        'review failed', '/private/failure.json', False, True)
-        task_id = core.schedule_memory_failure_reminder(notice)
+        task_id = schedule_failure_reminder(core.control_runtime, notice)
         handler = ProactiveTriggerHandler(manager, ProactiveRunner())
+        handler.owner = handle
         handler.handle(EventEnvelope(event_kind=EventKind.PROACTIVE_TRIGGER, source_kind='proactive',
             payload=ProactiveTriggerEvent(task_id, 'scheduled')), core.context)
         assert handler.tasks

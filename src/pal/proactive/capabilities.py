@@ -816,14 +816,22 @@ def register_with_core(
         handle = context.module_registry.get(PROACTIVE_MODULE_ID)
         if handle is None or not handle.mounted:
             return
-        if handle.mounted_subtree is not None and handle.mounted_subtree.mounted:
-            context.execution_runtime.unmount_subtree(handle)
-        context.execution_runtime.hydrate_module_handle(handle)
-        handle.published_capabilities = context.execution_runtime.mount_subtree(handle)
+        context.withdraw_module_capabilities(handle)
+        context.publish_module_capabilities(handle)
 
     manager.on_change = refresh_capabilities
     provider = ProactiveIntrospectionProvider(manager=manager, runner=runner, refresh_capabilities=refresh_capabilities, context=context)
-    source = ProactiveEventSource(manager=manager)
+    from pal.control.runtime_contracts import CORE_CONTROL
+
+    host = context.port_registry.observe(CORE_CONTROL)
+    timers = host.current.open_timer_scope()
+    source = ProactiveEventSource(manager=manager, timers=timers)
+    manager.on_ready = host.current.notify_ready
+
+    def cleanup_callbacks() -> None:
+        manager.on_ready = None
+        manager.on_change = None
+
     event_handler = ProactiveTriggerHandler(manager=manager, runner=runner)
     handle = ModuleHandle(
         module_id=PROACTIVE_MODULE_ID,
@@ -831,14 +839,18 @@ def register_with_core(
         detachable=True,
         introspection_provider=provider,
         event_sources=[source],
+        timer_scope=timers,
+        cleanup_callbacks=[cleanup_callbacks],
+        shutdown_async=event_handler.shutdown,
         event_handlers={EventKind.PROACTIVE_TRIGGER: [event_handler]},
         ports={"proactive_manager": manager, "proactive_runner": runner,
                "silent_once_scheduler": manager},
         port_contracts=(SILENT_ONCE_SCHEDULER,),
     )
+    event_handler.owner = handle
     context.register_module(handle)
     context.event_source_registry.attach(PROACTIVE_MODULE_ID, source)
-    context.event_handler_registry.register(EventKind.PROACTIVE_TRIGGER, event_handler, module_id=PROACTIVE_MODULE_ID)
+    context.event_handler_registry.register(EventKind.PROACTIVE_TRIGGER, event_handler, owner=handle, module_id=PROACTIVE_MODULE_ID)
     return handle
 
 

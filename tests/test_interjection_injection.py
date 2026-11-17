@@ -125,6 +125,9 @@ class _FakeOutputPort:
     def __init__(self) -> None:
         self.replies: list[tuple[TurnDeliveryBinding, str]] = []
 
+    def supports_stream_delivery(self, binding: TurnDeliveryBinding) -> bool:
+        return False
+
     def queue_reply(self, binding: TurnDeliveryBinding, text: str) -> str:
         self.replies.append((binding, text))
         return "reply-1"

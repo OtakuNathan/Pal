@@ -64,6 +64,7 @@ class ExecutionSlot:
             with candidate._registry_lock:
                 self._publish(context, handle, candidate, staged, published)
                 published_candidate = True
+            context.module_publications.publish(handle)
             extension.activate(context, owner_handle, candidate)
             for name, port in owner_handle.ports.items():
                 context.port_registry[f'{owner_handle.module_id}:{name}'] = port
@@ -80,6 +81,7 @@ class ExecutionSlot:
                                        published_capabilities=[])
                     published = previous.mount_subtree(restored, retire_replaced=False)
                     self._publish(context, handle, previous, restored, published)
+                context.module_publications.publish(handle)
 
             # Retain ownership before attempting restoration: restoration can
             # itself fail, and close must wait until the candidate is replaced.
@@ -121,6 +123,7 @@ class ExecutionSlot:
             published = previous.mount_subtree(staged, retire_replaced=False)
             with previous._registry_lock:
                 self._publish(context, handle, previous, staged, published)
+            context.module_publications.publish(handle)
         # Preserve cleanup ownership on failure. A retry closes this same
         # retired implementation without withdrawing the restored entries.
         extension.close(candidate)

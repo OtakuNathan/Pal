@@ -129,13 +129,14 @@ async def one(llm, values, case_id, root, records, generation):
     core.state.active_turn_id = 'waiting-for-cli'
     snapshot = {'eligible': True, 'anchor_epoch': 'fixture', 'anchor_ttl_seconds': 3600,
                 'anchor_remaining_ttl_seconds': 3500, 'prefix_tokens': 65536}
-    core.context.port_registry['llm:llm'] = SimpleNamespace(settings_repository=RuntimeSettingRepository(),
-        prompt_cache_warm_deadline_snapshot=lambda: snapshot)
-    owner = core.cache_warm_deadline
+    from tests.llm_fakes import scripted_llm
+    from tests.cache_reminder_factory import attach_cache_reminder
+    core.context.port_registry['llm:llm'] = scripted_llm(prompt_cache_reminder_snapshot=lambda: snapshot)
+    owner = attach_cache_reminder(core, RuntimeSettingRepository())
     from pal.control.contracts import ControlRoute
     owner.schedule_after_turn_commit(route=ControlRoute(endpoint_id='fixture', channel_kind='socket',
         reply_target={}, control_scope_key='fixture'), turn_id='previous')
-    config = CoreConfigurationService(root, owner)
+    config = CoreConfigurationService(root, core.context.configuration_operations)
     methods = {'catalog_snapshot': catalog.snapshot, 'catalog_refresh': catalog.refresh,
         'catalog_set_profile_override': catalog.set_profile_override, 'catalog_reset_profile_override': catalog.reset_profile_override,
         'catalog_set_family_override': catalog.set_family_override, 'catalog_reset_family_override': catalog.reset_family_override}

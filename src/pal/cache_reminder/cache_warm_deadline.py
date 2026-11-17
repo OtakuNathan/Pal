@@ -1,72 +1,19 @@
 from __future__ import annotations
 
-import asyncio
-from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, ContextManager, Mapping, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable, Mapping
+
+from pal.llm.settings_contracts import RuntimeSettingsPort
+from pal.foundation.diagnostics import exception_reason
+from pal.shared.timers import TimerHandlePort, TimerScopePort
 
 from pal.control.contracts import ControlRoute
 
 
-CACHE_WARM_DEADLINE_ENABLED_KEY = "cache_warm_deadline_enabled"
-CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY = "cache_warm_deadline_lead_seconds"
-CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY = (
-    "cache_warm_deadline_min_prefix_tokens"
+from pal.cache_reminder.settings import (
+    CacheWarmDeadlineSettings, read_cache_reminder_settings, configure_cache_reminder_settings,
 )
-
-DEFAULT_CACHE_WARM_DEADLINE_ENABLED = True
-DEFAULT_CACHE_WARM_DEADLINE_LEAD_SECONDS = 5 * 60
-DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS = 32_768
-
-
-class RuntimeSettingsPort(Protocol):
-    def get(self, setting_key: str) -> str | None: ...
-
-    def set(self, setting_key: str, setting_value: str) -> Any: ...
-
-
-@runtime_checkable
-class TransactionalRuntimeSettingsPort(RuntimeSettingsPort, Protocol):
-    def selection_transaction(self) -> ContextManager[Any]: ...
-
-
-@dataclass(frozen=True)
-class CacheWarmDeadlineSettings:
-    enabled: bool = DEFAULT_CACHE_WARM_DEADLINE_ENABLED
-    lead_seconds: int = DEFAULT_CACHE_WARM_DEADLINE_LEAD_SECONDS
-    min_prefix_tokens: int = DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS
-
-
-def read_cache_reminder_settings(repository: RuntimeSettingsPort | None) -> CacheWarmDeadlineSettings:
-    if repository is None:
-        return CacheWarmDeadlineSettings()
-    return CacheWarmDeadlineSettings(
-        enabled=_setting_bool(repository.get(CACHE_WARM_DEADLINE_ENABLED_KEY), DEFAULT_CACHE_WARM_DEADLINE_ENABLED),
-        lead_seconds=_setting_int(repository.get(CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY), DEFAULT_CACHE_WARM_DEADLINE_LEAD_SECONDS, minimum=30),
-        min_prefix_tokens=_setting_int(repository.get(CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY), DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS, minimum=1024),
-    )
-
-
-def configure_cache_reminder_settings(repository: RuntimeSettingsPort, *, enabled: bool | None = None,
-                                     lead_seconds: int | None = None,
-                                     min_prefix_tokens: int | None = None) -> CacheWarmDeadlineSettings:
-    # Validate the entire patch before storing any value, including enabled.
-    updates = {}
-    if lead_seconds is not None:
-        if int(lead_seconds) < 30:
-            raise ValueError("lead_seconds must be at least 30")
-        updates[CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY] = str(int(lead_seconds))
-    if min_prefix_tokens is not None:
-        if int(min_prefix_tokens) < 1024:
-            raise ValueError("min_prefix_tokens must be at least 1024")
-        updates[CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY] = str(int(min_prefix_tokens))
-    if enabled is not None:
-        updates[CACHE_WARM_DEADLINE_ENABLED_KEY] = "true" if bool(enabled) else "false"
-    with repository.selection_transaction() if isinstance(repository, TransactionalRuntimeSettingsPort) else nullcontext():
-        for key, value in updates.items():
-            repository.set(key, value)
-    return read_cache_reminder_settings(repository)
 
 
 @dataclass(frozen=True)
@@ -77,7 +24,7 @@ class CacheWarmDeadlineNotice:
     ttl_seconds: int
     lead_seconds: int
     prefix_tokens: int
-    expires_at: str
+    expires_at: datetime
     estimated: bool = False
 
 
@@ -85,7 +32,6 @@ CacheSnapshotProvider = Callable[[], Mapping[str, Any]]
 SettingsProvider = Callable[[], RuntimeSettingsPort | None]
 ActiveTurnProvider = Callable[[], bool]
 NoticeDelivery = Callable[[CacheWarmDeadlineNotice], Awaitable[bool]]
-Sleep = Callable[[float], Awaitable[None]]
 
 
 @dataclass
@@ -95,9 +41,9 @@ class CacheWarmDeadlineManager:
     has_active_turn: ActiveTurnProvider
     deliver_notice: NoticeDelivery
     expire_notice: NoticeDelivery
-    sleep: Sleep = asyncio.sleep
-    _task: asyncio.Task[None] | None = None
-    _task_loop: asyncio.AbstractEventLoop | None = None
+    timers: TimerScopePort
+    _notice_timer: TimerHandlePort | None = None
+    _expiry_timer: TimerHandlePort | None = None
     _generation: int = 0
     _scheduled_epoch: str = ""
     _scheduled_turn_id: str = ""
@@ -126,7 +72,12 @@ class CacheWarmDeadlineManager:
         resolved = configure_cache_reminder_settings(repository, enabled=enabled,
             lead_seconds=lead_seconds, min_prefix_tokens=min_prefix_tokens)
         if not resolved.enabled:
+            notice = self._active_notice
             self.cancel()
+            if notice is not None:
+                async def expire_disabled() -> None:
+                    await self._expire_active_notice(notice)
+                self.timers.schedule(0, expire_disabled)
         return self.inspect()
 
     def schedule_after_turn_commit(
@@ -168,39 +119,31 @@ class CacheWarmDeadlineManager:
             seconds=delay_seconds
         )
         self._cache_expires_at = scheduled_at + timedelta(seconds=lifetime)
-        self._task = asyncio.create_task(
-            self._wait_and_notify(
-                generation=generation,
-                route=route,
-                turn_id=str(turn_id or ""),
-                epoch=epoch,
-                ttl_seconds=ttl_seconds,
-                lead_seconds=settings.lead_seconds,
-                prefix_tokens=prefix_tokens,
-                delay_seconds=delay_seconds,
-                expires_at=self._cache_expires_at,
-                estimated=estimated,
-            ),
-            name="pal.cache_warm_deadline",
+        notice = CacheWarmDeadlineNotice(
+            route=route, epoch=epoch, turn_id=turn_id, ttl_seconds=ttl_seconds,
+            lead_seconds=settings.lead_seconds, prefix_tokens=prefix_tokens,
+            expires_at=self._cache_expires_at, estimated=estimated,
         )
-        self._task_loop = self._task.get_loop()
+
+        async def notify() -> None:
+            await self._notify_due(notice, generation)
+
+        async def expire() -> None:
+            if generation == self._generation:
+                active = self._active_notice
+                self.cancel()
+                await self._expire_active_notice(active)
+
+        self._notice_timer = self.timers.schedule(delay_seconds, notify)
+        self._expiry_timer = self.timers.schedule(lifetime, expire)
         return True
 
     def cancel(self) -> None:
         self._generation += 1
-        task = self._task
-        task_loop = self._task_loop
-        self._task = None
-        self._task_loop = None
-        if task is not None and not task.done():
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-            if task_loop is not None and task_loop.is_running() and running_loop is not task_loop:
-                task_loop.call_soon_threadsafe(task.cancel)
-            else:
-                task.cancel()
+        for timer in (self._notice_timer, self._expiry_timer):
+            if timer is not None:
+                timer.cancel()
+        self._notice_timer = self._expiry_timer = None
         self._active_notice = None
         self._clear_schedule()
 
@@ -225,7 +168,7 @@ class CacheWarmDeadlineManager:
             try:
                 await self.expire_notice(notice)
             except Exception as exc:
-                self._last_error = f"{exc.__class__.__name__}: {exc}"
+                self._last_error = exception_reason(exc)
 
     def ignore(self, epoch: str) -> bool:
         normalized = str(epoch or "").strip()
@@ -256,7 +199,7 @@ class CacheWarmDeadlineManager:
         if (
             self.has_active_turn()
             or not settings.enabled
-            or datetime.now(timezone.utc) >= datetime.fromisoformat(notice.expires_at)
+            or datetime.now(timezone.utc) >= notice.expires_at
             or not bool(snapshot.get("eligible"))
             or str(snapshot.get("anchor_epoch") or "") != normalized
             or int(snapshot.get("anchor_remaining_ttl_seconds") or 0) <= 0
@@ -280,7 +223,7 @@ class CacheWarmDeadlineManager:
                 0,
                 int((deadline - datetime.now(timezone.utc)).total_seconds()),
             )
-        scheduled = bool(self._task and not self._task.done())
+        scheduled = any(timer is not None and timer.pending for timer in (self._notice_timer, self._expiry_timer))
         reason = None
         if not scheduled:
             if not settings.enabled:
@@ -323,81 +266,38 @@ class CacheWarmDeadlineManager:
 
     def close(self) -> None:
         self.cancel()
+        self.timers.close()
 
-    async def _wait_and_notify(
-        self,
-        *,
-        generation: int,
-        route: ControlRoute,
-        turn_id: str,
-        epoch: str,
-        ttl_seconds: int,
-        lead_seconds: int,
-        prefix_tokens: int,
-        delay_seconds: float,
-        expires_at: datetime,
-        estimated: bool = False,
-    ) -> None:
+    async def _notify_due(self, notice: CacheWarmDeadlineNotice, generation: int) -> None:
+        if generation != self._generation:
+            return
         try:
-            await self.sleep(delay_seconds)
-            if generation != self._generation:
+            expires_at = notice.expires_at
+            remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+            if remaining <= 0:
                 return
-            while self.has_active_turn():
-                remaining_seconds = (
-                    expires_at - datetime.now(timezone.utc)
-                ).total_seconds()
-                if remaining_seconds <= 0:
-                    return
-                await self.sleep(min(5.0, remaining_seconds))
-                if generation != self._generation:
-                    return
-            if datetime.now(timezone.utc) >= expires_at:
+            if self.has_active_turn():
+                async def retry() -> None:
+                    await self._notify_due(notice, generation)
+                self._notice_timer = self.timers.schedule(min(5.0, remaining), retry)
                 return
             settings = self.settings()
-            snapshot = dict(self.cache_snapshot() or {})
-            remaining_ttl = snapshot.get("anchor_remaining_ttl_seconds")
-            if (
-                not settings.enabled
-                or str(snapshot.get("anchor_epoch") or "") != epoch
-                or not bool(snapshot.get("eligible"))
-                or (
-                    remaining_ttl is not None
-                    and int(remaining_ttl) <= 0
-                )
-                or _context_tokens(snapshot) < settings.min_prefix_tokens
-                or epoch in {self._ignored_epoch, self._notified_epoch}
-            ):
+            snapshot = dict(self.cache_snapshot())
+            ttl = snapshot.get("anchor_remaining_ttl_seconds")
+            if (not settings.enabled or not snapshot.get("eligible")
+                    or snapshot.get("anchor_epoch") != notice.epoch
+                    or (ttl is not None and ttl <= 0)
+                    or _context_tokens(snapshot) < settings.min_prefix_tokens
+                    or notice.epoch in {self._ignored_epoch, self._notified_epoch}):
                 return
-            notice = CacheWarmDeadlineNotice(
-                route=route,
-                epoch=epoch,
-                turn_id=turn_id,
-                ttl_seconds=ttl_seconds,
-                lead_seconds=lead_seconds,
-                prefix_tokens=_context_tokens(snapshot),
-                expires_at=expires_at.isoformat(),
-                estimated=estimated,
-            )
             if await self.deliver_notice(notice):
-                self._notified_epoch = epoch
+                if generation != self._generation:
+                    await self._expire_active_notice(notice)
+                    return
+                self._notified_epoch = notice.epoch
                 self._active_notice = notice
-                remaining_seconds = max(
-                    0.0,
-                    (expires_at - datetime.now(timezone.utc)).total_seconds(),
-                )
-                await self.sleep(remaining_seconds)
-                if generation == self._generation:
-                    await self.expire_notice(notice)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
-            self._last_error = f"{exc.__class__.__name__}: {exc}"
-        finally:
-            if generation == self._generation:
-                self._task = None
-                self._task_loop = None
-                self._active_notice = None
-                self._clear_schedule()
+            self._last_error = exception_reason(exc)
 
     def _clear_schedule(self) -> None:
         self._scheduled_epoch = ""
@@ -405,29 +305,6 @@ class CacheWarmDeadlineManager:
         self._scheduled_route = None
         self._scheduled_deadline_at = None
         self._cache_expires_at = None
-
-
-def _setting_bool(value: str | None, default: bool) -> bool:
-    normalized = str(value or "").strip().lower()
-    if not normalized:
-        return bool(default)
-    if normalized in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if normalized in {"0", "false", "no", "off", "disabled"}:
-        return False
-    return bool(default)
-
-
-def _setting_int(
-    value: str | None,
-    default: int,
-    *,
-    minimum: int,
-) -> int:
-    try:
-        return max(minimum, int(value)) if value is not None else int(default)
-    except (TypeError, ValueError):
-        return int(default)
 
 
 def _context_tokens(snapshot: Mapping[str, Any]) -> int:

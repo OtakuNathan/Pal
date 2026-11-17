@@ -1,5 +1,6 @@
 """The native runner submits files before completion; external adapters own submission."""
 from __future__ import annotations
+from pal.execution.runtime import ExecutionRuntime
 from pal.shared.ports import PortRegistry
 
 import copy
@@ -39,7 +40,7 @@ def render(value, root):
     registry = PromptFragmentRegistry()
     registry.register(BunshinPromptFragmentProvider(context.prompt_scaffold, lambda: ""))
     compiler = PromptCompiler(SimpleNamespace(
-        prompt_fragment_registry=registry, execution_runtime=None, port_registry=PortRegistry({}),
+        prompt_fragment_registry=registry, execution_runtime=ExecutionRuntime(), port_registry=PortRegistry({}),
         require_port=lambda key: (_ for _ in ()).throw(KeyError(key)),
     ))
     ir = compiler.build_prompt_ir(PromptAssemblyContext(metadata={"memory_pack": None}))

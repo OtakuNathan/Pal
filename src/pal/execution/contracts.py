@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared.result_snapshot import ResultSnapshotRef
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from pydantic import BaseModel
 
@@ -13,7 +13,17 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     model_validation_schema,
 )
-from pal.shared.tool_protocol import ToolAffordance, ToolContextMessageIR
+from pal.shared.tool_protocol import ToolAffordance, ToolCallIR, ToolContextMessageIR, ToolExecutionResult
+
+if TYPE_CHECKING:
+    from pal.foundation.lifecycle_gate import WriterPreferredRWGate
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    from pal.execution.logical_sessions import LogicalExecutionSessions
+    from pal.execution.result_snapshots import ResultSnapshotStore
+    from pal.execution.session_state import LogicalExecutionContext, LogicalExecutionStateBackend
+    from pal.execution.tool_registry import ToolRegistryGeneration
+    from pal.memory.contracts import MemoryServicePort
 
 
 @dataclass(frozen=True)
@@ -72,7 +82,7 @@ class CapabilityDescriptor:
             if model.model_config.get("strict") is not True:
                 raise ValueError(f"{model.__name__} must set strict=True")
             if (
-                not bool(getattr(model, "__pydantic_root_model__", False))
+                not model.__pydantic_root_model__
                 and model.model_config.get("extra") != "forbid"
             ):
                 raise ValueError(f"{model.__name__} must set extra='forbid'")
@@ -81,8 +91,9 @@ class CapabilityDescriptor:
             raise ValueError(
                 f"non-empty InputModel for {declared[0]!r} requires at least one example"
             )
+        input_model = cast(type[BaseModel], self.InputModel)
         for example in self.examples:
-            self.InputModel.model_validate(example, strict=True)
+            input_model.model_validate(example, strict=True)
 
 
 @dataclass(frozen=True)
@@ -154,16 +165,66 @@ class ExecutionProjectionPort(Protocol):
 
 
 class ExecutionRuntimePort(ExecutionProjectionPort, Protocol):
+    runtime_root: Path | None
+    lifecycle_gate: WriterPreferredRWGate
+    sync_executor: ThreadPoolExecutor | None
+    logical_state: LogicalExecutionStateBackend
+    execution_sessions: LogicalExecutionSessions
+    result_snapshots: ResultSnapshotStore | None
+
+    @property
+    def registry_generation(self) -> ToolRegistryGeneration: ...
+
     def prepare_prompt_context(self, memory: Any, continuation: Any, *,
         context_view: Any = None, include_live: bool = True) -> None: ...
 
-    def tool_call_failed_result(self, call: Any, exc: Exception) -> Any:
+    def prepare_model_context(self, memory: Any, continuation: Any, *, context_view: Any = None) -> None: ...
+
+    def model_response_received(self, continuation: Any) -> None: ...
+
+    def observe_tool_delivery(self, call: ToolCallIR, result: ToolExecutionResult) -> None: ...
+
+    def stagnation_payload(self, call: ToolCallIR, result: ToolExecutionResult) -> dict[str, Any]: ...
+
+    def bind_result_history(self, memory_service: MemoryServicePort) -> None: ...
+
+    def logical_context_for_turn(self, turn_id: str | None) -> LogicalExecutionContext: ...
+
+    def advance_tool_result_clock(self, *, turn_id: str, clock_id: str,
+        retention_steps: int | None = None) -> LogicalExecutionContext: ...
+
+    def retire_tool_results(self, *, turn_id: str | None, result_ids: tuple[str, ...],
+        execution_lifetime_id: str = "") -> tuple[str, ...]: ...
+
+    def discard_uncommitted_tool_delivery(self, *, turn_id: str, result_ref: str) -> None: ...
+
+    async def acknowledge_tool_result_async(self, call_id: str, turn_id: str) -> None: ...
+
+    def role_capabilities(self, allowed: list[str]) -> list[str]: ...
+
+    def project_role_descriptor(self, descriptor: CapabilityDescriptor) -> CapabilityDescriptor: ...
+
+    def project_execution_view(self, view: Any) -> Any: ...
+
+    async def complete_evidence(self, call: ToolCallIR, result: ToolExecutionResult,
+        **kwargs: Any) -> ToolExecutionResult: ...
+
+    def begin_tool_result_turn(self, *, turn_id: str, scope_key: str = "",
+        retention_user_turns: int = ..., input_id: str = "") -> LogicalExecutionContext: ...
+
+    def tool_call_failed_result(self, call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
         ...
 
-    def register_provider_ref(self, provider_id: str, provider: Any) -> None:
+    def validate_provider_ref(self, provider_id: str, provider: Any, *, owner_id: str) -> None:
         ...
 
-    def unregister_provider_ref(self, provider_id: str) -> None:
+    def register_provider_ref(self, provider_id: str, provider: Any, *, owner_id: str) -> None:
+        ...
+
+    def replace_provider_ref(self, provider_id: str, provider: Any, *, owner_id: str, expected: object) -> None:
+        ...
+
+    def unregister_provider_ref(self, provider_id: str, *, expected: object) -> None:
         ...
 
     def has_registered_capability(self, name: str) -> bool:
@@ -177,12 +238,12 @@ class ExecutionRuntimePort(ExecutionProjectionPort, Protocol):
 
     async def execute_tool_async(
         self,
-        call: Any,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
         turn_id: str | None = None,
-    ) -> Any:
+    ) -> ToolExecutionResult:
         ...
 
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:

@@ -63,6 +63,8 @@ class SQLiteVecStatus:
 def ensure_memory_schema(database=None) -> SQLiteVecStatus:
     db = database if database is not None else BaseModel._meta.database
     _ensure_schema_migrations(db.connection())
+    from pal.memory.change_capture import install_capture
+    install_capture(db.connection())
     view = db.execute_sql("SELECT sql FROM sqlite_master WHERE type='view' AND name='memory_document_projection'").fetchone()
     if view is not None and "WHERE lifecycle = 'active'" not in str(view[0]):
         db.execute_sql("DROP VIEW IF EXISTS memory_document_projection")
@@ -72,6 +74,8 @@ def ensure_memory_schema(database=None) -> SQLiteVecStatus:
 
 
 def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
+    connection.execute("CREATE TABLE IF NOT EXISTS memory_embedding_space (singleton INTEGER PRIMARY KEY CHECK(singleton=1), profile_json TEXT NOT NULL, dimension INTEGER)")
+    connection.execute("CREATE TABLE IF NOT EXISTS memory_embedding_configuration (singleton INTEGER PRIMARY KEY CHECK(singleton=1), configuration_json TEXT NOT NULL)")
     for table in ("memory_facts", "memory_cases"):
         _ensure_column(connection, table_name=table, column_name="content_revision", definition="INTEGER NOT NULL DEFAULT 1")
     _ensure_column(connection, table_name="memory_cases", column_name="canonical_key", definition="TEXT")

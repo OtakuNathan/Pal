@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from pal.core.lifecycle_owner import ModuleLifecycleOwnerResult, lifecycle_owner_not_found
 from pal.core.module_registry import ModuleHandle
+from pal.core.registration_state import RegistrationEvent, RegistrationPhase
 from pal.plugins.contracts import (
     FirstPartyPluginBundle,
     PLUGIN_SOURCE_FIRST_PARTY,
@@ -38,6 +39,7 @@ from pal.shared.diagnostics import exception_report
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
+    from pal.plugins.package_lifecycle import PluginPackageLifecycle
 
 
 def _module_cache_prefixes(
@@ -130,6 +132,11 @@ class PluginHost:
     def third_party_root(self) -> Path:
         return self.runtime_root / "plugins" / "community"
 
+    @property
+    def package_lifecycle(self) -> PluginPackageLifecycle:
+        from pal.plugins.package_lifecycle import PluginPackageLifecycle
+        return PluginPackageLifecycle(self)
+
     def bootstrap(self) -> None:
         self.rescan()
         try:
@@ -147,8 +154,7 @@ class PluginHost:
         from pal.plugins.capabilities import build_management_handle
 
         handle = build_management_handle(self)
-        self.context.execution_runtime.hydrate_module_handle(handle)
-        handle.published_capabilities = self.context.execution_runtime.mount_subtree(handle)
+        self.context.publish_module_capabilities(handle)
         self.context.port_registry["core:plugins"] = self
         self._management_handle = handle
         return handle
@@ -177,7 +183,7 @@ class PluginHost:
 
     def _shutdown_owned(self) -> None:
         if self._management_handle is not None:
-            self.context.execution_runtime.unmount_subtree(self._management_handle)
+            self.context.withdraw_module_capabilities(self._management_handle)
             if self._management_handle.shutdown_sync:
                 self._management_handle.shutdown_sync()
                 self._management_handle.shutdown_sync = None
@@ -890,6 +896,10 @@ class PluginHost:
         manifest = self.manifests.get(plugin_id)
         if record is None or manifest is None:
             return RuntimeStatus.NOT_FOUND
+        if self.context.module_registry.get(manifest.module_id) is not None:
+            self._set_state(plugin_id, attached=False, status=PLUGIN_STATUS_LOAD_FAILED,
+                            error=f"module already registered: {manifest.module_id}")
+            return RuntimeStatus.ERROR
         plugin_dir = Path(record.filesystem_path) if record.filesystem_path else None
         generation: PluginGeneration | None = None
         scope: PluginScope | None = None
@@ -930,7 +940,8 @@ class PluginHost:
             scope.absorb_handle_cleanups(handle)
             handle.mounted = True
             handle.degraded = False
-            self.context.register_module(handle)
+            self.context.register_module(handle, publish_control=False)
+            scope.registration.advance(RegistrationEvent.CLAIM, owns_registration=scope.owns_registration)
             if handle.channel_extension is not None:
                 manager = self.context.require_port("channel:provider_manager")
                 manager.plugin_host = self
@@ -941,16 +952,14 @@ class PluginHost:
             if handle.execution_extension is not None:
                 scope.defer(lambda: self.context.execution_runtime.uninstall(self.context, handle))
                 self.context.execution_runtime.install(handle.execution_extension, self.context, handle)
-            scope.published = True
+            scope.registration.advance(RegistrationEvent.PUBLISH, owns_registration=scope.owns_registration)
             self._restore_provider_refs(handle)
             self._restore_prompt_fragment_providers(handle)
             self._restore_event_sources(handle)
             self._restore_event_handlers(handle)
-            self._restore_control_action_handlers(handle)
             self._publish_module_capabilities(handle.module_id)
-            if handle.control_commands:
-                control = self.context.require_port("control:control")
-                handle.control_command_lease = control.install_commands(plugin_id, handle.control_commands)
+            self._restore_control_action_handlers(handle)
+            if handle.control_command_lease is not None:
                 scope.defer(handle.control_command_lease.close)
             self._generation_counter += 1
             generation = PluginGeneration(self._generation_counter, instance, scope, handle)
@@ -958,9 +967,11 @@ class PluginHost:
             target = self.first_party_handles if record.source == PLUGIN_SOURCE_FIRST_PARTY else self.third_party_handles
             target[plugin_id] = handle
             self._bind_plugin_module(plugin_id, handle)
-            self._replay_optional_contributions(plugin_id)
+            self.context.module_publications.publish(handle)
+            self.context.publish_module_observer(handle)
             scope.publish_core_subscriptions()
             self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED)
+            scope.registration.advance(RegistrationEvent.COMMIT, owns_registration=scope.owns_registration)
             return RuntimeStatus.OK
         except (Exception, asyncio.CancelledError) as exc:
             errors = [exception_report(exc)]
@@ -994,12 +1005,20 @@ class PluginHost:
         if scope is not None:
             candidate = scope.handle
             if candidate is not None:
+                candidate.mounted = False
+                scope.absorb_handle_cleanups(candidate)
+            try:
+                scope.begin_retirement()
+            except (Exception, asyncio.CancelledError) as exc:
+                return ["Registration retirement failed:\n" + exception_report(exc)]
+            if scope.registration.phase is RegistrationPhase.WITHDRAWING:
+                assert candidate is not None
                 try:
                     self.context.execution_runtime.revoke_subtree_admission(candidate)
-                    scope.absorb_handle_cleanups(candidate)
                     self.context.execution_runtime.unmount_subtree(candidate)
                     self._withdraw_generation_surface(candidate)
                     self.context.unregister_module(candidate)
+                    scope.registration.advance(RegistrationEvent.WITHDRAW, owns_registration=scope.owns_registration)
                 except (Exception, asyncio.CancelledError) as exc:
                     # Entry revocation does not depend on registry compilation.
                     # Keep resources alive until all other published callbacks
@@ -1018,28 +1037,25 @@ class PluginHost:
             )
         except Exception as exc:
             errors.append("Import cleanup failed:\n" + exception_report(exc))
+        if not errors and scope is not None and scope.registration.phase is RegistrationPhase.CLEANING:
+            scope.registration.advance(RegistrationEvent.CLOSE, owns_registration=scope.owns_registration)
         return errors
 
     def _withdraw_generation_surface(self, handle: ModuleHandle) -> None:
-        if handle.control_command_lease is not None:
-            handle.control_command_lease.close()
-        self._withdraw_module_capabilities(handle.module_id)
+        if self.context.module_registry.get(handle.module_id) is not handle:
+            return
+        self.context.module_publications.unsubscribe(handle)
+        self.context.withdraw_module_control(handle)
+        self.context.withdraw_module_capabilities(handle)
         self.context.prompt_fragment_registry.unregister_module(handle.module_id)
-        self.context.event_source_registry.detach_module(handle.module_id)
-        self.context.event_handler_registry.detach_module(handle.module_id)
-        self.context.control_action_registry.unregister_module(handle.module_id)
+        self.context.event_source_registry.detach_module(handle.module_id, expected_sources=handle.event_sources)
+        self.context.event_handler_registry.detach_module(handle.module_id, expected_owner=handle)
         for provider_id in list(handle.provider_refs):
-            self.context.execution_runtime.unregister_provider_ref(provider_id)
+            self.context.execution_runtime.unregister_provider_ref(
+                provider_id, expected=handle.ports[f"provider:{provider_id}"])
         if handle.l3_provider is not None:
             self.context.require_port("memory:memory").unregister_l3_provider(handle.l3_provider)
         handle.mounted = False
-
-    def _replay_optional_contributions(self, plugin_id: str) -> None:
-        skill = self.context.port_registry.get("skill:skill")
-        register = getattr(skill, "register_declared_module", None)
-        if callable(register):
-            for generation in self.generations.values():
-                register(generation.handle)
 
     def withdraw_tool_entries(self, plugin_id: str) -> tuple[tuple[str, PluginGeneration], ...]:
         """Preflight and withdraw entry points, retaining all cleanup ownership."""
@@ -1048,6 +1064,7 @@ class PluginHost:
         captured = tuple((name, self.generations[name]) for name in ordered if name in self.generations)
         runtime = self.context.execution_runtime
         for _, generation in captured:
+            generation.handle.background_work.check_idle()
             runtime.check_detach(generation.handle)
         # No gate wait under the registry lock. The runtime validates each
         # exact mount authority before one atomic dependency-closure withdrawal.
@@ -1055,6 +1072,12 @@ class PluginHost:
             generation.handle for name, generation in captured
             if self.generations.get(name) is generation
         ))
+        try:
+            for _, generation in captured:
+                self.context.module_publications.withdraw(generation.handle)
+        except BaseException:
+            self.restore_tool_entries(captured)
+            raise
         return captured
 
     def restore_tool_entries(self, captured: tuple[tuple[str, PluginGeneration], ...]) -> None:
@@ -1071,6 +1094,7 @@ class PluginHost:
                     continue
                 if subtree.module_id not in runtime.registry_generation.mounted_subtrees:
                     runtime.mount_subtree(handle)
+            self.context.module_publications.publish(handle)
 
     def _detach_generation(self, plugin_id: str) -> str:
         pending = self._pending_rollbacks.get(plugin_id)
@@ -1105,8 +1129,10 @@ class PluginHost:
             return RuntimeStatus.OK
         handle = generation.handle
         try:
+            handle.background_work.retire()
             self.context.execution_runtime.check_detach(handle)
         except Exception as exc:
+            handle.background_work.resume()
             self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED, error=exception_report(exc))
             return RuntimeStatus.ERROR
         # Publication withdrawal is still reversible. Do not start resource
@@ -1114,10 +1140,12 @@ class PluginHost:
         try:
             self.context.execution_runtime.unmount_subtree(handle)
         except Exception as exc:
+            handle.background_work.resume()
             self._set_state(plugin_id, attached=True, status=PLUGIN_STATUS_ATTACHED, error=exception_report(exc))
             return RuntimeStatus.ERROR
         with self.context.execution_runtime._registry_lock:
             generation.cleanup_started = True
+            handle.mounted = False
         # This is the logical unload commit. Arbitrary RAII callbacks can have
         # irreversible effects; after this point failures retain cleanup ownership
         # and never republish a potentially half-closed generation.
@@ -1219,45 +1247,17 @@ class PluginHost:
         return factory(context=build_context)
 
     def _restore_control_action_handlers(self, handle: ModuleHandle) -> None:
-        for action_kind, handler in handle.control_action_handlers.items():
-            self.context.control_action_registry.register(handle.module_id, action_kind, handler)
+        self.context.publish_module_control(handle)
 
     # --- capability management ---
 
     def _publish_module_capabilities(self, module_id: str) -> list[str]:
-        handle = self.context.module_registry.require(module_id)
-        if handle.introspection_provider is None:
-            return []
-        if handle.mounted_subtree is None or not handle.mounted_subtree.mounted:
-            self.context.execution_runtime.hydrate_module_handle(handle)
-        published = self.context.execution_runtime.mount_subtree(handle)
-        try:
-            handle.published_capabilities = published
-            self._register_skill_declarations(handle)
-            return published
-        except Exception:
-            self.context.execution_runtime.unmount_subtree(handle)
-            self._unregister_skill_declarations(module_id)
-            handle.published_capabilities = []
-            raise
-
-    def _withdraw_module_capabilities(self, module_id: str) -> list[str]:
-        names = list(self.context.capability_registry.by_module.get(module_id, ()))
-        handle = self.context.module_registry.get(module_id)
-        if handle is not None:
-            self.context.execution_runtime.unmount_subtree(handle)
-            self._unregister_skill_declarations(handle.module_id)
-            handle.published_capabilities = []
-        return names
+        return self.context.publish_module_capabilities(self.context.module_registry.require(module_id), notify=False)
 
     def _restore_provider_refs(self, handle: ModuleHandle) -> None:
         for provider_id in handle.provider_refs:
             provider = handle.ports.get(f"provider:{provider_id}")
-            if provider is None:
-                continue
-            self.context.execution_runtime.register_provider_ref(provider_id, provider)
-            if handle.l3_provider is provider:
-                self.context.require_port("memory:memory").register_l3_provider(provider)
+            self.context.execution_runtime.register_provider_ref(provider_id, provider, owner_id=handle.module_id)
 
     def _restore_prompt_fragment_providers(self, handle: ModuleHandle) -> None:
         for provider in handle.prompt_fragment_providers:
@@ -1270,19 +1270,8 @@ class PluginHost:
     def _restore_event_handlers(self, handle: ModuleHandle) -> None:
         for event_kind, handlers in handle.event_handlers.items():
             for handler in handlers:
-                self.context.event_handler_registry.register(event_kind, handler, module_id=handle.module_id)
+                self.context.event_handler_registry.register(event_kind, handler, owner=handle, module_id=handle.module_id)
 
-    def _register_skill_declarations(self, handle: ModuleHandle) -> None:
-        skill = self.context.port_registry.get("skill:skill")
-        skill_register = getattr(skill, "register_declared_module", None)
-        if callable(skill_register):
-            skill_register(handle)
-
-    def _unregister_skill_declarations(self, module_id: str) -> None:
-        skill = self.context.port_registry.get("skill:skill")
-        skill_unregister = getattr(skill, "unregister_declared_module", None)
-        if callable(skill_unregister):
-            skill_unregister(module_id)
 
 def _plugin_disabled_result(plugin_id: str) -> dict[str, Any]:
     return {

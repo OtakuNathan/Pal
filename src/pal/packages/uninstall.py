@@ -9,7 +9,6 @@ import time
 import uuid
 
 from pal.packages.archive import valid_id
-from pal.packages.integration import RuntimeActivation
 from pal.packages.process import PackageError, atomic_json, check_cancelled, install_lock, runtime_lease, error_text
 from pal.plugins.settings import PluginSettings
 
@@ -81,9 +80,10 @@ def _safe_install_target(root, name):
 def uninstall(service, name, *, purge_data=False):
     name = valid_id(name)
     root = service.runtime_root
+    owner = service.activation.owner if service.activation is not None else None
     from pal.plugins.paths import _source_plugins_root
     if ((root / "plugins/_builtin" / name).exists() or (_source_plugins_root() / name / "plugin.toml").exists()
-            or (service.activation and name in service.activation.host.first_party_records)):
+            or (owner is not None and owner.is_builtin(name))):
         raise PackageError("Built-in plugins cannot be uninstalled; use manage_plugin operation=disable")
     with install_lock(root):
         target = _safe_install_target(root, name)
@@ -102,7 +102,6 @@ def uninstall(service, name, *, purge_data=False):
         if purge_data:
             data_paths = validate_data_paths(root, data_paths, other_paths=_other_data_paths(root, name))
         settings = PluginSettings(root)
-        host = service.activation.host if service.activation else None
         installed = settings.installation(name)
         if installed and Path(installed["filesystem_path"]).resolve() != target:
             raise PackageError("Registered plugin path is outside its community installation directory")
@@ -126,9 +125,7 @@ def uninstall(service, name, *, purge_data=False):
             record.update(stage=stage, updated_at=time.time(), **updates)
             atomic_json(path, record)
         with service._activation_gate("plugin", name):
-            cleanup_before = tuple((generation, generation.cleanup_started)
-                                   for generation in service.activation.host.generations.values()
-                                   ) if isinstance(service.activation, RuntimeActivation) else ()
+            cleanup_committed = owner.removal_checkpoint() if owner is not None else lambda: False
             retained_before = settings.get("plugin.retained:" + name)
             current_detach_result = None
             destructive_started = False
@@ -139,14 +136,14 @@ def uninstall(service, name, *, purge_data=False):
                         "enabled": bool(installed["enabled"]), "config": json.loads(installed["config_blob"]),
                     })
                 save("detaching", error="")
-                if host and (name in host.generations or host._record(name) is not None):
-                    result = host.detach(name)
+                result = owner.detach_for_removal(name) if owner is not None else None
+                if result is not None:
                     current_detach_result = result
                     record["detach_result"] = result
                     for key in ("logical_unload_committed", "cleanup_pending", "cleanup_plugin_id", "recovery_hint"):
                         if key in result:
                             record[key] = result[key]
-                    if result["status"] != "ok" or name in host.generations:
+                    if result["status"] != "ok":
                         raise PackageError(f"Plugin cleanup is incomplete: {result}")
                 check_cancelled()
                 destructive_started = True
@@ -157,8 +154,8 @@ def uninstall(service, name, *, purge_data=False):
                         raise PackageError("Both installed and retired directories exist; refusing to overwrite either")
                     os.replace(target, retired)
                 save("forgetting")
-                if host:
-                    host.forget_uninstalled(name)
+                if owner is not None:
+                    owner.forget_uninstalled(name)
                 settings.forget_installation(name)
                 if purge_data:
                     save("purging")
@@ -204,8 +201,7 @@ def uninstall(service, name, *, purge_data=False):
                 detach_result = current_detach_result or {}
                 committed = (bool(detach_result.get("logical_unload_committed"))
                              or detach_result.get("status") == "ok"
-                             or any(not started and generation.cleanup_started
-                                    for generation, started in cleanup_before)
+                             or cleanup_committed()
                              or destructive_started)
                 if committed:
                     save(record.get("stage", "detaching"), status="cleanup_failed", error=error_text(exc))

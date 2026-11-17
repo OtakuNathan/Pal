@@ -575,18 +575,23 @@ def render_llm_status(payload: dict[str, Any]) -> str:
 
 
 def register_with_core(context: MainContext, runtime: LLMRuntime) -> ModuleHandle:
+    from pal.llm.commands import command_specs, interaction_specs
+    from pal.llm.control import LLMControl
+    from pal.llm.settings_contracts import LLM_SETTINGS
 
     provider = LLMIntrospectionProvider(runtime=runtime)
+    control = LLMControl(context, runtime, lambda: render_llm_status(llm_status_payload(provider)))
     handle = ModuleHandle(
         module_id="llm",
         tier=MODULE_TIER_CORE_FOUNDATION,
         detachable=False,
         introspection_provider=provider,
-        control_action_handlers={
-            "show_llm_status": provider.handle_status_control_action,
-        },
-        ports={"llm": runtime, },
-        port_contracts=(LLM_RUNTIME,),
+        control_action_handlers=control.handlers(),
+        control_status_provider=control.status,
+        control_commands=command_specs(),
+        control_interactions=interaction_specs(),
+        ports={"llm": runtime, "settings": runtime.settings_repository},
+        port_contracts=(LLM_RUNTIME, LLM_SETTINGS),
         shutdown_sync=runtime.close,
     )
     context.register_module(handle)

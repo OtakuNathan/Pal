@@ -33,7 +33,7 @@ blobs. Legacy tables remain a migration backup; ordinary runtime reads use the
 published generation. Migration does not alter endpoint or channel configuration.
 
 `pal setup --upgrade --runtime-root /path/to/runtime` explicitly performs the
-same memory separation, followed by initial workflow pin registration. It holds
+same memory separation. New workflows retain their L3 generation. It holds
 the existing runtime lease and refuses an active host before schema changes.
 The initial startup compatibility path shares `MemoryStorage.migrate`; repeated
 upgrades preserve the already published generation and do not copy legacy memory
@@ -79,7 +79,11 @@ full dependency-bound independent review.
 
 ## Scheduling and admission
 
-Only the main Pal registers the independent `memory.dreaming` event source.
+The built-in `dreaming` plugin registers the independent `memory.dreaming` event
+source on the main Pal. It depends on `sqlite_vec_l3`; PluginHost owns both
+lifecycles, so replacing the provider also replaces Dreaming. The module
+schedules its cron deadline through Core’s generic timer scope. Core retains
+maintenance admission, while the module owns run policy and failure handoffs.
 It shares cron calculation and Core wake deadlines with other event sources;
 it is not a proactive prompt. Configuration lives in the memory catalog
 (`memory/archive.sqlite3`, `memory_settings.dreaming_config`). On first startup,
@@ -205,6 +209,12 @@ path. Persist the complete candidate before publication. One archive/catalog
 transaction writes archive increments, successor relations, current generation
 and the run's completed state. That transaction is the sole public commit point.
 
+Normal publication and committed-publication recovery both rebind through the
+backend generation port. Rebinding reloads the embedding identity and derives
+indexing state from the new generation's catalog record. A ready Dreaming
+generation therefore resumes vector recall even when its source had an unfinished
+swap index job; that old job can only retire as superseded.
+
 On failure before commit, current stays unchanged. After an uncertain commit,
 the catalog is authoritative; recovery must not publish twice or pretend an
 already exposed generation never existed. Startup recovers an abandoned writer
@@ -212,10 +222,20 @@ fence only after verifying that its owner lock has been released. A failed round
 can reuse proposals only when complete dependency fingerprints still match.
 
 The main Pal reconnects and clears only its L2 entries and heat. L1 survives.
-Bunshin pins are durable per workflow: roles, retries, worker restarts and recovery
-inherit the original generation. Only a truly new workflow chooses current.
-Worker processes do not resolve current to replace a missing binding. Their
-result metadata retains the generation; old projections do not replace main L2.
+Bunshin holds a durable generation reference per workflow. Roles, retries and
+recovery read that generation without copying the database. Same-generation main
+writes remain visible; after publication retires it, old readers retain its original
+content and embedding identity. Explicit forgetting still applies through shared
+tombstones. Logical references cover paused workflows, while file reader leases
+cover surviving processes. Manager releases terminal workflow references and repairs
+interrupted registrations independently of whether Dreaming runs or produces merges.
+
+Dreaming and backend changes share one Memory maintenance lifetime and generation
+publication reducer. Backend changes announce Pal sleep to the CLI and, when a
+user route exists, wait for the channel notice before entering sleep. Ordinary
+scheduled Dreaming remains silent. A committed generation that fails to mount keeps
+Pal asleep until binding recovery succeeds. Semantic candidates pass Dreaming review
+before entering the same verified publication transaction used by backend migration.
 
 The current and immediately preceding published generations are retained.
 Older generations need at least seven days since retirement and no live logical
@@ -335,8 +355,9 @@ generation before reopening service.
 `pal setup --upgrade` now performs the memory split under the runtime lease and
 requires the Bunshin manager to be stopped. Repeated upgrade of a private copy
 preserved the same generation and existing data. Normal bootstrap also completes
-memory migration and existing workflow pin registration before optional plugins
-can launch workers. No live migration or service restart was performed here.
+memory migration before optional plugins can launch workers. Recovered workflows require their original durable generation reference; startup
+does not manufacture a binding to current.
+No live migration or service restart was performed here.
 
 The Linux / Python 3.13.5 review integration checkpoint passed all four batches:
 `core-a` 616, `core-b` 952 with 7 skips, `bunshin-a` 465, and `bunshin-b` 476.

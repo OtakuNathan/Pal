@@ -1,4 +1,6 @@
 """Model selection must preserve replay and cross the idle boundary once."""
+from tests.control_factory import replace_llm
+from pal.llm import control_presentation as model_interactions
 import asyncio
 import json
 import tempfile
@@ -48,6 +50,12 @@ class Settings:
         self.active = active
         self.think = {}
 
+    def get(self, key):
+        return None
+
+    def set(self, key, value):
+        return value
+
     def get_active_llm_endpoint_id(self):
         return self.active
 
@@ -82,6 +90,32 @@ def reasoning_message(source="a", model="gpt-5.6-sol"):
             ],
         }),
     )
+
+
+class TurnSettingsSnapshotTests(unittest.TestCase):
+    def test_existing_turn_keeps_its_settings_when_configuration_changes(self):
+        source = endpoint()
+        settings = Settings()
+        runtime = LLMRuntime(EndpointResolver(endpoints=(source,)), settings)
+        current = runtime.snapshot_turn_settings()
+
+        runtime.set_think_level("high")
+        source.capabilities_blob["prompt_cache"]["enabled"] = True
+        following = runtime.snapshot_turn_settings()
+
+        self.assertEqual(current.thinking_levels["a"], "low")
+        self.assertEqual(following.thinking_levels["a"], "high")
+        self.assertFalse(current.cache_policy["a"]["policy"]["enabled"])
+        self.assertTrue(following.cache_policy["a"]["policy"]["enabled"])
+        payload = current.to_payload()
+        payload["cache_policy_snapshot"]["a"]["policy"]["enabled"] = True
+        self.assertFalse(current.cache_policy["a"]["policy"]["enabled"])
+
+    def test_settings_read_failure_prevents_an_empty_turn_snapshot(self):
+        runtime = LLMRuntime(EndpointResolver(endpoints=(endpoint(),)), Settings())
+        with patch.object(runtime.settings_repository, "get_active_llm_endpoint_id", side_effect=OSError("settings unavailable")):
+            with self.assertRaisesRegex(OSError, "settings unavailable"):
+                runtime.snapshot_turn_settings()
 
 
 class ReplayCompatibilityTests(unittest.TestCase):
@@ -245,7 +279,7 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
         self.settings = Settings()
         self.target = endpoint("b", "gpt-6-astra")
         self.llm = LLMRuntime(EndpointResolver(endpoints=(endpoint(), self.target)), self.settings)
-        self.core.context.port_registry["llm:llm"] = self.llm
+        replace_llm(self.core, self.llm)
         self.memory.begin_l1_turn("old", user_message=LLMMessageIR(MessageRole.USER, (TextPartIR("task"),)))
         self.memory.upsert_l1_assistant("old", reasoning_message())
         self.memory.settle_l1_turn("old")
@@ -382,8 +416,9 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
             await self.open_model_panel()
             await self.click(provider, "control.model.set", endpoint_id="b")
             request = self.core.state.control_scopes[self.route.control_scope_key].pending_requests["model_switch"]
-            request.expires_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
-            await self.core.expire_pending_control_requests_async()
+            request.expires_at = (datetime.now(timezone.utc) - timedelta(seconds=1))
+            self.core.control_runtime.requests.put(request)
+            await self.core.run_until_idle_async()
             self.assertIn("model selection expired", bot.edit_message_text.await_args.kwargs["text"])
             self.assertIsNone(bot.edit_message_text.await_args.kwargs["reply_markup"])
             self.assertIsNone(provider._restore_interaction(interactions.control_panel_interaction_id(self.route)))
@@ -481,7 +516,7 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
             )
             bot = SimpleNamespace(edit_message_text=AsyncMock())
             provider.application = SimpleNamespace(bot=bot)
-            spec = interactions.model_switch_delivery(request, {}).interaction
+            spec = model_interactions.model_switch_delivery(request, {}).interaction
             provider._remember_interaction(spec, {"chat_id": 100, "message_id": 10})
 
             async def deliver(delivery, **kwargs):
@@ -618,7 +653,7 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
         await self.step(request, "confirm")
         self.assertIn("configuration changed", self.replies())
         request = await self.select()
-        request.expires_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        request.expires_at = (datetime.now(timezone.utc) - timedelta(seconds=1))
         await self.step(request, "confirm")
         self.assertEqual(self.compact_calls, [])
         self.assertEqual(self.llm.active_endpoint_id, "a")
@@ -717,7 +752,7 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
     async def test_text_commands_follow_the_same_confirmation_steps(self):
         request = await self.select()
         for command in (f"confirm {request.request_id}", f"think {request.request_id} high"):
-            action = self.fixture.control_plane._handle_model(ControlCommandInvocation(
+            action = self.fixture.control_plane.registry.resolve("model").handler(ControlCommandInvocation(
                 command_name="model", argv=tuple(command.split()), route=self.route,
             ))
             await self.core.handle_control_action_async(action)

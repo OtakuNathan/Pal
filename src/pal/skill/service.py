@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -31,6 +31,10 @@ from pal.skill.contracts import (
 )
 from pal.skill.repository import SkillRepository
 from pal.skill.decorators import SkillBlueprint
+
+
+if TYPE_CHECKING:
+    from pal.core.module_registry import ModuleHandle
 
 
 class SkillInputError(ValueError):
@@ -161,11 +165,11 @@ class SkillService:
             "patch": {"status": "disabled", "enabled": False},
         })
 
-    def register_declared_module(self, handle: Any) -> None:
-        provider = getattr(handle, "introspection_provider", None)
+    def register_declared_module(self, handle: ModuleHandle) -> None:
+        provider = handle.introspection_provider
         if provider is None:
             return
-        module_id = str(getattr(handle, "module_id", "") or getattr(provider, "module_id", "") or "")
+        module_id = handle.module_id
         if not module_id:
             return
         self.repository.delete_declared_skills_for_module(module_id)

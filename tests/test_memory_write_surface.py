@@ -36,7 +36,6 @@ def memory_runtime(request, tmp_path):
         else:
             provider = MockL3Plugin()
         register_l3(core.context, provider)
-        memory.l3_selector.active_provider_id = provider.provider_id
         core.publish_module_capabilities("memory")
         core.publish_module_capabilities(provider.module_id)
         yield runtime, provider, memory
@@ -112,7 +111,7 @@ def test_reconciliation_reads_original_store_without_switch_or_fallback(memory_r
         "document_id": mem_ref, "document_kind": "fact", "summary": "Different store"}])
     # The registry resolver is the same one used by the production facade.
     memory.providers.register(other)
-    memory.l3_selector.active_provider_id = other.provider_id
+    memory.l3_selector._adopt(other.provider_id)
     recalled = runtime.invoke_direct_tool(new_tool_call(name="recall_memory", args={
         "provider_id": provider.provider_id, "mem_ref": mem_ref}))
     assert recalled.kind == "complete", recalled

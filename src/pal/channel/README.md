@@ -164,3 +164,12 @@ Channel plugin contract:
 - Python compatibility methods `reload_provider` and `rescan_providers` delegate
   to PluginHost when composed; separate model-facing provider lifecycle tools
   are no longer published.
+
+Current-peer reply checks query the host's `TURN_IO.capture_delivery_binding()`.
+Channel does not inspect PalCore or its active-turn registry; embedded and role
+hosts provide the same routing query contract.
+
+Capability refresh uses MainContext's staged replacement. Failed declaration
+publication restores the previous compiled Channel surface with fresh callable
+tokens before the hub reducer rolls back its visibility transition. Handle mount
+state always reflects a real registry entry, including after failed refresh.

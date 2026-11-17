@@ -90,7 +90,7 @@ def test_cancelled_start_rolls_back_and_preserves_failed_cleanup(staged_plugin, 
     if phase == "start":
         code = code.replace("        return handle", "        raise asyncio.CancelledError('publication cancelled')")
     source.write_text(code)
-    with patch.object(host, "_replay_optional_contributions", side_effect=asyncio.CancelledError("publication cancelled")):
+    with patch.object(core.context, "publish_module_observer", side_effect=asyncio.CancelledError("publication cancelled")):
         with pytest.raises(asyncio.CancelledError, match="publication cancelled"):
             host.attach("publication_test")
     assert attempts == ["cleanup"]
@@ -138,7 +138,7 @@ def test_late_publication_failure_releases_maps_and_allows_retry(staged_plugin, 
     host, core, _ = staged_plugin
     target, name = {
         "binding": (host, "_bind_plugin_module"),
-        "replay": (host, "_replay_optional_contributions"),
+        "replay": (core.context, "publish_module_observer"),
         "subscriptions": (PluginScope, "publish_core_subscriptions"),
         "status": (host, "_set_state"),
     }[phase]
@@ -172,14 +172,15 @@ def test_real_declared_skills_replay_failure_allows_retry(staged_plugin):
         "    calls = 0\n"
         "    def declared_skills(self):\n"
         "        self.calls += 1\n"
-        "        if self.calls == 2:\n"
+        "        if self.calls == 1:\n"
         "            raise RuntimeError('declaration replay failed')\n"
         "        return ()"))
-    core.context.port_registry["skill:skill"] = SkillService(repository=ReadOnlySkillRepository())
+    from pal.skill.capabilities import register_with_core as register_skill
+    register_skill(core.context, SkillService(repository=ReadOnlySkillRepository()))
     assert host.attach("publication_test")["status"] == RuntimeStatus.ERROR
     assert "declaration replay failed" in host._record("publication_test").last_error
     assert_rolled_back(host, core)
-    source.write_text(source.read_text().replace("if self.calls == 2:", "if False:"))
+    source.write_text(source.read_text().replace("if self.calls == 1:", "if False:"))
     assert host.attach("publication_test")["status"] == RuntimeStatus.OK
 
 
@@ -198,7 +199,7 @@ def test_failed_rollback_retains_cleanup_owner_until_retry(staged_plugin):
         generation.scope.defer(cleanup)
         raise RuntimeError("replay failed")
 
-    with patch.object(host, "_replay_optional_contributions", side_effect=fail_replay):
+    with patch.object(core.context, "publish_module_observer", side_effect=fail_replay):
         assert host.attach("publication_test")["status"] == RuntimeStatus.ERROR
     generation = captured[0]
     assert host.generations["publication_test"] is generation

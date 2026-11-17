@@ -119,4 +119,4 @@ def test_manager_rejects_stale_required_case_then_accepts_fresh_replays(verifier
                 scratch_only=False, workspace=workspace)
             assert any("current corpus" in error or "stale recorded cases" in error for error in errors)
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()

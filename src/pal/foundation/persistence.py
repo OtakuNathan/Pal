@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Iterator, Sequence
 
 from peewee import DatabaseProxy, Model
-from playhouse.sqlite_ext import SqliteDatabase
+
+from pal.foundation.sqlite_database import OwnedSqliteDatabase
 
 
 database_proxy: DatabaseProxy = DatabaseProxy()
@@ -56,15 +57,14 @@ class PalV2Database:
             database_path = f"file:{self.db_path.resolve()}?mode=ro"
             database_options["uri"] = True
             pragmas = {"foreign_keys": 1, "query_only": 1}
-        self._database = SqliteDatabase(
+        self._database = OwnedSqliteDatabase(
             database_path,
             pragmas=pragmas,
-            check_same_thread=False,
             **database_options,
         )
 
     @property
-    def peewee_db(self) -> SqliteDatabase:
+    def peewee_db(self) -> OwnedSqliteDatabase:
         return self._database
 
     def initialize(self, models: Sequence[type[Model]]) -> None:
@@ -91,10 +91,9 @@ class PalV2Database:
                 self._database.execute_sql(statement)
 
     @contextmanager
-    def transaction(self) -> Iterator[SqliteDatabase]:
+    def transaction(self) -> Iterator[OwnedSqliteDatabase]:
         with self._database.atomic():
             yield self._database
 
     def close(self) -> None:
-        if not self._database.is_closed():
-            self._database.close()
+        self._database.close_all()

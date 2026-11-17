@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import contextmanager
 from pal.llm.contracts import collect_generation
 from pal.shared.ports import PortRegistry
 
@@ -13,6 +14,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from tests.llm_fakes import NonStreamingLLM
+from tests.core_factory import build_context
+from pal.memory.service import MemoryService
 from pal.core.turns import TurnContinuation
 from pal.core.turn_state import AgentTurnRuntimeState
 from unittest.mock import patch
@@ -95,6 +98,16 @@ class _Settings:
 
     def set_active_llm_endpoint_id(self, value: str) -> None:
         self.values["active"] = value
+
+    def get(self, setting_key):
+        return None
+
+    def set(self, setting_key, setting_value):
+        return setting_value
+
+    @contextmanager
+    def selection_transaction(self):
+        yield
 
     def get_think_level(self, endpoint_id: str) -> str | None:
         return self.values.get(f"think:{endpoint_id}")
@@ -197,7 +210,7 @@ class _StartedFailingShapeInvoker(ShapeEndpointInvoker):
 
 
 def _capture_turn_failure_signal(response: LLMResponseIR, *, final_replies=None):
-    from pal.core.failure_orchestrator import FailureOrchestrator
+    from pal.failure.presentation import render_failure_feedback_text
     from pal.failure.contracts import FailureUserFeedback
     class _FailingRuntime(NonStreamingLLM):
         projection_port = None
@@ -208,10 +221,10 @@ def _capture_turn_failure_signal(response: LLMResponseIR, *, final_replies=None)
             return LLMGenerationResult(response=response)
 
     runtime = _FailingRuntime()
+    request = _request()
+    memory = MemoryService()
+    memory.begin_l1_turn("turn-failure", user_message=request.messages[0])
     captured = []
-
-    async def call_port(port, async_name, _sync_name, *args):
-        return await getattr(port, async_name)(*args)
 
     async def handle_failure(signal, **_kwargs):
         captured.append(signal)
@@ -220,7 +233,7 @@ def _capture_turn_failure_signal(response: LLMResponseIR, *, final_replies=None)
             next_step="Restore the endpoint before retrying."))
 
     executor = TurnExecutor(
-        SimpleNamespace(require_port=lambda _name: runtime, port_registry=PortRegistry({"llm:llm": runtime})),
+        build_context(port_registry=PortRegistry({"llm:llm": runtime, "memory:memory": memory})),
         AgentTurnRuntimeState(),
         SimpleNamespace(),
         build_canonical_prompt=lambda *args, **kwargs: None,
@@ -229,10 +242,10 @@ def _capture_turn_failure_signal(response: LLMResponseIR, *, final_replies=None)
         debug_log_reply=lambda *args, **kwargs: None,
         build_llm_tool_contracts=lambda: [],
         handle_failure_async=handle_failure,
-        render_failure_feedback_text=lambda feedback: FailureOrchestrator.render_failure_feedback_text(None, feedback),
+        render_failure_feedback_text=lambda feedback: render_failure_feedback_text(feedback),
         should_enter_failure_flow_for_tool_result=lambda _result: False,
     )
-    executor.build_turn_prompt = lambda *args, **kwargs: _request()
+    executor.build_turn_prompt = lambda *args, **kwargs: request
     continuation = TurnContinuation(
         program=iter(()),
         correlation_id="turn-failure",
@@ -771,6 +784,9 @@ class LLMRuntimeIRTests(unittest.TestCase):
         class _Output:
             def __init__(self) -> None:
                 self.statuses: list[tuple[str, dict]] = []
+
+            def supports_stream_delivery(self, binding):
+                return False
 
             def queue_status(self, binding, kind, *, payload=None):
                 _ = binding

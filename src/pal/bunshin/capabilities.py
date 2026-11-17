@@ -111,16 +111,6 @@ class BunshinManagerProvider:
                 self.last_health = health
                 self.last_error = ""
                 self._sync_harness_registry()
-                core = (
-                    self.context.port_registry.get("core:core")
-                    if self.context is not None
-                    else None
-                )
-                core_state = getattr(core, "state", None)
-                if core_state is not None:
-                    self.prompt_log_enabled = bool(
-                        getattr(core_state, "prompt_log_enabled", False)
-                    )
                 log_policy = self.client.request_sync(
                     "set_prompt_log_enabled",
                     {"enabled": bool(self.prompt_log_enabled)},
@@ -740,7 +730,10 @@ def register_with_core(
     runtime_db_path: Path | None = None,
     harness_registry: BunshinHarnessRegistry | None = None,
 ) -> ModuleHandle:
+    from pal.control.runtime_contracts import CORE_CONTROL
+    from pal.core.control_action_registry import ControlActionSpec
     _ = service
+    controls = context.port_registry.observe(CORE_CONTROL)
     resolved_root = Path(runtime_root or context.execution_runtime.runtime_root or Path.cwd() / ".pal-bunshin")
     manager = BunshinManagerProvider(
         runtime_root=resolved_root,
@@ -754,9 +747,21 @@ def register_with_core(
         wake_manager=manager.wake_workflows,
         manager_request=manager.client.request_sync,
     )
-    manager.event_notify = lambda: getattr(context.port_registry.get("core:core"), "notify_ready", lambda: None)()
+    manager.prompt_log_enabled = controls.current.snapshot().prompt_log_enabled
+    manager.event_notify = controls.current.notify_ready
     source = BunshinEventSource(provider=manager)
-    handler = BunshinControlEventHandler(provider=manager)
+    handler = BunshinControlEventHandler(provider=manager, controls=controls.current)
+
+    async def control_action(action: ControlAction) -> None:
+        text = await manager.handle_control_action_async(action)
+        if text:
+            await controls.current.reply(action, text)
+
+    async def refresh_endpoints(payload) -> None:
+        await manager.refresh_llm_endpoints()
+
+    async def update_logging(payload) -> None:
+        await manager.set_prompt_log_enabled(bool(payload["enabled"]))
     event_kinds = (
         EventKind.APPROVAL_REQUEST,
         EventKind.BUNSHIN_TERMINAL,
@@ -774,10 +779,12 @@ def register_with_core(
         event_sources=[source],
         event_handlers={kind: [handler] for kind in event_kinds},
         control_action_handlers={
-            "bunshin_approval_decision": manager.handle_control_action_async,
-            "bunshin_question_answer": manager.handle_control_action_async,
-            "bunshin_v2_human_decision": manager.handle_control_action_async,
+            "bunshin_approval_decision": ControlActionSpec(control_action),
+            "bunshin_question_answer": ControlActionSpec(control_action),
+            "bunshin_v2_human_decision": ControlActionSpec(control_action),
         },
+        control_observers={"llm.endpoints.changed": refresh_endpoints,
+                           "core.prompt_log.changed": update_logging},
         ports={"bunshin": manager, "bunshin_v2": public},
         shutdown_sync=manager._stop_manager,
     )
@@ -788,7 +795,7 @@ def register_with_core(
     context.register_module(handle)
     context.event_source_registry.attach("bunshin", source)
     for kind in event_kinds:
-        context.event_handler_registry.register(kind, handler, module_id="bunshin")
+        context.event_handler_registry.register(kind, handler, owner=handle, module_id="bunshin")
     return handle
 
 

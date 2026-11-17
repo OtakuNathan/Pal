@@ -21,6 +21,7 @@ from pal.llm.contracts import (
     LLMGenerationResult,
     LLMPreflightAdvice,
     LLMMetadata,
+    LLMTurnSettings,
     LLMCompactionPlan,
     LLMPreflightRequest,
     LLMService,
@@ -893,6 +894,20 @@ class LLMRuntime:
             "thinking_levels": list(endpoint.thinking_levels_blob or ()),
             "default_thinking_level": endpoint.default_thinking_level,
         }
+
+    def snapshot_turn_settings(self) -> LLMTurnSettings:
+        self.refresh_runtime_settings()
+        return LLMTurnSettings(thinking_levels=self.thinking_levels_snapshot(), cache_policy=self.cache_policy_snapshot())
+
+    def resolve_output_budget(self, *, preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None, requested: int | None = None) -> int:
+        limit = self.resolve_max_output_tokens(preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source)
+        if requested is not None:
+            if requested < 1:
+                raise ValueError("Requested output budget must be positive")
+            return min(requested, limit) if limit is not None else requested
+        return limit if limit is not None else self.config.fallback_max_output_tokens
 
     def resolve_max_output_tokens(
         self,

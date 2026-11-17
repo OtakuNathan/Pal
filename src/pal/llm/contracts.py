@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR as _ToolCallIR
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, AsyncIterator, Callable, Protocol
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, Protocol, Mapping
 
 from pal.llm.ir import LLMRequestIR, LLMResponseIR, LLMResponseUpdate, LLMMessageIR, LLMUsageIR, MessageRole, ReasoningPartIR, TextPartIR
 from pal.llm.conversions import request_ir_from_prompt
@@ -179,10 +179,36 @@ class LLMProjectionPort(Protocol):
     def retire_projection_sessions(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class LLMTurnSettings:
+    thinking_levels: Mapping[str, str] = field(default_factory=dict)
+    cache_policy: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        from pal.shared.json_values import freeze_json_mapping
+        object.__setattr__(self, "thinking_levels", freeze_json_mapping(self.thinking_levels))
+        object.__setattr__(self, "cache_policy", freeze_json_mapping(self.cache_policy))
+
+    def to_payload(self) -> dict[str, Any]:
+        from pal.shared.json_values import thaw_json
+        return {"think_levels": dict(self.thinking_levels), "cache_policy_snapshot": thaw_json(self.cache_policy)}
+
+
 class LLMService(Protocol):
+    def snapshot_turn_settings(self) -> LLMTurnSettings: ...
+
+    def resolve_output_budget(self, *, preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None, requested: int | None = None) -> int: ...
+
     def plan_compaction(self, endpoint_id: str | None = None, *, force_semantic: bool = False) -> LLMCompactionPlan: ...
 
     def release_context(self, context_id: str) -> None: ...
+
+    def end_prompt_cache_turn(self, turn_id: str) -> None: ...
+
+    def prompt_cache_reminder_snapshot(self) -> dict[str, Any]: ...
+
+    def prompt_cache_warm_deadline_snapshot(self) -> dict[str, Any]: ...
 
     def prompt_cache_eligible_anchor_request(
         self, *, logical_scope_id: str = "pal:resident", endpoint_id: str = "",

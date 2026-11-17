@@ -19,9 +19,13 @@ def configure_memory_parser(parser: argparse.ArgumentParser) -> None:
     refresh.add_argument("--retry-failed", action="store_true")
     for command in (providers, inspect, refresh):
         add_config_options(command, online=True)
-    for name in ("attach", "detach", "select"):
+    for name in ("attach", "detach", "swap"):
         command = commands.add_parser(name)
         command.add_argument("name")
+        add_config_options(command, online=True)
+    for name in ("swap-status", "swap-resume", "swap-cancel"):
+        command = commands.add_parser(name)
+        command.add_argument("job_id")
         add_config_options(command, online=True)
     embedding = commands.add_parser("embedding", help="Plan or resume an offline embedding-space migration")
     operations = embedding.add_subparsers(dest="embedding_command", required=True)
@@ -37,6 +41,10 @@ def configure_memory_parser(parser: argparse.ArgumentParser) -> None:
 
 async def run_memory_cli_async(args: argparse.Namespace) -> int:
     try:
+        if args.memory_command in {"swap", "swap-resume"}:
+            import sys
+            from pal.memory.generation_maintenance import BACKEND_SLEEP_NOTICE
+            print(BACKEND_SLEEP_NOTICE, file=sys.stderr, flush=True)
         root = require_runtime(args.runtime_root)
         with configuration_target(root) as target:
             if args.memory_command == "embedding":
@@ -46,6 +54,8 @@ async def run_memory_cli_async(args: argparse.Namespace) -> int:
                 result = run_embedding_command(root, args)
             elif target == "live":
                 params = {"name": args.name} if getattr(args, "name", None) else {}
+                if args.memory_command in {"swap-status", "swap-resume", "swap-cancel"}:
+                    params = {"job_id": args.job_id}
                 if args.memory_command == "refresh-indexes":
                     params.update(limit=args.limit, retry_failed=args.retry_failed)
                 client = SidecarRpcClient(configuration_endpoint(root), request_timeout_seconds=args.timeout_seconds)

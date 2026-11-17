@@ -90,10 +90,12 @@ def test_retry_after_retirement_failure(tmp_path):
 
 def test_failed_detached_generation_must_finish_cleanup(tmp_path):
     target = install_copy(tmp_path)
-    host = SimpleNamespace(first_party_records={}, generations={'demo': object()},
+    host = SimpleNamespace(first_party_records={}, generations={'demo': SimpleNamespace(cleanup_started=False)},
                            _record=lambda name: SimpleNamespace(attached=False),
                            detach=Mock(return_value={'status': 'error'}), forget_uninstalled=Mock())
-    activation = SimpleNamespace(host=host, gate=nullcontext)
+    from pal.plugins.package_lifecycle import PluginPackageLifecycle
+    host._pending_rollbacks = {}
+    activation = SimpleNamespace(owner=PluginPackageLifecycle(host), gate=nullcontext)
     with pytest.raises(PackageError, match='cleanup'):
         PackageService(tmp_path, activation=activation).uninstall('demo')
     host.detach.assert_called_once_with('demo')

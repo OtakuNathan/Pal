@@ -10,7 +10,7 @@ import pytest
 from pal.core.main_context import MainContext
 from pal.core.runtime import PalCore
 from pal.control.contracts import ControlAction, ControlEvent, ControlRoute
-from pal.control.service import ControlPlane
+from tests.control_factory import build_control_plane
 from pal.core.btw import BTW_INSTRUCTION, cancel_btw, start_btw
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightAdvice
 from pal.llm.runtime import LLMRuntime
@@ -34,6 +34,9 @@ class Output:
 
     def get_endpoint(self, _):
         return None
+
+    def supports_stream_delivery(self, binding):
+        return False
 
     def queue_reply(self, binding, message):
         self.replies.append((binding, message))
@@ -77,13 +80,16 @@ class Model(NonStreamingLLM):
 
 def make_core(model):
     context = build_context()
-    context.port_registry["memory:memory"] = MemoryService()
+    from pal.memory.capabilities import register_with_core as register_memory
+    register_memory(context, MemoryService())
     if isinstance(model, LLMRuntime):
         register_llm(context, model)
     else:
         context.port_registry["llm:llm"] = model
     context.port_registry["channel:channel"] = Output()
     core = build_core(context=context)
+    from pal.core.capabilities import register_with_core
+    register_with_core(core)
     events = []
     context.core_event_bus.subscribe("turn.start", lambda topic, payload: events.append((topic, payload)))
     context.core_event_bus.subscribe("turn.end", lambda topic, payload: events.append((topic, payload)))
@@ -147,7 +153,7 @@ def seed_left(memory):
 
 
 def test_slash_preserves_question_text_and_rejects_empty():
-    plane = ControlPlane()
+    plane = build_control_plane()
     text = 'explain "two words"\n  and this line'
     parsed = plane.parse_event(ControlEvent(EventKind.SLASH_COMMAND, "channel", {"text": "/btw " + text}, route=ROUTE))
     assert parsed.action_kind == "start_btw"

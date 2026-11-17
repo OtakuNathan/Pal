@@ -441,35 +441,28 @@ def test_interrupted_artifact_cache_is_rebuilt_from_original(tmp_path):
 def test_provider_scan_failures_cannot_report_success(tmp_path):
     from types import SimpleNamespace
     from unittest.mock import Mock
-    from pal.packages.integration import RuntimeActivation
+    from pal.plugins.package_lifecycle import PluginPackageLifecycle, PluginReplacementState
     directory = tmp_path / "channel/providers/demo"
-    directory.mkdir(parents=True)
-    (directory / "provider.toml").write_text('enabled=true\n')
-    manager = Mock()
-    manager.discovered_runtime_providers = {}
-    manager._provider_hub_ids.return_value = []
-    manager.rescan_providers.return_value = {"scan_errors": [f"{directory}: RuntimeError: broken backend"]}
-    host = SimpleNamespace(runtime_root=tmp_path, context=Mock())
-    host.context.require_port.return_value = manager
-    activation = RuntimeActivation(host)
+    host = SimpleNamespace(rescan=Mock(return_value={"scan_errors": [f"{directory}/provider.toml: broken backend"]}),
+        _record=Mock(return_value=None), attach=Mock(return_value={"status": "ok"}))
+    owner = PluginPackageLifecycle(host)
+    state = PluginReplacementState(existed=False, attached=False, enabled=True)
     with pytest.raises(PackageError, match="broken backend"):
-        activation.after("provider", "demo", {"existed": False, "endpoints": []})
-    manager.rescan_providers.return_value = {"scan_errors": []}
+        owner.finish_replacement("demo", state)
+    host.rescan.return_value = {"scan_errors": []}
     with pytest.raises(PackageError, match="not discovered"):
-        activation.after("provider", "demo", {"existed": False, "endpoints": []})
-    manager.discovered_runtime_providers = {"demo": object()}
-    manager.rescan_providers.return_value = {"scan_errors": ["/providers/other/: broken"]}
-    activation._check_provider_scan(manager, "demo", manager.rescan_providers())
+        owner.finish_replacement("demo", state)
+    host._record.return_value = SimpleNamespace(enabled=True)
+    host.rescan.return_value = {"scan_errors": ["/providers/other/provider.toml: broken"]}
+    assert owner.finish_replacement("demo", state) == "attached"
+    host.attach.assert_called_once_with("demo")
 
 
 def test_new_provider_rollback_removes_discovery(tmp_path):
     from types import SimpleNamespace
     from unittest.mock import Mock
-    from pal.packages.integration import RuntimeActivation
-    manager = Mock()
-    manager._provider_hub_ids.return_value = []
-    manager.rescan_providers.return_value = {"scan_errors": []}
-    host = SimpleNamespace(context=Mock())
-    host.context.require_port.return_value = manager
-    RuntimeActivation(host).restore("provider", "demo", {"existed": False})
-    manager.rescan_providers.assert_called_once()
+    from pal.plugins.package_lifecycle import PluginPackageLifecycle, PluginReplacementState
+    host = SimpleNamespace(rescan=Mock(), attach=Mock())
+    PluginPackageLifecycle(host).restore_replacement("demo", PluginReplacementState(False, False, True))
+    host.rescan.assert_called_once()
+    host.attach.assert_not_called()

@@ -17,7 +17,11 @@ from pal.bunshin.runner_components import runtime_build
 from pal.core.module_lifecycle import ModuleLifecycle
 from pal.foundation import PalV2Database
 from pal.lsp.plugin import LspManagerPluginProvider
+from contextlib import closing
+from pal.memory.embedding import HashingEmbedder
+from pal.memory.service import MemoryService
 from pal.memory.storage import MemoryStorage
+from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
 from pal.skill import SkillDescriptor, SkillReadTool, SkillSearchTool, SkillInjectTool
 from pal.skill.repository import SkillRepository, ReadOnlySkillRepository
 from pal.web_fetch.browser_service import BrowserServiceManager
@@ -42,6 +46,8 @@ def test_full_slim_runtime_skill_publication_and_withdrawal(tmp_path, monkeypatc
     database.close()
     storage = MemoryStorage(tmp_path)
     generation = storage.create_initial()
+    with closing(storage.open()) as repository:
+        SQLiteVecL3Plugin(service=MemoryService(), repository=repository, embedding_provider=HashingEmbedder())
     storage.pin("synthetic-workflow")
 
     monkeypatch.setenv(BUNSHIN_RUNTIME_DB_PATH_ENV, str(tmp_path / "pal.sqlite3"))
@@ -141,6 +147,7 @@ def test_full_slim_runtime_skill_publication_and_withdrawal(tmp_path, monkeypatc
         def failed_declarations():
             yield _skill("test.partial", module_id="lsp")
             raise ValueError("synthetic declaration failure")
+        lifecycle.withdraw_module_capabilities("lsp")
         monkeypatch.setattr(provider, "declared_skills", failed_declarations)
         with pytest.raises(ValueError, match="synthetic declaration failure"):
             lifecycle.publish_module_capabilities("lsp")
@@ -208,6 +215,8 @@ def test_bwrap_full_slim_bootstrap_uses_only_readonly_fixture(tmp_path, monkeypa
     database.close()
     storage = MemoryStorage(runtime_root)
     storage.create_initial()
+    with closing(storage.open()) as repository:
+        SQLiteVecL3Plugin(service=MemoryService(), repository=repository, embedding_provider=HashingEmbedder())
     storage.pin("synthetic-workflow")
     endpoint = runtime_root / "data" / "bunshin-role" / "role.sock"
     endpoint.parent.mkdir(parents=True)

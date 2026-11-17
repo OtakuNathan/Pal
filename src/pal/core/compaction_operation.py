@@ -57,7 +57,7 @@ class CompactionOperation:
         preferred_model_id: str | None = None,
         max_attempts: int | None = None,
         timeout_seconds: float | None = None,
-        cache_epoch: str = "",
+        replay_guard: Callable[[], bool] | None = None,
         commit_guard: Callable[[], bool] | None = None,
         force_semantic: bool = False,
     ) -> CompactionRunResult:
@@ -75,20 +75,18 @@ class CompactionOperation:
             )
         if max_attempts is not None or timeout_seconds is not None:
             engine = engine.with_limits(max_attempts=max_attempts, timeout_seconds=timeout_seconds)
-        metadata = dict(
-            getattr(assembly_context, "metadata", {}) or {}
-        )
+        metadata = dict(assembly_context.metadata) if assembly_context is not None else {}
         logical_scope_id = str(
             metadata.get("prompt_cache_scope_id") or ""
         ).strip()
         if not logical_scope_id:
             bunshin_scope_key = (
-                getattr(assembly_context, "work_order_id", "")
+                (assembly_context.work_order_id if assembly_context is not None else "")
                 or (continuation.turn_id if continuation is not None else None)
             )
             logical_scope_id = (
                 f"bunshin:{bunshin_scope_key}"
-                if getattr(assembly_context, "core_mode", "") == "bunshin"
+                if assembly_context is not None and assembly_context.core_mode == "bunshin"
                 else "pal:resident"
             )
         metadata["prompt_cache_scope_id"] = logical_scope_id
@@ -113,10 +111,8 @@ class CompactionOperation:
             )
         except Exception:
             clock_value = 0
-        execution_runtime = getattr(self.context, "execution_runtime", None)
-        bind = getattr(execution_runtime, "bind_result_history", None)
-        if callable(bind):
-            bind(memory_service)
+        execution_runtime = self.context.execution_runtime
+        execution_runtime.bind_result_history(memory_service)
 
         def current_l1_result_ids() -> tuple[str, ...]:
             turns = memory_service.history.turns if memory_service is not None else ()
@@ -142,12 +138,7 @@ class CompactionOperation:
 
 
         after_compact = None
-        retire_tool_results = getattr(
-            execution_runtime,
-            "retire_tool_results",
-            None,
-        )
-        if callable(retire_tool_results) and result_ids_before_compact:
+        if result_ids_before_compact:
             def retire_compacted_l1_results() -> None:
                 remaining_ids = set(current_l1_result_ids())
                 removed = tuple(
@@ -161,7 +152,7 @@ class CompactionOperation:
                         if continuation is not None
                         else None
                     )
-                    retire_tool_results(
+                    execution_runtime.retire_tool_results(
                         turn_id=retirement_turn_id,
                         result_ids=removed,
                         execution_lifetime_id=(
@@ -312,24 +303,6 @@ class CompactionOperation:
                 clock_value=clock_value,
             )
 
-        def replay_guard() -> bool:
-            # Hot-cache compaction (cache_epoch): the still-warm anchor must
-            # remain eligible while the engine retries — an expired or
-            # epoch-shifted anchor aborts instead of falling back to a cold
-            # request the notice never asked for.
-            reader = getattr(llm_runtime, "prompt_cache_warm_deadline_snapshot", None)
-            if not callable(reader):
-                return False
-            try:
-                current = dict(reader() or {})
-                return bool(
-                    current.get("eligible")
-                    and str(current.get("anchor_epoch") or "") == cache_epoch
-                    and int(current.get("anchor_remaining_ttl_seconds") or 0) > 0
-                )
-            except Exception:
-                return False
-
         try:
             history = self.context.port_registry.get(RESIDENT_HISTORY.name)
             history_reference = history.prepare_history_reference(left_snapshot) if history is not None else None
@@ -349,7 +322,7 @@ class CompactionOperation:
                 engine.run(
                     snapshot,
                     llm_runtime=llm_runtime,
-                    replay_guard=replay_guard if cache_epoch else None,
+                    replay_guard=replay_guard,
                     commit_hooks=history_reference,
                 ),
                 timeout=max(deadline_at - _time.monotonic(), 0.05),

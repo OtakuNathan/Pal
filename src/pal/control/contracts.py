@@ -111,6 +111,13 @@ class InteractionResult:
 
 
 ControlCommandHandler = Callable[[ControlCommandInvocation], ControlAction | None]
+ControlInteractionHandler = Callable[[InteractionResult], ControlAction | None]
+
+
+@dataclass(frozen=True)
+class ControlInteractionSpec:
+    action_key: str
+    handler: ControlInteractionHandler
 
 
 @dataclass(frozen=True)
@@ -152,13 +159,8 @@ class ControlPlanePort(Protocol):
     def handle_interaction(self, result: InteractionResult) -> ControlAction | None:
         ...
 
-    def register_command(self, spec: ControlCommandSpec) -> None:
-        ...
-
-    def unregister_command(self, name: str) -> None:
-        ...
-
-    def install_commands(self, owner: str, specs: tuple[ControlCommandSpec, ...]) -> ControlCommandLease:
+    def install_commands(self, owner: str, specs: tuple[ControlCommandSpec, ...], *,
+                         interactions: tuple[ControlInteractionSpec, ...] = ()) -> ControlCommandLease:
         ...
 
     def list_panel_commands(self) -> list[ControlCommandSpec]:

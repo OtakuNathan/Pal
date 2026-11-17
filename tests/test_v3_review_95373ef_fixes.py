@@ -549,15 +549,15 @@ class RuntimeAndHistoryContracts(unittest.TestCase):
         runtime=_runtime(CapturingTransport(['ANSWER','RETRY_OK']))
         ex=_executor(memory,runtime)
         request=_request_for(memory,());ex.build_turn_prompt=lambda *a,**k:request
-        original=ex._upsert_l1_assistant_async
-        async def explode(_continuation,_message):raise RuntimeError('L1 down')
-        ex._upsert_l1_assistant_async=explode
+        original=ex._upsert_l1_assistant
+        def explode(_continuation,_message):raise RuntimeError('L1 down')
+        ex._upsert_l1_assistant=explode
         async def failing():
             with self.assertRaises(RuntimeError):
                 await ex._handle_llm_request(
                     LLMRequestEffect(assembly_context=PromptAssemblyContext()),_continuation())
         asyncio.run(failing())
-        ex._upsert_l1_assistant_async=original
+        ex._upsert_l1_assistant=original
         session=runtime.endpoint_projection_session('pal:resident',rebind=False)
         self.assertIsNone(session._active,
                           'a failed acceptance must not strand its draft')

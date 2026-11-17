@@ -1,5 +1,6 @@
 from __future__ import annotations
 from tests.core_factory import build_core
+from tests.cache_reminder_factory import attach_cache_reminder
 
 import asyncio
 from dataclasses import replace
@@ -8,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from pal.control import ControlAction
-from pal.control.interactions import cache_warm_deadline_delivery
-from pal.core.cache_warm_deadline import CacheWarmDeadlineManager
+from pal.cache_reminder.presentation import cache_warm_deadline_delivery
+from pal.cache_reminder.cache_warm_deadline import CacheWarmDeadlineManager
 from pal.core.compaction_coordinator import CompactionTrigger
 from pal.core.runtime import PalCore
 from pal.llm import cache_reminder
@@ -17,7 +18,7 @@ from pal.llm.ir import LLMUsageIR, WireShape
 from pal.llm.prompt_cache import PromptCacheCoordinator
 from pal.llm.runtime import EndpointResolver, LLMRuntime
 from pal.llm.shapes.base import ShapeContext
-from tests.test_cache_warm_deadline import _ControlledSleep, _Settings, _route, _capture
+from tests.test_cache_warm_deadline import _ControlledTimers, _Settings, _route, _capture
 from tests.test_llm_runtime_ir import _endpoint, _Settings as _LLMSettings
 from tests.test_prompt_cache_policy import _request
 
@@ -124,7 +125,7 @@ def test_runtime_reads_only_current_endpoint_and_honors_disabled_policy():
     assert runtime.prompt_cache_reminder_snapshot()["eligible"]
     core = build_core()
     core.context.port_registry["llm:llm"] = runtime
-    assert core._prompt_cache_warm_deadline_snapshot()["estimated"]
+    assert attach_cache_reminder(core).inspect()["cache"]["estimated"]
     assert not runtime.prompt_cache_warm_deadline_snapshot()["eligible"]
     endpoint.base_url = "https://replacement.test"
     assert not runtime.prompt_cache_reminder_snapshot()["eligible"]
@@ -136,18 +137,18 @@ def test_runtime_reads_only_current_endpoint_and_honors_disabled_policy():
 
 def test_estimated_timer_uses_remaining_response_lifetime_and_one_shot_claim():
     async def scenario():
-        sleep, delivered = _ControlledSleep(), []
+        sleep, delivered = _ControlledTimers(), []
         snapshot = {"eligible": True, "estimated": True, "anchor_epoch": "estimate",
                     "anchor_ttl_seconds": 1800, "anchor_remaining_ttl_seconds": 1500.5,
                     "context_tokens": 50_000}
         manager = CacheWarmDeadlineManager(
             cache_snapshot=lambda: snapshot, settings_provider=lambda: None,
             has_active_turn=lambda: False, deliver_notice=lambda notice: _capture(delivered, notice),
-            expire_notice=lambda notice: _capture([], notice), sleep=sleep,
+            expire_notice=lambda notice: _capture([], notice), timers=sleep,
         )
         assert manager.schedule_after_turn_commit(route=_route(), turn_id="one")
         await asyncio.sleep(0)
-        assert sleep.calls == [1200.5]  # 30m minus commit delay and 5m lead.
+        assert sleep.calls == [1200.5, 1500.5]  # 30m minus commit delay and 5m lead.
         await sleep.release(0)
         assert delivered[0].estimated
         assert manager.is_estimated_notice("estimate")
@@ -165,7 +166,7 @@ def test_estimated_card_does_not_promise_cache_hit():
     )
     assert "estimated" in delivery.interaction.text
     assert "cache reuse is not guaranteed" in delivery.interaction.text
-    assert delivery.interaction.buttons[0][0].action_args == {"cache_epoch": "estimate"}
+    assert delivery.interaction.buttons[0][0].action_args["args"] == {"cache_epoch": "estimate"}
 
 
 def test_estimated_click_uses_manual_compaction_without_hot_authorization():
@@ -176,14 +177,14 @@ def test_estimated_click_uses_manual_compaction_without_hot_authorization():
     async def scenario():
         core = build_core()
         register_memory(core.context, _memory_with_turns(2))
-        sleep = _ControlledSleep()
+        sleep = _ControlledTimers()
         snapshot = {"eligible": True, "estimated": True, "anchor_epoch": "estimate",
                     "anchor_ttl_seconds": 1800, "anchor_remaining_ttl_seconds": 1800,
                     "context_tokens": 50_000}
-        manager = core.cache_warm_deadline
+        manager = attach_cache_reminder(core)
         manager.cache_snapshot = lambda: snapshot
         manager.settings_provider = lambda: _Settings()
-        manager.sleep = sleep
+        manager.timers = sleep
         manager.deliver_notice = lambda notice: _capture([], notice)
         assert manager.schedule_after_turn_commit(route=_route(), turn_id="one")
         await asyncio.sleep(0)
@@ -198,11 +199,14 @@ def test_estimated_click_uses_manual_compaction_without_hot_authorization():
         core._deliver_control_delivery_async = AsyncMock(return_value=True)
         core._flush_control_status_async = AsyncMock()
         core._complete_compact_reply_async = AsyncMock()
-        action = ControlAction(action_kind="compact_memory", target_scope="memory",
+        action = ControlAction(action_kind="cache_warm_deadline_compact", target_scope="cache_reminder",
                                route=_route(), args={"cache_epoch": "estimate"})
-        await core._handle_compact_memory_async(action)
-        await core._handle_compact_memory_async(action)
-        assert calls == [(CompactionTrigger.MANUAL, {"max_attempts": None, "cache_epoch": ""})]
+        await core.handle_control_action_async(action)
+        await core.handle_control_action_async(action)
+        assert len(calls) == 1
+        assert calls[0][0] == CompactionTrigger.MANUAL
+        assert calls[0][1]["max_attempts"] is None
+        assert calls[0][1]["replay_guard"] is None
         assert not manager.claim_compaction("estimate")
         manager.close()
     asyncio.run(scenario())
@@ -235,7 +239,7 @@ def test_offline_response_adapter_updates_reminder_only_after_success(outcome, t
         assert snapshot["context_tokens"] == 100_000
         core = build_core()
         core.context.port_registry["llm:llm"] = llm
-        assert core._prompt_cache_warm_deadline_snapshot()["anchor_epoch"] == snapshot["anchor_epoch"]
+        assert attach_cache_reminder(core).inspect()["cache"]["anchor_epoch"] == snapshot["anchor_epoch"]
     elif outcome == "cancelled":
         with pytest.raises(asyncio.CancelledError):
             llm._generate_response(_request())

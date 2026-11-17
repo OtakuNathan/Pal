@@ -44,7 +44,7 @@ def scoped(runtime, tmp_path):
     scoped = BunshinScopedExecutionRuntime(base_runtime=runtime, workspace=workspace,
         allowed_capabilities=['op_bunshin_artifact_write', 'op_bunshin_artifact_edit'])
     yield scoped
-    scoped.base_runtime.runtime.shutdown()
+    scoped._execution.runtime.shutdown()
 
 
 def artifact_call(scoped, name='write_workflow_artifact', **args):
@@ -256,8 +256,9 @@ def test_core_configuration_is_mounted_and_callable():
     core = build_core()
     from tests.test_cache_warm_deadline import _Settings
     settings = _Settings()
-    core.cache_warm_deadline.settings_provider = lambda: settings
     register_with_core(core)
+    from tests.cache_reminder_factory import attach_cache_reminder
+    attach_cache_reminder(core, settings)
     core.publish_module_capabilities('core')
     runtime = core.context.execution_runtime
     try:

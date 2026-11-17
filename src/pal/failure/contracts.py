@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
+from pal.shared.ports import PortKey
 
 
 FAILURE_VERIFICATION_OK = "ok"
@@ -108,3 +109,25 @@ class RepairWorkOrderDraft:
     summary: str
     related_ids: dict[str, str] = field(default_factory=dict)
 
+
+@dataclass(frozen=True)
+class FailureFlowOutcome:
+    verification: VerificationResult
+    enriched_fields: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FailureHandlingResult:
+    verification: VerificationResult
+    user_feedback: FailureUserFeedback
+    report: FailureReport | None = None
+    repair_resolution: RepairResolutionRecord | None = None
+    repair_work_order: RepairWorkOrderDraft | None = None
+
+
+class FailureRecoveryPort(Protocol):
+    async def handle_failure_async(self, signal: FailureSignal, *, origin: str,
+        route: str | None = None, conversation_context: dict[str, Any] | None = None) -> FailureHandlingResult: ...
+
+
+FAILURE_RECOVERY = PortKey[FailureRecoveryPort]("failure:recovery", FailureRecoveryPort)

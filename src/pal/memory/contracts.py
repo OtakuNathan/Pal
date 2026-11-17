@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolResultIR
+from pal.shared import IntrospectionCall, IntrospectionResult
 from pal.shared.ports import PortKey
 from pal.memory.history_contracts import HistoryReadPort, HistoryRootPort
+from pal.memory.backend_contracts import SqliteGenerationPort
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -119,6 +121,18 @@ class L3CommitRequest:
     task_text: str = ""
     action_text: str = ""
     result_text: str = ""
+
+
+@dataclass(frozen=True)
+class MemoryCase:
+    canonical_key: str
+    title: str
+    situation: str
+    task: str
+    action: str
+    result: str
+    topics: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -251,6 +265,14 @@ class L2Store(Protocol):
 
 class L3ProviderPort(Protocol):
     provider_id: str
+    mounted: bool
+
+    @property
+    def generation_port(self) -> SqliteGenerationPort | None: ...
+
+    def attach(self, call: IntrospectionCall) -> IntrospectionResult: ...
+
+    def detach(self, call: IntrospectionCall) -> IntrospectionResult: ...
 
     def inspect(self) -> dict[str, Any]:
         ...
@@ -281,7 +303,11 @@ L3ProviderResolver = Callable[[str], L3ProviderPort]
 
 
 class MemoryServicePort(Protocol):
+    def remember_case(self, case: MemoryCase) -> L3MutationResult: ...
+
     def register_l3_provider(self, provider: L3ProviderPort) -> None: ...
+
+    def validate_l3_provider(self, provider: L3ProviderPort, *, module_id: str) -> None: ...
 
     def unregister_l3_provider(self, provider: L3ProviderPort) -> None: ...
 

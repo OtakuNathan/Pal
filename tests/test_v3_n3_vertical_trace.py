@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from pal.shared.ports import PortRegistry
+from tests.core_factory import build_context
 
 from pal.core.turns import LLMRequestEffect
 from pal.llm.endpoint import ShapeEndpointInvoker
@@ -102,8 +103,7 @@ def _executor(memory, runtime):
 
     ports = PortRegistry({"memory:memory": memory, "llm:llm": runtime})
     return TurnExecutor(
-        SimpleNamespace(port_registry=ports, require_port=lambda key: require_test_port(ports, key),
-                        execution_runtime=None),
+        build_context(port_registry=ports),
         SimpleNamespace(diagnostics=[]), None,
          build_canonical_prompt=None,
         debug_log_prompt=lambda *a: None, debug_log_outcome=lambda *a: None,

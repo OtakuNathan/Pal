@@ -15,12 +15,12 @@ if TYPE_CHECKING:
     from pal.core.event_source_registry import EventSourceRegistry
     from pal.core.event_handler_registry import EventHandlerRegistry
     from pal.core.prompt_fragment_registry import PromptFragmentRegistry
-    from pal.core.control_action_registry import ControlActionHandlerRegistry
 
 T = TypeVar("T")
 R = TypeVar("R")
 
 from pal.core.module_registry import ModuleHandle
+from pal.core.registration_state import RegistrationEvent, RegistrationPhase, RegistrationState
 
 
 Cleanup = Callable[[], Any]
@@ -40,8 +40,8 @@ class _StagedEventSources(_StagedRegistry["EventSourceRegistry"]):
     def iter_sources(self):
         return self._real.iter_sources()
 
-    def detach_module(self, module_id):
-        return self._real.detach_module(module_id)
+    def detach_module(self, module_id, *, expected_sources):
+        return self._real.detach_module(module_id, expected_sources=expected_sources)
 
     @property
     def sources(self):
@@ -49,15 +49,15 @@ class _StagedEventSources(_StagedRegistry["EventSourceRegistry"]):
 
 
 class _StagedEventHandlers(_StagedRegistry["EventHandlerRegistry"]):
-    def register(self, event_kind, handler, *, module_id=None) -> None:
+    def register(self, event_kind, handler, *, owner, module_id=None) -> None:
         if self._scope.published:
-            self._real.register(event_kind, handler, module_id=module_id)
+            self._real.register(event_kind, handler, owner=owner, module_id=module_id)
 
     def matching(self, event_kind):
         return self._real.matching(event_kind)
 
-    def detach_module(self, module_id):
-        return self._real.detach_module(module_id)
+    def detach_module(self, module_id, *, expected_owner=None):
+        return self._real.detach_module(module_id, expected_owner=expected_owner)
 
     @property
     def handlers(self):
@@ -81,22 +81,6 @@ class _StagedPromptFragments(_StagedRegistry["PromptFragmentRegistry"]):
     @property
     def providers(self):
         return self._real.providers
-
-
-class _StagedControlActions(_StagedRegistry["ControlActionHandlerRegistry"]):
-    def register(self, module_id, action_kind, handler) -> None:
-        if self._scope.published:
-            self._real.register(module_id, action_kind, handler)
-
-    def unregister_module(self, module_id):
-        return self._real.unregister_module(module_id)
-
-    async def handle(self, action):
-        return await self._real.handle(action)
-
-    @property
-    def handlers(self):
-        return self._real.handlers
 
 
 class _StagedModuleRegistry:
@@ -123,13 +107,13 @@ class _StagedExecutionRuntime:
         self._real = real
         self._scope = scope
 
-    def register_provider_ref(self, provider_id: str, provider: Any) -> None:
+    def register_provider_ref(self, provider_id: str, provider: Any, *, owner_id: str) -> None:
         if self._scope.published:
-            self._real.register_provider_ref(provider_id, provider)
+            self._real.register_provider_ref(provider_id, provider, owner_id=owner_id)
 
-    def unregister_provider_ref(self, provider_id: str) -> None:
+    def unregister_provider_ref(self, provider_id: str, *, expected: object) -> None:
         if self._scope.published:
-            self._real.unregister_provider_ref(provider_id)
+            self._real.unregister_provider_ref(provider_id, expected=expected)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
@@ -146,7 +130,6 @@ class StagedMainContext:
         self.event_source_registry = _StagedEventSources(real.event_source_registry, scope)
         self.event_handler_registry = _StagedEventHandlers(real.event_handler_registry, scope)
         self.prompt_fragment_registry = _StagedPromptFragments(real.prompt_fragment_registry, scope)
-        self.control_action_registry = _StagedControlActions(real.control_action_registry, scope)
 
     def register_module(self, handle: ModuleHandle) -> None:
         if self._scope.handle is not None and self._scope.handle is not handle:
@@ -154,7 +137,9 @@ class StagedMainContext:
         self._scope.handle = handle
 
     def unregister_module(self, handle: ModuleHandle) -> bool:
-        if not self._scope.published and self._scope.handle is handle:
+        if (self._scope.registration.phase is RegistrationPhase.PREPARING
+                and self._real.module_registry.get(handle.module_id) is not handle
+                and self._scope.handle is handle):
             self._scope.handle = None
             return True
         return self._real.unregister_module(handle)
@@ -167,6 +152,16 @@ class StagedMainContext:
 
     def require_port(self, key: PortKey[T] | str) -> T | Any:
         return self._real.require_port(key)
+
+    def publish_module_capabilities(self, handle, *, notify=True):
+        if self._scope.published:
+            return self._real.publish_module_capabilities(handle, notify=notify)
+        return []
+
+    def withdraw_module_capabilities(self, handle):
+        if self._scope.published:
+            return self._real.withdraw_module_capabilities(handle)
+        return []
 
     @property
     def port_registry(self):
@@ -198,12 +193,30 @@ class PluginScope:
     plugin_id: str
     cleanups: list[Cleanup] = field(default_factory=list)
     handle: ModuleHandle | None = None
-    published: bool = False
+    registration: RegistrationState = field(default_factory=RegistrationState)
     _core_subscriptions: list[Any] = field(default_factory=list, repr=False)
     _pending_cleanup: asyncio.Future[Any] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.context = StagedMainContext(self.core_context, self)
+
+    @property
+    def published(self) -> bool:
+        return self.registration.publishing
+
+    @property
+    def owns_registration(self) -> bool:
+        return self.handle is not None and self.core_context.module_registry.get(self.handle.module_id) is self.handle
+
+    def begin_retirement(self) -> None:
+        phase = self.registration.phase
+        if phase is RegistrationPhase.CLOSED:
+            return
+        owns = self.owns_registration
+        event = (RegistrationEvent.RETRY if phase is RegistrationPhase.CLEANING
+                 or (phase is RegistrationPhase.WITHDRAWING and owns)
+                 else RegistrationEvent.RETIRE if owns else RegistrationEvent.ABANDON)
+        self.registration.advance(event, owns_registration=owns)
 
     def subscribe_core_events(self, topics=None, *, max_pending=128):
         """Read system observations in a plugin-owned worker, never inline I/O."""

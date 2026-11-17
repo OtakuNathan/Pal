@@ -208,7 +208,7 @@ def test_incompatible_manual_thinking_budget_falls_back_or_stops(hot):
     core = build_core()
     service = _memory_with_turns(2)
     llm = _ScriptedLLM([generation_result_from_values(text=_valid_pal_payload())])
-    _attach_hot_cache(llm, service)
+    live = _attach_hot_cache(llm, service)
     old_reader = llm.prompt_cache_confirmed_anchor_request
     anchor = old_reader()
     anchor["request"] = replace(anchor["request"], policy=GenerationPolicyIR(max_output_tokens=16000,
@@ -217,7 +217,7 @@ def test_incompatible_manual_thinking_budget_falls_back_or_stops(hot):
     core.context.port_registry["llm:llm"] = llm
     before = list(service.l1_store.items)
     result = asyncio.run(core.turn_executor.compaction.run(service, target_input_budget=8192,
-        reserved_output_tokens=2048, cache_epoch="epoch-a" if hot else ""))
+        reserved_output_tokens=2048, replay_guard=(lambda: bool(live.get("eligible") and live.get("anchor_epoch") == "epoch-a" and live.get("anchor_remaining_ttl_seconds", 0) > 0)) if hot else None))
     if hot:
         assert result.status == "hot_cache_unavailable"
         assert not llm.generate_requests

@@ -710,6 +710,180 @@
       "module": "spec/core/ResidentTurnScheduling.tla",
       "kind": "negative",
       "invariant": "BarrierOwnership"
+    },
+    {
+      "config": "spec/core/ModuleRegistrationOwnership.cfg",
+      "module": "spec/core/ModuleRegistrationOwnership.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/core/ModuleRegistrationForeignRollback.cfg",
+      "module": "spec/core/ModuleRegistrationOwnership.tla",
+      "kind": "negative",
+      "invariant": "PublishedOwnership"
+    },
+    {
+      "config": "spec/core/ModuleRegistrationDuplicateSource.cfg",
+      "module": "spec/core/ModuleRegistrationOwnership.tla",
+      "kind": "negative",
+      "invariant": "PublishedOwnership"
+    },
+    {
+      "config": "spec/core/ModuleRegistrationRetryWitness.cfg",
+      "module": "spec/core/ModuleRegistrationOwnership.tla",
+      "kind": "witness",
+      "invariant": "RetryReplacementWitness"
+    },
+    {
+      "config": "spec/memory/MemoryBackendSwap.cfg",
+      "module": "spec/memory/MemoryBackendSwap.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/memory/MemorySwapLostDelta.cfg",
+      "module": "spec/memory/MemoryBackendSwap.tla",
+      "kind": "negative",
+      "invariant": "NoLostWrites"
+    },
+    {
+      "config": "spec/memory/MemorySwapLateWriter.cfg",
+      "module": "spec/memory/MemoryBackendSwap.tla",
+      "kind": "negative",
+      "invariant": "RetiredReadOnly"
+    },
+    {
+      "config": "spec/memory/MemorySwapIndexRollback.cfg",
+      "module": "spec/memory/MemoryBackendSwap.tla",
+      "kind": "negative",
+      "invariant": "CommitIsAuthoritative"
+    },
+    {
+      "config": "spec/memory/MemorySwapEarlyCollect.cfg",
+      "module": "spec/memory/MemoryBackendSwap.tla",
+      "kind": "negative",
+      "invariant": "ReaderPinSafe"
+    },
+    {
+      "config": "spec/memory/MemorySwapRecoveryWitness.cfg",
+      "module": "spec/memory/MemoryBackendSwap.tla",
+      "kind": "witness",
+      "invariant": "RecoveryWitness"
+    },
+    {
+      "config": "spec/memory/MemorySwapRecovery.cfg",
+      "module": "spec/memory/MemorySwapRecovery.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/memory/MemorySwapResumePaused.cfg",
+      "module": "spec/memory/MemorySwapRecovery.tla",
+      "kind": "negative",
+      "invariant": "PausedStaysStopped"
+    },
+    {
+      "config": "spec/memory/MemorySwapStaleBackend.cfg",
+      "module": "spec/memory/MemorySwapRecovery.tla",
+      "kind": "negative",
+      "invariant": "StaleNeedsNoBackend"
+    },
+    {
+      "config": "spec/memory/MemorySwapResumeWitness.cfg",
+      "module": "spec/memory/MemorySwapRecovery.tla",
+      "kind": "witness",
+      "invariant": "ResumeWitness"
+    },
+    {
+      "config": "spec/memory/MemoryEmbeddingIsolation.cfg",
+      "module": "spec/memory/MemoryEmbeddingIsolation.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/memory/MemoryEmbeddingReload.cfg",
+      "module": "spec/memory/MemoryEmbeddingIsolation.tla",
+      "kind": "negative",
+      "invariant": "NoMixedModels"
+    },
+    {
+      "config": "spec/memory/MemoryEmbeddingStaleReply.cfg",
+      "module": "spec/memory/MemoryEmbeddingIsolation.tla",
+      "kind": "negative",
+      "invariant": "NoMixedModels"
+    },
+    {
+      "config": "spec/memory/MemoryEmbeddingDimension.cfg",
+      "module": "spec/memory/MemoryEmbeddingIsolation.tla",
+      "kind": "negative",
+      "invariant": "OneDimension"
+    },
+    {
+      "config": "spec/memory/MemoryEmbeddingReuse.cfg",
+      "module": "spec/memory/MemoryEmbeddingIsolation.tla",
+      "kind": "negative",
+      "invariant": "NoMixedModels"
+    },
+    {
+      "config": "spec/memory/MemoryEmbeddingWitness.cfg",
+      "module": "spec/memory/MemoryEmbeddingIsolation.tla",
+      "kind": "witness",
+      "invariant": "MigrationWitness"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceLifecycle.cfg",
+      "module": "spec/memory/MemoryMaintenanceLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceSilentSleep.cfg",
+      "module": "spec/memory/MemoryMaintenanceLifecycle.tla",
+      "kind": "negative",
+      "invariant": "NoticeBeforeSleep"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceEarlyWake.cfg",
+      "module": "spec/memory/MemoryMaintenanceLifecycle.tla",
+      "kind": "negative",
+      "invariant": "BoundBeforeWake"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceRecoveryWitness.cfg",
+      "module": "spec/memory/MemoryMaintenanceLifecycle.tla",
+      "kind": "witness",
+      "invariant": "RecoveryWitness"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceEarlyRelease.cfg",
+      "module": "spec/memory/MemoryMaintenanceLifecycle.tla",
+      "kind": "negative",
+      "invariant": "OwnerBeforeWake"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceOwnership.cfg",
+      "module": "spec/memory/MemoryMaintenanceOwnership.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceOldClose.cfg",
+      "module": "spec/memory/MemoryMaintenanceOwnership.tla",
+      "kind": "negative",
+      "invariant": "NewOwnerProtected"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceStaleRecovery.cfg",
+      "module": "spec/memory/MemoryMaintenanceOwnership.tla",
+      "kind": "negative",
+      "invariant": "NewOwnerProtected"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenanceOwnerRecoveryWitness.cfg",
+      "module": "spec/memory/MemoryMaintenanceOwnership.tla",
+      "kind": "witness",
+      "invariant": "RecoveryWitness"
+    },
+    {
+      "config": "spec/memory/MemoryMaintenancePartialBinding.cfg",
+      "module": "spec/memory/MemoryMaintenanceLifecycle.tla",
+      "kind": "negative",
+      "invariant": "BoundBeforeWake"
     }
   ],
   "support_modules": [
@@ -720,6 +894,14 @@
     {
       "module": "spec/foundation/FdLeaseImplementationTopology.tla",
       "reason": "Generated implementation relation, checked for freshness and imported by its lifecycle model."
+    },
+    {
+      "module": "spec/core/ModuleRegistrationReducer.tla",
+      "reason": "Generated by the production registration and ownership reducers, imported by the checked ownership model."
+    },
+    {
+      "module": "spec/memory/MemorySwapReducer.tla",
+      "reason": "Generated by executing the production Memory swap reducer and publication guards."
     }
   ]
 }

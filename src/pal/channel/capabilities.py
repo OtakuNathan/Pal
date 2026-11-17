@@ -420,17 +420,11 @@ class ChannelIntrospectionProvider:
     def _is_current_peer_reply(self, *, turn_id: str, channel_id: str) -> bool:
         if not turn_id or self.main_context is None:
             return False
-        try:
-            core = self.main_context.require_port("core:core")
-            continuation = core.state.active_turns.get(turn_id)
-            binding = getattr(continuation, "delivery_binding", None)
-            endpoint = binding.endpoint
-        except (AttributeError, KeyError, TypeError):
+        turn_io = self.main_context.execution_runtime.turn_io
+        if turn_io is None:
             return False
-        return (
-            str(endpoint.channel_kind or "") == "websocket_bridge"
-            and str(endpoint.endpoint_id or "") == channel_id
-        )
+        binding = turn_io.capture_delivery_binding(turn_id)
+        return binding.get("channel_kind") == "websocket_bridge" and binding.get("channel_id") == channel_id
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -795,22 +789,7 @@ class ChannelIntrospectionProvider:
         handle = context.module_registry.get(self.module_id)
         if handle is None:
             return []
-        previous_subtree = handle.mounted_subtree
-        try:
-            handle.mounted_subtree = None
-            context.execution_runtime.hydrate_module_handle(handle)
-            # mount_subtree compiles and swaps one immutable registry
-            # generation under its lock. Keeping the previous subtree mounted
-            # until this call succeeds avoids a transient empty capability
-            # registry during channel publication changes.
-            published = context.execution_runtime.mount_subtree(handle)
-        except Exception:
-            handle.mounted_subtree = previous_subtree
-            raise
-        if previous_subtree is not None:
-            previous_subtree.mounted = False
-        handle.published_capabilities = published
-        return published
+        return context.refresh_module_capabilities(handle)
 
 
 def inspect_channel(provider: ChannelIntrospectionProvider) -> ChannelSnapshot:

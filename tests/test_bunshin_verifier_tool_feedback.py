@@ -66,7 +66,7 @@ def verifier(request):
     try:
         yield fixture, workspace, probe, call, runtime, view
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         fixture.tearDown()
 
 
@@ -310,7 +310,7 @@ def test_runner_records_bound_ordinary_execution_and_edit_invalidates_it(verifie
     assert not current_verification_receipts(refs, workspace)[0]['stale']
     probe.write_text('assert 4 == 4\n')
     assert current_verification_receipts(refs, workspace)[0]['stale']
-    runtime.base_runtime.runtime.shutdown()
+    runtime._execution.runtime.shutdown()
     real_runtime.shutdown()
 
 
@@ -416,7 +416,7 @@ def test_real_published_shell_result_preserves_execution_status(verifier, exit_c
         assert payload(result)['case']['exit_code'] == exit_code
         assert workspace['review_tool_evidence_refs'][-1]['ok'] is (exit_code == 0)
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         real_runtime.shutdown()
 
 

@@ -294,6 +294,8 @@ def test_cancelled_workflow_retains_failed_effect_evidence(monkeypatch):
 @pytest.fixture
 def control(monkeypatch):
     core = build_core()
+    from pal.core.capabilities import register_with_core
+    register_with_core(core)
     monkeypatch.setattr(core, "_deliver_control_delivery_async", AsyncMock(return_value=True))
     route = ControlRoute("test", "socket", control_scope_key="scope")
     return core, route
@@ -307,8 +309,18 @@ def test_log_control_reports_partial_update_and_full_cause(control):
     core, route = control
     good, bad = MagicMock(), MagicMock()
     bad.set_prompt_log_enabled.side_effect = failure("dependent update failed")
-    core.context.port_registry["good"] = good
-    core.context.port_registry["bad"] = bad
+    from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
+
+    async def update_good(payload):
+        good.set_prompt_log_enabled(payload["enabled"])
+
+    async def update_bad(payload):
+        bad.set_prompt_log_enabled(payload["enabled"])
+
+    for name, callback in (("good", update_good), ("bad", update_bad)):
+        core.context.register_module(ModuleHandle(
+            module_id=name, tier=MODULE_TIER_DETACHABLE,
+            control_observers={"core.prompt_log.changed": callback}))
     asyncio.run(core.handle_control_action_async(ControlAction("set_log", "runtime", route=route,
         args={"prompt_log_enabled": True})))
     assert core.state.prompt_log_enabled is True

@@ -89,7 +89,7 @@ def test_real_wrapper_and_heartbeat_preserve_original_failure_without_public_cha
             with capture_verifier_failure(enabled=True) as next_capture:
                 assert next_capture.provenance is None
         finally:
-            scoped.base_runtime.runtime.shutdown()
+            scoped._execution.runtime.shutdown()
             runtime.shutdown()
     asyncio.run(scenario())
 

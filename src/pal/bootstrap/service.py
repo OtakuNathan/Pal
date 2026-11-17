@@ -70,9 +70,9 @@ class StubRuntimeHandle:
     async def stop_async(self) -> None:
         if self.configuration_service is not None:
             await self.configuration_service.stop_async()
-        dreaming = self.core.context.port_registry.get("memory.dreaming:dreaming")
-        if dreaming is not None:
-            await dreaming.shutdown()
+        for handle in tuple(self.core.context.module_registry.modules.values()):
+            if handle.quiesce_async is not None:
+                await handle.quiesce_async()
         await self.plugin_host.shutdown_async()
         if self.plugin_host.shutdown_errors:
             raise RuntimeError("plugin shutdown incomplete: " + "; ".join(self.plugin_host.shutdown_errors))
@@ -119,8 +119,6 @@ def compose_runtime(
     # Reconcile the memory owner before optional plugins can launch workers.
     # In particular, Bunshin must never race the initial generation migration.
     memory_storage.migrate(registration.runtime.db_path)
-    from pal.bunshin.memory_binding import initialize_existing_workflow_pins
-    initialize_existing_workflow_pins(registration.runtime.runtime_root, memory_storage)
     from pal.core.main_context import MainContext
     from pal.execution.backend import build_execution_runtime
     core = PalCore(config=config, context=MainContext(execution_runtime=build_execution_runtime()))
@@ -169,10 +167,6 @@ def compose_runtime(
     register_failure_with_core(core, failure_runtime)
     plugin_host.publish_management_capabilities()
     plugin_host.bootstrap()
-    provider = memory_service._resolve_l3_provider()
-    if getattr(getattr(provider, "repository", None), "catalog", None) is not None:
-        from pal.memory.dreaming.runtime import register_dreaming
-        register_dreaming(core, provider, llm_runtime, registration.runtime.runtime_root)
     channel_provider_manager = core.context.require_port("channel:provider_manager")
     channel_provider_manager.plugin_host = plugin_host
     channel_provider_manager.rescan_providers()
@@ -180,7 +174,6 @@ def compose_runtime(
     for module_id in ("core", "execution", "channel", "identity", "llm", "memory", "control", "failure"):
         core.publish_module_capabilities(module_id)
 
-    from pal.memory.maintenance import MemoryBackendOwner
     return StubRuntimeHandle(
         wizard=wizard,
         registration=registration,
@@ -194,9 +187,9 @@ def compose_runtime(
         plugin_host=plugin_host,
         control_plane=control_plane,
         failure_runtime=failure_runtime,
-        configuration_service=CoreConfigurationService(registration.runtime.runtime_root, core.cache_warm_deadline,
-                                                      identity_service=identity_service, control_plane=control_plane,
-                                                      memory_owner=MemoryBackendOwner(core, memory_service)),
+        configuration_service=CoreConfigurationService(
+            registration.runtime.runtime_root, core.context.execution_runtime.lifecycle_gate,
+            core.context.configuration_operations),
     )
 
 

@@ -89,7 +89,7 @@ def _result(provider, document_id, **metadata):
 
 def commit(provider, request):
     repo = provider.repository
-    if not provider.mounted or provider.read_only or repo.frozen:
+    if not provider.mounted or provider.read_only or not repo.writable:
         return L3MutationResult(status="unavailable", document_id="")
     if request.kind not in {"fact", "case"} or request.scope not in {"system", "task"}:
         return L3MutationResult(status="invalid", document_id="")
@@ -133,7 +133,7 @@ def commit_batch(provider, request):
     import logging
 
     repo = provider.repository
-    if not provider.mounted or provider.read_only or repo.frozen:
+    if not provider.mounted or provider.read_only or not repo.writable:
         return L3BatchCommitResult("unavailable")
     if not request.batch_id or not request.items:
         return L3BatchCommitResult("invalid")
@@ -210,12 +210,12 @@ def retire_document(repo, document, successors, *, reason):
     ))
     repo.sync_fts_row(ref)
     # Retired documents cannot participate in vector search or exact dedup.
-    repo.Embedding.update(index_status="stale").where(repo.Embedding.document_id == ref).execute()
+    repo.retire_document_embeddings(ref)
 
 
 def correct(provider, request):
     repo = provider.repository
-    if not provider.mounted or provider.read_only or repo.frozen:
+    if not provider.mounted or provider.read_only or not repo.writable:
         return L3MutationResult(status="unavailable", document_id=request.document_id)
     with repo.write_transaction():
         replayed = _replayed(repo, request, "update")

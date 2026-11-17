@@ -28,6 +28,15 @@ class _BunshinLLMRuntimeAdapter:
     def release_context(self, context_id):
         self._base.release_context(context_id)
 
+    def end_prompt_cache_turn(self, turn_id):
+        self._base.end_prompt_cache_turn(turn_id)
+
+    def prompt_cache_reminder_snapshot(self):
+        return self._base.prompt_cache_reminder_snapshot()
+
+    def prompt_cache_warm_deadline_snapshot(self):
+        return self._base.prompt_cache_warm_deadline_snapshot()
+
     @property
     def projection_port(self):
         return self._base.projection_port
@@ -41,6 +50,13 @@ class _BunshinLLMRuntimeAdapter:
         return self._base.prompt_cache_confirmed_anchor_request(
             logical_scope_id=logical_scope_id, endpoint_id=endpoint_id,
         )
+
+    def snapshot_turn_settings(self):
+        return self._base.snapshot_turn_settings()
+
+    def resolve_output_budget(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None, requested=None):
+        return self._base.resolve_output_budget(preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source, requested=requested)
 
     def resolve_max_output_tokens(self, *, preferred_endpoint_id=None, preferred_endpoint_source=None):
         return self._base.resolve_max_output_tokens(
@@ -98,6 +114,9 @@ class _BunshinLLMRuntimeAdapter:
 class _BunshinOutputPort:
     def __init__(self, reporter: Reporter) -> None:
         self._reporter = reporter
+
+    def supports_stream_delivery(self, envelope: TurnDeliveryBinding) -> bool:
+        return False
 
     async def queue_reply(self, envelope: TurnDeliveryBinding, text: Any) -> str:
         _ = envelope

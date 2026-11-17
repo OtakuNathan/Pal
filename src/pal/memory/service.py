@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.foundation.diagnostics import exception_report
+from pal.memory.swap_state import binding_ready
 
 from pal.shared.result_snapshot import ResultSnapshotRef
 
@@ -39,6 +40,7 @@ from pal.memory.contracts import (
     L3ProviderPort,
     L3RetireResult,
     MAX_RENEWAL_COUNT,
+    MemoryCase,
     MemoryCommitRequest,
     MemoryCommitResult,
     MemoryCompactResult,
@@ -73,7 +75,7 @@ from pal.llm.ir import (
     MessageRole,
     TextPartIR,
 )
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, IntrospectionCall, IntrospectionResult
 
 L2_WORKING_SET_CAPACITY = 128
 TOP_OF_MIND_LIMIT = 8
@@ -82,8 +84,10 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class DetachedL3Provider:
+    mounted: bool = True
     provider_id: str = "null_l3"
     module_id: str = "l3.null_l3"
+    generation_port = None
 
     def inspect(self) -> dict[str, object]:
         return {
@@ -92,6 +96,12 @@ class DetachedL3Provider:
             "vector_backend": "none",
             "pending_embeddings": 0,
         }
+
+    def attach(self, call: IntrospectionCall) -> IntrospectionResult:
+        return IntrospectionResult(status=RuntimeStatus.OK, text="Null memory provider is available")
+
+    def detach(self, call: IntrospectionCall) -> IntrospectionResult:
+        return IntrospectionResult(status=RuntimeStatus.FORBIDDEN, text="The resident null provider cannot be detached")
 
     def recall(self, query) -> L3RecallResult:
         _ = query
@@ -313,6 +323,8 @@ class MemoryService:
     _reviews: Any = field(default=None, init=False, repr=False)
     _conversation_turns: set[str] = field(default_factory=set, init=False, repr=False)
     _conversation_times: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
+    on_generation_work: Callable[[], None] | None = field(default=None, repr=False)
+    _l3_catalog: Any = field(default=None, init=False, repr=False)
 
     @property
     def reviews(self):
@@ -344,13 +356,48 @@ class MemoryService:
         from dataclasses import replace
         turns = tuple(replace(t, state=L1TurnState.SETTLED)
                       for t in self.history_root.left_turns())
-        context = MemoryService(l1_store=InMemoryL1Store(L1TurnStore(turns)), providers=self.providers)
+        context = MemoryService(l1_store=InMemoryL1Store(L1TurnStore(turns)), providers=self.providers,
+                                l3_selector=self.l3_selector)
         context.history_root.promote()
         return context
 
 
     def register_l3_provider(self, provider: L3ProviderPort) -> None:
+        self.validate_l3_provider(provider, module_id=f"l3.{provider.provider_id}")
         self.providers.register(provider)
+        port = provider.generation_port
+        if port is not None:
+            self._l3_catalog = port.repository.catalog.catalog_path
+            generation = port.repository.generation_id if port.repository.read_only else port.repository.catalog.current()
+            self.l3_selector._adopt(port.repository.catalog.provider_for_generation(generation))
+        elif self.l3_selector.active_provider_id == "null_l3" and provider.provider_id != "null_l3":
+            self.l3_selector._adopt(provider.provider_id)
+        if self.on_generation_work is not None:
+            self.on_generation_work()
+
+    def adopt_l3_generation(self, provider_id: str, generation_id: str) -> None:
+        provider = self.providers.require(provider_id)
+        port = provider.generation_port
+        if (port is None or port.repository.catalog.current() != generation_id
+                or port.repository.catalog.active_provider_id() != provider_id):
+            raise RuntimeError("L3 selection requires a committed memory generation")
+        port.bind_generation(generation_id)
+        self.l3_selector._adopt(provider_id)
+
+    def is_l3_generation_bound(self, provider_id: str, generation_id: str) -> bool:
+        provider = self.providers.get(provider_id)
+        if provider is None or not provider.mounted or provider.generation_port is None:
+            return False
+        port = provider.generation_port
+        return binding_ready(port.repository.generation_id == generation_id,
+                             port.generation_is_bound(generation_id),
+                             self.l3_selector is not None and self.l3_selector.active_provider_id == provider_id)
+
+    def validate_l3_provider(self, provider: L3ProviderPort, *, module_id: str) -> None:
+        self.providers.validate(provider, module_id=module_id)
+        port = provider.generation_port
+        if port is not None and self._l3_catalog is not None and self._l3_catalog != port.repository.catalog.catalog_path:
+            raise ValueError("L3 publication cannot replace the committed Memory catalog")
 
     def unregister_l3_provider(self, provider: L3ProviderPort) -> None:
         self.providers.unregister(provider)
@@ -1075,6 +1122,22 @@ class MemoryService:
             self.failed_retirements.extend(retireable)
             return 0
         return len(retireable)
+
+    def remember_case(self, case: MemoryCase) -> L3MutationResult:
+        """Persist a case, then project only the provider's committed result."""
+        provider = self._resolve_l3_provider()
+        if provider is None:
+            return L3MutationResult(status="unavailable", document_id="",
+                                    metadata={"reason": "No active L3 provider"})
+        result = provider.commit(L3CommitRequest(
+            kind="case", canonical_key=case.canonical_key, title=case.title,
+            summary=case.result, topics=list(case.topics), payload=dict(case.metadata),
+            search_text=f"Situation: {case.situation}\nTask: {case.task}\nAction: {case.action}\nResult: {case.result}",
+            situation_text=case.situation, task_text=case.task,
+            action_text=case.action, result_text=case.result))
+        if result.status == RuntimeStatus.OK:
+            self.project_mutation(result)
+        return result
 
     def _resolve_l3_provider(self):
         if self.l3_selector is None:

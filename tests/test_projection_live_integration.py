@@ -9,6 +9,7 @@
 """
 
 from __future__ import annotations
+from pal.execution.runtime import ExecutionRuntime
 from tests.llm_fakes import NonStreamingLLM
 from pal.llm.contracts import collect_generation
 
@@ -167,7 +168,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
                                   max_attempts=1, timeout_seconds=10.0)
         executor = TurnExecutor(
             SimpleNamespace(port_registry=ports, require_port=ports.require_port,
-                            execution_runtime=None),
+                            execution_runtime=ExecutionRuntime()),
             SimpleNamespace(diagnostics=[]),
             None,
             build_canonical_prompt=None,
@@ -227,7 +228,7 @@ class ExecutorLiveRebaseTests(unittest.TestCase):
                                   max_attempts=1, timeout_seconds=10.0)
         executor = TurnExecutor(
             SimpleNamespace(port_registry=ports, require_port=ports.require_port,
-                            execution_runtime=None),
+                            execution_runtime=ExecutionRuntime()),
             SimpleNamespace(diagnostics=diagnostics),
             None,
             build_canonical_prompt=None,

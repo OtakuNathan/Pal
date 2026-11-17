@@ -26,18 +26,18 @@ class _Provider:
     def settle_event(self, event, *, accepted, error=""):
         _ = (event, error)
         self.settlements.append(bool(accepted))
+        return True
 
 
 class _Core:
     def __init__(self) -> None:
         self.calls: list[str] = []
-        self.actions: list[object] = []
+        self.deliveries: list[object] = []
         self.fail_second_attachment_once = True
 
-    async def handle_control_action_async(self, action, *, require_provider):
+    async def deliver(self, delivery, *, require_provider):
         self.assert_require_provider(require_provider)
-        self.actions.append(action)
-        delivery = action.delivery
+        self.deliveries.append(delivery)
         if delivery.delivery_kind == "attachment":
             part = str(delivery.payload.get("path") or "")
         else:
@@ -68,7 +68,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider = _Provider()
         core = _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
+        context = SimpleNamespace(port_registry=PortRegistry())
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_ARCHITECTURE_REVIEW_RESOLVED,
             source_kind=SourceKind.BUNSHIN,
@@ -85,13 +85,13 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        await BunshinControlEventHandler(provider=provider).handle(event, context)
+        await BunshinControlEventHandler(provider=provider, controls=core).handle(event, context)
 
         self.assertEqual(core.calls, ["primary"])
-        action = core.actions[0]
-        self.assertEqual(action.action_kind, "interactive_resolve")
+        delivery = core.deliveries[0]
+        self.assertEqual(delivery.delivery_kind, "interactive_resolve")
         self.assertEqual(
-            action.delivery.interaction.interaction_id,
+            delivery.interaction.interaction_id,
             "bunshin_v2_architecture_revision-1",
         )
         self.assertEqual(provider.settlements, [True])
@@ -100,7 +100,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider = _Provider()
         core = _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
+        context = SimpleNamespace(port_registry=PortRegistry())
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_TERMINAL,
             source_kind=SourceKind.BUNSHIN,
@@ -126,13 +126,13 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
         )
-        handler = BunshinControlEventHandler(provider=provider)
+        handler = BunshinControlEventHandler(provider=provider, controls=core)
 
         await handler.handle(event, context)
 
         self.assertEqual(
-            [action.action_kind for action in core.actions],
-            ["interactive_resolve", "interactive_resolve", "route_reply"],
+            [delivery.delivery_kind for delivery in core.deliveries],
+            ["interactive_resolve", "interactive_resolve", "reply"],
         )
         self.assertEqual(
             provider.parts,
@@ -144,7 +144,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider = _Provider()
         core = _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
+        context = SimpleNamespace(port_registry=PortRegistry())
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_TERMINAL,
             source_kind=SourceKind.BUNSHIN,
@@ -168,7 +168,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        await BunshinControlEventHandler(provider=provider).handle(event, context)
+        await BunshinControlEventHandler(provider=provider, controls=core).handle(event, context)
 
         self.assertEqual(core.calls, ["/tmp/result.patch", "primary"])
         self.assertEqual(provider.parts, {"attachment:0", "primary"})
@@ -178,7 +178,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider = _Provider()
         core = _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
+        context = SimpleNamespace(port_registry=PortRegistry())
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_CLARIFICATION_RESOLVED,
             source_kind=SourceKind.BUNSHIN,
@@ -194,7 +194,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
         )
-        handler = BunshinControlEventHandler(provider=provider)
+        handler = BunshinControlEventHandler(provider=provider, controls=core)
 
         await handler.handle(event, context)
 
@@ -205,7 +205,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_retry_skips_parts_already_accepted_by_channel(self) -> None:
         provider = _Provider()
         core = _Core()
-        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core}))
+        context = SimpleNamespace(port_registry=PortRegistry())
         event = EventEnvelope(
             event_kind=EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING,
             source_kind=SourceKind.BUNSHIN,
@@ -228,7 +228,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
         )
-        handler = BunshinControlEventHandler(provider=provider)
+        handler = BunshinControlEventHandler(provider=provider, controls=core)
 
         await handler.handle(event, context)
         self.assertEqual(core.calls, ["first.md", "second.md"])
@@ -245,6 +245,29 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(provider.settlements, [False, True])
 
+    async def test_retry_after_manager_ack_failure_preserves_accepted_part(self):
+        provider, core = _Provider(), _Core()
+        core.fail_second_attachment_once = False
+        context = SimpleNamespace(port_registry=PortRegistry())
+        event = EventEnvelope(event_kind=EventKind.BUNSHIN_TERMINAL, source_kind=SourceKind.BUNSHIN,
+            payload={"delivery_id": "ack-failure", "summary": "done",
+                "route": {"endpoint_id": "telegram", "channel_kind": "telegram"},
+                "attachments": [{"path": "first.md"}, {"path": "second.md"}]})
+        acknowledge = provider.settle_event_part
+        def lost_ack(event, part):
+            acknowledge(event, part)
+            return False
+        provider.settle_event_part = lost_ack
+        handler = BunshinControlEventHandler(provider, core)
+        await handler.handle(event, context)
+        self.assertEqual(core.calls, ["first.md"])
+        self.assertEqual(provider.settlements, [False])
+        provider.settle_event_part = acknowledge
+        core.calls.clear()
+        await handler.handle(event, context)
+        self.assertEqual(core.calls, ["second.md", "primary"])
+        self.assertEqual(provider.settlements, [False, True])
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -256,20 +279,20 @@ class BunshinMemoryProposalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         memory = MemoryService()
         provider, core = _Provider(), _Core()
         core.fail_second_attachment_once = False
-        context = SimpleNamespace(port_registry=PortRegistry({"core:core": core, "memory:memory": memory}))
+        context = SimpleNamespace(port_registry=PortRegistry({"memory:memory": memory}))
         payload = {"delivery_id": "d", "task_id": "t", "workflow_id": "w", "invocation_id": "i",
             "status": "completed", "summary": "done",
             "route": {"endpoint_id": "socket", "channel_kind": "socket", "reply_target": {"session_id": "task"}},
             "memory_candidates": [{"kind": "fact", "title": "test", "summary": "test", "source_excerpt": "source"}]}
         event = EventEnvelope(event_kind=EventKind.BUNSHIN_TERMINAL, source_kind=SourceKind.BUNSHIN, payload=payload)
-        handler = BunshinControlEventHandler(provider)
+        handler = BunshinControlEventHandler(provider, core)
         await handler.handle(event, context)
         self.assertEqual(provider.settlements, [True])
         self.assertIn("memory_proposals", provider.parts)
-        proposal = next(action for action in core.actions if action.delivery.delivery_kind == "interactive_open")
+        proposal = next(delivery for delivery in core.deliveries if delivery.delivery_kind == "interactive_open")
         self.assertEqual(proposal.route.reply_target, {"session_id": "task"})
-        state = memory.reviews.get(proposal.delivery.interaction.interaction_id, proposal.route)
+        state = memory.reviews.get(proposal.interaction.interaction_id, proposal.route)
         self.assertEqual(state["source"]["task_id"], "t")
         self.assertEqual(state["drafts"][0]["decision"], "pending")
         await handler.handle(event, context)
-        self.assertEqual(len(core.actions), 2)
+        self.assertEqual(len(core.deliveries), 2)

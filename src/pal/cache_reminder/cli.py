@@ -5,8 +5,8 @@ from dataclasses import asdict
 
 from pal.cli_config import add_config_options, configuration_target, emit_error, emit_result, open_config_database, require_runtime, request_owner
 from pal.control.configuration import configuration_endpoint
-from pal.core.cache_warm_deadline import configure_cache_reminder_settings, read_cache_reminder_settings
-from pal.execution.generated_tool_models import CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput
+from pal.cache_reminder.settings import configure_cache_reminder_settings, read_cache_reminder_settings
+from pal.cache_reminder.settings import CacheReminderPatch
 from pal.foundation.sidecar import SidecarRpcClient
 from pal.llm.models import PalRuntimeSettingModel
 from pal.llm.repository import RuntimeSettingRepository
@@ -35,7 +35,7 @@ async def run_core_cli_async(args: argparse.Namespace) -> int:
             }.items() if value is not None}
             if not patch:
                 raise ValueError("configure requires at least one setting")
-            CoreCapabilitiesCoreIntrospectionProviderConfigureCacheWarmDeadlineInput.model_validate(patch)
+            CacheReminderPatch.model_validate(patch)
         with configuration_target(root) as target:
             if target == "live":
                 client = SidecarRpcClient(configuration_endpoint(root),

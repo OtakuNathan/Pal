@@ -4,6 +4,7 @@ Owns:
 - async and process-facing infrastructure contracts
 - database lifecycle, transaction scope, external-schema assumptions, raw SQL hook registry
 - shared low-level primitives that do not carry business semantics
+- owned worker joining through repeated cancellation, preserving worker failures as cancellation causes
 - generation-fenced ownership for fd-backed resource graphs
 
 Does not own:
@@ -16,6 +17,7 @@ Exposes:
 - `WriterPreferredRWGate` (generic cancellation-safe lifecycle admission)
 - `EventEnvelope`
 - `PalV2Database`
+- `sqlite_database.OwnedSqliteDatabase`
 - `RawSQLHookRegistry`
 - `RepositoryBase`
 - `FdLease`, `FdCapability`, and `FdCancellationControl`
@@ -59,3 +61,19 @@ Rule:
 - schema migration is external to `PalV2`
 - runtime initialization assumes the database has already been migrated or
   otherwise prepared before startup
+
+`OwnedSqliteDatabase` owns every Peewee worker connection. After the caller has
+drained admitted operations, owner cleanup closes them under Peewee's connection
+lock and clears their actual thread state. Failed closes retain ownership for
+retry and do not prevent cleanup of other connections; Memory retains its reader
+lease until cleanup succeeds. Per-thread connection contexts retain Peewee's
+ordinary scope, and later explicit reuse opens fresh connections. No per-query
+health checks are added.
+
+`WriterPreferredRWGate` fences tools and local control calls against lifecycle
+writers. An async task can nest shared calls under its admitted reader even when
+a writer is waiting; child tasks acquire independent leases. Cancellation drains
+pending acquisition before releasing it, including repeated cancellation.
+An exclusive async owner can nest notifications under its writer. Upgrading an
+admitted shared call to exclusive access is rejected; callers must declare their
+exclusive or owner-managed admission at the outer boundary.

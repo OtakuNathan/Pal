@@ -1,6 +1,7 @@
 """Configuration CLIs preserve ownership, persistence and recovery boundaries."""
 from tests.llm_fakes import scripted_llm
 from tests.core_factory import build_core
+from tests.cache_reminder_factory import attach_cache_reminder
 import asyncio
 from contextlib import redirect_stdout
 import io
@@ -15,7 +16,7 @@ import pytest
 from pal.core.runtime import PalCore
 from pal.main import _build_parser
 from pal.cli_config import open_config_database
-from pal.core.cli import run_core_cli_async
+from pal.cache_reminder.cli import run_core_cli_async
 from pal.bunshin.config_cli import run_bunshin_config_cli_async
 from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.catalog_store import profile_override_path
@@ -137,12 +138,12 @@ def test_core_cli_reaches_busy_owner_and_shutdown_closes_idle_clients(runtime_ro
         from tests.test_cache_warm_deadline import _route, _snapshot
         core = build_core()
         core.context.port_registry['llm:llm'] = scripted_llm(settings_repository=RuntimeSettingRepository(),
-            prompt_cache_warm_deadline_snapshot=_snapshot)
+            prompt_cache_reminder_snapshot=_snapshot)
         core.state.active_turn_id = 'waiting-for-cli'
-        owner = core.cache_warm_deadline
+        owner = attach_cache_reminder(core, RuntimeSettingRepository())
         owner.configure(enabled=True, lead_seconds=30, min_prefix_tokens=1024)
         assert owner.schedule_after_turn_commit(route=_route(), turn_id='previous')
-        service = CoreConfigurationService(runtime_root, owner)
+        service = CoreConfigurationService(runtime_root, core.context.execution_runtime.lifecycle_gate, core.context.configuration_operations)
         with runtime_lease(runtime_root):
             await service.start_async()
             endpoint = configuration_endpoint(runtime_root)
@@ -254,14 +255,12 @@ def test_bunshin_online_cli_uses_catalog_owner(runtime_root):
 
 def test_core_configuration_normalizes_relative_long_runtime_roots(runtime_root, monkeypatch):
     async def run():
-        from tests.test_cache_warm_deadline import _Settings
-        from pal.core.cache_warm_deadline import CacheWarmDeadlineManager
         long_root = runtime_root / ('long-directory-' * 8)
         long_root.mkdir()
         monkeypatch.chdir(runtime_root)
-        owner = CacheWarmDeadlineManager(cache_snapshot=lambda: {}, settings_provider=_Settings,
-            has_active_turn=lambda: False, deliver_notice=None, expire_notice=None)
-        service = CoreConfigurationService(Path(long_root.name), owner)
+        core = build_core()
+        owner = attach_cache_reminder(core)
+        service = CoreConfigurationService(Path(long_root.name), core.context.execution_runtime.lifecycle_gate, core.context.configuration_operations)
         await service.start_async()
         try:
             assert service.runtime_root == long_root.resolve()
@@ -277,7 +276,8 @@ def test_core_timeout_reports_unknown_and_does_not_repeat_or_fall_back(runtime_r
     async def run():
         core = build_core()
         core.context.port_registry['llm:llm'] = scripted_llm(settings_repository=RuntimeSettingRepository())
-        service = CoreConfigurationService(runtime_root, core.cache_warm_deadline)
+        owner = attach_cache_reminder(core, RuntimeSettingRepository())
+        service = CoreConfigurationService(runtime_root, core.context.execution_runtime.lifecycle_gate, core.context.configuration_operations)
         call_method = service._call_method
         calls = []
         gate = asyncio.Event()
@@ -294,7 +294,7 @@ def test_core_timeout_reports_unknown_and_does_not_repeat_or_fall_back(runtime_r
                 with redirect_stdout(io.StringIO()) as output:
                     assert await run_core_cli_async(args) == 2
                 assert json.loads(output.getvalue())['outcome'] == 'unknown'
-                assert core.cache_warm_deadline.settings().enabled is False
+                assert owner.settings().enabled is False
                 assert calls == ['cache_reminder.configure']
             finally:
                 gate.set()

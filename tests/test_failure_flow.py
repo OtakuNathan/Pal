@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from pal.core.runtime import PalCore
 from pal.core.capabilities import register_with_core as register_core_with_core
-from pal.core.turns import _render_failure_primary_input
+from pal.failure.presentation import _render_failure_primary_input
 from pal.execution import CapabilityResult
 from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_NONE
@@ -416,7 +416,7 @@ class FailureFlowTests(unittest.TestCase):
             _ = (draft, allowed_tools)
             raise RuntimeError("safe-mode orchestration broke")
 
-        core.failure_orchestrator._run_failure_flow_async = explode
+        core.failure_recovery.current._run_failure_flow_async = explode
 
         result = asyncio.run(
             core.handle_failure_async(
@@ -439,7 +439,7 @@ class FailureFlowTests(unittest.TestCase):
     def test_failure_flow_program_exception_returns_failed_verification(self) -> None:
         core = _core_with_failure_runtime()
         core.context.port_registry["llm:llm"] = _RecordingFailureLLM()
-        draft = core.failure_orchestrator.failure_runtime().begin_draft(
+        draft = core.failure_recovery.current.runtime.begin_draft(
             FailureSignal(
                 subsystem="execution",
                 component="run_shell",
@@ -450,8 +450,8 @@ class FailureFlowTests(unittest.TestCase):
             )
         )
 
-        with patch("pal.core.failure_orchestrator.failure_turn_program", side_effect=_exploding_failure_program):
-            outcome = asyncio.run(core.failure_orchestrator._run_failure_flow_async(draft, allowed_tools=[]))
+        with patch("pal.failure.recovery.failure_turn_program", side_effect=_exploding_failure_program):
+            outcome = asyncio.run(core.failure_recovery.current._run_failure_flow_async(draft, allowed_tools=[]))
 
         self.assertEqual(outcome.verification.status, FAILURE_VERIFICATION_FAILED)
         self.assertIn("Failure safe-mode flow crashed during program", outcome.verification.reason)
@@ -459,7 +459,7 @@ class FailureFlowTests(unittest.TestCase):
     def test_failure_flow_unknown_effect_returns_failed_verification(self) -> None:
         core = _core_with_failure_runtime()
         core.context.port_registry["llm:llm"] = _RecordingFailureLLM()
-        draft = core.failure_orchestrator.failure_runtime().begin_draft(
+        draft = core.failure_recovery.current.runtime.begin_draft(
             FailureSignal(
                 subsystem="execution",
                 component="run_shell",
@@ -470,8 +470,8 @@ class FailureFlowTests(unittest.TestCase):
             )
         )
 
-        with patch("pal.core.failure_orchestrator.failure_turn_program", side_effect=_unknown_effect_failure_program):
-            outcome = asyncio.run(core.failure_orchestrator._run_failure_flow_async(draft, allowed_tools=[]))
+        with patch("pal.failure.recovery.failure_turn_program", side_effect=_unknown_effect_failure_program):
+            outcome = asyncio.run(core.failure_recovery.current._run_failure_flow_async(draft, allowed_tools=[]))
 
         self.assertEqual(outcome.verification.status, FAILURE_VERIFICATION_FAILED)
         self.assertIn("Failure flow yielded unsupported effect: object", outcome.verification.reason)
@@ -522,7 +522,7 @@ class FailureFlowTests(unittest.TestCase):
                 execution=DIRECT_NONE,
                 handler=safe_probe,
         )
-        draft = core.failure_orchestrator.failure_runtime().begin_draft(
+        draft = core.failure_recovery.current.runtime.begin_draft(
             FailureSignal(
                 subsystem="execution",
                 component="run_shell",
@@ -534,7 +534,7 @@ class FailureFlowTests(unittest.TestCase):
         )
 
         asyncio.run(
-            core.failure_orchestrator._run_failure_flow_async(
+            core.failure_recovery.current._run_failure_flow_async(
                 draft,
                 allowed_tools=[
                     {

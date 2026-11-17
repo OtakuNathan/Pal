@@ -29,6 +29,12 @@ Exposes:
 - `CapabilityResult`
 - `ExecutionRuntime`
 
+Infrastructure provider references use `<owner_module_id>:<local_name>`. Claims
+validate the namespace and reject occupied names under the registry lock;
+replacement requires an explicit expected instance, and stale release cannot
+remove it. L3 providers are owned and selected by Memory rather than registered
+again as Execution infrastructure.
+
 Notes:
 - `Execution` is the physical owner of the unified Capability Forest
 - capability lifecycle and Manager dispatch use `canonical_path + target_id`
@@ -124,3 +130,9 @@ Notes:
   actions
 
 Lifecycle access is declared on each immutable tool execution contract: shared, exclusive, or owner-managed. Aliases never select locking behavior. The generic fence lives in Foundation; L3 providers are owned by Memory.
+
+Resident and Bunshin turn execution use the same `ExecutionRuntimePort`, including
+prompt visibility, result delivery and retirement. First-party implementations
+upgrade together; consumers call declared methods without signature filtering or
+optional-method fallbacks. The base runtime supplies the ordinary behavior, while
+execution extensions override their owned session and evidence operations.

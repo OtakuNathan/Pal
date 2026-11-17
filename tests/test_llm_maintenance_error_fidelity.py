@@ -246,11 +246,12 @@ def test_dreaming_provider_error_retains_response_and_metadata(dreaming):
 
 def test_dreaming_post_publish_error_does_not_disappear(dreaming, monkeypatch):
     before = dreaming.storage.current()
-    publish = dreaming.storage.publish
+    from pal.memory.swap_store import SwapStore
+    publish = SwapStore.publish
     def publish_then_fail(*args, **kwargs):
         publish(*args, **kwargs)
         raise chained_error("publication acknowledgement failed")
-    monkeypatch.setattr(dreaming.storage, "publish", publish_then_fail)
+    monkeypatch.setattr(SwapStore, "publish", publish_then_fail)
     result = asyncio.run(dreaming.run())
     assert result["status"] == "completed"
     assert dreaming.storage.current() != before

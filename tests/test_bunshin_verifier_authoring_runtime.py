@@ -87,7 +87,7 @@ def test_consumed_finding_edit_contracts_hydrate_fresh_and_resumed_pack(verifier
         assert 'add_finding' not in runtime.registry_generation.search_records
         assert runtime.get_capability_spec('add_finding') is None
         assert all(spec['canonical_path'] != ADD_FINDING_CAPABILITY for spec in runtime.list_capability_specs())
-        assert all(spec['name'] != 'add_finding' for spec in runtime.base_runtime.runtime.list_tool_specs())
+        assert all(spec['name'] != 'add_finding' for spec in runtime._execution.runtime.list_tool_specs())
         for alias in ('update_finding', 'remove_finding'):
             assert 'before submission' in contracts[alias]['description']
             assert 'read_verification_draft_status' in contracts[alias]['description']
@@ -96,7 +96,7 @@ def test_consumed_finding_edit_contracts_hydrate_fresh_and_resumed_pack(verifier
         assert pack.to_dict() == before
         assert base.role_capabilities(allowed) == allowed
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         base.shutdown()
 
 
@@ -134,8 +134,8 @@ def test_legacy_add_replays_only_persisted_permission_without_live_exposure(veri
         assert 'add_finding' not in _contracts(runtime)
         assert 'add_finding' not in runtime.registry_generation.search_records
         assert runtime.get_capability_spec('add_finding') is None
-        assert runtime.base_runtime.runtime._read_generation_tool(runtime.registry_generation, 'add_finding') is None
-        assert all(item['name'] != 'add_finding' for item in runtime.base_runtime.runtime.list_tool_specs())
+        assert runtime._execution.runtime._read_generation_tool(runtime.registry_generation, 'add_finding') is None
+        assert all(item['name'] != 'add_finding' for item in runtime._execution.runtime.list_tool_specs())
         call = new_tool_call(name='add_finding', call_id='persisted-legacy-call', args={
             'finding_kind': 'verification_defect', 'priority': 'p1', 'summary': 'Legacy probe assertion needs correction'})
         first = asyncio.run(runtime.execute_tool_async(call))
@@ -152,7 +152,7 @@ def test_legacy_add_replays_only_persisted_permission_without_live_exposure(veri
             assert len([item for item in draft.payload['items'] if item.get('item_id') == original['finding_id']]) == 1
         assert pack.to_dict() == before
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         base.shutdown()
 
 
@@ -179,7 +179,7 @@ def test_persisted_profile_denials_survive_consumed_contract_hydration(verifier,
             assert not result.ok
         assert pack.to_dict() == before
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         base.shutdown()
 
 
@@ -202,7 +202,7 @@ def test_finding_edit_aliases_require_bound_verifier(
         if role == 'reviewer':
             assert 'add_finding' in _contracts(runtime)
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         base.shutdown()
 
 
@@ -224,7 +224,7 @@ def test_partial_verifier_assignment_cannot_bypass_writer_guard(verifier, bindin
         assert not result.ok and result.structured['reason'] == 'verification_authoring_closed'
         assert effects == []
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         base.shutdown()
 
 
@@ -245,7 +245,7 @@ def test_hydration_keeps_invocation_evidence_contract_filter(verifier, allowed, 
         assert 'run_verification_diff_risk' not in contracts
         assert {'update_finding', 'remove_finding'}.intersection(contracts) == expected_edits
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         base.shutdown()
 
 
@@ -295,8 +295,8 @@ def test_submit_serializes_corpus_writer_across_runtime_views_and_rechecks_freez
             assert rejected.structured['reason'] == 'verification_authoring_closed'
             assert order == ['validated', 'receipt'] and probe.read_text() == original_content
         finally:
-            submitter.base_runtime.runtime.shutdown()
-            writer.base_runtime.runtime.shutdown()
+            submitter._execution.runtime.shutdown()
+            writer._execution.runtime.shutdown()
             base.shutdown()
 
     asyncio.run(asyncio.wait_for(scenario(), 10))
@@ -356,7 +356,7 @@ def test_direct_execution_records_receipt_before_waiting_submit_enters(verifier,
             assert order == ['execution', 'execution receipt', 'submit']
             assert len([ref for ref in workspace['review_tool_evidence_refs'] if ref['call_id'] == 'direct']) == 1
         finally:
-            runtime.base_runtime.runtime.shutdown()
+            runtime._execution.runtime.shutdown()
             base.shutdown()
 
     asyncio.run(asyncio.wait_for(scenario(), 10))
@@ -392,7 +392,7 @@ def test_writer_first_invalidates_pass_before_receipt_acceptance(verifier):
             context = SubmissionDraftContext.from_workspace(workspace, draft_kind='verification')
             assert store.read(context).status == 'active'
         finally:
-            runtime.base_runtime.runtime.shutdown()
+            runtime._execution.runtime.shutdown()
             base.shutdown()
 
     asyncio.run(asyncio.wait_for(scenario(), 10))
@@ -492,7 +492,7 @@ def test_native_session_completion_and_receipt_stay_inside_authoring_lock(verifi
             assert len(refs) == before_count + 1 and refs[-1]['ok']
             assert sessions.delegations == 1 and cancellation_checks == ['checked']
         finally:
-            runtime.base_runtime.runtime.shutdown()
+            runtime._execution.runtime.shutdown()
             base.shutdown()
 
     asyncio.run(asyncio.wait_for(scenario(), 10))
@@ -535,7 +535,7 @@ def test_nonverifier_keeps_outer_native_delegation_and_review_receipts(verifier)
         refs = runner.components.review_evidence.review_tool_evidence_refs
         assert len(refs) == 1 and 'verification_binding' not in refs[0]
     finally:
-        runtime.base_runtime.runtime.shutdown()
+        runtime._execution.runtime.shutdown()
         base.shutdown()
 
 

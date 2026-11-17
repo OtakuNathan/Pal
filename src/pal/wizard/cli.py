@@ -581,10 +581,8 @@ def _run_setup_upgrade_offline(*, runtime_root: Path) -> int:
     web_fetch_result = migrate_web_fetch_schema(db_path)
     result = cutover_bunshin_runtime(resolved_root)
     from pal.memory.storage import MemoryStorage
-    from pal.bunshin.memory_binding import initialize_existing_workflow_pins
     memory_storage = MemoryStorage(resolved_root)
     generation = memory_storage.migrate(db_path)
-    initialize_existing_workflow_pins(resolved_root, memory_storage)
     print(f"  Pal runtime upgrade complete: {resolved_root}")
     print(f"  LLM endpoint schema: {llm_result.status}")
     print(f"  Browser schema: {web_fetch_result.status}")
