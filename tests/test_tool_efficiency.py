@@ -74,7 +74,18 @@ def test_read_tool_full_contract_is_retained_only_in_structured_channel():
             assert 'output_schema' in result.structured
             assert result.structured['example'] is None  # No fabricated example for run_shell.
             assert 'output_schema' not in visible and 'example' not in visible
-            assert visible['input_schema'] == result.structured['input_schema']
+            original = result.structured['input_schema']
+            assert original == runtime.registry_generation.record_for_alias('run_shell').input_schema
+            assert 'title' in original
+            # This fixture has titles at the root and parameter schemas only.
+            # All other fields, including descriptions and nested rules/data,
+            # must match the original contract exactly.
+            expected = {key: value for key, value in original.items() if key != 'title'}
+            expected['properties'] = {
+                name: {key: value for key, value in field.items() if key != 'title'}
+                for name, field in original['properties'].items()
+            }
+            assert visible['input_schema'] == expected
             assert 'Output shape:' not in visible['description']
             # The failure handbook lives host-side on the guidance contract and
             # surfaces as result-side recovery on real failures; it is not
