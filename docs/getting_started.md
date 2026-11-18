@@ -141,9 +141,20 @@ upgrade path:
 pal setup --upgrade --runtime-root ~/.pal
 ```
 
-This applies the current LLM and Bunshin schema migrations without reopening the
-wizard or replacing user configuration. It does not replace code already loaded
-in a running host.
+With Pal stopped, this applies the current LLM, browser, Bunshin, and memory
+upgrades. If an older memory database contains vectors without a recorded
+embedding identity, the upgrade uses the configured embedding endpoint to rebuild
+the index in a separate generation. It preserves the source database and user
+configuration and publishes the new generation after verification. The endpoint
+must be reachable during the rebuild. If the rebuild stops, keep Pal stopped and
+rerun the same upgrade command to resume. Use `pal memory embedding migrate`
+separately when intentionally changing the configured model.
+Pass `--embedding-remote-only` to use only the configured remote Ollama
+endpoints for the rebuild. The migration journal retains this choice on retry.
+The configured primary establishes the model digest before rebuilding. Other
+endpoints can serve batches only when they report that digest. Align the
+endpoints to use the same model, or migrate explicitly to the intended model
+when changing embedding spaces.
 
 The packaged release bundle contains the Pal wheel, the runtime plugin overlay,
 and independently installable channel-provider wheels under `providers/`.

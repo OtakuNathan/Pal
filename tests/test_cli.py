@@ -78,7 +78,7 @@ class PalV2CliParserTests(unittest.TestCase):
         ):
             self.assertEqual(main(), 0)
 
-        run_setup_upgrade.assert_called_once_with(runtime_root=runtime_root.resolve())
+        run_setup_upgrade.assert_called_once_with(runtime_root=runtime_root.resolve(), embedding_remote_only=False)
 
     def test_tty_subcommand_parses_with_runtime_root(self) -> None:
         args = _build_parser().parse_args(
@@ -148,10 +148,10 @@ def test_setup_default_and_quoted_tilde_are_normalized(tmp_path, monkeypatch):
         with patch('pal.wizard.cli.run_setup_wizard', return_value=0) as setup:
             assert main() == 0
         setup.assert_called_once_with(runtime_root=expected)
-    monkeypatch.setattr(sys, 'argv', ['pal', 'setup', '--upgrade'])
+    monkeypatch.setattr(sys, 'argv', ['pal', 'setup', '--upgrade', '--embedding-remote-only'])
     with patch('pal.wizard.cli.run_setup_upgrade', return_value=0) as upgrade:
         assert main() == 0
-    upgrade.assert_called_once_with(runtime_root=tmp_path / '.pal')
+    upgrade.assert_called_once_with(runtime_root=tmp_path / '.pal', embedding_remote_only=True)
 
 
 def test_missing_default_runtime_does_not_create_another_pal(tmp_path, monkeypatch, capsys):

@@ -128,6 +128,14 @@ Each generation pins one full embedding profile and one vector dimension. Reload
 or runtime configuration drift cannot retarget its vectors. Mismatched or unknown
 provenance exposes basic reads until a private-generation migration completes;
 response and repository guards reject cross-model or cross-dimension results.
+With the host stopped, `pal setup --upgrade --runtime-root <dir>` detects legacy
+vectors without recorded provenance and rebuilds them using the configured model.
+Rerun the upgrade to resume an interrupted rebuild. Publication preserves the
+source generation and existing reader pins. A model change still uses the explicit
+embedding migration command.
+Offline Ollama migrations pin the configured primary's model digest in their
+journal. Each batch and verification query checks the serving endpoint against
+the pin so a fallback or retry cannot substitute a different model artifact.
 Dreaming publication and recovery rebind through the backend generation port;
 the backend reloads embedding identity and catalog-owned indexing state together.
 Vector inserts/updates maintain their native search entry in the write transaction.

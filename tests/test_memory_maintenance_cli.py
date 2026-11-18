@@ -214,3 +214,105 @@ def test_resume_refuses_unrelated_config_change_after_publication(stored_memory,
     assert result["status"] == "error"
     assert "configuration changed" in result["state"]["error"]
     assert 'untouched = "changed"' in config.read_text()
+
+
+def test_resumed_ollama_migration_refuses_a_different_fallback_model(stored_memory, monkeypatch):
+    from pal.memory.embedding import OllamaEmbeddingProvider, build_ollama_embedding_provider_from_config
+
+    root, storage, patch = stored_memory
+    with (root / "config.toml").open("a") as stream:
+        stream.write('embedding_ollama_remote_base_urls = ["http://remote:11434"]\n')
+    source = storage.current()
+    monkeypatch.setattr(migration, "build_ollama_embedding_provider_from_config",
+                        build_ollama_embedding_provider_from_config)
+    local_digest = "different-model"
+    local_batches = []
+
+    def request(self, method, path, payload):
+        remote = self.base_url == "http://remote:11434"
+        if path == "/api/tags":
+            return {"models": [{"name": self.model_name,
+                                "digest": "primary-model" if remote else local_digest}]}
+        if remote:
+            raise TimeoutError("remote compute unavailable")
+        local_batches.append(payload["input"])
+        return {"embeddings": [[1.0, 0.0] for _ in payload["input"]]}
+
+    monkeypatch.setattr(OllamaEmbeddingProvider, "_request_json", request)
+    failed = migration.run_embedding_command(root, command("migrate", patch))
+    assert failed["status"] == "error"
+    assert "digest differs" in failed["state"]["error"]
+    assert failed["state"]["model_digest"] == "primary-model"
+    assert storage.current() == source
+    assert not local_batches
+
+    local_digest = "primary-model"
+    completed = migration.run_embedding_command(root, command("resume"))
+    assert completed["status"] == "ok", completed
+    assert completed["state"]["model_digest"] == "primary-model"
+    assert completed["state"]["candidate_generation"] == failed["state"]["candidate_generation"]
+    assert storage.current() == completed["state"]["candidate_generation"]
+    assert len(local_batches) == 3  # Two documents and the verification query.
+
+
+@pytest.mark.parametrize("legacy_layout", ["generation", "monolithic"])
+def test_setup_upgrade_rebuilds_unidentified_embeddings_and_resumes(
+        stored_memory, monkeypatch, legacy_layout):
+    from pal.core.runtime_config import RuntimeConfig
+    from pal.memory.embedding_space import read_space
+    from pal.memory.service import MemoryService
+    from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
+    from pal.wizard.cli import run_setup_upgrade
+
+    root, storage, _ = stored_memory
+    config = (root / "config.toml").read_bytes()
+    source = storage.open(read_only=True)
+    try:
+        repo = storage.candidate(source)
+    finally:
+        source.close()
+    try:
+        provider = SQLiteVecL3Plugin(service=MemoryService(), repository=repo,
+                                    embedding_provider=Embeddings(RuntimeConfig.load(root)))
+        provider.prepare_generation(repo)
+        assert provider.refresh_indexes()["refreshed"] == 2
+        storage.publish_reindexed(repo, source_generation=storage.current(), profile=provider.migration_identity)
+        repo.database.execute_sql("DELETE FROM memory_embedding_space")
+        if legacy_layout == "monolithic":
+            legacy_root = root / "legacy"
+            legacy_root.mkdir()
+            storage.snapshot(repo, legacy_root / "pal.sqlite3")
+            (legacy_root / "config.toml").write_bytes(config)
+    finally:
+        repo.close()
+    if legacy_layout == "monolithic":
+        root = legacy_root
+        storage = MemoryStorage(root)
+
+    original = Embeddings.embed_documents
+
+    def unavailable(self, texts):
+        raise RuntimeError("fixture embedding endpoint unavailable")
+
+    monkeypatch.setattr(Embeddings, "embed_documents", unavailable)
+    assert run_setup_upgrade(runtime_root=root) == 2
+    failed = migration._read_journal(root)
+    assert storage.current() == failed["source_generation"]
+    assert (root / "config.toml").read_bytes() == config
+
+    monkeypatch.setattr(Embeddings, "embed_documents", original)
+    assert run_setup_upgrade(runtime_root=root) == 0
+    assert storage.current() == failed["candidate_generation"]
+    assert storage.path(failed["source_generation"]).is_file()
+    updated = storage.open(read_only=True)
+    try:
+        assert updated.inventory()["ready_embeddings"] == 2
+        assert updated.get_document("fact:one")["summary"] == "alpha"
+        assert read_space(updated.database.connection()).profile["model_name"] == "old"
+    finally:
+        updated.close()
+
+    monkeypatch.setattr(Embeddings, "embed_documents", unavailable)
+    assert run_setup_upgrade(runtime_root=root) == 0
+    assert storage.current() == failed["candidate_generation"]
+    assert (root / "config.toml").read_bytes() == config

@@ -546,22 +546,22 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     return 0
 
 
-def run_setup_upgrade(*, runtime_root: Path) -> int:
+def run_setup_upgrade(*, runtime_root: Path, embedding_remote_only: bool = False) -> int:
     """Apply runtime-owned upgrade steps without changing user configuration."""
 
     from pal.packages.process import PackageError, runtime_lease
     runtime_root = Path(runtime_root).expanduser().resolve()
     if not (runtime_root / DEFAULT_DB_FILENAME).is_file():
-        return _run_setup_upgrade_offline(runtime_root=runtime_root)
+        return _run_setup_upgrade_offline(runtime_root=runtime_root, embedding_remote_only=embedding_remote_only)
     try:
         with runtime_lease(runtime_root):
-            return _run_setup_upgrade_offline(runtime_root=runtime_root)
+            return _run_setup_upgrade_offline(runtime_root=runtime_root, embedding_remote_only=embedding_remote_only)
     except PackageError:
         print("  Stop Pal before running pal setup --upgrade; the runtime is in use.")
         return 2
 
 
-def _run_setup_upgrade_offline(*, runtime_root: Path) -> int:
+def _run_setup_upgrade_offline(*, runtime_root: Path, embedding_remote_only: bool = False) -> int:
 
     resolved_root = Path(runtime_root).expanduser().resolve()
     db_path = resolved_root / DEFAULT_DB_FILENAME
@@ -580,9 +580,23 @@ def _run_setup_upgrade_offline(*, runtime_root: Path) -> int:
     llm_result = migrate_llm_endpoint_schema(db_path)
     web_fetch_result = migrate_web_fetch_schema(db_path)
     result = cutover_bunshin_runtime(resolved_root)
+    from pal.memory.embedding_migration import upgrade_legacy_embeddings
     from pal.memory.storage import MemoryStorage
+
     memory_storage = MemoryStorage(resolved_root)
-    generation = memory_storage.migrate(db_path)
+    memory_storage.migrate(db_path)
+    try:
+        embedding_result = upgrade_legacy_embeddings(memory_storage, db_path, remote_only=embedding_remote_only)
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f"  Memory embedding upgrade could not proceed: {exc}")
+        return 2
+    if embedding_result and embedding_result["status"] != "ok":
+        print(f"  Memory embedding upgrade paused: {embedding_result['state']['error']}")
+        print(f"  Keep Pal stopped and rerun pal setup --upgrade --runtime-root {resolved_root}")
+        return 2
+    generation = memory_storage.current()
+    if embedding_result:
+        print(f"  Memory embeddings rebuilt: {embedding_result['state']['refreshed']}")
     print(f"  Pal runtime upgrade complete: {resolved_root}")
     print(f"  LLM endpoint schema: {llm_result.status}")
     print(f"  Browser schema: {web_fetch_result.status}")

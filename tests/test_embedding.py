@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from pal.core.runtime_config import RuntimeConfig
 from pal.memory.embedding import (
@@ -66,6 +67,21 @@ class _WorkingEmbedder:
 
 
 class EmbeddingProviderTests(unittest.TestCase):
+    def test_remote_only_does_not_fall_back_to_local_compute(self) -> None:
+        provider = build_ollama_embedding_provider_from_config(
+            RuntimeConfig(embedding_ollama_remote_base_urls=("http://remote:11434",))
+        )
+        assert isinstance(provider, OllamaFallbackEmbeddingProvider)
+        remote, local = provider.providers
+        fingerprint = provider.configuration_fingerprint
+        provider.restrict_to_remote()
+        with patch.object(remote, "embed_documents", side_effect=TimeoutError("remote timed out")), \
+                patch.object(local, "embed_documents") as local_compute:
+            with self.assertRaisesRegex(RuntimeError, "remote timed out"):
+                provider.embed_documents(["hello"])
+            local_compute.assert_not_called()
+        self.assertEqual(provider.configuration_fingerprint, fingerprint)
+
     def test_build_ollama_embedding_provider_uses_remote_first_fallback_when_configured(self) -> None:
         provider = build_ollama_embedding_provider_from_config(
             RuntimeConfig(embedding_ollama_remote_base_urls=("192.168.31.145:11434",))

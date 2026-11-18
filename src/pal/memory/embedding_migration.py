@@ -1,11 +1,13 @@
 """Offline, resumable embedding rebuild into an unpublished memory generation."""
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import replace
 import hashlib
 import json
 import math
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import tomllib
@@ -17,7 +19,9 @@ from pydantic import Field, field_validator
 from pal.core.runtime_config import RuntimeConfig
 from pal.execution.tool_facade import StrictToolModel
 from pal.foundation import utc_now
-from pal.memory.embedding import build_ollama_embedding_provider_from_config
+from pal.memory.embedding import (
+    OllamaEmbeddingProvider, OllamaFallbackEmbeddingProvider, build_ollama_embedding_provider_from_config,
+)
 from pal.memory.repository import deserialize_vector
 from pal.memory.embedding_space import read_space
 from pal.memory.storage import MemoryStorage
@@ -115,7 +119,7 @@ def _read_journal(root):
 def _public_state(state):
     return {key: value for key, value in (state or {}).items()
             if key in {"run_id", "stage", "source_generation", "candidate_generation", "target_identity",
-                       "refreshed", "inventory", "error", "verification"}}
+                       "refreshed", "inventory", "error", "verification", "model_digest", "remote_only"}}
 
 
 def _save(root, state):
@@ -172,23 +176,75 @@ def run_embedding_command(root, args):
                 "reembedding_required": source_identity != target_identity,
                 "dimension_alone_establishes_compatibility": False,
                 "strategy": "rebuild unpublished generation, verify, then publish and update configuration"}}
-        require_completed_migration(root)
-        state = {"run_id": uuid4().hex, "stage": "creating", "patch": patch,
-                 "source_generation": _storage(root).current(), "candidate_generation": None,
-                 "target_identity": target_identity, "config_before_digest": _digest(before),
-                 "config_target_digest": _digest(_render_config(before, patch)), "refreshed": 0}
-        backup = Path(root) / "memory" / "embedding-migrations" / (state["run_id"] + ".config-before.toml")
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(backup_fd, "w") as stream:
-            stream.write(before)
-            stream.flush()
-            os.fsync(stream.fileno())
-        _save(root, state)
+        state = _start(root, patch, before, target_identity)
     else:
         state = _read_journal(root)
         if not state:
             raise ValueError("No embedding migration to resume")
+    return _run(root, state, batch_size)
+
+
+def _start(root, patch, before, target_identity, *, remote_only=False):
+    require_completed_migration(root)
+    state = {"run_id": uuid4().hex, "stage": "creating", "patch": patch,
+             "source_generation": _storage(root).current(), "candidate_generation": None,
+             "target_identity": target_identity, "config_before_digest": _digest(before),
+             "config_target_digest": _digest(_render_config(before, patch) if patch else before),
+             "refreshed": 0, "remote_only": remote_only}
+    backup = Path(root) / "memory" / "embedding-migrations" / (state["run_id"] + ".config-before.toml")
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(backup_fd, "w") as stream:
+        stream.write(before)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _save(root, state)
+    return state
+
+
+def _has_unidentified_embeddings(connection):
+    if read_space(connection) is not None:
+        return False
+    for table in ("memory_embeddings", "memory_embedding_vec"):
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
+            if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                return True
+    return False
+
+
+def upgrade_legacy_embeddings(storage: MemoryStorage, legacy_path: Path, *, remote_only: bool = False):
+    """Under the offline runtime lease, rebuild legacy indexes with the configured model."""
+    root = storage.root.parent
+    state = _read_journal(root)
+    if state and state["stage"] != "completed":
+        if state["patch"]:
+            require_completed_migration(root)
+    else:
+        generation = storage.current()
+        with closing(sqlite3.connect(storage.path(generation).as_uri() + "?mode=ro", uri=True)) as connection:
+            needs_rebuild = _has_unidentified_embeddings(connection)
+            # The original split discarded vectors without provenance. Check
+            # that source as well, including a retry after the split published.
+            if not needs_rebuild and generation == "migrated" and read_space(connection) is None:
+                with closing(sqlite3.connect(legacy_path.as_uri() + "?mode=ro", uri=True)) as legacy:
+                    needs_rebuild = _has_unidentified_embeddings(legacy)
+        if not needs_rebuild:
+            return None
+        before = _config_text(root)
+        config = RuntimeConfig.load(root)
+        if remote_only and not config.embedding_ollama_remote_base_urls:
+            raise ValueError("Remote-only embedding requires a configured remote Ollama endpoint")
+        state = _start(root, {}, before, _identity(config), remote_only=remote_only)
+    if remote_only and not state.get("remote_only"):
+        state["remote_only"] = True
+        _save(root, state)
+    print("  Rebuilding legacy memory embeddings with the configured model...", flush=True)
+    # Legacy search texts can be long. Small batches fit the configured request
+    # timeout better and checkpoint progress more often during an offline upgrade.
+    return _run(root, state, batch_size=4)
+
+
+def _run(root, state, batch_size):
     if state["stage"] == "completed":
         return {"status": "ok", "activation": "on_start", "state": _public_state(state)}
     try:
@@ -199,6 +255,25 @@ def run_embedding_command(root, args):
         return {"status": "error", "activation": "not_completed", "state": _public_state(state),
                 "recovery": "Keep Pal stopped and run pal memory embedding resume; source data and configuration backup are retained"}
     return {"status": "ok", "activation": "on_start", "state": _public_state(state)}
+
+
+def _pin_ollama_model(root, state, embedder):
+    providers = embedder.providers if isinstance(embedder, OllamaFallbackEmbeddingProvider) else (embedder,)
+    ollama = tuple(provider for provider in providers if isinstance(provider, OllamaEmbeddingProvider))
+    if not ollama:
+        return
+    digest = state.get("model_digest")
+    if digest is None:
+        # Only the configured primary may establish identity. On subsequent
+        # requests a fallback must prove that it serves the same model bytes.
+        digest = ollama[0].model_digest()
+        state["model_digest"] = digest
+        state["stage"] = "preparing_indexes"
+        state["refreshed"] = 0
+        state.pop("inventory", None)
+        _save(root, state)
+    for provider in ollama:
+        provider.expected_model_digest = digest
 
 
 def _resume(root, state, batch_size):
@@ -218,7 +293,7 @@ def _resume(root, state, batch_size):
         finally:
             old.close()
         candidate = state["candidate_generation"] = repo.generation_id
-        state["stage"] = "reindexing"
+        state["stage"] = "preparing_indexes"
         _save(root, state)
     else:
         repo = storage.open(candidate)
@@ -226,13 +301,20 @@ def _resume(root, state, batch_size):
         if storage.current() != candidate:
             from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
             from pal.memory.service import MemoryService
-            provider = SQLiteVecL3Plugin(service=MemoryService(), repository=repo,
-                embedding_provider=build_ollama_embedding_provider_from_config(_target_config(root, state["patch"])))
+            embedder = build_ollama_embedding_provider_from_config(_target_config(root, state["patch"]))
+            if state.get("remote_only"):
+                if not isinstance(embedder, OllamaFallbackEmbeddingProvider):
+                    raise RuntimeError("Remote-only embedding requires a configured remote Ollama endpoint")
+                embedder.restrict_to_remote()
+            _pin_ollama_model(root, state, embedder)
+            provider = SQLiteVecL3Plugin(service=MemoryService(), repository=repo, embedding_provider=embedder)
             if provider.migration_identity != state["target_identity"]:
                 raise RuntimeError("Target embedding identity changed since migration was planned")
             space = read_space(repo.database.connection())
-            if space is None or space.profile != provider.migration_identity:
+            if state["stage"] == "preparing_indexes" or space is None or space.profile != provider.migration_identity:
                 provider.prepare_generation(repo)
+                state["stage"] = "reindexing"
+                _save(root, state)
             missing = [ref for (ref,) in repo.database.execute_sql("SELECT document_id FROM memory_document_projection")
                        if repo.get_embedding(ref + ":primary") is None]
             if missing:
@@ -251,7 +333,8 @@ def _resume(root, state, batch_size):
             storage.publish_reindexed(repo, source_generation=source, profile=provider.migration_identity)
         state["stage"] = "configuring"
         _save(root, state)
-        _write_config(root, state["patch"])
+        if state["patch"]:
+            _write_config(root, state["patch"])
         state.update(stage="completed", config_after_digest=_digest(_config_text(root)), error="")
         _save(root, state)
     finally:

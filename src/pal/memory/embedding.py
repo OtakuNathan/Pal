@@ -63,6 +63,7 @@ class OllamaEmbeddingProvider:
     transport: str = "http"
     model_revision: str | None = None
     text_processing_version: str = "search_text_v1"
+    expected_model_digest: str | None = field(default=None, init=False, repr=False)
 
     @property
     def configuration_fingerprint(self) -> str:
@@ -81,6 +82,8 @@ class OllamaEmbeddingProvider:
         normalized = [str(text or "") for text in texts]
         if not normalized:
             return []
+        if self.expected_model_digest is not None and self.model_digest() != self.expected_model_digest:
+            raise RuntimeError("Ollama model digest differs from the pinned embedding model; use a matching endpoint or migrate")
         payload: dict[str, Any] = {
             "model": self.model_name,
             "input": normalized,
@@ -97,6 +100,15 @@ class OllamaEmbeddingProvider:
                 raise RuntimeError("ollama embedding response returned invalid vector payload")
             decoded.append([float(item) for item in value])
         return decoded
+
+    def model_digest(self) -> str:
+        payload = self._request_json("GET", "/api/tags", None)
+        for item in payload.get("models", ()):
+            if isinstance(item, dict) and self._model_matches(str(item.get("name") or "")):
+                digest = item.get("digest")
+                if isinstance(digest, str) and digest:
+                    return digest
+        raise RuntimeError(f"Ollama did not report a digest for {self.model_name}")
 
     def health(self) -> dict[str, Any]:
         try:
@@ -177,6 +189,11 @@ class OllamaFallbackEmbeddingProvider:
     _failed_until: dict[int, float] = field(default_factory=dict)
     _last_provider_index: int | None = None
     _last_errors: list[str] = field(default_factory=list)
+    _remote_only: bool = field(default=False, init=False, repr=False)
+
+    def restrict_to_remote(self) -> None:
+        """Keep the configured identity while disabling local compute for this instance."""
+        self._remote_only = True
 
     @property
     def configuration_fingerprint(self) -> str:
@@ -268,6 +285,8 @@ class OllamaFallbackEmbeddingProvider:
         active: list[tuple[int, EmbeddingProviderPort]] = []
         cooled_down: list[tuple[int, EmbeddingProviderPort]] = []
         for index, provider in enumerate(self.providers):
+            if self._remote_only and provider.provider_id == DEFAULT_OLLAMA_PROVIDER_ID:
+                continue
             if self._failed_until.get(id(provider), 0.0) > now:
                 cooled_down.append((index, provider))
             else:

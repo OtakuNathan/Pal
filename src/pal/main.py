@@ -26,6 +26,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Upgrade an existing runtime without interactive reconfiguration",
     )
+    setup_parser.add_argument("--embedding-remote-only", action="store_true",
+                              help="With --upgrade, use only configured remote Ollama endpoints for the embedding rebuild")
     setup_parser.add_argument(
         "--runtime-root",
         type=Path,
@@ -207,6 +209,8 @@ def main() -> int:
         from pal.wizard.cli import run_setup_wizard
         if sum((args.check, args.upgrade, args.llm)) > 1:
             parser.error("setup --check, --upgrade and --llm are mutually exclusive")
+        if args.embedding_remote_only and not args.upgrade:
+            parser.error("--embedding-remote-only requires --upgrade")
         if args.llm:
             from pal.wizard.cli import run_llm_setup_wizard
             return run_llm_setup_wizard(runtime_root=args.runtime_root)
@@ -216,7 +220,7 @@ def main() -> int:
         if getattr(args, "upgrade", False):
             from pal.wizard.cli import run_setup_upgrade
             runtime_root = getattr(args, "runtime_root", None)
-            return run_setup_upgrade(runtime_root=runtime_root)
+            return run_setup_upgrade(runtime_root=runtime_root, embedding_remote_only=args.embedding_remote_only)
         return run_setup_wizard(runtime_root=getattr(args, "runtime_root", None))
 
     if args.command == "browser-service":
