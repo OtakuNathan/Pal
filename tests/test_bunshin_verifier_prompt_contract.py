@@ -139,10 +139,8 @@ def test_consumed_prompt_preserves_evidence_and_completion_gates(tmp_path, sink)
         "positive and negative consumer compile probe against the actual public API",
         "missing required enforcement is blocking",
         "execute affected checks after the final corpus edit",
+        "fill out the Manager-preseeded verification_report.yaml",
         "complete the required checklist",
-        "ready_by_outcome and blockers_by_outcome",
-        "for state/evidence readiness",
-        "supply its listed outcome_arguments at submission",
         "failed or UNKNOWN check is not PASS",
         "For UNKNOWN, supply the concrete environmental reason and follow-up verification plan",
         "advisory p2 entries do not prevent PASS",
@@ -151,8 +149,8 @@ def test_consumed_prompt_preserves_evidence_and_completion_gates(tmp_path, sink)
         assert rule in developer, rule
     assert developer.index("First replay") < developer.index("Then inspect the current Git review range")
     assert "current/historical regression" in user
-    assert "missing_historical_cases" in user
-    assert "read_verification_draft_status" in context.tool_session.visible_capability_aliases
+    assert "verification_report.yaml" in user
+    assert "read_verification_draft_status" not in context.tool_session.visible_capability_aliases
     assert "extra_obligations" not in full
     assert "write_verification_scratch" not in full
     assert "SFINAE" not in developer and "concepts/requires" not in developer
@@ -170,16 +168,16 @@ def test_current_candidate_reuses_analysis_and_cases_without_second_attack_phase
         "rerun the required evidence on the current Candidate",
         "prior Candidate's verdict or execution cannot settle this assignment",
         "multiple contract risks and checklist obligations",
-        "Still record every required classified policy obligation",
+        "Execute all checks directly with ordinary shell, file, and LSP tools",
         "Existing verifier cases can supply these attacks",
         "do not invent another test merely to start a separate adversarial phase",
     ):
         assert rule in developer, rule
-    assert "do not rerun it solely to obtain an ordinary-shell receipt" in user
+    assert "ordinary file, shell, and LSP tools" in user
     steps = pack.metadata["bunshin_v2"]["role_protocol"]["playbook"]["steps"]
     assert [step["key"] for step in steps] == ["regress", "changed_boundary", "verdict"]
     assert "independently challenge material boundaries" in steps[1]["instruction"]
-    assert "required classified policy evidence remains necessary" in steps[1]["done_when"]
+    assert "Existing independent cases may cover multiple risks" in steps[1]["done_when"]
     assert "mark this checklist item complete before submission" in steps[2]["done_when"]
 
     workspace = {**pack.workspace, "bunshin_v2": pack.metadata["bunshin_v2"]}

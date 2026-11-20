@@ -153,6 +153,9 @@ def _validate_transport_payload_authority(
         raise _ManagerTransportError(
             "encoded LLM payload changed endpoint model identity"
         )
+    continuation_ids = {"previous_response_id", "previous_interaction_id"}
+    if continuation_ids.intersection(payload) or continuation_ids.intersection(extra_body):
+        raise _ManagerTransportError("encoded LLM payload supplied an unbound continuation ID")
     if "extra_body" in payload:
         raise _ManagerTransportError(
             "encoded LLM payload must use the separate extra_body field"
@@ -162,6 +165,7 @@ def _validate_transport_payload_authority(
         "max_output_tokens",
         "max_completion_tokens",
         "max_tokens",
+        "generation_config",
         "stream",
     }
     overridden = sorted(protected.intersection(extra_body))
@@ -172,6 +176,10 @@ def _validate_transport_payload_authority(
     maximum = getattr(endpoint, "max_output_tokens", None)
     if maximum is None:
         return
+    if endpoint.wire_shape == "gemini_interactions":
+        payload = payload.get("generation_config", {})
+        if not isinstance(payload, Mapping):
+            raise _ManagerTransportError("Gemini generation_config must be an object")
     for key in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
         if key not in payload:
             continue
@@ -1499,6 +1507,10 @@ class BunshinManager:
         if not isinstance(payload, Mapping) or not isinstance(extra_body, Mapping):
             raise _ManagerTransportError("encoded LLM transport payload must be an object")
         _validate_transport_payload_authority(endpoint, payload, extra_body)
+        if endpoint.wire_shape == WireShape.GEMINI_INTERACTIONS.value:
+            # The broker receives full assignment-local history and owns no accepted parent ID.
+            payload = {**payload, "store": False}
+            extra_body = {k: v for k, v in extra_body.items() if k != "store"}
         record = _LLMTransportRequestState(
             request_id=request_id,
             run_id=state.run_id,

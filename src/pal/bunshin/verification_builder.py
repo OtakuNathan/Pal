@@ -577,7 +577,7 @@ def compile_verification_invocation_tool_contract(
             + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
         )}
     overrides[UPDATE_FINDING_CAPABILITY] = {"use_when": (
-        "Upsert one independently actionable, evidence-backed finding: choose an unused finding_id and expected_revision=0 to create, or the current ID/revision from read_verification_draft_status to replace. Use p0/p1/p2 priority, "
+        "Upsert one independently actionable, evidence-backed finding: choose an unused finding_id and expected_revision=0 to create, or the current ID/revision from Role Working State or the prior update_finding result to replace. Use p0/p1/p2 priority, "
         "a self-contained summary, and exact task_ledger or workspace locations when available. "
         "Use verification_defect for an incorrect Verifier-owned probe or corpus, module_defect "
         "for the current implementation, dependency_defect for upstream code, contract_defect "

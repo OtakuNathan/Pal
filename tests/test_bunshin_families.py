@@ -371,12 +371,16 @@ workspace_policy: {}
             "op_bunshin_verification_request_module_repair",
             software.allowed_capabilities,
         )
-        self.assertIn(
+        self.assertNotIn(
             "op_bunshin_verification_run_diff_risk",
             software.allowed_capabilities,
         )
-        self.assertIn(
+        self.assertNotIn(
             "op_bunshin_verification_run_historical_regression",
+            software.allowed_capabilities,
+        )
+        self.assertNotIn(
+            "op_bunshin_verification_draft_status",
             software.allowed_capabilities,
         )
         self.assertIn("op_file_read", software.allowed_capabilities)

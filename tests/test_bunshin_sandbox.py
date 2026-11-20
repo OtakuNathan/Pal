@@ -913,9 +913,10 @@ class BunshinSandboxTests(unittest.TestCase):
         ))
         self.assertIn("## Execution Discipline — High Priority", prompt)
         self.assertIn("Verification: follow the Role Contract completion rule", prompt)
-        self.assertIn("Manager's outcome-specific readiness", prompt)
+        self.assertIn("ordinary file, shell, and LSP tools", prompt)
         self.assertIn("Required history precedes current-delta", prompt)
-        self.assertIn("final-corpus validation, findings, and checklist gates", prompt)
+        self.assertIn("record structured defects with update_finding", prompt)
+        self.assertIn("verification_report.yaml", prompt)
         self.assertIn("Preserve every phase in the bound playbook", prompt)
         self.assertNotIn("## Reference Access Efficiency", prompt)
 

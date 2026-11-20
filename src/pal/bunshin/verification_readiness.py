@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -145,6 +146,63 @@ def final_verification_checks(receipts: list[dict[str, Any]]) -> list[dict[str, 
             and not item.get("stale")]
 
 
+def report_evidence_errors(
+    report: Mapping[str, Any], receipts: list[dict[str, Any]], workspace: Mapping[str, Any],
+) -> list[str]:
+    """Bind each claimed PASS to a fresh run, retaining the latest outcome per check."""
+    latest = {}
+    last_write = -1
+    for index, receipt in enumerate(receipts):
+        if receipt.get("kind") == "test_write":
+            last_write = index
+        if receipt.get("kind") not in {"command", "lsp"} or receipt.get("stale"):
+            continue
+        tool = receipt.get("tool_name")
+        if receipt.get("kind") == "lsp" and tool != "op_lsp_diagnostics":
+            continue
+        args = dict(receipt.get("args") or {})
+        args.pop("timeout_ms", None)
+        key = (tool, json.dumps(args, sort_keys=True))
+        latest[key] = (index, receipt)
+
+    errors = []
+    successful = set()
+    diagnostics = set()
+    for index, receipt in latest.values():
+        command = str((receipt.get("args") or {}).get("cmd") or "").strip()
+        call_id = str(receipt.get("call_id") or "")
+        if not receipt.get("ok"):
+            errors.append(f"unresolved failed verification check: {command or call_id}; rerun this check successfully")
+            continue
+        if index <= last_write:
+            continue
+        successful.update(value for value in (command, call_id) if value)
+        if receipt.get("kind") == "lsp":
+            diagnostics.add(call_id)
+
+    areas = report.get("focus_areas")
+    if not isinstance(areas, Mapping):
+        return errors
+    required = workspace.get("verification_report_focus_areas") or ("regressions", "candidate_delta", "adversarial_checks")
+    for name in required:
+        entry = areas.get(name)
+        if not isinstance(entry, Mapping):
+            errors.append(f"verification_report.yaml is missing required focus area {name}")
+        elif name != "adversarial_checks" and str(entry.get("status") or "").strip().lower() != "pass":
+            errors.append(f"required focus area {name} needs passing execution evidence")
+    for name, entry in areas.items():
+        if not isinstance(entry, Mapping) or str(entry.get("status") or "").strip().lower() != "pass":
+            continue
+        commands = entry.get("commands")
+        if not isinstance(commands, list) or not commands or any(
+            not isinstance(command, str) or command.strip() not in successful for command in commands
+        ):
+            errors.append(f"focus area {name} must cite exact commands or call IDs with fresh passing receipts")
+        elif name == "lsp" and not diagnostics.intersection(commands):
+            errors.append("focus area lsp must cite a fresh passing LSP diagnostics call")
+    return errors
+
+
 def record_verification_execution(
     workspace: Mapping[str, Any], call: Any, result: Any,
     before: Mapping[str, Any],
@@ -152,7 +210,7 @@ def record_verification_execution(
     """Record the delegated execution, never a claimed receipt in its output."""
     from pal.bunshin.review_receipts import _review_tool_evidence_ref
 
-    receipt = _review_tool_evidence_ref(call.name, call, result)
+    receipt = _review_tool_evidence_ref(call.name, call, result, workspace)
     if not receipt:
         return
     receipt["verification_binding"] = dict(before)

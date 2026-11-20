@@ -9,6 +9,7 @@ from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.workspace_git import git_changed_paths
 from pal.bunshin.paths import standalone_review_root
+from pal.bunshin.verification_corpus import verification_corpus_files as _verification_corpus_files
 from pal.bunshin.semantic_orchestration.workspace_safety import _git_output
 from pal.bunshin.semantic_orchestration.review_results import _ref_from_mapping
 from pal.bunshin.semantic_orchestration.workspace_safety import _safe_component
@@ -93,8 +94,8 @@ def _semantic_verifier_instruction(*, graph_sink: bool, direct: bool = False) ->
     scratch_rule = (
         "Put every transient configure, build, and test output under the exact "
         "workspace.build_scratch_dir from your invocation pack (for example, pass that path to "
-        "CMake with `-B`). Never create build output in the repository worktree; only durable "
-        "verifier cases may be written under the bound verification corpus. "
+        "CMake with `-B`). Never create build output in the repository worktree; write only durable "
+        "verifier cases and the Manager-preseeded verification_report.yaml under the bound verification corpus. "
     )
     if direct:
         return scratch_rule + (
@@ -141,28 +142,6 @@ def _verification_scratch_paths(review_scratch: Path) -> list[str]:
         for path in sorted(
             item for item in review_scratch.rglob("*") if item.is_file() and not item.is_symlink()
         )
-    ]
-
-
-def _verification_corpus_files(
-    review_workspace: Path,
-    corpus_scope: Mapping[str, Any],
-) -> list[str]:
-    root = review_workspace.resolve()
-    target = str(corpus_scope.get("path") or "").replace("\\", "/").strip("/")
-    if not target or not root.is_dir():
-        return []
-    path = (root / target).resolve()
-    if not path.is_relative_to(root):
-        return []
-    if str(corpus_scope.get("kind") or "") == "file":
-        return [target] if path.is_file() and not path.is_symlink() else []
-    if not path.is_dir():
-        return []
-    return [
-        item.relative_to(root).as_posix()
-        for item in sorted(path.rglob("*"))
-        if item.is_file() and not item.is_symlink()
     ]
 
 

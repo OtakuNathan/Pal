@@ -1989,6 +1989,15 @@ class BunshinV2VerificationTests(unittest.TestCase):
             },
             role="verifier",
         )
+        from pal.bunshin.verification_report import bind_verification_report_file
+
+        workspace = bind_verification_report_file(
+            workspace,
+            work_view={"module_name": "router"},
+            verification_policy={"require_candidate_delta_review": True},
+            candidate_digest=_digest,
+        )
+        self._record_current_corpus_check(workspace)
 
         premature = swe_verification_tool_result(
             new_tool_call(
@@ -2000,19 +2009,30 @@ class BunshinV2VerificationTests(unittest.TestCase):
             [],
         )
         self.assertFalse(premature.ok)
-        self.assertIn("candidate_delta_review", premature.llm_text)
+        self.assertIn("verification_report.yaml", premature.llm_text)
 
-        recorded = self._verification_call(
-            workspace,
-            "op_bunshin_verification_run_diff_risk",
-            {
-                "name": "current candidate delta",
-                "command": "exit 0",
-                "path": "src/router.py",
-                "description": "Exercise the current Candidate changed path.",
-            },
+        Path(workspace["verification_report_path"]).write_text(
+            (
+                'schema_version: "1"\n'
+                "module: router\n"
+                f"candidate_digest: {_digest}\n"
+                'verdict_summary: "Replayed verifier tests and checked current Candidate delta."\n'
+                "focus_areas:\n"
+                "  regressions:\n"
+                '    status: "pass"\n'
+                '    commands: ["current-corpus-check"]\n'
+                '    notes: "Existing verifier corpus passes."\n'
+                "  candidate_delta:\n"
+                '    status: "pass"\n'
+                '    commands: ["current-corpus-check"]\n'
+                '    notes: "Inspected src/router.py delta."\n'
+                "  adversarial_checks:\n"
+                '    status: "pass"\n'
+                '    commands: ["current-corpus-check"]\n'
+                '    notes: "Boundary assertions pass."\n'
+            ),
+            encoding="utf-8",
         )
-        self.assertTrue(recorded.ok, recorded.text)
         accepted = swe_verification_tool_result(
             new_tool_call(
                 name="op_bunshin_verification_pass",
@@ -2050,7 +2070,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             [],
         )
         self.assertFalse(next_result.ok)
-        self.assertIn("candidate_delta_review", next_result.llm_text)
+        self.assertIn("fresh validation required", next_result.llm_text)
 
     def test_candidate_defect_tool_binds_module_and_derives_report_fields(self) -> None:
         artifact_dir = self.runtime_root / "artifacts"

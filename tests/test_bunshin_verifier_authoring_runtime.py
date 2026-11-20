@@ -90,7 +90,7 @@ def test_consumed_finding_edit_contracts_hydrate_fresh_and_resumed_pack(verifier
         assert all(spec['name'] != 'add_finding' for spec in runtime._execution.runtime.list_tool_specs())
         for alias in ('update_finding', 'remove_finding'):
             assert 'before submission' in contracts[alias]['description']
-            assert 'read_verification_draft_status' in contracts[alias]['description']
+            assert 'Role Working State' in contracts[alias]['description']
             assert 'finding_id' in contracts[alias]['input_schema']['properties']
         assert contracts['update_finding']['input_schema']['properties']['expected_revision']['minimum'] == 0
         assert pack.to_dict() == before

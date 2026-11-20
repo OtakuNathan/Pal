@@ -2,7 +2,8 @@
 from __future__ import annotations
 import hashlib
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, Mapping
 from uuid import uuid4
 from pal.shared import ToolExecutionResult
 from pal.shared.tool_protocol import ToolCallIR
@@ -12,6 +13,7 @@ def _review_tool_evidence_ref(
     target_name: str,
     tool_call: ToolCallIR,
     result: ToolExecutionResult,
+    workspace: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not (
         str(target_name).startswith(("op_exec_shell", "op_lsp_"))
@@ -36,15 +38,32 @@ def _review_tool_evidence_ref(
         sort_keys=True,
         default=str,
     ).encode("utf-8")
+    is_write_tool = str(target_name) in {
+        "op_file_write",
+        "op_file_edit",
+        "op_bunshin_verification_scratch_write",
+    }
+    written_path = str(
+        args.get("file_path")
+        or args.get("path")
+        or args.get("relative_path")
+        or ""
+    )
+    workspace = workspace or {}
+    bound_report = workspace.get("verification_report_path")
+    if target_name == "op_bunshin_verification_scratch_write":
+        write_root = workspace.get("review_scratch_dir")
+    else:
+        write_root = workspace.get("repo_path")
+    report_write = bool(is_write_tool and bound_report and written_path and
+                        (Path(write_root or "") / written_path) == Path(bound_report))
     return {
         "evidence_ref_id": f"tev_{uuid4().hex[:12]}",
         "kind": (
-            "test_write"
-            if str(target_name) in {
-                "op_file_write",
-                "op_file_edit",
-                "op_bunshin_verification_scratch_write",
-            }
+            "report_write"
+            if report_write
+            else "test_write"
+            if is_write_tool
             else "lsp"
             if str(target_name).startswith("op_lsp_")
             else "command"

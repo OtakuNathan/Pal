@@ -149,9 +149,9 @@ UPDATE_FINDING_TOOL_SPEC = {
     "guidance": {
         "search_objects": ('finding', 'findings'),
         "purpose": "Create or replace one current verifier draft finding before submission with one upsert tool.",
-        "use_when": "To create, choose a never-used finding_id and expected_revision=0. To replace, use its current finding_id and revision from read_verification_draft_status. Supply the complete finding fields; all finding kinds are editable.",
+        "use_when": "To create, choose a never-used finding_id and expected_revision=0. To replace, use its current finding_id and revision from Role Working State or the prior update_finding result. Supply the complete finding fields; all finding kinds are editable.",
         "do_not_use_when": "Do not edit external or submitted history. A completed finding is still editable until submission; retain accurate defects.",
-        "failure_next_steps": "Read read_verification_draft_status for the current identity and revision, then retry with a new call after a conflicting edit.",
+        "failure_next_steps": "Check the current finding_id and revision in Role Working State (or the returned error), then retry with a new call after a conflicting edit.",
     },
     "InputModel": BunshinUpdateFindingInput,
     "idempotency": "keyed_idempotent", "retry_policy": "reconcile_first",
@@ -161,9 +161,9 @@ REMOVE_FINDING_TOOL_SPEC = {
     "guidance": {
         "search_objects": ('finding', 'findings'),
         "purpose": "Delete one current verifier draft finding before submission while preserving its audit history.",
-        "use_when": "Use the finding_id and revision from update_finding or read_verification_draft_status when you no longer endorse a current finding, regardless of its kind or completed status.",
+        "use_when": "Use the finding_id and revision from update_finding or Role Working State when you no longer endorse a current finding, regardless of its kind or completed status.",
         "do_not_use_when": "Do not erase external or submitted history or hide a real remaining defect. Removing a finding does not make failed or stale test evidence pass.",
-        "failure_next_steps": "Read read_verification_draft_status for the current identity and revision and give a short reason. Submitted or pending accepted receipts freeze authoring.",
+        "failure_next_steps": "Check the current finding_id and revision in Role Working State (or the returned error) and give a short reason. Submitted or pending accepted receipts freeze authoring.",
     },
     "InputModel": BunshinRemoveFindingInput,
     "idempotency": "keyed_idempotent", "retry_policy": "reconcile_first",
@@ -564,7 +564,7 @@ def render_work_item_context(workspace: Mapping[str, Any]) -> str:
         for item in findings:
             finding = dict(item.get("finding") or {})
             lines.append(
-                f"- {item.get('item_id')}: {finding.get('priority')} "
+                f"- {item.get('item_id')} (rev {int(item.get('revision') or 1)}): {finding.get('priority')} "
                 f"{finding.get('summary')}"
             )
     return "\n".join(lines)
@@ -688,4 +688,4 @@ def edit_finding_tool_result(call: ToolCallIR, workspace: Mapping[str, Any]) -> 
         action = "created" if result.get("created") else "updated" if call.name == UPDATE_FINDING_CAPABILITY else "removed"
         return _ok(call, f"Finding {result['finding_id']} {action}; audit history retained.", result)
     except Exception as exc:
-        return authoring_error_result(call, exc, progress, correction="Call read_verification_draft_status and correct the finding identity or revision.")
+        return authoring_error_result(call, exc, progress, correction="Check Role Working State (or the returned error) and correct the finding identity or revision.")

@@ -395,6 +395,14 @@ class BunshinWorkflowService:
         family_binding_ref = _artifact_ref_mapping(task.payload.get("family_binding_ref"))
         if not family_binding_ref:
             raise ValueError("Task has no pinned FamilyBindingArtifact")
+        primary_profile_id = str(task.payload.get("primary_profile_id") or "").strip()
+        if operation == "new_requirement" and not artifact_ref and primary_profile_id:
+            try:
+                family_binding_ref = self.catalog.publish_family_binding(
+                    primary_profile_id
+                ).to_dict()
+            except ValueError:
+                pass
         validate_family_binding_payload(
             dict(self.artifacts.read_json(family_binding_ref))
         )

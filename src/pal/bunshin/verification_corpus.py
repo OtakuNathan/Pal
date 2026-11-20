@@ -8,6 +8,32 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 
+def verification_corpus_files(
+    review_workspace: Path,
+    corpus_scope: Mapping[str, Any],
+    *,
+    exclude_filename_at_root: str = "",
+) -> list[str]:
+    root = review_workspace.resolve()
+    target = str(corpus_scope.get("path") or "").replace("\\", "/").strip("/")
+    if not target or not root.is_dir():
+        return []
+    path = root / target
+    if path.resolve() != path or not path.is_relative_to(root):
+        return []
+    if str(corpus_scope.get("kind") or "") == "file":
+        return [target] if path.is_file() and not path.is_symlink() else []
+    if not path.is_dir():
+        return []
+    return [
+        item.relative_to(root).as_posix()
+        for item in sorted(path.rglob("*"))
+        if item.is_file()
+        and not item.is_symlink()
+        and item != path / exclude_filename_at_root
+    ]
+
+
 def verification_corpus_snapshot(workspace: Mapping[str, Any]) -> dict[str, Any]:
     """Snapshot explicit corpus scopes with bounded, no-follow descriptor reads.
 
@@ -24,6 +50,7 @@ def verification_corpus_snapshot(workspace: Mapping[str, Any]) -> dict[str, Any]
             capture_output=True, text=True, check=True, timeout=5,
         )
         candidate = head.stdout.strip()
+    report_path = workspace.get("verification_report_relpath")
     entries: dict[str, str] = {}
     count = total_bytes = 0
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -48,6 +75,8 @@ def verification_corpus_snapshot(workspace: Mapping[str, Any]) -> dict[str, Any]
         elif kind == "directory" and not stat.S_ISDIR(before.st_mode):
             entries[relative] = "not-a-directory"
         elif stat.S_ISREG(before.st_mode):
+            if relative == report_path:
+                return
             total_bytes += before.st_size
             if total_bytes > 256 * 1024 * 1024:
                 raise ValueError("verification corpus snapshot exceeds its byte limit")

@@ -39,8 +39,13 @@ def prepare_finding_edit(workspace: Mapping[str, Any], args: Mapping[str, Any]):
             return payload, {"created": True, "updated": True, "finding_id": finding_id, "revision": 1}
         if target is None:
             raise ValueError("finding identity is not in the current editable draft; external/submitted history cannot be edited")
-        if int(target.get("revision") or 1) != revision:
-            raise ValueError("finding revision is stale; call read_verification_draft_status before editing")
+        current_revision = int(target.get("revision") or 1)
+        if current_revision != revision:
+            raise ValueError(
+                f"finding revision is stale (current revision is {current_revision}); "
+                "check Role Working State and retry with expected_revision="
+                f"{current_revision}"
+            )
         if updating:
             assert finding is not None
             semantic_hash = _finding_hash(finding)

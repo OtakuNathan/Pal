@@ -1064,6 +1064,17 @@ def _guard_scoped_workspace_mutation(
         if candidate.is_absolute()
         else (repo / candidate).resolve()
     )
+    if workspace.get("verification_scratch_only") and target_name in {"op_file_write", "op_file_edit"}:
+        from pal.bunshin.verification_report import VERIFICATION_REPORT_FILENAME
+
+        scratch = workspace.get("review_scratch_dir")
+        bound = workspace.get("verification_report_path")
+        if scratch and bound and candidate == Path(bound) == Path(scratch) / VERIFICATION_REPORT_FILENAME:
+            if target != candidate or not target.is_file():
+                return call, _path_not_writable_result(
+                    call, raw_path=raw_path, relative_path="", reason="report_path_changed",
+                )
+            return _tool_call_with_effective_args(call, args), None
     try:
         relative = target.relative_to(repo).as_posix()
     except ValueError:

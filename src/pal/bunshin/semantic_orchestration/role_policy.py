@@ -2,7 +2,6 @@ from __future__ import annotations
 from pal.bunshin.contract_runtime import ResearchMode
 from pal.bunshin.candidate_builder import CANDIDATE_BUILDER_CAPABILITIES
 from pal.bunshin.swe_verification import SWE_VERIFICATION_CAPABILITIES
-from pal.bunshin.verification_builder import VERIFICATION_EVIDENCE_CAPABILITIES
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.shared import BunshinInvocationPack
 
@@ -61,10 +60,7 @@ def apply_role_capability_policy(
             # tools that _run_verification accepts.  Falling back to the
             # legacy VerificationPlan builder gives the worker a submit tool
             # whose durable receipt the Manager can never consume.
-            OrchestrationRole.VERIFIER: {
-                *SWE_VERIFICATION_CAPABILITIES,
-                *VERIFICATION_EVIDENCE_CAPABILITIES,
-            },
+            OrchestrationRole.VERIFIER: set(SWE_VERIFICATION_CAPABILITIES),
             OrchestrationRole.REVIEWER: {
                 "op_bunshin_update_checklist",
                 "op_bunshin_add_finding",

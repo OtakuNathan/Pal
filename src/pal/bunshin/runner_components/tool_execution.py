@@ -96,7 +96,7 @@ class ToolExecution:
         # The scoped verifier runtime records direct execution under its
         # authoring lock, before a competing submit can observe the corpus.
         if not bound_execution:
-            self.review_evidence.record_review_tool_evidence(target_name, policy_call, result)
+            self.review_evidence.record_review_tool_evidence(target_name, policy_call, result, evidence_workspace)
         return result
 
     def tool_call_with_bunshin_defaults(self, tool_call: ToolCallIR) -> ToolCallIR:

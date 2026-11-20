@@ -773,7 +773,7 @@ def _write_bytes_atomically_beneath(
 def _read_bytes_beneath(root: Path, relative_path: PurePosixPath) -> bytes:
     directory_fd, filename = _open_materialization_parent(root, relative_path, create=False)
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
         file_fd = os.open(filename, flags, dir_fd=directory_fd)
         try:
             if not stat.S_ISREG(os.fstat(file_fd).st_mode):

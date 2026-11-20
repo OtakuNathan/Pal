@@ -177,8 +177,10 @@ def scoped_for(view, *, guidance=None, contract=None):
     pack = apply_role_capability_policy(BunshinInvocationPack(
         invocation_id="projection-test", workspace=workspace,
     ), activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE))
+    from pal.bunshin.verification_builder import VERIFICATION_EVIDENCE_CAPABILITIES
+    legacy_allowed = sorted(set(pack.allowed_capabilities) | set(VERIFICATION_EVIDENCE_CAPABILITIES))
     runtime = BunshinScopedExecutionRuntime(
-        ExecutionRuntime(), list(pack.allowed_capabilities), workspace=workspace,
+        ExecutionRuntime(), legacy_allowed, workspace=workspace,
         capability_guidance_overrides=guidance or {},
     )
     return pack, runtime, contract
@@ -195,10 +197,12 @@ def providers(runtime):
     {"module_name": "delivery", "graph_sink": True, "entrypoints": [{"kind": "platform_probe"}]},
 ])
 def test_evidence_provider_discovery_and_admission_match_bound_contract(view):
+    from pal.bunshin.verification_builder import VERIFICATION_EVIDENCE_CAPABILITIES
+
     pack, runtime, contract = scoped_for(view)
     advertised = providers(runtime)
     try:
-        expected = set(pack.allowed_capabilities) & set(contract["allowed_capabilities"])
+        expected = (set(pack.allowed_capabilities) | set(VERIFICATION_EVIDENCE_CAPABILITIES)) & set(contract["allowed_capabilities"])
         for canonical, spec in VERIFICATION_BUILDER_TOOL_SPECS.items():
             alias = spec["alias"]
             assert (alias in advertised) == (canonical in expected)

@@ -993,8 +993,10 @@ class BunshinOutboxProcessor:
             record = self.repository.artifacts.read_artifact_record(result_sha)
             if record and str(record.get("artifact_type") or "") == "DeliveryReceiptArtifact":
                 payload = self.service.artifacts.read_json(result_artifact_ref)
+                verification_ref_value: Mapping[str, Any] = {}
                 if payload.get("schema_version") == "4":
                     direct_receipt = DirectDeliveryReceipt.model_validate(payload)
+                    verification_ref_value = direct_receipt.verification_ref
                     for item in direct_receipt.files:
                         content = self.service.artifacts.read_bytes(item.artifact_ref)
                         if hashlib.sha256(content).hexdigest() != item.content_sha256:
@@ -1009,6 +1011,7 @@ class BunshinOutboxProcessor:
                     summary = "Bunshin workflow completed. Verified reports attached."
                 else:
                     delivery_receipt = DeliveryReceipt.model_validate(payload)
+                    verification_ref_value = delivery_receipt.verification_ref
                 if delivery_receipt is not None:
                     patch_bytes = self.service.artifacts.read_bytes(delivery_receipt.patch_ref)
                     if (
@@ -1041,6 +1044,9 @@ class BunshinOutboxProcessor:
                             ),
                         }
                     )
+                report_attachment = self._verification_report_attachment(verification_ref_value)
+                if report_attachment is not None:
+                    attachments.append(report_attachment)
         revision_id = str(workflow.payload.get("architecture_revision_id") or "").strip()
         resolved_interactions = (
             [
@@ -1063,6 +1069,41 @@ class BunshinOutboxProcessor:
         if attachments:
             event["attachments"] = attachments
         self.publish_workflow_event(event)
+
+    def _verification_report_attachment(
+        self,
+        verification_ref: Mapping[str, Any],
+    ) -> dict[str, str] | None:
+        verification_sha = str(dict(verification_ref or {}).get("sha256") or "").strip()
+        if not verification_sha:
+            return None
+        verification_record = self.repository.artifacts.read_artifact_record(verification_sha)
+        if not verification_record or str(verification_record.get("artifact_type") or "") != "VerificationArtifact":
+            return None
+        verification = self.service.artifacts.read_json(verification_ref)
+        report_ref = dict(verification.get("verification_report_ref") or {})
+        report_sha = str(report_ref.get("sha256") or "").strip()
+        if not report_sha:
+            return None
+        report_record = self.repository.artifacts.read_artifact_record(report_sha)
+        if not report_record or str(report_record.get("artifact_type") or "") != "VerificationReportArtifact":
+            return None
+        report_bytes = self.service.artifacts.read_bytes(report_ref)
+        expected_sha = str(verification.get("verification_report_sha256") or "").strip()
+        if expected_sha and hashlib.sha256(report_bytes).hexdigest() != expected_sha:
+            raise IOError("verification report content hash does not match its artifact")
+        storage_path = Path(str(report_record.get("storage_path") or ""))
+        if not storage_path.is_file():
+            raise FileNotFoundError("verification report artifact file is unavailable")
+        module_name = str(verification.get("module_name") or "").strip()
+        relpath = str(verification.get("verification_report_path") or "verification_report.yaml").strip()
+        file_name = f"{module_name}_verification_report.yaml" if module_name else "verification_report.yaml"
+        return {
+            "path": str(storage_path),
+            "file_name": file_name,
+            "mime_type": "text/yaml",
+            "caption": f"Verification report ({module_name or 'module'}): {relpath}",
+        }
 
     def _submit_effect_action(self, effect: Mapping[str, Any], payload: Mapping[str, Any]) -> Mapping[str, Any]:
         action_type = str(payload.get("action_type") or "")

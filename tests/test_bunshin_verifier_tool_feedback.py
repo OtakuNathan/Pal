@@ -15,7 +15,10 @@ from pal.bunshin.scoped_execution import BunshinScopedExecutionRuntime
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.role_policy import apply_role_capability_policy
 from pal.bunshin.swe_verification import semantic_verification_submission_errors
-from pal.bunshin.verification_builder import compile_verification_invocation_tool_contract
+from pal.bunshin.verification_builder import (
+    VERIFICATION_EVIDENCE_CAPABILITIES,
+    compile_verification_invocation_tool_contract,
+)
 from pal.bunshin.work_items import update_checklist_tool_result
 from pal.core.turn_executor import TurnExecutor
 from pal.llm.ir import GenerationPolicyIR, LLMMessageIR, LLMRequestIR, MessageRole, WireShape
@@ -55,7 +58,8 @@ def verifier(request):
     pack = apply_role_capability_policy(BunshinInvocationPack(
         invocation_id=workspace['invocation_id'], workspace=workspace,
     ), activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE))
-    runtime = BunshinScopedExecutionRuntime(fixture.adapter, list(pack.allowed_capabilities), workspace=workspace)
+    legacy_allowed = sorted(set(pack.allowed_capabilities) | set(VERIFICATION_EVIDENCE_CAPABILITIES))
+    runtime = BunshinScopedExecutionRuntime(fixture.adapter, legacy_allowed, workspace=workspace)
     index = 0
 
     def call(tool_name, **args):

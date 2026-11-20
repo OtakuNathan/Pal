@@ -449,3 +449,52 @@ def test_source_attachment_does_not_waive_code_checks():
     from pal.bunshin.direct_contract import report_only_changes
     assert not report_only_changes(["app.py"], ["app.py"])
     assert report_only_changes(["report.md"], ["report.md", "tests/repository/verifier/test_probe.py"])
+
+
+def test_existing_legacy_software_task_refreshes_family_binding_for_direct_workflow(tmp_path):
+    import copy
+    from unittest.mock import patch
+    from pal.bunshin.service import BunshinWorkflowService
+    from pal.bunshin.workspace_git import _git
+
+    source = tmp_path / "legacy-repo"
+    source.mkdir()
+    _git(source, "init")
+    (source / "app.py").write_text("print('legacy')\n", encoding="utf-8")
+    _git(source, "add", "app.py")
+    _git(source, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "Init")
+
+    service = BunshinWorkflowService(tmp_path / "runtime")
+    current_ref = service.catalog.publish_family_binding("software_engineering.v2_coder")
+    old_binding = copy.deepcopy(service.artifacts.read_json(current_ref))
+    for role in ("implementation", "verifier"):
+        old_binding["role_bindings"][role]["role_profile"]["metadata"].pop("direct_execution", None)
+    legacy_ref = service.artifacts.put_json(old_binding, artifact_type="FamilyBindingArtifact")
+
+    # Simulate a pre-direct Task whose pinned FamilyBindingArtifact predates
+    # direct_execution=true on v2_coder / v2_verifier.
+    with patch.object(service.catalog, "publish_family_binding", return_value=legacy_ref):
+        task = service.create_task(
+            {
+                "title": "Legacy Repo Task",
+                "objective": "Maintain legacy repo",
+                "profile": "software_engineering.v2_coder",
+                "workspace": {"kind": "existing_repo", "repo_path": str(source), "primary_language": "python"},
+            }
+        )
+    assert task["family_binding_ref"] == legacy_ref.to_dict()
+
+    started = service.start_workflow(
+        {
+            "task_id": task["task_id"],
+            "goal": "Investigate issue in legacy repo",
+            "execution_mode": "direct",
+            "task_spec": {"authoritative_text": "Investigate issue in app.py."},
+            "delivery_binding": {"channel_id": "test", "channel_kind": "socket", "reply_target": {"session_id": "test"}},
+        }
+    )
+    workflow = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
+    assert workflow is not None
+    refreshed_binding = service.artifacts.read_json(workflow.payload["family_binding_ref"])
+    assert refreshed_binding["role_bindings"]["implementation"]["role_profile"]["metadata"]["direct_execution"] is True
+    assert refreshed_binding["role_bindings"]["verifier"]["role_profile"]["metadata"]["direct_execution"] is True

@@ -268,6 +268,34 @@ def render_bunshin_task_prompt(pack: BunshinInvocationPack) -> str:
                 ),
             ]
         )
+    verification_report_path = str(
+        (pack.workspace.get("verification_report_path") if pack.workspace.get("verification_scratch_only")
+         else pack.workspace.get("verification_report_relpath"))
+        or pack.workspace.get("verification_report_path")
+        or ""
+    ).strip()
+    if verification_report_path:
+        report_read_args = json.dumps(
+            {"file_path": verification_report_path},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        lines.extend(
+            [
+                "",
+                "## Writable Outputs",
+                (
+                    "- verification_report.yaml: Manager-preseeded verification report form; "
+                    f"path={verification_report_path}; read_file_args={report_read_args}"
+                ),
+                (
+                    "- Run tests and checks using ordinary file, shell, and LSP tools, "
+                    "then fill out that exact report file using edit_file or write_file "
+                    "before calling your semantic verification outcome tool."
+                ),
+            ]
+        )
     references = [dict(item) for item in list(pack.workspace.get("reference_paths") or []) if isinstance(item, dict)]
     if references:
         lines.extend(["", "## Immutable Inputs"])
@@ -357,8 +385,8 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
     elif role == "verifier":
         lines.extend(
             [
-                "- Verification: follow the Role Contract completion rule and the Manager's outcome-specific readiness. Required history precedes current-delta and independent adversarial risk checks. Submit once all required evidence, final-corpus validation, findings, and checklist gates permit the intended outcome; do not invent additional adversarial work once required risk coverage is established. Preserve every phase in the bound playbook.",
-                "- When LSP evidence applies, use the visible Manager-prepared verification LSP tool. Do not invoke language-server executables or create compile configuration through shell.",
+                "- Verification: follow the Role Contract completion rule. Required history precedes current-delta and independent adversarial risk checks. Use ordinary file, shell, and LSP tools to run checks, record structured defects with update_finding, fill out the Manager-preseeded verification_report.yaml, and submit one semantic outcome once ready. Preserve every phase in the bound playbook.",
+                "- When LSP evidence applies, use the visible Manager-prepared LSP diagnostics tool. Do not invoke language-server executables or create compile configuration through shell.",
             ]
         )
     elif role == "architect":

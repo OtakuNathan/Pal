@@ -382,6 +382,9 @@ class VerificationSettlement:
             if outcome == "unknown"
             else VerificationStatus.FAIL
         )
+        report_fields, report_child = _verification_report_artifact_fields(
+            self.artifacts, submission,
+        )
         report_payload = {
                 "schema_version": "2",
                 "source_pending_verification_ref": dict(node.payload.get("pending_verification_ref") or {}),
@@ -398,6 +401,7 @@ class VerificationSettlement:
                 "candidate_ref": accepted_candidate_ref.to_dict(),
                 "implementation_candidate_ref": candidate_ref.to_dict(),
                 "tool_receipts_ref": receipts_ref.to_dict(),
+                **report_fields,
             }
         if workspace_evidence_ref is not None:
             report_payload["workspace_evidence_ref"] = workspace_evidence_ref.to_dict()
@@ -405,6 +409,7 @@ class VerificationSettlement:
             (accepted_candidate_ref.sha256, "candidate"),
             (candidate_ref.sha256, "implementation_candidate"),
             (receipts_ref.sha256, "tool_receipts"),
+            *([report_child] if report_child is not None else []),
         ]
         if workspace_evidence_ref is not None:
             report_children.append((workspace_evidence_ref.sha256, "workspace_evidence"))
@@ -415,6 +420,38 @@ class VerificationSettlement:
             child_refs=tuple(report_children),
         )
         return accepted_candidate, accepted_candidate_digest, accepted_candidate_ref, changed_paths, fencing_token, findings, invocation_id, lease_resource, outcome, receipts, receipts_ref, report_ref, scratch_only, status
+
+
+def _verification_report_artifact_fields(
+    artifacts: ContentAddressedArtifactStore,
+    submission: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[str, str] | None]:
+    report = submission.get("verification_report")
+    report_relpath = str(submission.get("verification_report_path") or "").strip()
+    if not isinstance(report, Mapping):
+        return ({"verification_report_path": report_relpath} if report_relpath else {}), None
+    # The accepted submission owns the attachment, including its comments and line endings.
+    source = submission.get("verification_report_yaml")
+    if source is None:
+        import yaml
+
+        source = yaml.safe_dump(dict(report), allow_unicode=True, sort_keys=False)
+    report_bytes = source.encode("utf-8")
+    report_ref = artifacts.put_bytes(
+        report_bytes,
+        artifact_type="VerificationReportArtifact",
+        media_type="text/yaml",
+        provenance={"owner": "manager", "source_role": "verifier", "path": report_relpath},
+    )
+    fields: dict[str, Any] = {
+        "verification_report": dict(report),
+        "verification_report_ref": report_ref.to_dict(),
+        "verification_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+    }
+    if report_relpath:
+        fields["verification_report_path"] = report_relpath
+    return fields, (report_ref.sha256, "verification_report")
+
 
 def _publish_repair_evidence(
     artifacts: ContentAddressedArtifactStore, repository: BunshinRepository, accepted_candidate: Any, accepted_candidate_digest: Any, candidate_ref: ArtifactRef, changed_paths: Any,

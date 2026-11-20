@@ -21,6 +21,7 @@ from pal.bunshin.work_views import UnitWorkViewBuilder
 from pal.bunshin.skeleton import compiled_module_write_scopes
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.verification import repair_bill_semantic_view
+from pal.bunshin.verification_report import VERIFICATION_REPORT_FILENAME
 from pal.bunshin.work_items import submission_work_items
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity
@@ -316,6 +317,7 @@ class ImplementationRun:
                         )
                         or {}
                     ),
+                    exclude_filename_at_root=VERIFICATION_REPORT_FILENAME,
                 )
             )
             semantic_repair_ref = self.artifacts.put_json(

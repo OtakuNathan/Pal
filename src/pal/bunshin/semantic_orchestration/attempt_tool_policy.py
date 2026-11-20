@@ -13,6 +13,7 @@ from pal.bunshin.tool_guidance import merge_tool_guidance_overrides
 from pal.bunshin.adapters import prepare_role_workspace
 from pal.bunshin.contract_submission import bind_architect_file
 from pal.bunshin.swe_verification import compile_swe_verification_tool_contract
+from pal.bunshin.verification_report import bind_verification_report_file
 from pal.bunshin.semantic_orchestration.attempt_models import BoundRolePlaybook, InitialRolePrompt, PreparedRolePrompt, PreparedRoleWorkspace, RoleAttemptRequest
 
 
@@ -162,4 +163,37 @@ class ToolPolicy:
                     "workspace": bound_workspace,
                 }
             )
+        if activation.role == OrchestrationRole.VERIFIER:
+            pack = self._bind_verifier_report(pack, bound_reference_refs, snapshot)
         return PreparedRolePrompt(pack=pack)
+
+    def _bind_verifier_report(
+        self,
+        pack: BunshinInvocationPack,
+        bound_reference_refs: Mapping[str, Any],
+        snapshot: Any,
+    ) -> BunshinInvocationPack:
+        view_ref = bound_reference_refs.get("module_work_view")
+        work_view = self.artifacts.read_json(view_ref) if view_ref is not None else {}
+        policy_ref = bound_reference_refs.get("verification_policy")
+        verification_policy = (
+            self.artifacts.read_json(policy_ref) if policy_ref is not None else {}
+        )
+        delivery_ref = bound_reference_refs.get("system_delivery_view")
+        system_delivery_view = (
+            self.artifacts.read_json(delivery_ref) if delivery_ref is not None else None
+        )
+        pack_value = pack.to_dict()
+        bound_workspace = bind_verification_report_file(
+            dict(pack_value.get("workspace") or {}),
+            work_view=work_view,
+            verification_policy=verification_policy,
+            system_delivery_view=system_delivery_view,
+            candidate_digest=str(snapshot.payload.get("candidate_digest") or ""),
+        )
+        return BunshinInvocationPack.from_dict(
+            {
+                **pack_value,
+                "workspace": bound_workspace,
+            }
+        )
