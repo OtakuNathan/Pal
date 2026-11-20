@@ -177,6 +177,11 @@ def bind_verification_report_file(
     if location is None:
         return result
     root, relative, rel_path = location
+    if result.get("verification_scratch_only"):
+        # Pin the parent at bind time (e.g. macOS /var -> /private/var).
+        # Keep the scratch directory itself subject to the no-follow check.
+        root = root.parent.resolve() / root.name
+        result["review_scratch_dir"] = str(root)
     path = root / relative
     digest = str(candidate_digest or "").strip()
     refresh = not path.exists()

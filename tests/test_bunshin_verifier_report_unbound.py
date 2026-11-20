@@ -5,6 +5,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -442,6 +443,19 @@ def test_report_io_rejects_symbolic_links(tmp_path):
     assert not (path.parent / "missing").exists()
 
 
+def test_scratch_report_binding_rejects_linked_scratch_directory(tmp_path):
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.symlink_to(destination, target_is_directory=True)
+    with pytest.raises(ValueError, match="destination root"):
+        bind_verification_report_file(
+            {"review_scratch_dir": str(scratch), "verification_scratch_only": True},
+            work_view={},
+        )
+    assert not (destination / VERIFICATION_REPORT_FILENAME).exists()
+
+
 @pytest.mark.parametrize("scratch", [False, True])
 def test_nested_same_named_fixture_remains_a_verification_case(tmp_path, scratch):
     from pal.bunshin.swe_verification import _verification_case_files
@@ -561,10 +575,17 @@ def test_role_working_state_and_stale_revision_error_surface_finding_revisions_w
         fixture.tearDown()
 
 
-def test_scratch_only_report_binds_in_review_scratch(tmp_path):
-    fixture, workspace, _pack, runtime, base_runtime, _repo, _digest, _view = _setup_unbound_verifier(
-        tmp_path, scratch_only=True,
-    )
+def test_scratch_only_report_binds_in_review_scratch(tmp_path, monkeypatch):
+    # macOS exposes its temporary directory through a symlinked ancestor.
+    temp_alias = tmp_path / "temp-alias"
+    temp_root = tmp_path / "temp-root"
+    temp_root.mkdir()
+    temp_alias.symlink_to(temp_root, target_is_directory=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(tempfile, "tempdir", str(temp_alias))
+        fixture, workspace, _pack, runtime, base_runtime, _repo, _digest, _view = _setup_unbound_verifier(
+            tmp_path, scratch_only=True,
+        )
     try:
         assert workspace["verification_report_relpath"] == "review_scratch/verification_report.yaml"
         assert Path(workspace["verification_report_path"]).is_file()
