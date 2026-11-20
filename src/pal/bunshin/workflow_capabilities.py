@@ -51,6 +51,8 @@ BUNSHIN_START_WORKFLOW_PURPOSE = (
 )
 
 BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
+    search_domain="bunshin",
+    search_domain_description="Delegate, track and review multi-step workflows.",
     search_enum_fields=("operation", "execution_mode"),
     search_objects=('workflow', 'workflows'),
     search_terms=('create', 'launch', 'delegate', 'task', 'tasks', 'project',),

@@ -164,6 +164,8 @@ class ProactiveIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_domain="proactive",
+            search_domain_description="Schedule future work and inspect past runs.",
             search_objects=('status',),
             search_terms=('state', 'show', 'get',),
             purpose="Show proactive module status.",

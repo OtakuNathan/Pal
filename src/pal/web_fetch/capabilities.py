@@ -169,6 +169,8 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_domain="browser",
+            search_domain_description="Read and interact with web pages, inspect elements and take screenshots.",
             search_objects=('status', 'session', 'extension', 'extensions'),
             search_terms=('state', 'health', 'show', 'check', 'configuration', 'capabilities', 'worker', 'workers'),
             search_intents=('inspect browser extension configuration and observed workers',),
@@ -343,7 +345,7 @@ class WebFetchIntrospectionProvider:
     def fetch(self, call: IntrospectionCall) -> IntrospectionResult | CapabilityResult:
         return self._action(call, "fetch", "Browser fetch")
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(search_objects=('screenshot', 'screenshots'), search_terms=('image', 'picture', 'png',), purpose="Capture the current page or target as a PNG and register its artifact for automatic core delivery. Vision-capable models receive pixels within image budgets; other models receive the artifact reference.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check inspect_browser_status and page state; failed calls return no screenshot.", next_tool_hints=(NextToolHint(name="import_artifact", use_when="Automatic artifact registration was unavailable and the artifact owner has recovered; pass artifact.local_cached_path as path. Do not reimport an already registered screenshot."),)), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("capture_browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", action_name="screenshot", guidance=ToolGuidance(search_objects=('screenshot', 'screenshots'), search_terms=('image', 'picture', 'png',), purpose="Capture a PNG screenshot of the current page or target and register its artifact for automatic core delivery. Vision-capable models receive pixels within image budgets; other models receive the artifact reference.", use_when="Pixel-level visual evidence is required.", do_not_use_when="Text or geometry evidence is sufficient.", failure_next_steps="Check inspect_browser_status and page state; failed calls return no screenshot.", next_tool_hints=(NextToolHint(name="import_artifact", use_when="Automatic artifact registration was unavailable and the artifact owner has recovered; pass artifact.local_cached_path as path. Do not reimport an already registered screenshot."),)), InputModel=BrowserScreenshotInput, OutputModel=BrowserActionOutput, aliases=("capture_browser_screenshot",), metadata={"canonical_path": "op_browser_screenshot", "omit_family_in_canonical": True, "async_required": True}, execution=INDIRECT_UNSAFE_LOCAL_WRITE)
     async def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
             key, persistent = self._scope(call)

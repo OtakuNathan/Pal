@@ -107,6 +107,8 @@ class ChecklistIntrospectionProvider:
         family="checklist",
         action_name="upsert",
         guidance=ToolGuidance(
+            search_domain="checklist",
+            search_domain_description="Track task steps and mark them complete.",
             search_objects=('checklist', 'checklists'),
             search_terms=('create', 'update', 'edit', 'mark', 'plan', 'steps'),
             search_intents=('update checklist step statuses including pending and in progress', 'replace a plan or update several completed phases together'),

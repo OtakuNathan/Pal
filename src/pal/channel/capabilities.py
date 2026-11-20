@@ -188,6 +188,8 @@ class ChannelIntrospectionProvider:
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
+            search_domain="channel",
+            search_domain_description="Send messages or attachments and manage channel connections.",
             search_objects=('state', 'status', 'health', 'hub'),
             purpose="Inspect the channel hub's inventory, publication and routing state without expanding endpoint diagnostics.",
             use_when="Checking channel-wide availability or why endpoints are missing from discovery.",

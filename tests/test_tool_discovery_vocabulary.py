@@ -42,6 +42,13 @@ def aliases(generation, query, top_k=None, *, keyword_only=False):
     return [hit["alias"] for hit in search(generation, args)["hits"]]
 
 
+def test_lsp_domain_advertises_code_navigation_before_search(generation):
+    from pal.execution.discovery_terms import search_domain_catalog
+
+    description = search_domain_catalog(generation.search_records)["lsp"]["description"]
+    assert all(task in description for task in ("definitions", "references", "callers", "diagnostics"))
+
+
 def test_catalog_preserves_every_exact_alias_and_provider_declaration(catalog, generation):
     assert any(tool.alias == "submit_candidate" and tool.role_scoped for tool in catalog)
     assert "submit_candidate" not in generation.search_records
@@ -211,6 +218,8 @@ def test_keyword_stage_keeps_unsupported_domains_operations_and_prefixes_unmatch
     ('memory', 'replace remembered content', 'update_memory'),
     ('skill', 'recover pending candidate', 'inspect_skill_state'),
     ('browser', 'inspect extension configuration workers', 'inspect_browser_status'),
+    ('browser', 'take a screenshot of the current browser page', 'capture_browser_screenshot'),
+    ('browser', 'screenshot current browser page', 'capture_browser_screenshot'),
     ('mcp', 'inspect server quarantine error', 'read_mcp_server'),
     ('bunshin', 'read human architecture review', 'read_bunshin_task_status'),
     ('llm', 'inspect active configuration model', 'inspect_llm'),

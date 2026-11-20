@@ -102,6 +102,8 @@ class LspManagerPluginProvider:
     @capability_action(
         namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="status",
         guidance=ToolGuidance(
+            search_domain="lsp",
+            search_domain_description="Find code definitions, references, callers and callees, and read diagnostics.",
             search_objects=('status', 'provider', 'server', 'servers', 'workspace'),
             search_terms=('state', 'health', 'show', 'check', 'doctor', 'readiness', 'binary', 'initialization'),
             purpose="Inspect LSP host health, a workspace's recorded readiness, or one selected server's complete diagnosis.",

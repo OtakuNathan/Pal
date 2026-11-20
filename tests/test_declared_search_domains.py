@@ -75,6 +75,7 @@ def test_registry_domain_metadata_changes_hash_and_roundtrips(runtime):
 
 def test_tool_policy_includes_current_declared_domains_and_updates_after_unmount(runtime):
     from tests.capability_fixture import unmount_test_capability
+    fallback = mount(runtime, "focus_lens", domain="", module="eye")
     handle = mount(runtime, "eye_observe", domain="eye", aliases=("camera",), description="Physical camera input.")
     registry = PromptFragmentRegistry()
     registry.register(MinimalOperatingRulesPromptFragmentProvider())
@@ -83,7 +84,19 @@ def test_tool_policy_includes_current_declared_domains_and_updates_after_unmount
         return next(f.content for f in compiler.collect_prompt_fragments(PromptAssemblyContext()) if f.section == "tool_policy")
     assert "eye (also: camera): Physical camera input." in policy()
     unmount_test_capability(runtime, handle)
+    assert "- eye: e.g. focus_lens" in policy()
     assert "eye (also: camera)" not in policy()
+    unmount_test_capability(runtime, fallback)
+    assert "- eye:" not in policy()
+
+
+def test_legacy_domain_examples_are_bounded_and_stable():
+    from pal.execution.discovery_terms import search_domain_catalog
+
+    names = ("read_wind", "read_rain", "read_humidity")
+    for order in (names, reversed(names)):
+        catalog = search_domain_catalog({name: {"module_id": "weather"} for name in order})
+        assert catalog["weather"]["description"] == "e.g. read_humidity, read_rain"
 
 
 @pytest.mark.parametrize("patch", [{"search_domain": "Eye"}, {"search_domain_aliases": ("camera",)},

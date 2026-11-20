@@ -224,6 +224,8 @@ class MemoryIntrospectionProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
+            search_domain="memory",
+            search_domain_description="Remember, recall and update durable facts and preferences.",
             search_objects=('state', 'states', 'hub', 'module', 'manager', 'backend', 'backends'),
             search_terms=('status', 'show', 'get', 'check', 'active', 'current', 'selected', 'provider', 'health'),
             purpose="Inspect memory hub state, L1/L2 counts and active provider availability together.",

@@ -74,8 +74,14 @@ def prompt_messages(variant, task, prior_fragments=None, candidate_fragments=Non
                 text = prior_fragments[f.section]
             elif f.section == 'system_map':
                 text = text.split('\nTool-surface search domains')[0]
+                text = text.split('; use search_tools')[0] + '.' if '; use search_tools' in text else text
             elif f.section == 'tool_policy':
-                text = '- On failure' + text.split('- On failure', 1)[1]
+                for marker in ('Tool execution and error recovery:', '- On failure'):
+                    if marker in text:
+                        text = marker + text.split(marker, 1)[1]
+                        break
+            elif f.section == 'tool_routing':
+                text = text.split('- Capabilities grow dynamically', 1)[0].rstrip()
         grouped[f.metadata['prompt_target']].append(f'<{f.section}>\n{text}\n</{f.section}>')
     grouped['system'].append('This is an isolated discovery evaluation with synthetic inputs. '
         'Find the appropriate tool and issue its call; business execution is intercepted. '

@@ -128,6 +128,8 @@ class McpManagerPluginProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show",
         guidance=ToolGuidance(
+            search_domain="mcp",
+            search_domain_description="Connect external tool servers and inspect their status.",
             search_objects=('state', 'states', 'hub', 'manager', 'projection'),
             search_terms=('status', 'show', 'get', 'health', 'process', 'server', 'count', 'tools'),
             purpose="Inspect MCP manager process health, server counts and tool projection state.",

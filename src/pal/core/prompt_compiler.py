@@ -73,7 +73,9 @@ class PromptCompiler:
                     aliases = " (also: " + ", ".join(entry["aliases"][:8]) + ")" if entry["aliases"] else ""
                     description = ": " + entry["description"][:160] if entry["description"] else ""
                     lines.append(f"- {domain}{aliases}{description}")
-                lines.append("Use these names rather than guessing from plugin implementation names. Native contracts already exposed need no discovery.")
+                lines.append("Choose the domain by the result the user wants. When the inputs are already given, "
+                             "start with its exposed tool or search_tools(domain=..., query=...). "
+                             "Use preliminary file or shell inspection only for missing information.")
                 fragments = [replace(fragment, content=fragment.content + "\n" + "\n".join(lines))
                              if fragment.section == "tool_policy" else fragment for fragment in fragments]
         return fragments

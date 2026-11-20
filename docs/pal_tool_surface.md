@@ -243,8 +243,10 @@ lowercase owner name, independently of their implementation module. Optional
 aliases route to the same strict bucket and cannot claim another owner's name.
 Conflicts reject the candidate registry generation. `search_domain_description`
 provides a short explanation (up to 160 characters) for the live domain list in
-the system tool policy. Domain metadata contributes to the registry fingerprint
-but stays out of retrieved contracts. Without an explicit declaration, existing
+the system tool policy. Describe the tasks a user would ask for. One visible
+tool can supply the description for its domain. If none supplies one, the list
+shows up to two visible tool names as examples. Domain metadata contributes to
+the registry fingerprint but stays out of retrieved contracts. Without an explicit declaration, existing
 alias and module ownership rules apply. For example, a native execution plugin
 can declare `shell` for command/session tools and `remote` for target lifecycle
 tools while continuing to mount under the execution module.

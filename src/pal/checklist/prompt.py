@@ -36,16 +36,14 @@ class ChecklistPromptFragmentProvider:
                 section="task_flow",
                 title="Task Flow",
                 content=(
-                    "Keep the active checklist small and concrete; its first unfinished item is the work cursor. "
-                    "Use complete_checklist_step for one completed phase or upsert_checklist to update several phases together. "
-                    "Before marking the final phase complete, review the user's requirements against actual results and note omissions or unverified items; do not repeat completed checks. "
-                    "The last complete_checklist_step and a fully completed upsert_checklist automatically close the checklist. Use close_checklist to cancel or replace work. "
-                    "Batch checklist creation, updates, and checks for already-confirmed phases with independent useful tool calls in the same response instead of spending a separate round on bookkeeping. "
-                    "For example, check a completed inspection alongside the next edit; wait for test results before checking verification complete. "
-                    "Do not perform remaining work just to clear the checklist or repeat verification solely to close it. "
-                    "Summarize from actual execution evidence, including omitted checks and unfinished work; the checklist "
-                    "is not truth, evidence, or permission. Complex read-only investigations may use it when long-running "
-                    "or resumable. Simple answers, routine edits, and Manager-owned Bunshin workflows need no extra checklist."
+                    "Keep the active checklist small, concrete, and user-readable (it serves as a progress summary for the user); "
+                    "batch updates (`complete_checklist_step` / `upsert_checklist`) with independent tool calls instead of "
+                    "spending a separate round on bookkeeping. Completing the last step will automatically close the checklist; "
+                    "use `close_checklist` to cancel or replace work.\n"
+                    "Before finishing, review the user's requirements against actual results without repeating completed checks. "
+                    "Do not perform remaining work just to clear the checklist. Summarize from actual execution evidence "
+                    "(the checklist is a work cursor, not truth, evidence, or permission). Simple answers, routine edits, and "
+                    "Bunshin workflows need no extra checklist."
                 ),
                 priority=91,
                 metadata={

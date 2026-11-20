@@ -87,6 +87,8 @@ class SkillIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_domain="skill",
+            search_domain_description="Find, load and maintain reusable procedures.",
             search_objects=('state', 'states', 'candidate', 'candidates'),
             search_terms=('status', 'show', 'get', 'health', 'pending', 'assimilation', 'recover', 'count', 'counts'),
             search_intents=('recover a pending skill candidate after an uncertain preparation',),

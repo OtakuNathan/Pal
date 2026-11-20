@@ -107,6 +107,8 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="inspect",
         guidance=ToolGuidance(
+            search_domain="llm",
+            search_domain_description="Inspect model endpoints, active settings, token usage and cost.",
             search_intents=('view current model and endpoint', 'list available model connections',
                             'inspect endpoint model capabilities and limits', 'check active model token usage',
                             '查看当前模型和所有端点'),

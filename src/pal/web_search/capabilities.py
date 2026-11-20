@@ -98,6 +98,8 @@ class WebSearchIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_domain="web",
+            search_domain_description="Search the web and inspect search providers.",
             search_objects=('state', 'hub', 'provider', 'providers', 'backend', 'backends'),
             search_terms=('list', 'status', 'active', 'current', 'selected', 'health', 'auth', 'authentication', 'credentials', 'settings'),
             purpose="Inspect the web search hub and every configured provider's public configuration, authentication and last-request health in one call.",

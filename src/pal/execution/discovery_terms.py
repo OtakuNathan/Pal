@@ -67,9 +67,11 @@ def search_domain_catalog(records: Mapping[str, Any]) -> dict[str, dict[str, Any
         domain = record.get("domain") or tool_domain(alias, str(record.get("module_id") or ""))
         if not domain:
             continue
-        entry = catalog.setdefault(domain, {"aliases": set(), "descriptions": set(), "tool_count": 0})
+        entry = catalog.setdefault(domain, {"aliases": set(), "descriptions": set(), "examples": [], "tool_count": 0})
         entry["tool_count"] += 1
         entry["aliases"].update(record.get("search_domain_aliases", ()))
+        if len(entry["examples"]) < 2:
+            entry["examples"].append(alias)
         description = str(record.get("search_domain_description") or "").strip()
         if description:
             entry["descriptions"].add(description)
@@ -84,7 +86,8 @@ def search_domain_catalog(records: Mapping[str, Any]) -> dict[str, dict[str, Any
             if key != domain:
                 normalized.add(key)
         entry["aliases"] = sorted(normalized)
-        entry["description"] = "; ".join(sorted(entry.pop("descriptions")))
+        examples = entry.pop("examples")
+        entry["description"] = "; ".join(sorted(entry.pop("descriptions"))) or "e.g. " + ", ".join(examples)
     return catalog
 
 

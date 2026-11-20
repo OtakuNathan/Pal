@@ -3760,7 +3760,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(after.payload["tools"], before.payload["tools"])
             self.assertEqual(after.payload.get("tool_choice"), before.payload.get("tool_choice"))
             self.assertEqual(after.payload.get("system"), before.payload.get("system"))
-            key = "input" if shape == WireShape.OPENAI_RESPONSE else "messages"
+            key = "input" if shape in {WireShape.OPENAI_RESPONSE, WireShape.GEMINI_INTERACTIONS} else "messages"
             self.assertEqual(after.payload[key][:len(before.payload[key])], before.payload[key])
             before_spans = {span.message_id: span.cache_prefix_fingerprint for span in before.message_spans}
             after_spans = {span.message_id: span.cache_prefix_fingerprint for span in after.message_spans}
@@ -4502,9 +4502,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertIn("Direct tools are not the complete capability inventory", system_map.content)
         self.assertIn("Memory holds durable facts", system_map.content)
-        self.assertIn("llm = model endpoints", system_map.content)
-        self.assertIn("keywords, not module_name/family filters", system_map.content)
-        self.assertIn("bunshin = delegated workflows", system_map.content.lower())
+        self.assertIn("live search domains catalog in tool_policy", system_map.content)
+        self.assertNotIn("llm = model endpoints", system_map.content)
         self.assertIn("Use the right source for the truth needed", source_of_truth.content)
         self.assertIn("live introspection/capability calls", source_of_truth.content)
         self.assertIn("<recalled_memories> contains durable memory context", prompt_context_policy.content)
@@ -4523,9 +4522,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("shell", operating_guidance.content)
         self.assertIn("verification scope", priority.content)
         self.assertIn("result-specific recovery affordances", tool_policy.content)
-        self.assertIn("Tool naming and discovery conventions", tool_policy.content)
-        self.assertIn("manage_plugin operation=reload", tool_policy.content)
-        self.assertIn("list enumerates; read retrieves content", tool_policy.content)
+        self.assertIn("pal.self.maintenance", tool_policy.content)
+        self.assertIn("Tool result metadata", tool_policy.content)
+        self.assertIn("affirmative English task description", tool_routing.content)
         self.assertIn("suggested next tool only when", tool_routing.content)
         self.assertIn("never blindly retry a mutation", tool_policy.content)
         self.assertIn("describe state when the call ran", tool_policy.content)

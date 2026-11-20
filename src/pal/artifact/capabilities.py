@@ -96,6 +96,8 @@ class ArtifactIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_domain="artifact",
+            search_domain_description="Import, find and inspect conversation attachments.",
             search_objects=('state', 'states', 'attachment', 'attachments'),
             search_terms=('status', 'show', 'get', 'health', 'lifecycle', 'limits', 'count'),
             purpose="Inspect artifact manager policy and conversation-scoped resource and lifecycle counts.",

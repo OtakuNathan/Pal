@@ -78,11 +78,23 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="search",
         guidance=ToolGuidance(
+            search_domain="execution",
+            search_domain_description="Discover tools, read their contracts and invoke them.",
             search_objects=('tool', 'tools', 'capability', 'capabilities', 'alias', 'aliases'),
-            purpose="Find callable tools by task purpose within a strict domain bucket, or by exact alias; broad keyword discovery with purpose fallback is available when the owner is unknown.",
-            use_when="When the callable alias is unknown. With a known operation owner, pass domain and use a short affirmative English task description in query, matching the primary language of tool purposes. Keep excluded alternatives and all constraints in the original request for full-contract review. Purpose and tool-authored auxiliary terms/intents rank full contracts within that bucket; action/object words are not hard gates. Candidates may miss requested features, so compare unmatched_terms and the complete contract with the original task. When query words are uncertain, pass domain alone for the complete compact directory of names and brief purposes, then read a plausible contract. Large results use the ordinary output snapshot; inspect omitted content with read_file. Domains are strict; target instance names belong in invocation arguments. Omit domain when uncertain to retain broad keyword discovery. Partial hits expose unmatched_terms for diagnostic context words; compare these with the whole request and contract before execution. Unmatched words do not establish supported features. On a domain-search miss, spelling recovery can return up to three suggestions with full contracts. Without domain, exact aliases and conservative keyword hits take priority; on no hits, purpose search across filtered visible tools requires at least two positive term matches. Review the included contracts and invoke directly when suitable; extra read_tool is unnecessary when the contract is complete. Do not search indefinitely. If a reasonable change of query, owner/filter or relevant inventory check still reveals no suitable callable, it may be unavailable; explain that possibility and any uncertainty. Reuse unchanged inventory and complete contracts.",
-            do_not_use_when="When you already know a callable alias and its arguments, invoke it directly or via call_tool according to its invocation mode. Avoid repeated discovery that provides no new evidence; the requested capability may be unavailable.",
-            failure_next_steps="On a miss, review suggestions and their included contracts first. If unresolved, inspect directory.tools when present: these are available tools in the selected domain, not query matches. Compare their purposes with the original request and use read_tool for a plausible alias before invoking it. If output is shortened, use read_file on its snapshot to inspect omitted directory content. Without a directory, choose from available_domains and pass domain alone. Suggestions remain candidates requiring review against the original task; unmatched words never establish supported features. If filters were guessed, correct or remove them. Try a reasonable change of strategy when useful, but do not continue discovery indefinitely. If relevant checks still reveal no suitable callable, it may be unavailable; report what was checked and any uncertainty rather than substituting an unrelated capability. Use facets=true only when classification discovery is needed; family is not a business-domain taxonomy.",
+            purpose="Find callable tools by short affirmative English task query within a strict owner domain, browse a domain directory, list available domains, or look up an exact alias.",
+            use_when=(
+                "When the needed capability alias is unknown. Pass a known strict owner domain (not a target instance "
+                "name) with a short affirmative English query (keep negations and extra constraints for contract "
+                "review); pass domain alone to browse that domain's directory; pass no arguments to list available "
+                "domains; or omit domain for broad keyword/purpose discovery. Hits include full contracts—verify "
+                "against the task (including unmatched_terms) and invoke directly without an extra read_tool."
+            ),
+            do_not_use_when="When you already know a callable alias and its contract in context, or to repeat an unchanged search.",
+            failure_next_steps=(
+                "Follow the returned usage_hint (review suggestions, directory.tools, or available_domains). Use "
+                "read_tool for plausible directory entries and read_file on the snapshot if output is shortened. "
+                "Stop if reasonable checks still reveal no suitable tool and report uncertainty."
+            ),
             next_tool_hints=(
                 NextToolHint(
                     name="read_tool",

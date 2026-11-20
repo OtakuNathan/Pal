@@ -54,10 +54,10 @@ def test_prompt_ablation_only_removes_new_conventions_and_domain_map():
     from pal.llm.serde import message_to_payload
     prior = str([message_to_payload(m) for m in benchmark.prompt_messages('prior_prompt', 'task')])
     candidate = str([message_to_payload(m) for m in benchmark.prompt_messages('candidate', 'task')])
-    assert 'Tool naming and discovery conventions' not in prior
-    assert 'Tool-surface search domains' not in prior
-    assert 'Tool naming and discovery conventions' in candidate
-    assert 'Tool-surface search domains' in candidate
+    assert 'affirmative English task description' not in prior
+    assert 'live search domains catalog in tool_policy' not in prior
+    assert 'affirmative English task description' in candidate
+    assert 'live search domains catalog in tool_policy' in candidate
     assert 'never blindly retry a mutation' in prior and 'never blindly retry a mutation' in candidate
 
 

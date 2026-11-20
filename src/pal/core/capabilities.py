@@ -54,6 +54,8 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="observe",
         guidance=ToolGuidance(
+            search_domain="core",
+            search_domain_description="Inspect active turns, queued events and runtime health.",
             search_objects=('state', 'states', 'task', 'tasks', 'turn', 'turns'),
             search_terms=('status', 'inspect', 'show', 'get', 'check', 'summary', 'queue', 'backlog'),
             purpose="Inspect core runtime state, queued events, active turns, detached modules.",

@@ -162,6 +162,8 @@ class PluginsIntrospectionProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list",
         guidance=ToolGuidance(
+            search_domain="plugin",
+            search_domain_description="Install packages and manage or reload plugins and channel providers.",
             search_objects=('plugin', 'plugins'),
             purpose="List known first-party and third-party plugins with usable names and enabled/attached status.",
             use_when='When you need to find which module owns a capability, or how to detach/attach a specific plugin (e.g. bunshin, mcp). The authoritative source for module ownership and lifecycle state. Missing entries can indicate an undiscovered or invalid manifest; inspect the configured plugin directory and rescan_plugins results.',

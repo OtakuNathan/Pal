@@ -35,6 +35,8 @@ from pal.shared import (
 SHELL_EXEC_DESCRIPTION = "Run one shell command and return stdout, stderr, and exit status."
 
 SHELL_EXEC_GUIDANCE = ToolGuidance(
+    search_domain="shell",
+    search_domain_description="Run shell commands.",
     search_objects=('command', 'commands'),
     search_terms=('execute', 'exec', 'terminal', 'bash', 'script', 'scripts', 'test', 'tests',
                   'build', 'builds', 'directory', 'directories', 'folder', 'folders', 'listing',

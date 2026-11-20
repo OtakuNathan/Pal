@@ -40,6 +40,8 @@ class FailureIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
+            search_domain="failure",
+            search_domain_description="Inspect recorded runtime failures.",
             search_objects=('state', 'report', 'reports', 'error', 'errors', 'history'),
             search_terms=('status', 'show', 'get', 'list', 'summary', 'recent', 'delivery', 'blocker', 'diagnosis'),
             purpose="Inspect failure tracking counts and the last 16 structured failure summaries, with a file containing full report details and evidence.",

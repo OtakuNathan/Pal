@@ -42,6 +42,8 @@ from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResu
 
 
 FILE_READ_GUIDANCE = ToolGuidance(
+    search_domain="file",
+    search_domain_description="Read, write and edit local files.",
     search_objects=('file', 'files'),
     search_terms=('local', 'text', 'source', 'code', 'config', 'configuration', 'show',),
     purpose=(
