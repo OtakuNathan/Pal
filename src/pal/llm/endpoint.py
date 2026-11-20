@@ -12,12 +12,14 @@ from typing import Any
 from uuid import uuid4
 
 from pal.foundation.diagnostics import diagnostic_text, exception_report
+from pal.llm.response_lineage import ResponseLineage
 from pal.llm.ir import (
     LLMResponseDeltaKind,
     LLMRequestIR,
     LLMResponseIR,
     LLMResponseUpdate,
     MessageState,
+    WireShape,
 )
 from pal.llm.attempts import LLMAttemptResult
 from pal.llm.decode_diagnostics import DecodeFailureCapture
@@ -61,6 +63,7 @@ class ShapeEndpointInvoker:
     attempt_sink: Callable[[LLMAttemptResult], Any] | None = None
     model_hooks: ModelHookRegistry = field(default_factory=lambda: ModelHookRegistry({}))
     _codecs: dict[str, tuple[str, EndpointCodec]] = field(default_factory=dict, init=False, repr=False)
+    lineage: ResponseLineage = field(default_factory=ResponseLineage, init=False, repr=False)
     _binding_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -275,9 +278,23 @@ class ShapeEndpointInvoker:
                     message_ids=tuple(message.message_id for message in request.messages),
                 ))
 
+        scope_id = request.logical_scope_id or request.metadata.get("prompt_cache_scope_id")
+        chain = bool(
+            scope_id and isinstance(binding, LLMEndpoint) and binding.spec.supports_response_continuation
+            and not encoded.applied_cache_breakpoint_message_ids
+            and not {"input", "model", "instructions", "system_instruction"}.intersection(encoded.extra_body)
+        )
+        scope = (scope_id, binding.lineage_generation) if isinstance(binding, LLMEndpoint) else None
+        prefix = self.lineage.match(scope, request.messages, encoded.payload) if chain else None
+        wire_sends = []
+        first_frame_seconds = None
+
+        def record_send(chained: bool, size: int) -> None:
+            wire_sends.append({"mode": "previous_id" if chained else "full", "bytes": size})
+
         transport_request = EncodedTransportRequest(
-            request_id=request_id, wire_shape=shape, timeout_seconds=float(timeout_seconds),
-            payload=encoded.payload, extra_body=encoded.extra_body,
+            on_wire_send=record_send, request_id=request_id, wire_shape=shape, timeout_seconds=float(timeout_seconds),
+            payload=encoded.payload, extra_body=encoded.extra_body, response_prefix=prefix,
             stream=stream, stream_control=stream_control,
             on_submitted=observe_submission,
         )
@@ -287,6 +304,7 @@ class ShapeEndpointInvoker:
         decoded = None
         frame_count = 0
         last_event_type = ""
+        completed_output = None
         failure_capture = DecodeFailureCapture()
 
         def save_failure(exc: BaseException) -> None:
@@ -313,13 +331,17 @@ class ShapeEndpointInvoker:
             )
 
         def observed_frames():
-            nonlocal frames, frame_count, last_event_type
+            nonlocal frames, frame_count, last_event_type, first_frame_seconds, completed_output
             frames = iter(binding.frames(transport_request) if isinstance(binding, LLMEndpoint)
                           else self._transport().frames(endpoint, transport_request))
             for frame in frames:
                 failure_capture.observe(frame)
+                if frame_count == 0:
+                    first_frame_seconds = time.monotonic() - started_at
                 frame_count += 1
-                last_event_type = str(frame.payload.get("type") or "")[:120]
+                last_event_type = str(frame.payload.get("event_type") or frame.payload.get("type") or "")[:120]
+                if chain and shape == WireShape.OPENAI_RESPONSE and last_event_type == "response.completed":
+                    completed_output = frame.payload.get("response", {}).get("output")
                 observe_submission()
                 evidence.observe(frame)
                 yield frame
@@ -355,6 +377,16 @@ class ShapeEndpointInvoker:
             if last is None or (not last.response.message.parts and last.response.finish_reason not in {LLMFinishReason.LENGTH, LLMFinishReason.ERROR}):
                 raise RuntimeError("LLM stream completed without semantic output")
             status = "failed" if last.response.finish_reason == LLMFinishReason.ERROR else "success"
+            replay = last.response.message.replay
+            if (chain and status == "success" and replay and not replay.source_payload and
+                    last.response.finish_reason in {LLMFinishReason.STOP, LLMFinishReason.TOOL_CALLS} and
+                    request.metadata.get("purpose") != "memory_compaction_engine" and
+                    capture.replay and capture.replay.payload == replay.payload):
+                key = "steps" if shape == WireShape.GEMINI_INTERACTIONS else "output"
+                output = replay.payload.get(key)
+                if shape == WireShape.GEMINI_INTERACTIONS or (completed_output and completed_output == output):
+                    self.lineage.remember(scope, last.response.message.message_id, evidence.provider_generation_id,
+                                          encoded.payload, output)
             if status == "failed":
                 save_failure(RuntimeError("Provider returned finish_reason=error"))
         except BaseException as exc:
@@ -406,7 +438,8 @@ class ShapeEndpointInvoker:
                 elapsed_seconds=attempt.elapsed_seconds, provider_generation_id=attempt.provider_generation_id,
                 returned_model=attempt.returned_model, actual_provider=attempt.actual_provider,
                 service_tier=attempt.service_tier,
-                reasoning_context=evidence.reasoning_context,
+                reasoning_context=evidence.reasoning_context, wire_sends=wire_sends,
+                first_frame_seconds=first_frame_seconds,
                 prompt_cache_diagnostics=evidence.prompt_cache_diagnostics,
             )
             first_settlement = self.attempt_sink(attempt) if self.attempt_sink is not None else True

@@ -36,6 +36,7 @@ from pal.llm.ir import (
     LLMRequestIR,
     MessageRole,
     TextPartIR,
+    WireShape,
 )
 from pal.llm.projection_contracts import (
     HistoryView, ProjectionChunk, LeftReplacement,
@@ -76,6 +77,7 @@ class ContinuationUnavailable(ProjectionSessionError):
 
 _ITEM_CONTAINER_KEY = {
     "openai_response": "input",
+    "gemini_interactions": "input",
     "openai_completion": "messages",
     "anthropic_messages": "messages",
 }
@@ -1373,6 +1375,8 @@ class EndpointProjectionSession:
                 for part in raw_tail_system
                 if isinstance(part, Mapping)
             ]
+        if tail_payload.get("system_instruction"):
+            tail_system_parts = [{"text": tail_payload["system_instruction"]}]
         self._active.prepared_head_system = tail_system_parts
         self._active.prepared_head_cache_spans = split_spans(
             tail_spans, "system", len(tail_system_parts))
@@ -1381,7 +1385,11 @@ class EndpointProjectionSession:
               for part in entry.parts),
             *tail_system_parts,
         ]
-        if merged_system:
+        if merged_system and self.binding.wire_shape == WireShape.GEMINI_INTERACTIONS:
+            payload["system_instruction"] = "\n\n".join(filter(None, (
+                shell_fields.get("system_instruction"), *(part["text"] for part in merged_system),
+            )))
+        elif merged_system:
             shell_system = shell_fields.get("system")
             if isinstance(shell_system, (list, tuple)):
                 payload["system"] = [
@@ -1752,8 +1760,8 @@ def _wire_items_from_native(shape_value: str, payload_json: str) -> list[dict]:
     if shape_value == "openai_completion":
         message = payload.get("message")
         return [dict(message)] if isinstance(message, dict) else []
-    if shape_value == "openai_response":
-        output = payload.get("output")
+    if shape_value in {"openai_response", "gemini_interactions"}:
+        output = payload.get("steps" if shape_value == "gemini_interactions" else "output")
         return [dict(item) for item in output] if isinstance(output, list) else []
     if shape_value == "anthropic_messages":
         content = payload.get("content")

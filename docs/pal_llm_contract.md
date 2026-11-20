@@ -590,12 +590,14 @@ HTTP proxy selection and bypass settings. SOCKS proxies additionally require
 the library's optional `python-socks` dependency.
 
 Each socket sends sequential `response.create` messages and reads through the
-terminal event. Requests send full input history and `store=false`, omit
+terminal event. Requests use `store=false`, omit
 unsupported parameters including `max_output_tokens` and `temperature`, project
 system messages to developer messages, and group Pal functions under the `pal`
-namespace. WebSocket messages omit HTTP's `stream` flag. No
-`previous_response_id` or lane state is required: L1 remains the conversation
-authority. Local token budgets still govern Pal's context planning. Only
+namespace. WebSocket messages omit HTTP's `stream` flag. L1 retains the full
+conversation. When its accepted prefix matches the most recent completed response
+on the leased socket, the next request can send `previous_response_id` with the
+remaining input. A fresh socket starts with full replay. Local token budgets
+still govern Pal's context planning. Only
 `response.completed` completes a subscription inference; interrupted/incomplete
 streams and failed responses cannot authorize pending tool execution or replay
 acceptance. Ordinary API endpoint behavior remains independent.

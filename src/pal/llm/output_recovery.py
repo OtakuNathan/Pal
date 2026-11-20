@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 from pal.llm.ir import (
+    LLMFinishReason,
     LLMMessageIR,
     LLMRequestIR,
     LLMResponseDeltaKind,
@@ -217,7 +218,10 @@ def _merge_replay(responses: list[LLMResponseIR]) -> ReplayEnvelope | None:
     """Keep every accepted continuation piece; usage-only retries are excluded."""
     from pal.shared.json_values import thaw_json
 
-    envelopes = [response.message.replay for response in responses]
+    envelopes = [
+        response.message.replay for response in responses
+        if response.message.replay or response.message.parts or response.finish_reason != LLMFinishReason.LENGTH
+    ]
     if not envelopes or all(envelope is None for envelope in envelopes):
         return None
     if any(envelope is None for envelope in envelopes):
@@ -235,7 +239,11 @@ def _merge_replay(responses: list[LLMResponseIR]) -> ReplayEnvelope | None:
                                 for message in value.get("messages", [value.get("message")])
                                 if message is not None]}
     else:
-        key = "output" if first.wire_shape == WireShape.OPENAI_RESPONSE else "content"
+        key = {
+            WireShape.OPENAI_RESPONSE: "output",
+            WireShape.GEMINI_INTERACTIONS: "steps",
+            WireShape.ANTHROPIC_MESSAGES: "content",
+        }[first.wire_shape]
         payload = {key: [item for value in values for item in value.get(key, ())]}
     return replace(first, payload=payload, source_payload={"attempts": [
         thaw_json(envelope.source_payload if envelope.source_payload is not None else envelope.payload)

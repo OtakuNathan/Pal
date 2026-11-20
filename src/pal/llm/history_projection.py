@@ -619,6 +619,7 @@ class HistoryProjection:
         logical_scope_id: str, preferred_endpoint_id: str | None,
         preferred_model_id: str | None, active_turn_id: str,
         strategy: str, build_request: Callable[[str | None, str | None], LLMRequestIR],
+        response_continuation: bool = False,
     ) -> CompactionSource:
         """Derive native and cached request material from Memory's frozen cut."""
         from pal.llm.compaction import is_native_window
@@ -645,20 +646,41 @@ class HistoryProjection:
                 "dialect": dialect, "wire_shape": wire_shape})
         native_source = any(is_native_window(message) for message in captured)
         next_request = None
-        if strategy == "openai_responses" or native_source:
+        native_window = strategy == "openai_responses" or native_source
+        reference_binding = None
+        if response_continuation and replay is None and not native_window:
+            bindings = {(m.replay.wire_shape.value, m.replay.endpoint_id, m.replay.model_id)
+                        for m in captured if m.replay}
+            if len(bindings) == 1:
+                shape, endpoint_id, model_id = bindings.pop()
+                if (shape in {"gemini_interactions", "openai_response"}
+                        and preferred_endpoint_id in {None, endpoint_id}
+                        and preferred_model_id in {None, model_id}):
+                    reference_binding = (shape, endpoint_id, model_id)
+        if native_window or reference_binding:
             try:
                 capabilities = self.capabilities(preferred_endpoint_id)
+                if reference_binding:
+                    shape, endpoint_id, model_id = reference_binding
+                    if (capabilities.get("endpoint_id", endpoint_id) != endpoint_id
+                            or capabilities.get("model_id", model_id) != model_id):
+                        return CompactionSource(endpoint_id=preferred_endpoint_id, model_id=preferred_model_id)
+                    preferred_endpoint_id, preferred_model_id = endpoint_id, model_id
                 source_id_set = set(source_ids)
-                messages, tail = [], []
-                for turn in memory_service.history_root.all_turns():
+                messages, tail, projected_ids = [], [], []
+                turns = memory_service.history_root.all_turns() if native_window else left_snapshot.turns
+                for turn in turns:
                     projected = self.project_messages(list(turn.messages), turn_id=turn.turn_id,
                         artifact_scope_key=logical_scope_id, capabilities=capabilities)
                     for message in projected:
                         if message.message_id in source_id_set:
+                            projected_ids.append(message.message_id)
                             messages.append(Continuity.from_message(message, {}).standalone_message()
                                 if message.semantic_kind == "runtime_context_summary" else message)
                         else:
                             tail.append(message)
+                if reference_binding and tuple(projected_ids) != source_ids:
+                    return CompactionSource(endpoint_id=preferred_endpoint_id, model_id=preferred_model_id)
                 shell = build_request(preferred_endpoint_id, preferred_model_id)
                 stable = tuple(message for message in shell.messages if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER})
                 source_stable = stable
@@ -667,12 +689,21 @@ class HistoryProjection:
                     if frozen:
                         source_stable = tuple(message_from_payload(message) for message in frozen)
                         break
-                if replay is None or native_source:
-                    replay = replace(shell, messages=(*source_stable, *messages))
-                next_request = replace(shell, messages=(*stable, *tail))
-                wire_shape, dialect = "openai_response", "canonical_history"
+                if reference_binding:
+                    from pal.memory.prompt_context import applicable_context
+                    history = applicable_context((*source_stable, *messages), active_turn_id="")
+                    replay = replace(shell, messages=tuple(history), logical_scope_id=logical_scope_id)
+                    dialect, wire_shape = "canonical_lineage", reference_binding[0]
+                else:
+                    if replay is None or native_source:
+                        replay = replace(shell, messages=(*source_stable, *messages))
+                    next_request = replace(shell, messages=(*stable, *tail))
+                    wire_shape, dialect = "openai_response", "canonical_history"
             except Exception as exc:
-                raise CompactionSourceUnavailable(str(exc)) from exc
+                if native_window:
+                    raise CompactionSourceUnavailable(str(exc)) from exc
+                self.diagnostics.append({"kind": "compaction_continuation_unavailable",
+                    "run_id": left_snapshot.run_id, "reason": type(exc).__name__})
         return CompactionSource(replay, next_request, dialect, wire_shape,
                                 preferred_endpoint_id, preferred_model_id)
 

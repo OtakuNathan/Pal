@@ -357,6 +357,7 @@ class LLMMetadata:
 @dataclass(frozen=True)
 class LLMCompactionPlan:
     strategy: str = "semantic_checkpoint"
+    response_continuation: bool = False
 
     @property
     def include_completed_tail(self) -> bool:

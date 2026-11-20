@@ -44,6 +44,30 @@ class LLMEndpointSchemaMigrationTests(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT endpoint_id, transport FROM llm_endpoints ORDER BY endpoint_id").fetchall(), [("api", "http"), ("chatgpt", "websocket")])
             self.assertEqual(migrate_llm_endpoint_schema(path).status, "current")
 
+    def test_previous_shape_constraint_expands_without_changing_existing_rows(self) -> None:
+        from pal.llm.schema import _CREATE_NEXT_TABLE_SQL
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pal.sqlite3"
+            with sqlite3.connect(path) as conn:
+                conn.execute(_CREATE_NEXT_TABLE_SQL.replace("llm_endpoints__next", "llm_endpoints")
+                             .replace(", 'gemini_interactions'", ""))
+                conn.execute("CREATE INDEX endpoint_note ON llm_endpoints(notes)")
+            db = PalV2Database(path)
+            db.initialize((LLMEndpointModel,))
+            try:
+                LLMEndpointModel.create(**LLMEndpointSpec.from_value(endpoint()).to_payload())
+            finally:
+                db.close()
+            with sqlite3.connect(path) as conn:
+                before = conn.execute("SELECT * FROM llm_endpoints").fetchall()
+            self.assertEqual(migrate_llm_endpoint_schema(path).status, "migrated")
+            with sqlite3.connect(path) as conn:
+                self.assertEqual(before, conn.execute("SELECT * FROM llm_endpoints").fetchall())
+                self.assertIn("endpoint_note", [row[1] for row in conn.execute("PRAGMA index_list(llm_endpoints)")])
+                conn.execute("UPDATE llm_endpoints SET wire_shape='gemini_interactions', transport='http', "
+                             "auth_kind='api_key_ref', capabilities_blob='{}'")
+            self.assertEqual(migrate_llm_endpoint_schema(path).status, "current")
+
     def test_failed_transport_upgrade_rolls_back_schema_and_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "pal.sqlite3"

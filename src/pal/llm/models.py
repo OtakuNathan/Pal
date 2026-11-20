@@ -14,7 +14,7 @@ class LLMEndpointModel(BaseModel):
     wire_shape = CharField(
         constraints=[
             Check(
-                "wire_shape IN ('openai_completion', 'openai_response', 'anthropic_messages')"
+                "wire_shape IN ('openai_completion', 'openai_response', 'anthropic_messages', 'gemini_interactions')"
             )
         ]
     )

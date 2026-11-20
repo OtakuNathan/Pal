@@ -347,7 +347,31 @@ class ContinuationContract:
         return self.validator(candidate)
 
 
+def _validate_gemini(candidate: NativeCandidate) -> ContinuationDecision:
+    payload = candidate.payload()
+    steps = payload.get("steps") if isinstance(payload, Mapping) else None
+    issues = []
+    call_ids = []
+    if not isinstance(steps, list) or not steps:
+        issues.append(_issue("steps_missing", "Gemini replay requires a nonempty steps array"))
+    else:
+        for step in steps:
+            kind = step.get("type") if isinstance(step, dict) else None
+            if kind == "function_call":
+                call_id = step.get("id")
+                if not call_id or call_id in call_ids or not step.get("name") or not isinstance(step.get("arguments"), dict):
+                    issues.append(_issue("invalid_function_call", "Gemini function call is malformed"))
+                call_ids.append(call_id)
+            elif kind not in {"thought", "model_output"}:
+                issues.append(_issue("unknown_step", f"unsupported Gemini step {kind!r}"))
+    if tuple(call_ids) != candidate.call_ids:
+        issues.append(_issue("tool_inventory_mismatch", "Gemini call IDs differ from accepted calls"))
+    decision = ContinuationDecisionKind.DEGRADED if issues else ContinuationDecisionKind.PRESERVED
+    return ContinuationDecision(decision, tuple(issues), "gemini-interactions-1")
+
+
 _CONTRACTS: dict[WireShape, ContinuationContract] = {
+    WireShape.GEMINI_INTERACTIONS: ContinuationContract(WireShape.GEMINI_INTERACTIONS, "gemini-interactions-1", _validate_gemini),
     WireShape.ANTHROPIC_MESSAGES: ContinuationContract(
         WireShape.ANTHROPIC_MESSAGES,
         _ANTHROPIC_CONTRACT_VERSION,

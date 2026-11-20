@@ -41,6 +41,12 @@ class LLMEndpointSpec:
     notes: str | None
     transport: str = "http"
 
+    @property
+    def supports_response_continuation(self) -> bool:
+        return self.capabilities_blob.get("continuation_mode") != "full" and (
+            self.wire_shape == WireShape.GEMINI_INTERACTIONS.value or self.transport == "websocket"
+        )
+
     @classmethod
     def from_value(cls, value: Mapping[str, Any] | object) -> "LLMEndpointSpec":
         source = _value_mapping(value)
@@ -105,6 +111,8 @@ class LLMEndpointSpec:
         capabilities = _json_mapping(source.get("capabilities_blob"))
         if capabilities.get("compaction_strategy", "auto") not in {"auto", "semantic_checkpoint", "openai_responses"}:
             raise LLMEndpointSpecError("invalid capabilities_blob.compaction_strategy")
+        if capabilities.get("continuation_mode", "auto") not in ("auto", "full"):
+            raise LLMEndpointSpecError("invalid continuation_mode")
         sampling_policy = capabilities.get("sampling_policy")
         if sampling_policy is not None and (
             wire_shape not in {"openai_response", "openai_completion"}

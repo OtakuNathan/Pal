@@ -95,6 +95,8 @@ def _default_capabilities(
     shape: WireShape, provider_id: str, model_id: str, base_url: str,
 ) -> PromptCacheCapabilities:
     """Compatibility presets used only while binding an endpoint context."""
+    if shape == WireShape.GEMINI_INTERACTIONS:
+        return PromptCacheCapabilities()
     provider = provider_id.strip().lower()
     gateway = provider == "openrouter" or urlsplit(base_url or "").hostname == "openrouter.ai"
     implicit = (PromptCacheDialect.OPENROUTER_AUTOMATIC if gateway else

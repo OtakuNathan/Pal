@@ -1,10 +1,12 @@
 from pal.llm.ir import WireShape
 from pal.llm.shapes.anthropic_messages import AnthropicMessagesCodec
+from pal.llm.shapes.gemini import GeminiInteractionsCodec
 from pal.llm.shapes.base import EncodedRequest, ShapeCodec, ShapeContext, ShapeDecodeError
 from pal.llm.shapes.openai_completion import OpenAICompletionCodec
 from pal.llm.shapes.openai_response import OpenAIResponseCodec
 
 _CODECS: dict[WireShape, ShapeCodec] = {
+    WireShape.GEMINI_INTERACTIONS: GeminiInteractionsCodec(),
     WireShape.OPENAI_COMPLETION: OpenAICompletionCodec(),
     WireShape.OPENAI_RESPONSE: OpenAIResponseCodec(),
     WireShape.ANTHROPIC_MESSAGES: AnthropicMessagesCodec(),
@@ -24,6 +26,7 @@ __all__ = [
     "ShapeContext",
     "ShapeDecodeError",
     "AnthropicMessagesCodec",
+    "GeminiInteractionsCodec",
     "OpenAICompletionCodec",
     "OpenAIResponseCodec",
     "codec_for_shape",

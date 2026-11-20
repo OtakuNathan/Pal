@@ -470,3 +470,49 @@ def test_real_websocket_reuse_through_codec_preserves_usage_and_tool_namespace()
             assert messages[0]["input"][0]["role"] == "developer"
         finally:
             ws.close()
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_previous_response_uses_only_the_leased_socket_and_replays_once(fallback):
+    from pal.llm.response_lineage import ResponsePrefix
+    rejected = {"type": "error", "error": {"code": "previous_response_not_found"}}
+    replies = [[_completed()], [rejected], [_completed()]] if fallback else [[_completed()], [_completed()]]
+    socket = _Socket(replies)
+    fresh = _Socket([[_completed()]])
+    transport = ResponsesWebSocketTransport(_Connector(socket, fresh))
+    req = _request()
+    prefix = ResponsePrefix("response-test", 1, b"verified-by-invoker")
+    history = [*req.payload["input"], {"role": "user", "content": "new tail"}]
+    second = replace(req, response_prefix=prefix, payload={**req.payload, "input": history})
+    try:
+        list(transport.frames(req))
+        frames = list(transport.frames(second))
+        assert frames[-1].payload["type"] == "response.completed"
+        assert socket.sent[1]["previous_response_id"] == prefix.response_id
+        assert socket.sent[1]["input"] == history[1:]
+        assert len(socket.sent) == 2 + int(fallback)
+        if fallback:
+            assert "previous_response_id" not in socket.sent[2]
+            assert socket.sent[2]["input"] == history
+        list(transport.frames(replace(second, api_key="rotated-token")))
+        assert "previous_response_id" not in fresh.sent[0]
+        assert fresh.sent[0]["input"] == history
+    finally:
+        transport.close()
+
+
+def test_subscription_invoker_continues_the_accepted_message_via_previous_id():
+    socket = _Socket([[_completed()], [_completed(2800)]])
+    invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(
+        lambda _: "test-token", websocket_transport=ResponsesWebSocketTransport(_Connector(socket)),
+    ))
+    req = replace(request(), logical_scope_id="resident")
+    try:
+        first, _ = invoker.invoke(endpoint(), req)
+        second, _ = invoker.invoke(endpoint(), replace(req, messages=(*req.messages, first.message, req.messages[-1])))
+        assert socket.sent[1]["previous_response_id"] == "response-test"
+        assert len(socket.sent[1]["input"]) == 1
+        assert socket.sent[1]["store"] is False
+        assert second.usage.cached_input_tokens == 2800
+    finally:
+        invoker.close()

@@ -663,7 +663,7 @@ class LLMIRShapeTests(unittest.TestCase):
         self.assertEqual(streamed.usage.reasoning_tokens, 1)
         self.assertTrue(streamed.usage.reasoning_tokens_reported)
 
-    def test_anthropic_fallback_replays_reasoning_when_envelope_is_missing(self) -> None:
+    def test_anthropic_fallback_omits_unsigned_reasoning_when_envelope_is_missing(self) -> None:
         codec = codec_for_shape(WireShape.ANTHROPIC_MESSAGES)
         message = LLMMessageIR(
             MessageRole.ASSISTANT,
@@ -674,17 +674,47 @@ class LLMIRShapeTests(unittest.TestCase):
         )
         request = LLMRequestIR(
             messages=(message,),
-            tools=(),
+            tools=(ToolDefinitionIR("read", "read", {"type": "object", "properties": {}}),),
             policy=GenerationPolicyIR(
                 max_output_tokens=100,
+                temperature=0.05,
+                tool_choice="required",
                 thinking_level="high",
             ),
         )
 
         encoded = codec.encode(request, _context(WireShape.ANTHROPIC_MESSAGES)).payload
         blocks = encoded["messages"][0]["content"]
-        self.assertEqual(blocks[0], {"type": "thinking", "thinking": "inspect"})
-        self.assertEqual(blocks[1]["type"], "tool_use")
+        self.assertEqual([b["type"] for b in blocks], ["tool_use"])
+        self.assertNotIn("temperature", encoded)
+        self.assertNotIn("tool_choice", encoded)
+
+        no_thinking = LLMRequestIR(
+            messages=request.messages,
+            tools=request.tools,
+            policy=GenerationPolicyIR(
+                max_output_tokens=100, temperature=0.05, tool_choice="required", thinking_level="off",
+            ),
+        )
+        encoded_off = codec.encode(no_thinking, _context(WireShape.ANTHROPIC_MESSAGES)).payload
+        self.assertEqual(encoded_off["temperature"], 0.05)
+        self.assertEqual(encoded_off["tool_choice"], {"type": "any"})
+
+    def test_anthropic_stream_tool_use_replay_stores_dict_input(self) -> None:
+        codec = codec_for_shape(WireShape.ANTHROPIC_MESSAGES)
+        updates = list(codec.split(
+            [
+                JSONFrame(0, {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call-1", "name": "read", "input": {}}}),
+                JSONFrame(1, {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"path":"a"}'}}),
+                JSONFrame(2, {"type": "content_block_stop", "index": 0}),
+                JSONFrame(3, {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+                JSONFrame(4, {"type": "message_stop"}),
+            ],
+            _context(WireShape.ANTHROPIC_MESSAGES),
+        ))
+        replay = updates[-1].response.message.replay
+        self.assertIsNotNone(replay)
+        self.assertEqual(replay.payload["content"][0]["input"], {"path": "a"})
 
     def test_fragmented_invalid_tool_json_never_becomes_executable(self) -> None:
         shape = WireShape.OPENAI_COMPLETION

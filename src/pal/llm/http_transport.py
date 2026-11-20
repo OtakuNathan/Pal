@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import RLock
 from typing import Any, Protocol
 
 import httpx
 
+from pal.foundation.diagnostics import diagnostic_text
 from pal.foundation.fd_lease import (
     FdCapability, FdCloseOutcome, FdLease, FdLeaseCancelledError, FdLeaseInvariantError,
 )
 from pal.llm.ir import WireShape
 from pal.llm.shapes.base import _JSONFrame
-from pal.llm.transport_contracts import AuthenticatedTransportRequest as SDKTransportRequest, LLMTransportError
+from pal.llm.transport_contracts import AuthenticatedTransportRequest as SDKTransportRequest, LLMProviderStartedError, LLMTransportError
 from pal.shared.json_values import thaw_json
 
 
@@ -75,6 +78,7 @@ class SDKJSONTransport:
         init=False,
         repr=False,
     )
+    _gemini_parents: deque[tuple[str, str]] = field(default_factory=lambda: deque(maxlen=256), init=False, repr=False)
     _active_endpoint_id: str = field(default="", init=False, repr=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
@@ -82,7 +86,10 @@ class SDKJSONTransport:
         payload = thaw_json(request.payload)
         extra_body = thaw_json(request.extra_body)
         if extra_body:
-            payload["extra_body"] = extra_body
+            if request.wire_shape == WireShape.GEMINI_INTERACTIONS:
+                payload.update(extra_body)
+            else:
+                payload["extra_body"] = extra_body
         if request.operation == "generate":
             payload["stream"] = bool(request.stream)
         elif request.operation not in {"compact", "input_tokens"} or request.wire_shape != WireShape.OPENAI_RESPONSE:
@@ -90,6 +97,11 @@ class SDKJSONTransport:
         if request.stream and request.wire_shape == WireShape.OPENAI_COMPLETION:
             payload.setdefault("stream_options", {"include_usage": True})
         key, entry, capability = self._acquire(request)
+        gemini = request.wire_shape == WireShape.GEMINI_INTERACTIONS
+        if gemini and request.response_prefix:
+            with self._lock:
+                if (key[-1], request.response_prefix.response_id) not in self._gemini_parents:
+                    request = replace(request, response_prefix=None)
         control = request.stream_control
         succeeded = False
         if control is not None:
@@ -116,6 +128,11 @@ class SDKJSONTransport:
                     frame = capability.call_sync(_next_sdk_frame)
                 except StopIteration:
                     break
+                if gemini and payload.get("store"):
+                    interaction = frame.payload.get("interaction", frame.payload)
+                    if interaction.get("status") in {"completed", "requires_action"} and interaction.get("id"):
+                        with self._lock:
+                            self._gemini_parents.append((key[-1], interaction["id"]))
                 yield frame
             if control is not None:
                 control.raise_if_cancelled()
@@ -123,6 +140,9 @@ class SDKJSONTransport:
         except Exception as exc:
             if isinstance(exc, (LLMTransportError, FdLeaseCancelledError)):
                 raise
+            if gemini and isinstance(exc, (httpx.ReadError, httpx.ReadTimeout, httpx.WriteError,
+                                           httpx.WriteTimeout, httpx.RemoteProtocolError)):
+                raise LLMProviderStartedError("Gemini connection interrupted after submission began") from exc
             raise LLMTransportError(f"{request.wire_shape.value} request failed: {exc}") from exc
         finally:
             capability.release_sync(reuse=succeeded)
@@ -183,19 +203,18 @@ class SDKJSONTransport:
                 None,
             )
             if entry is None:
-                client = (
-                    self.client_factory.anthropic(
+                if request.wire_shape == WireShape.GEMINI_INTERACTIONS:
+                    client = httpx.Client(base_url=request.base_url.rstrip("/") + "/", timeout=request.timeout_seconds,
+                                          headers={"x-goog-api-key": request.api_key, "Api-Revision": "2026-05-20"})
+                else:
+                    build = (self.client_factory.anthropic if request.wire_shape == WireShape.ANTHROPIC_MESSAGES
+                             else self.client_factory.openai)
+                    client = build(
                         api_key=request.api_key,
                         base_url=request.base_url,
                         timeout=request.timeout_seconds,
                     )
-                    if request.wire_shape == WireShape.ANTHROPIC_MESSAGES
-                    else self.client_factory.openai(
-                        api_key=request.api_key,
-                        base_url=request.base_url,
-                        timeout=request.timeout_seconds,
-                    )
-                )
+
                 entry = _ClientEntry(
                     owner=FdLease(
                         resource_kind=f"llm.sdk_client:{request.endpoint_id}",
@@ -275,6 +294,9 @@ def _open_sdk_response(
 ) -> None:
     if graph.response is not None or graph.frames is not None:
         raise FdLeaseInvariantError("SDK client graph already has an active response")
+    if request.wire_shape == WireShape.GEMINI_INTERACTIONS:
+        _open_gemini_response(graph, request, payload)
+        return
     resource = graph.resource
     method = "create"
     if request.operation == "compact":
@@ -309,7 +331,78 @@ def _open_sdk_response(
     graph.response_close_attempted = False
 
 
+def _open_gemini_response(graph: _SDKClientGraph, request: SDKTransportRequest, payload: dict) -> None:
+    prefix = request.response_prefix
+    while True:
+        body = dict(payload)
+        body.pop("previous_interaction_id", None)
+        if prefix:
+            body.update(previous_interaction_id=prefix.response_id, input=body["input"][prefix.length:])
+        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+        if request.on_wire_send:
+            request.on_wire_send(prefix is not None, len(encoded))
+        manager = graph.client.stream("POST", "interactions", headers={"Content-Type": "application/json"}, content=encoded)
+        response = manager.__enter__()
+        graph.response_context = manager
+        graph.response = response
+        if response.is_success:
+            break
+        response.read()
+        try:
+            error = response.json().get("error", {})
+        except (ValueError, AttributeError):
+            error = {}
+        if not isinstance(error, dict):
+            error = {}
+        if prefix and response.status_code == 404 and _missing_interaction(error, prefix.response_id):
+            if not _close_active_sdk_response(graph):
+                raise LLMTransportError("could not close rejected Gemini interaction")
+            if request.stream_control:
+                request.stream_control.raise_if_cancelled()
+            prefix = None
+            continue
+        detail = diagnostic_text(error.get("message") or response.reason_phrase, limit=500)
+        raise LLMTransportError(f"Gemini Interactions status code: {response.status_code}: {detail}")
+    if request.on_submitted:
+        request.on_submitted()
+    graph.frames = _gemini_frames(response, request.stream)
+
+
+def _missing_interaction(error: Mapping, previous_id: str) -> bool:
+    message = str(error.get("message", "")).lower()
+    if error.get("status") == "NOT_FOUND" and message == "requested entity was not found.":
+        return True
+    return ("not found" in message or "expired" in message) and (
+        previous_id.lower() in message or "previous interaction" in message or "previous_interaction_id" in message
+    )
+
+
+def _gemini_frames(response: httpx.Response, stream: bool) -> Iterator[_JSONFrame]:
+    if not stream:
+        response.read()
+        yield _JSONFrame(0, response.json())
+        return
+    data = []
+    sequence = 0
+    for line in response.iter_lines():
+        if line.startswith("data:"):
+            data.append(line[5:].lstrip())
+        elif not line and data:
+            value = "\n".join(data)
+            if value == "[DONE]":
+                return
+            yield _JSONFrame(sequence, json.loads(value))
+            data.clear()
+            sequence += 1
+    if data:
+        value = "\n".join(data)
+        if value != "[DONE]":
+            yield _JSONFrame(sequence, json.loads(value))
+
+
 def _sdk_resource(client: Any, shape: WireShape) -> Any:
+    if shape == WireShape.GEMINI_INTERACTIONS:
+        return client
     if shape == WireShape.ANTHROPIC_MESSAGES:
         return client.messages
     if shape == WireShape.OPENAI_RESPONSE:
@@ -415,7 +508,7 @@ def _raw_http_response(response: Any) -> Any:
 
 
 def _observe_raw_response_stream(response: Any, on_chunk: Callable[[], None]) -> None:
-    raw = _raw_http_response(response)
+    raw = response if isinstance(response, httpx.Response) else _raw_http_response(response)
     stream = getattr(raw, "stream", None)
     if not isinstance(stream, httpx.SyncByteStream):
         return

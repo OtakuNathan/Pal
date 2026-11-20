@@ -84,9 +84,11 @@ def retire_spans(entries: ItemSpans, item: Mapping[str, Any],
 
 def native_spans(shape: str, items: list[dict], message_id: str) -> list[ItemSpans]:
     """Use the codec's target rules on accepted native bytes, without encoding."""
-    container = "input" if shape == "openai_response" else "messages"
+    container = "input" if shape in {"openai_response", "gemini_interactions"} else "messages"
     targets = ()
-    if shape == "openai_completion":
+    if shape == "gemini_interactions":
+        targets = tuple((container, i) for i in range(len(items)))
+    elif shape == "openai_completion":
         from pal.llm.shapes.openai_completion import _chat_message_cache_targets
         targets = tuple(path for i in range(len(items))
                         for path in _chat_message_cache_targets(items, i))

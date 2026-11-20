@@ -45,6 +45,7 @@ SHAPES = (WireShape.OPENAI_COMPLETION, WireShape.OPENAI_RESPONSE,
           WireShape.ANTHROPIC_MESSAGES)
 
 CONTAINERS = {
+    WireShape.GEMINI_INTERACTIONS: "input",
     WireShape.OPENAI_COMPLETION: "messages",
     WireShape.OPENAI_RESPONSE: "input",
     WireShape.ANTHROPIC_MESSAGES: "messages",

@@ -50,6 +50,27 @@ for this standalone compact contract on the configured routes:
 The stored DeepSeek `deepseek-v4.1-pro` ID was not renamed: published model naming
 did not establish that this configured alias should be replaced.
 
+## Gemini Interactions and Responses WebSocket continuation
+
+Pal retains the full accepted history, including Gemini thought signatures and
+function calls. With `--continuation-mode auto`, Gemini Interactions can send a
+matching `previous_interaction_id` and the remaining input. Responses WebSocket
+can send `previous_response_id` when the leased connection still holds that
+response. A replacement endpoint generation or process restart starts with full replay.
+`--continuation-mode full` also disables Gemini interaction storage.
+
+For a semantic checkpoint, Memory freezes L before the request is assembled.
+The source endpoint can reuse an accepted response whose complete input and
+output match a prefix of that L. The checkpoint instruction and any remaining
+L items follow the ID. A response covering part of R is ineligible. A model
+switch can use this path on the source model, then start the destination model
+from the portable checkpoint. Preflight still budgets the full context.
+
+Both full and incremental requests can hit implicit prompt caches. Pal records
+the actual transmitted size and the provider's reported cache reads separately.
+[Gemini caching](https://ai.google.dev/gemini-api/docs/caching)
+and [Responses WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode).
+
 ## History, failure, and switching contracts
 
 Semantic checkpoints keep the existing prompt, validation, retries, and memory

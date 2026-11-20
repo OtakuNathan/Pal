@@ -8,10 +8,10 @@ from typing import Any, Mapping
 from pal.llm.ir import LLMUsageIR
 
 USAGE_FIELD_PATHS = {
-    "input_tokens": ("input_tokens", "prompt_tokens"),
-    "output_tokens": ("output_tokens", "completion_tokens"),
+    "input_tokens": ("input_tokens", "prompt_tokens", "total_input_tokens"),
+    "output_tokens": ("output_tokens", "completion_tokens", "total_output_tokens"),
     "cached_input_tokens": (
-        "cached_input_tokens", "cache_read_input_tokens",
+        "cached_input_tokens", "cache_read_input_tokens", "total_cached_tokens",
         "prompt_tokens_details.cached_tokens", "input_tokens_details.cached_tokens",
     ),
     "cache_write_input_tokens": (
@@ -19,7 +19,7 @@ USAGE_FIELD_PATHS = {
         "prompt_tokens_details.cache_write_tokens", "input_tokens_details.cache_write_tokens",
     ),
     "reasoning_tokens": (
-        "reasoning_tokens", "thinking_tokens", "completion_tokens_details.reasoning_tokens",
+        "reasoning_tokens", "thinking_tokens", "total_thought_tokens", "completion_tokens_details.reasoning_tokens",
         "output_tokens_details.reasoning_tokens", "completion_tokens_details.thinking_tokens",
         "output_tokens_details.thinking_tokens",
     ),

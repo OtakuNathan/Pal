@@ -841,7 +841,8 @@ Create or update endpoint metadata only after checking the existing endpoint lis
 - `endpoint_id`: stable unique ID, such as `my_provider_gpt_5`.
 - `provider`: display, credential, and telemetry identity only.
 - `model_id`: exact model identifier used by model-hook lookup.
-- `wire_shape`: exactly `openai_completion`, `openai_response`, or `anthropic_messages`.
+- `wire_shape` accepts `openai_completion`, `openai_response`, `anthropic_messages`, or `gemini_interactions`.
+- Gemini Interactions uses the Google API base URL ending in `/v1beta`. On this shape and on Responses WebSocket endpoints, `--continuation-mode full` forces complete local replay.
 - `base_url`: provider base URL, without credentials.
 - `auth_kind`: `api_key_ref`, `oauth`, or `local_provider_auth`.
 - `credential_ref`: secret reference such as `my_provider:api-key`; never store the key in the model hook.

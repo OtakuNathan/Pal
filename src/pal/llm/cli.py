@@ -98,6 +98,7 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     add_parser.add_argument("--transport", choices=("http", "websocket"), default=None)
     add_parser.add_argument("--base-url", default=None)
     add_parser.add_argument("--compaction-strategy", choices=("auto", "semantic_checkpoint", "openai_responses"), default=None)
+    add_parser.add_argument("--continuation-mode", choices=("auto", "full"), default=None)
     add_parser.add_argument("--cache-mode", choices=("implicit", "hybrid", "explicit"), default=None,
                             help="Cache policy: automatic, fixed anchors plus automatic, or rolling explicit anchors")
     add_parser.add_argument("--cache-protocol", choices=("general", *(item.value for item in PromptCacheDialect)),
@@ -272,6 +273,8 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
         if same_model
         else {}
     )
+    if args.continuation_mode is not None:
+        capabilities["continuation_mode"] = args.continuation_mode
     if args.compaction_strategy is not None:
         capabilities["compaction_strategy"] = args.compaction_strategy
     for name, value in dict(model_defaults.get("capabilities") or {}).items():
@@ -428,7 +431,14 @@ def _endpoint_identity_defaults(
     normalized_url = str(base_url or "").strip()
     model_defaults = _model_endpoint_defaults(normalized_model)
     deepseek = normalized_provider == "deepseek" or normalized_model.lower().startswith("deepseek-") or "deepseek.com" in normalized_url.lower()
-    if deepseek:
+    google_base = "https://generativelanguage.googleapis.com/v1beta"
+    if not normalized_shape and normalized_provider == "google" and normalized_url.rstrip("/") in {"", google_base}:
+        normalized_shape = WireShape.GEMINI_INTERACTIONS.value
+    if normalized_shape == WireShape.GEMINI_INTERACTIONS.value:
+        normalized_provider = normalized_provider or "google"
+        if not normalized_url or normalized_url.rstrip("/") == google_base + "/openai":
+            normalized_url = google_base
+    elif deepseek:
         normalized_provider = "deepseek"
         normalized_shape = normalized_shape or WireShape.ANTHROPIC_MESSAGES.value
         normalized_url = normalized_url or _DEEPSEEK_ANTHROPIC_BASE_URL
@@ -465,6 +475,8 @@ def _thinking_levels(
         candidates = [item.strip().lower() for item in str(raw).split(",")]
     elif existing is not None:
         candidates = [str(item).strip().lower() for item in (existing.thinking_levels_blob or ())]
+    elif wire_shape == WireShape.GEMINI_INTERACTIONS.value:
+        candidates = ["low", "medium", "high"]
     elif str(model_id).lower().startswith("deepseek-v4-"):
         candidates = ["off", "high", "max"]
     elif model_defaults.get("thinking_levels"):

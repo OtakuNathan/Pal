@@ -252,7 +252,8 @@ class CompactionOperation:
                 logical_scope_id=logical_scope_id, preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
                 active_turn_id=str(continuation.turn_id) if continuation is not None else "",
-                strategy=plan.strategy, build_request=build_compaction_request)
+                strategy=plan.strategy, build_request=build_compaction_request,
+                response_continuation=plan.response_continuation)
         except CompactionSourceUnavailable as exc:
             memory_service.close_compaction(run_id, cancelled=False, reason="source_unavailable")
             return CompactionRunResult(status="source_unavailable", failures=(exception_report(exc),),

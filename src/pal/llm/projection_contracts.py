@@ -550,10 +550,10 @@ def _item_tool_events(item: Any) -> tuple[list[tuple[str, str]], list[str]]:
             problems.append("tool message has no tool_call_id")
     item_type = str(item.get("type") or "")
     if item_type == "function_call":
-        call_id = str(item.get("call_id") or "").strip()
+        call_id = str(item.get("call_id") or (item.get("id") if isinstance(item.get("arguments"), Mapping) else "") or "").strip()
         if call_id:
             events.append(("call", call_id))
-    elif item_type == "function_call_output":
+    elif item_type in {"function_call_output", "function_result"}:
         call_id = str(item.get("call_id") or "").strip()
         if call_id:
             events.append(("result", call_id))
@@ -744,8 +744,9 @@ def _native_call_inventory_mismatch(
                             else _MISSING,
                         )
                     )
-    elif shape_value == "openai_response":
-        output = payload.get("output")
+    elif shape_value in {"openai_response", "gemini_interactions"}:
+        gemini = shape_value == "gemini_interactions"
+        output = payload.get("steps" if gemini else "output")
         if isinstance(output, (list, tuple)):
             for item in output:
                 if (
@@ -754,7 +755,7 @@ def _native_call_inventory_mismatch(
                 ):
                     native.append(
                         (
-                            str(item.get("call_id") or ""),
+                            str(item.get("id" if gemini else "call_id") or ""),
                             str(item.get("name") or ""),
                             item.get("arguments", _MISSING),
                         )

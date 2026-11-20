@@ -1,7 +1,6 @@
 """Persistent Responses WebSocket surface beneath the shared JSON pipeline.
 
-Each request sends full context. No server-side conversation state, incremental
-continuation, multiplexing, or transport-level generation retries are required.
+Each request carries a full replay and may reference a matching prefix on the leased connection.
 Only a fully received successful terminal response makes a socket reusable.
 """
 from __future__ import annotations
@@ -71,6 +70,7 @@ def _connect(request: SDKTransportRequest) -> Any:
 @dataclass
 class _SocketGraph:
     connection: Any = None
+    last_response_id: str = ""
 
 
 @dataclass
@@ -104,10 +104,10 @@ class ResponsesWebSocketTransport:
         if request.timeout_seconds <= 0:
             raise ValueError("WebSocket timeout must be positive")
         payload = {**thaw_json(request.payload), **thaw_json(request.extra_body)}
-        for key in ("stream", "background"):
+        for key in ("stream", "background", "previous_response_id"):
             payload.pop(key, None)
         payload["type"] = "response.create"
-        message = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        full_message = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         control = request.stream_control
         if control is not None:
             control.raise_if_cancelled()
@@ -123,9 +123,17 @@ class ResponsesWebSocketTransport:
                 control.raise_if_cancelled()
             # A failed write can have reached the provider. Do not turn an
             # ambiguous send/receive failure into a retryable connection error.
+            prefix = request.response_prefix
+            chained = prefix is not None and capability.call_sync(lambda graph: prefix.response_id == graph.last_response_id)
+            message = full_message
+            if chained:
+                message = json.dumps({**payload, "previous_response_id": prefix.response_id,
+                                      "input": payload["input"][prefix.length:]}, ensure_ascii=False, separators=(",", ":"))
             send_attempted = True
             if control is not None:
                 control.mark_provider_started()
+            if request.on_wire_send:
+                request.on_wire_send(chained, len(message.encode()))
             capability.call_sync(lambda graph: graph.connection.send(message))
             if request.on_submitted is not None:
                 request.on_submitted()
@@ -149,8 +157,21 @@ class ResponsesWebSocketTransport:
                 event = json.loads(raw)
                 if not isinstance(event, dict) or not isinstance(event.get("type"), str):
                     raise ValueError("WebSocket frame is missing an event type")
+                if (chained and sequence == 0 and event["type"] == "error" and
+                        (event.get("error") or event).get("code") == "previous_response_not_found"):
+                    chained = False
+                    if control:
+                        control.raise_if_cancelled()
+                    if request.on_wire_send:
+                        request.on_wire_send(False, len(full_message.encode()))
+                    capability.call_sync(lambda graph: graph.connection.send(full_message))
+                    continue
                 terminal = event["type"] in _TERMINAL_EVENTS
                 completed = event["type"] == "response.completed"
+                if completed:
+                    def remember(graph: _SocketGraph) -> None:
+                        graph.last_response_id = event.get("response", {}).get("id", "")
+                    capability.call_sync(remember)
                 yield _JSONFrame(sequence, event)
                 sequence += 1
                 if terminal:

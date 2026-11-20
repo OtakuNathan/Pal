@@ -42,7 +42,8 @@ def test_unknown_models_keep_existing_sampling_behavior(shape, model):
     request = LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(
         max_output_tokens=128, temperature=0.2,
     ))
-    assert codec_for_shape(shape).encode(request, context).payload["temperature"] == 0.2
+    payload = codec_for_shape(shape).encode(request, context).payload
+    assert payload.get("generation_config", payload)["temperature"] == 0.2
 
 
 def test_explicit_capabilities_override_model_defaults_and_keep_parameter_restrictions():

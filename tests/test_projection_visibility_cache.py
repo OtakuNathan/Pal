@@ -74,8 +74,6 @@ from tests.test_projection_two_segment import _Lineage, _user, _assistant, _atte
 
 @pytest.mark.parametrize('shape', list(WireShape))
 def test_frozen_span_paths_survive_left_replacement(shape):
-    if shape not in (WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION, WireShape.ANTHROPIC_MESSAGES):
-        pytest.skip('not a projection codec')
     lineage = _Lineage(shape)
     old = (_user('OLD', 'old-q'), _assistant('OLD ANSWER', 'old-a'))
     keep = (_user('KEEP', 'keep-q'), _assistant('KEEP ANSWER', 'keep-a'))

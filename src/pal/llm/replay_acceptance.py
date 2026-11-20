@@ -14,12 +14,19 @@ from pal.llm.response_hook_contracts import ProviderResponseHookError
 from pal.shared.json_values import thaw_json
 
 
+_CALL_ITEMS = {
+    WireShape.GEMINI_INTERACTIONS: ("steps", "function_call", "id"),
+    WireShape.OPENAI_RESPONSE: ("output", "function_call", "call_id"),
+    WireShape.ANTHROPIC_MESSAGES: ("content", "tool_use", "id"),
+}
+
+
 def has_opaque_continuation(message: LLMMessageIR) -> bool:
     if message.reasoning_text:
         return True
     def contains(value: Any) -> bool:
         if isinstance(value, dict):
-            return (value.get("type") in {"reasoning", "thinking", "redacted_thinking"}
+            return (value.get("type") in {"reasoning", "thinking", "redacted_thinking", "thought"}
                     or any(key in value for key in (
                         "encrypted_content", "reasoning", "reasoning_content", "reasoning_details"))
                     or any(contains(item) for item in value.values()))
@@ -67,9 +74,7 @@ def repair_replay_calls(native: ReplayEnvelope | None, call_ids: set[str]) -> Re
                 else:
                     message.pop("tool_calls", None)
     else:
-        key, kind, id_key = (("output", "function_call", "call_id")
-                            if native.wire_shape == WireShape.OPENAI_RESPONSE
-                            else ("content", "tool_use", "id"))
+        key, kind, id_key = _CALL_ITEMS[native.wire_shape]
         if key in payload:
             payload[key] = [item for item in payload[key]
                             if item.get("type") != kind or str(item.get(id_key) or "") in call_ids]
@@ -100,6 +105,9 @@ def validate_native_for_send(message: LLMMessageIR) -> None:
         if native.wire_shape == WireShape.OPENAI_COMPLETION:
             calls = value.get("message", {}).get("tool_calls") or ()
             ids = tuple(str(call.get("id") or "") for call in calls)
+        elif native.wire_shape == WireShape.GEMINI_INTERACTIONS:
+            calls = tuple(item for item in value.get("steps", ()) if item.get("type") == "function_call")
+            ids = tuple(str(item.get("id") or "") for item in calls)
         elif native.wire_shape == WireShape.OPENAI_RESPONSE:
             calls = tuple(item for item in value.get("output", ()) if item.get("type") == "function_call")
             ids = tuple(str(item.get("call_id") or "") for item in calls)
@@ -162,9 +170,7 @@ def bind_accepted_replay(
         calls = wire.get("tool_calls") or []
         identities = tuple(str(call.get("id") or "") for call in calls)
     else:
-        key, kind, id_key = (("output", "function_call", "call_id")
-                            if native.wire_shape == WireShape.OPENAI_RESPONSE
-                            else ("content", "tool_use", "id"))
+        key, kind, id_key = _CALL_ITEMS[native.wire_shape]
         calls = [item for item in raw.get(key, ()) if item.get("type") == kind]
         identities = tuple(str(call.get(id_key) or "") for call in calls)
     accepted = tuple(call.call_id for call in message.tool_calls)
@@ -183,6 +189,12 @@ def bind_accepted_replay(
                 "arguments": json.dumps(thaw_json(call.arguments), ensure_ascii=False),
             }} for call in message.tool_calls
         ]
+    elif native.wire_shape == WireShape.GEMINI_INTERACTIONS:
+        raw["steps"] = [s for s in raw["steps"] if s["type"] != "model_output"]
+        if message.text:
+            raw["steps"].append({"type": "model_output", "content": [{"type": "text", "text": message.text}]})
+        raw["steps"].extend({"type": "function_call", "id": c.call_id, "name": c.name,
+                             "arguments": thaw_json(c.arguments)} for c in message.tool_calls)
     elif native.wire_shape == WireShape.ANTHROPIC_MESSAGES:
         raw["content"] = [item for item in raw.get("content", ()) if item.get("type") != "text"]
         if message.text:

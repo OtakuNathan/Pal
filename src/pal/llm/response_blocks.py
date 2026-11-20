@@ -193,7 +193,15 @@ def materialize_replay(
     payload = thaw_json(replay.payload)
     accepted = {c.call_id: c for c in calls}
     changed_by_hook = False
-    if replay.wire_shape == WireShape.ANTHROPIC_MESSAGES:
+    if replay.wire_shape == WireShape.GEMINI_INTERACTIONS:
+        for item in payload.get("steps", ()):
+            call = accepted.get(str(item.get("id")))
+            if item.get("type") == "function_call" and call:
+                arguments = thaw_json(call.arguments)
+                if item.get("arguments") != arguments or item.get("name") != call.name:
+                    item.update(arguments=arguments, name=call.name)
+                    changed_by_hook = True
+    elif replay.wire_shape == WireShape.ANTHROPIC_MESSAGES:
         for item in payload.get("content", ()):
             if item.get("type") != "tool_use":
                 continue

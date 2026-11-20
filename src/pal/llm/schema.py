@@ -81,45 +81,45 @@ def migrate_llm_endpoint_schema(db_path: Path) -> LLMEndpointMigrationResult:
         columns = _table_columns(database, "llm_endpoints")
         if not columns:
             return LLMEndpointMigrationResult(status="new_database")
-        if _CURRENT_COLUMNS <= columns and not (_REMOVED_COLUMNS & columns):
+        if _supports_native_interactions(database, columns):
             assert_llm_endpoint_schema_current(database)
             return LLMEndpointMigrationResult(status="current")
-        if (_CURRENT_COLUMNS - {"transport"}) <= columns and not (_REMOVED_COLUMNS & columns):
-            database.execute("BEGIN IMMEDIATE")
-            try:
-                database.execute("ALTER TABLE llm_endpoints ADD COLUMN transport TEXT NOT NULL DEFAULT 'http' CHECK (transport IN ('http', 'websocket'))")
-                rows = database.execute("SELECT endpoint_id, capabilities_blob FROM llm_endpoints").fetchall()
-                for row in rows:
-                    if _legacy_transport(_json_object(row["capabilities_blob"])) == "websocket":
-                        database.execute("UPDATE llm_endpoints SET transport='websocket' WHERE endpoint_id=?", (row["endpoint_id"],))
-                assert_llm_endpoint_schema_current(database)
-                database.commit()
-            except Exception:
-                database.rollback()
-                raise
-            return LLMEndpointMigrationResult(status="migrated", migrated_rows=len(rows))
-        if "api_mode" not in columns:
+        database.execute("BEGIN IMMEDIATE")
+        # Another opener may have completed the migration while this one waited.
+        columns = _table_columns(database, "llm_endpoints")
+        if _supports_native_interactions(database, columns):
+            assert_llm_endpoint_schema_current(database)
+            return LLMEndpointMigrationResult(status="current")
+        current_shape = "wire_shape" in columns and not (_REMOVED_COLUMNS & columns)
+        if not current_shape and "api_mode" not in columns:
             raise LLMEndpointSchemaError(
                 "unrecognized LLM endpoint schema; expected legacy api_mode or current wire_shape"
             )
+        schema_objects = database.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='llm_endpoints' "
+            "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+        ).fetchall() if current_shape else []
         rows = [dict(row) for row in database.execute("SELECT * FROM llm_endpoints ORDER BY endpoint_id")]
-        database.execute("BEGIN IMMEDIATE")
         try:
             database.execute("DROP TABLE IF EXISTS llm_endpoints__next")
             database.execute(_CREATE_NEXT_TABLE_SQL)
             for row in rows:
-                payload = _migrate_row(row)
+                payload = row if current_shape else _migrate_row(row)
+                if current_shape and "transport" not in payload:
+                    payload["transport"] = _legacy_transport(_json_object(row["capabilities_blob"]))
                 database.execute(
                     _INSERT_NEXT_SQL,
                     tuple(payload[name] for name in _INSERT_COLUMNS),
                 )
             database.execute("DROP TABLE llm_endpoints")
             database.execute("ALTER TABLE llm_endpoints__next RENAME TO llm_endpoints")
+            for statement in schema_objects:
+                database.execute(statement[0])
             database.execute(
-                "CREATE INDEX llm_endpoints_enabled_priority ON llm_endpoints(enabled, priority)"
+                "CREATE INDEX IF NOT EXISTS llm_endpoints_enabled_priority ON llm_endpoints(enabled, priority)"
             )
             database.execute(
-                "CREATE INDEX llm_endpoints_enabled_supports_tools_supports_streaming "
+                "CREATE INDEX IF NOT EXISTS llm_endpoints_enabled_supports_tools_supports_streaming "
                 "ON llm_endpoints(enabled, supports_tools, supports_streaming)"
             )
             assert_llm_endpoint_schema_current(database)
@@ -131,6 +131,13 @@ def migrate_llm_endpoint_schema(db_path: Path) -> LLMEndpointMigrationResult:
         return LLMEndpointMigrationResult(status="migrated", migrated_rows=len(rows))
     finally:
         database.close()
+
+
+def _supports_native_interactions(database: sqlite3.Connection, columns: frozenset[str]) -> bool:
+    if not _CURRENT_COLUMNS <= columns or _REMOVED_COLUMNS & columns:
+        return False
+    ddl = database.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='llm_endpoints'").fetchone()
+    return bool(ddl and "gemini_interactions" in ddl[0])
 
 
 def _migrate_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -259,7 +266,7 @@ CREATE TABLE llm_endpoints__next (
     model_id TEXT NOT NULL,
     display_name TEXT,
     wire_shape TEXT NOT NULL CHECK (
-        wire_shape IN ('openai_completion', 'openai_response', 'anthropic_messages')
+        wire_shape IN ('openai_completion', 'openai_response', 'anthropic_messages', 'gemini_interactions')
     ),
     transport TEXT NOT NULL DEFAULT 'http' CHECK (transport IN ('http', 'websocket')),
     base_url TEXT NOT NULL,

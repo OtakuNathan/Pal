@@ -88,8 +88,15 @@ Invariants:
   reject new admission and close after their in-flight requests finish.
 - `http_transport` owns SDK clients and request/response lifetimes;
   `websocket_transport` owns persistent Responses sockets. Sequential socket
-  requests reuse a socket while continuing to send full context, with no
-  dependency on provider-side response lineage. Concurrent requests hold
+  requests can reference accepted output on the same socket using `previous_response_id`.
+  Native Gemini Interactions uses `previous_interaction_id` over HTTP. Both paths
+  retain full local replay and verify the exact input prefix for each logical scope
+  and endpoint generation. Set `continuation_mode=full` to force full replay and
+  disable Gemini interaction storage. Cache diagnostics record the provider's cached
+  input tokens separately from the transmitted byte count and first-frame latency.
+  Semantic compaction may continue a matching frozen left prefix on its source model.
+  Following a model switch, the destination starts with the committed checkpoint.
+  Concurrent WebSocket requests hold
   exclusive sockets. Cancellation, uncertain writes, failed responses, token
   rotation and endpoint changes retire affected sockets through fd leases.
   Shared request, cancellation and transport-error types live in

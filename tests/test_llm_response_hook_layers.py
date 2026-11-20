@@ -35,6 +35,14 @@ def rewrite(updates, transform):
 
 
 def frames(shape, raw, streaming):
+    if shape == WireShape.GEMINI_INTERACTIONS:
+        step = {"type": "function_call", "id": "native", "name": "read_file", "arguments": raw}
+        if not streaming:
+            return [{"steps": [step], "status": "requires_action"}]
+        return [{"event_type": "step.start", "index": 0, "step": {**step, "arguments": {}}},
+                {"event_type": "step.delta", "index": 0, "delta": {"type": "arguments_delta", "arguments": raw}},
+                {"event_type": "step.stop", "index": 0},
+                {"event_type": "interaction.completed", "interaction": {"status": "requires_action"}}]
     if shape == WireShape.ANTHROPIC_MESSAGES:
         tool = {"type": "tool_use", "id": "native", "name": "read_file", "input": raw}
         if not streaming:
@@ -221,6 +229,10 @@ def test_adapted_tool_inventory_replays_through_common_binding_with_opaque_reaso
             {"type": "thinking", "thinking": "reason", "signature": "opaque-signature"},
             {"type": "text", "text": _dsml_call()},
         ], "stop_reason": "stop"}]
+    elif shape == WireShape.GEMINI_INTERACTIONS:
+        payloads = [{"steps": [{"type": "thought", "signature": "opaque-signature"},
+                               {"type": "model_output", "content": [{"type": "text", "text": _dsml_call()}]}],
+                     "status": "completed"}]
     elif shape == WireShape.OPENAI_RESPONSE:
         payloads = [{"output": [
             {"type": "reasoning", "id": "r", "encrypted_content": "opaque-signature", "summary": []},

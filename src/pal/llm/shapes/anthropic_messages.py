@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR
 from pal.llm.response_blocks import ResponseBlock, ResponseBlockSnapshot, ResponseBlockUpdate
 
+import json
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
@@ -136,21 +137,10 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                         continue
                 if message.role == MessageRole.ASSISTANT:
                     blocks: list[dict[str, Any]] = []
-                    # Replay is the authoritative provider wire form.  Keep a
-                    # lossless semantic fallback for an active turn restored from
-                    # an older checkpoint (or after an endpoint/model switch)
-                    # where the envelope is unavailable but reasoning is still in
-                    # the IR.  Omitting this block while thinking mode is enabled
-                    # makes Anthropic reject the next request before it reaches
-                    # the model.
-                    for part in message.parts:
-                        if isinstance(part, ReasoningPartIR):
-                            blocks.append(
-                                {
-                                    "type": "redacted_thinking" if part.redacted else "thinking",
-                                    **({} if part.redacted else {"thinking": part.text}),
-                                }
-                            )
+                    # Anthropic requires a valid provider signature on every
+                    # thinking block and opaque data on redacted_thinking. Only
+                    # native replay carries those fields; never synthesize
+                    # unsigned thinking blocks from provider-neutral IR.
                     text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
                     if text:
                         blocks.append({"type": "text", "text": text})
@@ -198,15 +188,19 @@ class AnthropicMessagesCodec(ShapeCodecBase):
         }
         if system_parts:
             payload["system"] = system_parts
+        thinking_active = policy.thinking_level not in {None, ThinkingLevel.OFF}
         if (
             policy.temperature is not None
-            and request_parameter_supported(context, "temperature")
+            and (not thinking_active or context.capabilities.get("supports_temperature") is True)
+            and request_parameter_supported(context, "temperature", thinking_level=policy.thinking_level)
         ):
             payload["temperature"] = policy.temperature
         if request.tools:
             payload["tools"] = [anthropic_tool_definition(tool) for tool in request.tools]
             if policy.tool_choice not in {"", "auto", "omit"}:
-                payload["tool_choice"] = {"type": policy.tool_choice}
+                tool_choice_type = "any" if policy.tool_choice == "required" else policy.tool_choice
+                if not (thinking_active and tool_choice_type == "any"):
+                    payload["tool_choice"] = {"type": tool_choice_type}
         if policy.thinking_level == ThinkingLevel.MINIMAL:
             raise ValueError("anthropic_messages does not support effort 'minimal'")
         if policy.thinking_budget_tokens is not None and (
@@ -438,8 +432,9 @@ class AnthropicMessagesDecoder:
             "type": "tool_use",
             "id": str(draft["id"]),
             "name": name,
-            "input": thaw_json(arguments),
+            "input": _decode_tool_input_for_replay(arguments),
         }
+        self._refresh_replay()
         tool_update = self.builder.append_tool_block(
             call_id=str(draft["id"]),
             name=name,
@@ -472,7 +467,7 @@ class AnthropicMessagesDecoder:
                 "type": "tool_use",
                 "id": call_id,
                 "name": name,
-                "input": thaw_json(arguments),
+                "input": _decode_tool_input_for_replay(arguments),
             }
             updates.append(
                 self.builder.append_tool_block(
@@ -554,3 +549,15 @@ def _block_index(payload: Mapping[str, Any]) -> int:
     if type(value) is not int or value < 0:
         raise ShapeDecodeError("Anthropic stream event requires a non-negative integer index")
     return value
+
+
+def _decode_tool_input_for_replay(arguments: Any) -> Any:
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+        except ValueError:
+            return arguments
+        if isinstance(parsed, dict):
+            return parsed
+        return arguments
+    return thaw_json(arguments)

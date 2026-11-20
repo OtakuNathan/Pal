@@ -18,6 +18,7 @@ from pal.shared.tool_protocol import (
 
 
 class WireShape(StrEnum):
+    GEMINI_INTERACTIONS = "gemini_interactions"
     OPENAI_COMPLETION = "openai_completion"
     OPENAI_RESPONSE = "openai_response"
     ANTHROPIC_MESSAGES = "anthropic_messages"

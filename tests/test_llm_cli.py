@@ -26,6 +26,19 @@ class LLMCLITests(unittest.TestCase):
         configure_llm_parser(parser)
         return parser.parse_args(list(argv))
 
+    def test_native_google_endpoint_can_select_full_replay(self) -> None:
+        args = self._parse("add", "google-demo", "--provider", "google", "--model-id", "gemini-4-carbon",
+                           "--continuation-mode", "full", "--runtime-root", str(self.runtime_root))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_llm_cli(args), 0)
+        with sqlite3.connect(self.runtime_root / "pal.sqlite3") as db:
+            shape, url, capabilities = db.execute(
+                "SELECT wire_shape, base_url, capabilities_blob FROM llm_endpoints WHERE endpoint_id = 'google-demo'"
+            ).fetchone()
+        self.assertEqual(shape, "gemini_interactions")
+        self.assertEqual(url, "https://generativelanguage.googleapis.com/v1beta")
+        self.assertEqual(json.loads(capabilities)["continuation_mode"], "full")
+
     def test_transport_is_configurable_and_replace_preserves_it(self) -> None:
         from unittest.mock import patch
 

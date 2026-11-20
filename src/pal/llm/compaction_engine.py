@@ -651,7 +651,7 @@ class CompactionEngine:
             # LLM runtime must not inject those instructions/tools a second
             # time before sending the provider-identical A prefix.
             "model_hooks_already_applied": (
-                True if snapshot.replay_request is not None else None
+                True if snapshot.replay_request is not None and snapshot.replay_dialect != "canonical_lineage" else None
             ),
         }
         metadata = {
@@ -698,7 +698,7 @@ class CompactionEngine:
                     replay.policy,
                     max_output_tokens=max_output,
                     tool_choice=("none" if snapshot.replay_wire_shape in {
-                        "openai_response", "openai_completion"
+                        "openai_response", "openai_completion", "gemini_interactions"
                     } else replay.policy.tool_choice),
                 ),
                 model_hint=str(

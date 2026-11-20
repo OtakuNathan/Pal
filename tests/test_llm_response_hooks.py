@@ -634,7 +634,12 @@ def test_reasoning_examples_and_native_calls_keep_their_block_types(provider, sh
     reasoning = "I am studying this protocol:\n" + _dsml_call()
     text = "Example only:\n```xml\n" + _dsml_call() + "\n```"
     native = {"id": "native-id", "type": "tool_use", "name": "read_file", "input": {"target": 5}}
-    if shape == WireShape.ANTHROPIC_MESSAGES:
+    if shape == WireShape.GEMINI_INTERACTIONS:
+        frames = [{"status": "requires_action", "steps": [
+            {"type": "thought", "summary": [{"type": "text", "text": reasoning}], "signature": "sig"},
+            {"type": "model_output", "content": [{"type": "text", "text": text}]},
+            {"type": "function_call", "id": "native-id", "name": "read_file", "arguments": {"target": 5}}]}]
+    elif shape == WireShape.ANTHROPIC_MESSAGES:
         frames = [{"content": [
             {"type": "thinking", "thinking": reasoning},
             {"type": "text", "text": text}, native,

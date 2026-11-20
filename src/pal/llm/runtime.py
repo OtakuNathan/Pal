@@ -249,7 +249,11 @@ class LLMRuntime:
                 for endpoint in endpoints}
 
     def plan_compaction(self, endpoint_id: str | None = None, *, force_semantic: bool = False) -> LLMCompactionPlan:
-        return LLMCompactionPlan("semantic_checkpoint" if force_semantic else self.compaction_strategy(endpoint_id))
+        adapter = self.model_adapters.get(endpoint_id or self.active_endpoint_id or "")
+        return LLMCompactionPlan(
+            "semantic_checkpoint" if force_semantic else self.compaction_strategy(endpoint_id),
+            response_continuation=bool(adapter and adapter.spec.supports_response_continuation),
+        )
 
     def compaction_strategy(self, endpoint_id: str | None = None) -> str:
         adapter = self.model_adapters.get(endpoint_id or self.active_endpoint_id or "")

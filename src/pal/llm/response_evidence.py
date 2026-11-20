@@ -27,15 +27,19 @@ class WireResponseEvidence:
             return
         self.last_sequence = frame.sequence
         payload = frame.payload
-        event = str(payload.get("type") or "")
+        gemini = self.wire_shape == WireShape.GEMINI_INTERACTIONS
+        event = str(payload.get("event_type" if gemini else "type") or "")
         provider_sequence = payload.get("sequence_number")
         if isinstance(provider_sequence, int):
             if provider_sequence <= self.last_provider_sequence:
                 return
             self.last_provider_sequence = provider_sequence
         nested = payload.get("response", payload.get("message"))
+        if gemini:
+            nested = payload.get("interaction")
         objects = [nested, payload] if isinstance(nested, Mapping) else [payload]
         final = event in {"response.completed", "response.failed", "response.incomplete", "message_delta", "message_stop"}
+        final = final or (gemini and (event == "interaction.completed" or "steps" in payload))
         choices = payload.get("choices")
         complete_chat = isinstance(choices, (list, tuple)) and (
             not choices or any(isinstance(c, Mapping) and ("message" in c or c.get("finish_reason")) for c in choices)
@@ -52,7 +56,7 @@ class WireResponseEvidence:
                 # Best-effort request diagnostics, never a per-marker receipt.
                 self.prompt_cache_diagnostics = {k: thaw_json(diagnostics[k]) for k in
                     ("type", "reason", "comparison_response_id") if k in diagnostics}
-            identity_object = source is nested or any(k in source for k in ("output", "content", "choices"))
+            identity_object = source is nested or any(k in source for k in ("output", "content", "choices", "steps"))
             if identity_object:
                 for wire_key, attr in (("id", "provider_generation_id"), ("model", "returned_model"),
                                        ("provider", "actual_provider"), ("service_tier", "service_tier")):

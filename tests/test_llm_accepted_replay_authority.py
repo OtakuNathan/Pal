@@ -28,6 +28,13 @@ OPAQUE = "opaque-original-signature"
 
 
 def with_reasoning(shape, payloads, streaming):
+    if shape == WireShape.GEMINI_INTERACTIONS:
+        thought = {"type": "thought", "signature": OPAQUE}
+        if streaming:
+            return [{"event_type": "step.start", "index": 0, "step": thought}, {"event_type": "step.stop", "index": 0},
+                    *({**e, "index": e["index"] + 1} if "index" in e else e for e in payloads)]
+        payloads[0]["steps"].insert(0, thought)
+        return payloads
     if shape == WireShape.OPENAI_COMPLETION:
         reasoning = {"reasoning_content": "original reasoning", "reasoning_details": [{"opaque": OPAQUE}]}
         if streaming:
@@ -56,6 +63,8 @@ def with_reasoning(shape, payloads, streaming):
 
 
 def wire_calls(shape, payload):
+    if shape == WireShape.GEMINI_INTERACTIONS:
+        return [(s["id"], s["name"], s["arguments"]) for s in payload.get("steps", payload.get("input", ())) if s["type"] == "function_call"]
     if shape == WireShape.OPENAI_COMPLETION:
         messages = payload.get("messages", [payload.get("message", {})])
         return [(call["id"], call["function"]["name"], json.loads(call["function"]["arguments"]))
@@ -71,6 +80,12 @@ def wire_calls(shape, payload):
 
 
 def body_frames(shape, text, streaming):
+    if shape == WireShape.GEMINI_INTERACTIONS:
+        step = {"type": "model_output", "content": [{"type": "text", "text": text}]}
+        if streaming:
+            return [{"event_type": "step.start", "index": 0, "step": step}, {"event_type": "step.stop", "index": 0},
+                    {"event_type": "interaction.completed", "interaction": {"status": "completed"}}]
+        return [{"steps": [step], "status": "completed"}]
     if shape == WireShape.OPENAI_COMPLETION:
         if streaming:
             return [*({"choices": [{"delta": {"content": char}}]} for char in text),
@@ -127,6 +142,8 @@ def test_hook_repairs_are_the_same_in_l1_projection_and_next_request(tmp_path, s
             if len(self.requests) == 1:
                 payloads = body_frames(shape, raw, streaming) if syntax == "body_dsml" else frames(shape, raw, streaming)
                 payloads = with_reasoning(shape, payloads, streaming)
+            elif shape == WireShape.GEMINI_INTERACTIONS:
+                payloads = body_frames(shape, "done", False)
             elif shape == WireShape.OPENAI_COMPLETION:
                 payloads = [{"choices": [{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}]}]
             elif shape == WireShape.OPENAI_RESPONSE:
@@ -167,7 +184,7 @@ def test_hook_repairs_are_the_same_in_l1_projection_and_next_request(tmp_path, s
         assert wire_calls(shape, thaw_json(accepted.replay.payload)) == expected
         assert accepted.replay.source_payload is not None
         original = thaw_json(accepted.replay.source_payload)
-        assert raw in json.dumps(original, ensure_ascii=False).replace('\\"', '"')
+        assert raw in json.dumps(original, ensure_ascii=False, separators=(",", ":")).replace('\\"', '"')
         assert OPAQUE in json.dumps(original)
         session = runtime.endpoint_projection_session("pal:resident", rebind=False)
         assert len(session.native_by_attempt) == 1, executor.state.diagnostics

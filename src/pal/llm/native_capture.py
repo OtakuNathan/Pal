@@ -11,7 +11,7 @@ import json
 from collections.abc import Iterable, Iterator
 from typing import Generic, TypeVar
 
-from pal.llm.ir import LLMResponseUpdate, ReplayEnvelope, WireShape
+from pal.llm.ir import LLMFinishReason, LLMResponseUpdate, MessageState, ReplayEnvelope, WireShape
 from pal.shared.json_values import thaw_json
 from pal.shared.tool_protocol import ToolCallIR
 from pal.llm.response_blocks import ResponseBlock, ResponseBlockUpdate, materialize_replay
@@ -54,10 +54,11 @@ class NativeCapture(Generic[UpdateT]):
         replay = message.replay
         if replay is not None and replay.payload:
             self._final_replay = replay
-        elif self._final_replay is None:
-            # Track codec-level tool inventory even when no envelope exists
-            # yet, so the final call order reflects the codec's view.
-            pass
+        elif (message.state == MessageState.COMPLETE and update.response.finish_reason == LLMFinishReason.LENGTH
+              and not message.parts):
+            # No accepted output survived truncation. Earlier tool drafts cannot be replayed.
+            self._final_replay = None
+            self._call_ids = ()
         calls = tuple(
             part.call_id for part in message.parts if isinstance(part, (ToolCallIR, ResponseBlock))
         )

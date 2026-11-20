@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pal.foundation.fd_lease import FdCancellationControl, FdCapability, FdLeaseCancelledError
 from pal.llm.ir import WireShape
+from pal.llm.response_lineage import ResponsePrefix
 from pal.llm.models import LLMEndpointModel
 from pal.llm.shapes.base import _JSONFrame
 
@@ -96,6 +97,8 @@ class AuthenticatedTransportRequest:
     stream_control: LLMStreamControl | None = None
     on_submitted: Callable[[], None] | None = None
     operation: str = "generate"
+    response_prefix: ResponsePrefix | None = None
+    on_wire_send: Callable[[bool, int], None] | None = None
 
 
 SDKTransportRequest = AuthenticatedTransportRequest
@@ -115,6 +118,8 @@ class EncodedTransportRequest:
     stream_control: LLMStreamControl | None = None
     on_submitted: Callable[[], None] | None = None
     operation: str = "generate"
+    response_prefix: ResponsePrefix | None = None
+    on_wire_send: Callable[[bool, int], None] | None = None
 
 
 class LLMJSONTransportPort(Protocol):

@@ -74,7 +74,7 @@ def query_model_metadata(
         return _KNOWN_ANTHROPIC_MODELS.get(model_id)
 
     url = _models_url_from_base(base_url, model_id)
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"x-goog-api-key": api_key} if wire_shape == "gemini_interactions" else {"Authorization": f"Bearer {api_key}"}
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -84,6 +84,12 @@ def query_model_metadata(
 
     if not isinstance(data, dict):
         return None
+
+    if wire_shape == "gemini_interactions":
+        return {key: data[field] for key, field in (
+            ("context_length", "inputTokenLimit"), ("max_output_tokens", "outputTokenLimit"),
+            ("supports_thinking", "thinking"),
+        ) if field in data} or None
 
     meta = data.get("data") or data
     if not isinstance(meta, dict):
@@ -355,23 +361,30 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         "openai_completion": "1",
         "openai_response": "2",
         "anthropic_messages": "3",
+        "gemini_interactions": "4",
     }.get(current.wire_shape if current else "", "1")
     shape_choice = ask(
-        "  Wire shape: 1) openai_completion  2) openai_response  3) anthropic_messages",
+        "  Wire shape: 1) openai_completion  2) openai_response  3) anthropic_messages  4) gemini_interactions",
         current_shape_choice,
     )
     wire_shape = {
         "2": "openai_response",
         "3": "anthropic_messages",
+        "4": "gemini_interactions",
     }.get(shape_choice.strip(), "openai_completion")
 
     model_id = ask("  Model ID", current.model_id if current else label)
 
     if wire_shape in {"openai_completion", "openai_response"}:
         default_url = "https://api.openai.com/v1"
+    elif wire_shape == "gemini_interactions":
+        default_url = "https://generativelanguage.googleapis.com/v1beta"
     else:
         default_url = "https://api.anthropic.com/v1"
-    base_url = ask("  Base URL", current.base_url if current else default_url)
+    if current and wire_shape == "gemini_interactions" and current.base_url.rstrip("/") == default_url + "/openai":
+        base_url = ask("  Base URL", default_url)
+    else:
+        base_url = ask("  Base URL", current.base_url if current else default_url)
 
     api_key = ask_password("  API key (hidden, blank to keep current)" if current else "  API key (hidden, blank to skip)")
 
@@ -392,8 +405,10 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         context_window = capabilities.get("context_length")
         max_output_tokens = capabilities.get("max_output_tokens")
         if bool(capabilities.get("supports_thinking")):
-            thinking_levels = ["off", "low", "medium", "high"]
-            default_thinking_level = "medium"
+            thinking_levels = ["low", "medium", "high"] if wire_shape == "gemini_interactions" else ["off", "low", "medium", "high"]
+            if current and current.model_id == model_id and wire_shape == "gemini_interactions":
+                thinking_levels = list(current.thinking_levels)
+            default_thinking_level = "medium" if "medium" in thinking_levels else thinking_levels[0]
         else:
             thinking_levels = ["off"]
             default_thinking_level = "off"
@@ -537,7 +552,9 @@ def run_llm_endpoint_preflight(
         credential_resolver=credentials.resolve_api_key
     )
     from pal.llm.chatgpt import is_chatgpt
-    thinking = endpoint.default_thinking_level if is_chatgpt(endpoint) else None
+    gemini = endpoint.wire_shape == "gemini_interactions"
+    probe_tokens = min(512, endpoint.max_output_tokens or 512) if gemini else 64
+    thinking = endpoint.default_thinking_level if gemini or is_chatgpt(endpoint) else None
 
     try:
         try:
@@ -549,7 +566,7 @@ def run_llm_endpoint_preflight(
                         LLMMessageIR(MessageRole.USER, (TextPartIR("Reply with exactly PAL_PREFLIGHT_OK."),)),
                     ),
                     tools=(),
-                    policy=GenerationPolicyIR(max_output_tokens=16, temperature=0, thinking_level=thinking),
+                    policy=GenerationPolicyIR(max_output_tokens=probe_tokens if gemini else 16, temperature=0, thinking_level=thinking),
                 ),
                 timeout_seconds=timeout_seconds,
             )
@@ -588,7 +605,8 @@ def run_llm_endpoint_preflight(
                 LLMMessageIR(MessageRole.USER, (TextPartIR("Call pal_preflight_probe with ok=true. After its result, reply PAL_PREFLIGHT_OK."),)),
             ),
             tools=tools,
-            policy=GenerationPolicyIR(max_output_tokens=64, temperature=0, thinking_level=thinking),
+            policy=GenerationPolicyIR(max_output_tokens=probe_tokens, temperature=0, thinking_level=thinking),
+            logical_scope_id="wizard:preflight",
         )
         try:
             tool_outcome = active_invoker.invoke(
@@ -612,7 +630,7 @@ def run_llm_endpoint_preflight(
                 detail="text call succeeded, but tool probe returned no tool call",
                 text_ok=True,
             )
-        if is_chatgpt(endpoint):
+        if gemini or is_chatgpt(endpoint):
             if any(call.name != "pal_preflight_probe" or dict(call.arguments) != {"ok": True}
                    for call in tool_response.message.tool_calls):
                 return WizardLLMPreflightResult(status="error", detail="Unexpected probe tool or arguments", text_ok=True)
@@ -626,7 +644,8 @@ def run_llm_endpoint_preflight(
                             ToolResultIR(item.call_id, item.name, '{"ok":true}')
                             for item in tool_response.message.tool_calls
                         )),
-                    ), tools=tools, policy=GenerationPolicyIR(max_output_tokens=64, tool_choice="none", thinking_level=thinking),
+                    ), tools=tools, policy=GenerationPolicyIR(max_output_tokens=probe_tokens, tool_choice="none", thinking_level=thinking),
+                    logical_scope_id=tool_request.logical_scope_id,
                 ), timeout_seconds=timeout_seconds)
                 final = followup[0] if isinstance(followup, tuple) else followup
                 if final.finish_reason != LLMFinishReason.STOP or not final.message.text.strip():
@@ -642,6 +661,8 @@ def run_llm_endpoint_preflight(
 def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
     if endpoint.provider:
         return endpoint.provider
+    if endpoint.wire_shape == "gemini_interactions":
+        return "google"
     if endpoint.wire_shape == "anthropic_messages":
         return "anthropic"
     if endpoint.wire_shape in {"openai_completion", "openai_response"}:

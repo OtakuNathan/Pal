@@ -56,6 +56,8 @@ class LLMEndpoint(EndpointCodec):
     transport: AuthenticatedFrameTransport
     _lifetime: "_EndpointLifetime" = field(default_factory=lambda: _EndpointLifetime(), compare=False, repr=False)
 
+    lineage_generation: object = field(default_factory=object, compare=False, repr=False)
+
     def frames(self, request: EncodedTransportRequest) -> Iterator[_JSONFrame]:
         self._lifetime.acquire()
         try:
@@ -81,7 +83,8 @@ class LLMEndpoint(EndpointCodec):
             wire_shape=self.context.wire_shape, api_key=credential, base_url=self.spec.base_url,
             timeout_seconds=request.timeout_seconds, payload=request.payload, extra_body=request.extra_body,
             stream=self.auth.force_stream or request.stream, stream_control=request.stream_control,
-            on_submitted=request.on_submitted, operation=request.operation,
+            on_submitted=request.on_submitted, operation=request.operation, response_prefix=request.response_prefix,
+            on_wire_send=request.on_wire_send,
         ))
         try:
             for frame in iterator:
