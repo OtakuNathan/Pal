@@ -119,6 +119,28 @@ class TurnSettingsSnapshotTests(unittest.TestCase):
 
 
 class ReplayCompatibilityTests(unittest.TestCase):
+    def test_renamed_endpoint_can_replay_only_its_original_binding(self):
+        from pal.llm.compaction import native_origin
+        from pal.llm.replay_compatibility import compatible_replay_bindings
+
+        source = endpoint()
+        target = endpoint("OpenAI gpt-5.6-sol openai_response")
+        target.capabilities_blob["replay_endpoint_aliases"] = {"a": native_origin(source)}
+        old_binding = [source.wire_shape, source.endpoint_id, source.model_id]
+        self.assertIn(old_binding, compatible_replay_bindings(target, (target,)))
+        reused_id = endpoint("a", model="unrelated")
+        self.assertNotIn(old_binding, compatible_replay_bindings(target, (target, reused_id)))
+        target.credential_ref = "DIFFERENT"
+        self.assertNotIn(old_binding, compatible_replay_bindings(target, (target,)))
+
+    def test_model_command_preserves_full_endpoint_name(self):
+        from pal.llm.commands import command_specs
+        name = "OpenRouter openai/gpt-6.2-sol openai_response"
+        model = next(spec for spec in command_specs() if spec.name == "model")
+        for args in ((name,), tuple(name.split())):
+            action = model.handler(ControlCommandInvocation(command_name="model", argv=args))
+            self.assertEqual(action.args["endpoint_id"], name)
+
     def test_hooks_cannot_hide_incompatible_original_replay(self):
         target = endpoint("b", "gpt-6-astra")
         runtime = LLMRuntime(EndpointResolver(endpoints=(endpoint(), target)), Settings())

@@ -108,12 +108,28 @@ endpoint. Enabling and choosing an endpoint are separate choices. `--set-active`
 requires an enabled endpoint. Do not invent flags for arbitrary capabilities_blob
 fields that the CLI does not expose.
 
+Use the same human-readable string for an LLM endpoint's `endpoint_id` and
+`display_name`. Join the route's provider label, the exact API `model_id`, and
+the stored `wire_shape` with single spaces. Preserve the upstream prefix and
+slash when the model ID includes one, as in
+`OpenRouter openai/gpt-6.2-sol openai_response`. A direct model uses its bare
+ID, as in `BigModel glm-5.4 anthropic_messages`. Provider labels identify the
+actual route (for example OpenAI, ChatGPT, Z.ai or BigModel). Quote the whole
+name when passing it as a shell argument.
+
+When renaming existing endpoints, check for collisions and migrate the active
+selection, per-endpoint thinking levels, Bunshin profile preferences and other
+configured endpoint references. Preserve credential references. For retained
+conversation replay, record each former ID under
+`capabilities_blob.replay_endpoint_aliases` with its pre-rename
+`pal.llm.compaction.native_origin` digest.
+
 Runnable command shapes (replace the example values with verified user choices):
 
 ```sh
 pal llm list --all --json --runtime-root /path/to/runtime
-pal llm add example --model-id example-model --provider example-provider --wire-shape openai_completion --base-url https://api.example.com/v1 --store-api-key --no-enabled --runtime-root /path/to/runtime
-pal llm add example --replace --enabled --set-active --runtime-root /path/to/runtime
+pal llm add "Example example-model openai_completion" --model-id example-model --provider example --wire-shape openai_completion --base-url https://api.example.com/v1 --store-api-key --no-enabled --runtime-root /path/to/runtime
+pal llm add "Example example-model openai_completion" --replace --enabled --set-active --runtime-root /path/to/runtime
 pal llm delete example --runtime-root /path/to/runtime
 pal web-search list --json --runtime-root /path/to/runtime
 pal web-search configure example --patch-file /path/to/settings-patch.json --json --runtime-root /path/to/runtime

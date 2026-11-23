@@ -102,6 +102,13 @@ class LLMEndpointSpec:
             endpoint_id=endpoint_id,
         )
         capabilities = _json_mapping(source.get("capabilities_blob"))
+        aliases = capabilities.get("replay_endpoint_aliases", {})
+        if not isinstance(aliases, Mapping) or any(
+            not isinstance(alias, str) or not alias.strip() or not isinstance(origin, str)
+            or len(origin) != 64 or any(ch not in "0123456789abcdef" for ch in origin)
+            for alias, origin in aliases.items()
+        ):
+            raise LLMEndpointSpecError("replay_endpoint_aliases must map former endpoint IDs to origin digests")
         declared_window = capabilities.get("physical_context_window")
         if declared_window is not None and (type(declared_window) is not int or declared_window < 1):
             raise LLMEndpointSpecError("physical_context_window must be a positive integer")

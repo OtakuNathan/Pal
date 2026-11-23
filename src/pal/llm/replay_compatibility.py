@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from pal.llm.compaction import native_origin
 from pal.llm.ir import ReplayEnvelope, WireShape
 
 
@@ -40,11 +41,23 @@ def endpoints_replay_compatible(source: Any, target: Any) -> bool:
 
 
 def compatible_replay_bindings(target: Any, endpoints: Any) -> list[list[str]]:
-    return [
+    endpoints = tuple(endpoints)
+    bindings = [
         [str(source.wire_shape), str(source.endpoint_id), str(source.model_id)]
         for source in endpoints
         if endpoints_replay_compatible(source, target)
     ]
+    # A renamed endpoint can read its own older envelopes. Bind the former
+    # ID to the original model, service and credential reference, and give
+    # any currently registered endpoint precedence over a historical name.
+    aliases = (target.capabilities_blob or {}).get("replay_endpoint_aliases", {})
+    if aliases:
+        current_ids = {source.endpoint_id for source in endpoints}
+        origin = native_origin(target)
+        bindings.extend([str(target.wire_shape), alias, str(target.model_id)]
+                        for alias, fingerprint in aliases.items()
+                        if fingerprint == origin and alias not in current_ids)
+    return bindings
 
 
 def accepts_replay(

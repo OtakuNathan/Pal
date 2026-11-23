@@ -41,7 +41,7 @@ def _handle_model(invocation: ControlCommandInvocation) -> ControlAction:
             args={"operation": operation, "request_id": invocation.argv[1],
                   "think_level": invocation.argv[2] if operation == "think" else ""},
         )
-    endpoint_id = invocation.argv[0].strip()
+    endpoint_id = " ".join(invocation.argv).strip()
     if not endpoint_id:
         return ControlAction(
             action_kind="invalid_command", target_scope="control", route=invocation.route,
