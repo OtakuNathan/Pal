@@ -39,6 +39,7 @@ from pal.llm.compaction_engine import (
     CompactionEngine,
     CompactionSnapshot,
 )
+from pal.llm.contracts import LLMPreflightAdvice
 from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.core.turns import LLMRequestEffect
 from pal.llm import generation_result_from_values
@@ -72,7 +73,7 @@ class ReplyFixture(NonStreamingLLM):
 
     async def preflight(self, request):
         self.preflights.append(request)
-        return SimpleNamespace(
+        return LLMPreflightAdvice(
             status=LLMPreflightStatus.READY,
             target_input_budget=100_000,
             reserved_output_tokens=4096,
@@ -196,9 +197,9 @@ class C1SourceBoundaryTests(unittest.TestCase):
                 status = (LLMPreflightStatus.READY
                           if size <= self.window_chars
                           else LLMPreflightStatus.COMPACT_REQUIRED)
-                return SimpleNamespace(status=status,
-                                       target_input_budget=100_000,
-                                       reserved_output_tokens=4096)
+                return LLMPreflightAdvice(status=status,
+                                          target_input_budget=100_000,
+                                          reserved_output_tokens=4096)
 
             async def respond(self, request):
                 self.requests.append(request)
