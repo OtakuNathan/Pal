@@ -81,13 +81,11 @@ class ExecutionDiscoveryCapabilityMixin:
             search_domain="execution",
             search_domain_description="Discover tools, read their contracts and invoke them.",
             search_objects=('tool', 'tools', 'capability', 'capabilities', 'alias', 'aliases'),
-            purpose="Find callable tools by short affirmative English task query within a strict owner domain, browse a domain directory, list available domains, or look up an exact alias.",
+            purpose="Find callable tools by task or exact alias, or browse their owner domains.",
             use_when=(
-                "When the needed capability alias is unknown. Pass a known strict owner domain (not a target instance "
-                "name) with a short affirmative English query (keep negations and extra constraints for contract "
-                "review); pass domain alone to browse that domain's directory; pass no arguments to list available "
-                "domains; or omit domain for broad keyword/purpose discovery. Hits include full contracts—verify "
-                "against the task (including unmatched_terms) and invoke directly without an extra read_tool."
+                "When a callable alias is unknown, use a short affirmative English query and its owner domain if known. "
+                "Omit namespace unless you need a registry filter. Pass domain alone to browse, or no arguments to "
+                "list domains. Review full candidate contracts against the task; invoke directly if suitable."
             ),
             do_not_use_when="When you already know a callable alias and its contract in context, or to repeat an unchanged search.",
             failure_next_steps=(

@@ -40,9 +40,9 @@ TOOL_DISCOVERY_DEVELOPER_GUIDANCE = (
     "Historical names do not guarantee current availability—use the live tool surface and discovered contracts.\n"
     "- Capabilities grow dynamically via plugins. For unfamiliar indirect tools, call search_tools with a short "
     "affirmative English task description in query (keep negations and extra constraints for contract review) and a "
-    "known strict owner domain from the available domains list; pass domain alone to browse that domain's directory, "
-    "call search_tools() with no arguments to list domains, or omit domain when unsure.\n"
-    "- Search hits include complete contracts—verify against the full request (including unmatched_terms) and invoke "
+    "known owner domain; omit namespace by default and omit domain when unsure. Pass domain alone to browse it, "
+    "or call search_tools() to list domains.\n"
+    "- Search hits and recovery candidates include complete contracts—verify against the full request (including unmatched_terms) and invoke "
     "directly. Use read_tool only for directory entries or missing/changed contracts; inspect truncated outputs with "
     "read_file on the returned snapshot.\n"
     + TOOL_DISCOVERY_STOP_RULE

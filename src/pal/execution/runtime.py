@@ -1094,12 +1094,42 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     @staticmethod
     def _search_generation(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
+        result = ExecutionRuntime._search_scoped_generation(generation, args)
+        applied = result["applied_filters"]
+        namespace = applied.get("namespace")
+        alternate_namespace = {"operation": "introspection", "introspection": "operation"}.get(namespace)
+        if not alternate_namespace or not applied.get("query") or result["hits"] or result.get("suggestions"):
+            return result
+
+        # A namespace is a registry classification, not a read/write promise.
+        # Recover callable contracts separately without changing any other filter
+        # or promoting an out-of-namespace tool to a strict hit.
+        retry = ExecutionRuntime._search_scoped_generation(generation, {**args, "namespace": alternate_namespace})
+        alternatives = retry["hits"][:3]
+        if alternatives:
+            result.pop("directory", None)
+            result.pop("available_domains", None)
+            result.pop("filter_suggestions", None)
+            result["suggestions"] = [
+                {"alias": hit["alias"], "purpose": hit["purpose"],
+                 "matched_terms": hit.get("matched_terms", []), "unmatched_terms": hit.get("unmatched_terms", []),
+                 "contract": hit}
+                for hit in alternatives
+            ]
+            result["usage_hint"] = (
+                f"No hits in namespace={namespace}. Suggestions keep the other filters. "
+                "If the namespace is required, ignore them; otherwise review the contracts and invoke if suitable."
+            )
+        return result
+
+    @staticmethod
+    def _search_scoped_generation(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
+        from pal.execution.domain_search import search_domain
+
         if normalize_domain(str(args.get("domain") or "")):
-            from pal.execution.domain_search import search_domain
             return search_domain(generation, args)
         result = ExecutionRuntime._search_keywords(generation, args)
         if not result["hits"] and str(args.get("query") or "").strip():
-            from pal.execution.domain_search import search_domain
             purpose_result = search_domain(generation, args)
             if purpose_result["hits"]:
                 return purpose_result

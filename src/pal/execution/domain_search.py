@@ -117,8 +117,7 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
         result.update(hits=[contract(row) for row in ranked[:limit]], total_count=len(ranked),
                       returned_count=min(len(ranked), limit), truncated=len(ranked) > limit)
         result["usage_hint"] = (
-            "Matches are not proof of every requested feature; check unmatched_terms against the original task. "
-            "Invoke when the complete contract supports it; no extra read_tool is needed."
+            "Matches are not proof of support; check unmatched_terms and the contract before invoking."
         )
     elif domain and not browse and not excluded_alias and records:
         # Spelling-only recovery after lexical retrieval misses. No central
@@ -160,6 +159,6 @@ def search_domain(generation: Any, args: dict[str, Any]) -> dict[str, Any]:
         result["usage_hint"] += " Use read_tool for a plausible alias or query this domain. Read omitted snapshot content with read_file."
     elif not result["hits"] and not result.get("suggestions"):
         result.setdefault("usage_hint", "No matching tools within this domain and supplied filters.")
-    if result.get("usage_hint"):
+    if not ranked and result.get("usage_hint"):
         result["usage_hint"] += " " + TOOL_DISCOVERY_STOP_HINT
     return result

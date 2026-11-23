@@ -168,7 +168,7 @@ class ProactiveIntrospectionProvider:
             search_domain_description="Schedule future work and inspect past runs.",
             search_objects=('status',),
             search_terms=('state', 'show', 'get',),
-            purpose="Show proactive module status.",
+            purpose="Inspect scheduler module health and proactive runtime status.",
             use_when="Diagnosing proactive system health — how many tasks registered, pending triggers, triggered runs.",
             do_not_use_when="Listing specific tasks (use list_proactive_tasks). Checking one task's details (use read_proactive_task).",
             failure_next_steps="If absent, use manage_plugin operation=attach with name='proactive'.",
