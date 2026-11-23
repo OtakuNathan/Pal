@@ -5,33 +5,15 @@ Do not recursively filter arbitrary tool results by these field names.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
+from pal.shared.json_schema import iter_schema_nodes
 from pal.shared.result_rendering import render_structured_for_llm
-
-
-def _schema_nodes(schema: Any) -> Iterator[dict[str, Any]]:
-    """Walk schema positions, never enum/default/const/example data."""
-    if not isinstance(schema, dict):
-        return
-    yield schema
-    for key, value in schema.items():
-        if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"} and isinstance(value, dict):
-            for child in value.values():
-                yield from _schema_nodes(child)
-        elif key in {"items", "additionalItems", "additionalProperties", "unevaluatedProperties",
-                     "unevaluatedItems", "contains", "propertyNames", "not", "if", "then", "else", "contentSchema"}:
-            for child in value if isinstance(value, list) else [value]:
-                yield from _schema_nodes(child)
-        elif key in {"allOf", "anyOf", "oneOf", "prefixItems"} and isinstance(value, list):
-            for child in value:
-                yield from _schema_nodes(child)
 
 
 def _scoped_references(schema: dict[str, Any]) -> bool:
     return any(node.keys() & {"$id", "id", "$anchor", "$dynamicAnchor", "$dynamicRef", "$recursiveAnchor", "$recursiveRef"}
-               for node in _schema_nodes(schema))
+               for node in iter_schema_nodes(schema))
 
 
 def _prune_unused_definitions(schema: dict[str, Any]) -> dict[str, Any]:
@@ -43,7 +25,7 @@ def _prune_unused_definitions(schema: dict[str, Any]) -> dict[str, Any]:
     definitions = schema.get("$defs")
     if not isinstance(definitions, dict) or _scoped_references(schema):
         return schema
-    pending = [node["$ref"] for node in _schema_nodes({k: v for k, v in schema.items() if k != "$defs"})
+    pending = [node["$ref"] for node in iter_schema_nodes({k: v for k, v in schema.items() if k != "$defs"})
                if "$ref" in node]
     retained: set[str] = set()
     while pending:
@@ -59,7 +41,7 @@ def _prune_unused_definitions(schema: dict[str, Any]) -> dict[str, Any]:
             target = target[part]
         if name not in retained:
             retained.add(name)
-            pending.extend(node["$ref"] for node in _schema_nodes(definitions[name]) if "$ref" in node)
+            pending.extend(node["$ref"] for node in iter_schema_nodes(definitions[name]) if "$ref" in node)
     result = {key: value for key, value in schema.items() if key != "$defs"}
     if retained:
         result["$defs"] = {name: value for name, value in definitions.items() if name in retained}

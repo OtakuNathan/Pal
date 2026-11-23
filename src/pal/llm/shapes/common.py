@@ -11,6 +11,7 @@ from pal.llm.ir import (
     TextPartIR,
 )
 from pal.llm.response_blocks import json_object
+from pal.shared.json_schema import iter_schema_nodes
 from pal.shared.json_values import thaw_json
 
 
@@ -47,12 +48,18 @@ def openai_tool_definition(tool: ToolDefinitionIR) -> dict[str, Any]:
 
 
 def responses_tool_definition(tool: ToolDefinitionIR) -> dict[str, Any]:
-    return {
+    parameters = thaw_json(tool.input_schema)
+    definition = {
         "type": "function",
         "name": tool.name,
         "description": tool.description,
-        "parameters": thaw_json(tool.input_schema),
+        "parameters": parameters,
     }
+    # Responses may infer strict mode when omitted. Its strict compiler
+    # rejects conditionals, which Pal still enforces when validating the call.
+    if any(node.keys() & {"if", "then", "else"} for node in iter_schema_nodes(parameters)):
+        definition["strict"] = False
+    return definition
 
 
 def anthropic_tool_definition(tool: ToolDefinitionIR) -> dict[str, Any]:

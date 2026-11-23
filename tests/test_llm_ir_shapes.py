@@ -843,6 +843,38 @@ class LLMIRShapeTests(unittest.TestCase):
             self.assertEqual(payload["model"], "demo-model")
             self.assertTrue(payload["tools"])
 
+    def test_responses_opts_conditional_tools_out_of_strict_mode(self) -> None:
+        condition = {
+            "if": {"required": ["stdin"], "properties": {"stdin": {"type": "string"}}},
+            "then": {"properties": {"tty": {"const": False}}},
+        }
+        parameters = {
+            "type": "object",
+            "properties": {"stdin": {"type": "string"}, "tty": {"type": "boolean"}},
+        }
+        named_fields = {
+            "type": "object",
+            "properties": {"if": {"type": "string"}, "then": {"type": "integer"}},
+            "examples": [{"if": "example", "then": 1}],
+        }
+        nested = {**parameters, "allOf": [condition]}
+        root = {**parameters, **condition}
+        request = LLMRequestIR(
+            messages=(),
+            tools=(
+                ToolDefinitionIR("shell", "", nested),
+                ToolDefinitionIR("conditional", "", root),
+                ToolDefinitionIR("plain", "", named_fields),
+            ),
+            policy=GenerationPolicyIR(max_output_tokens=100),
+        )
+        shape = WireShape.OPENAI_RESPONSE
+        tools = codec_for_shape(shape).encode(request, _context(shape)).payload["tools"]
+        self.assertEqual([tool["parameters"] for tool in tools], [nested, root, named_fields])
+        self.assertIs(tools[0]["strict"], False)
+        self.assertIs(tools[1]["strict"], False)
+        self.assertNotIn("strict", tools[2])
+
     def test_sdk_single_shot_and_stream_share_json_frame_boundary(self) -> None:
         class SDKObject:
             def __init__(self, value: int) -> None:
