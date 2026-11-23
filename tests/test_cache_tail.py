@@ -52,6 +52,9 @@ def test_modes_final_payload(shape, provider, model, mode, count):
     found = [path for path, node in protocol_nodes(thaw_json(encoded.payload)) if "prompt_cache_breakpoint" in node]
     assert len(found) == count
     assert plan.mode == mode
+    if shape == WireShape.OPENAI_RESPONSE:
+        assert "instructions" not in encoded.payload and "instructions" not in encoded.extra_body
+        assert encoded.payload["input"][0]["content"][0]["text"] == request.messages[0].parts[0].text
     if mode == "implicit":
         assert "prompt_cache_options" not in encoded.extra_body
     else:

@@ -58,6 +58,11 @@ under a snapshot is rejected.
 The three modes are available for the recognized OpenAI GPT-5.6 and GPT-6 Astra
 families, plus `gpt-6.2-astra` and `gpt-6.2-sol`, on Responses and Chat
 Completions, directly or through OpenRouter (using the `openai/` model prefix).
+On GPT-6.2 Responses, top-level `instructions` follow `input` and are billed
+as uncached input on every request. Pal already encodes standing system and
+developer messages as content blocks in `input`, where the existing cache
+planner can mark the stable prefix. [OpenAI prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+
 Unknown compatible endpoints/models get only `implicit`; schema resemblance
 does not establish support. Anthropic Messages retains its existing explicit
 strategy behind the shared selector, with `implicit` also available. Anthropic
