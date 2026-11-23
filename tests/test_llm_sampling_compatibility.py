@@ -15,7 +15,9 @@ from tests.test_llm_endpoint_composition import _Port
 
 @pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
 @pytest.mark.parametrize("prefix", ["", "openai/"])
-@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"])
+@pytest.mark.parametrize("model", [
+    "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna",
+])
 @pytest.mark.parametrize("level", [None, ThinkingLevel.HIGH, ThinkingLevel.OFF])
 def test_model_sampling_rules_apply_across_access_paths(shape, prefix, model, level):
     context = ShapeContext(shape, "test", prefix + model)

@@ -169,12 +169,13 @@ context remains 1,050,000 tokens, but operators may configure a 272,000-token
 limit to stay below OpenRouter's higher long-context pricing tier.
 
 Request contexts also bind built-in sampling defaults for the exact model IDs
-`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-sol`, and `gpt-6-luna`,
-including their `openai/` aliases. This applies to existing endpoint rows and
+`gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`,
+`gpt-6-sol`, and `gpt-6-luna`, including their `openai/` aliases.
+This applies to existing endpoint rows and
 all OpenAI-shaped encode paths, without rewriting configuration or consulting
-provider identity. Astra and 6.1 Sol omit sampling parameters. Terra, Sol and
-Luna omit them unless thinking is explicitly `off`; omission of an effort uses
-the model's reasoning default and does not enable sampling.
+provider identity. Both 6.2 models, GPT-6 Astra, and GPT-6.1 Sol omit sampling
+parameters. GPT-6.1 Terra, GPT-6 Sol, and GPT-6 Luna allow sampling only with
+thinking explicitly set to `off`.
 
 `capabilities_blob.sampling_policy` can explicitly override the default with
 `supported`, `unsupported`, or `requires_no_reasoning`; it is valid only for

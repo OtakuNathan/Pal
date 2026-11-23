@@ -8,6 +8,8 @@ from pal.shared.json_values import freeze_json_mapping
 
 
 _MODEL_SAMPLING_POLICIES = {
+    "gpt-6.2-astra": "unsupported",
+    "gpt-6.2-sol": "unsupported",
     "gpt-6-astra": "unsupported",
     "gpt-6.1-sol": "unsupported",
     "gpt-6.1-terra": "requires_no_reasoning",
