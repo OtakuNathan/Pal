@@ -56,11 +56,15 @@ from pal.llm.projection_contracts import (
 )
 from pal.llm.projection_session import EndpointProjectionSession
 from pal.llm.model_hooks import ModelHookRegistry
+from pal.llm.context_budget import (
+    OUTPUT_LIMIT, UsageBoundary, count_payload, counting_shape, message_fingerprint,
+    physical_window, provider_input_maximum, standard_input_limit,
+)
 from pal.llm.model_adapter import BoundModelAdapter, bind_model_adapter
 from pal.llm.invocation_contracts import ModelAdapterInvokerPort
 from pal.llm.ir import ReplayEnvelope
 from pal.llm.compaction import (NATIVE_WINDOW_KEY, is_native_window, native_origin,
-                                validate_native_window, token_count_payload)
+                                validate_native_window, PremiumCompactionError)
 from pal.llm.models import LLMEndpointModel
 from pal.llm.output_recovery import (
     continuation_request,
@@ -195,6 +199,7 @@ class LLMRuntime:
     cache_profile_generation: int = field(default=1, init=False)
     model_hooks: ModelHookRegistry = field(init=False)
     model_adapters: dict[str, BoundModelAdapter] = field(default_factory=dict, init=False)
+    _usage_boundaries: dict[tuple, UsageBoundary] = field(default_factory=dict, init=False, repr=False)
     _native_token_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     provider_response_hooks: ProviderResponseHookRegistry = field(init=False)
     _response_hook_defaults: ProviderResponseHookRegistry = field(init=False, repr=False)
@@ -259,23 +264,48 @@ class LLMRuntime:
         adapter = self.model_adapters.get(endpoint_id or self.active_endpoint_id or "")
         return adapter.compaction_strategy if adapter is not None else "semantic_checkpoint"
 
-    def _count_native_input(self, endpoint, request: LLMRequestIR, *, control=None) -> int:
+    def _count_native_input(self, endpoint, request: LLMRequestIR, *, control=None, compact_source=False) -> int:
         invoker = self.endpoint_invoker
         if not isinstance(invoker, ModelAdapterInvokerPort):
             raise LLMRequestPreparationError("Native history requires an endpoint with exact token counting")
         encoded = invoker.encode_request(endpoint, request)
-        payload = token_count_payload(encoded.payload)
+        payload = (self.model_adapters[endpoint.endpoint_id].compact_payload(encoded.payload)
+                   if compact_source else count_payload(counting_shape(endpoint), {**encoded.payload, **encoded.extra_body}))
+        if payload is None:
+            raise LLMRequestPreparationError("Counter cannot represent the complete request")
+        return self._count_payload(endpoint, payload, invoker, control)
+
+    def _count_payload(self, endpoint, payload, invoker, control):
         digest = hashlib.sha256((self._endpoint_config_digest(endpoint) + json.dumps(
             payload, ensure_ascii=False, sort_keys=True)).encode()).hexdigest()
-        if digest not in self._native_token_counts:
-            result = invoker.invoke_operation(endpoint, payload, operation="input_tokens", stream_control=control)
-            count = result.get("input_tokens")
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                raise LLMRequestPreparationError("Token counting returned no valid input_tokens")
-            if len(self._native_token_counts) >= 128:
-                self._native_token_counts.clear()
-            self._native_token_counts[digest] = count
-        return self._native_token_counts[digest]
+        cached = self._native_token_counts.get(digest)
+        if cached is not None:
+            return cached
+        result = invoker.invoke_operation(endpoint, payload, operation="input_tokens", stream_control=control)
+        field = "totalTokens" if endpoint.wire_shape == WireShape.GEMINI_INTERACTIONS else "input_tokens"
+        count = result.get(field)
+        if type(count) is not int or count < 0:
+            raise LLMRequestPreparationError(f"Token counting returned no valid {field}")
+        if len(self._native_token_counts) >= 128:
+            self._native_token_counts.clear()
+        self._native_token_counts[digest] = count
+        return count
+
+    async def native_source_over_standard_limit(self, request: LLMRequestIR) -> bool:
+        endpoints = self._enabled_endpoints(request)
+        if not endpoints:
+            raise LLMRequestPreparationError("Selected compact endpoint is unavailable")
+        endpoint = LLMEndpointSpec.from_value(endpoints[0])
+        limit = standard_input_limit(endpoint)
+        if limit is None:
+            return False
+        control = LLMStreamControl()
+
+        def check():
+            prepared = self._compile_request(endpoint, request, count_native=False)
+            return self._count_native_input(endpoint, prepared.request, compact_source=True, control=control) > limit
+
+        return await self._await_native_job(check, control)
 
     async def acompact_native(self, request: LLMRequestIR, *, timeout_seconds: float = 180.0,
                               next_request: LLMRequestIR | None = None) -> tuple["ReplayEnvelope", int, dict[str, Any]]:
@@ -292,12 +322,26 @@ class LLMRuntime:
             raise LLMRequestPreparationError("Selected endpoint cannot perform native compaction")
         control = LLMStreamControl()
 
+        premium_submitted = False
+
         def perform():
+            nonlocal premium_submitted
             prepared = self._compile_request(endpoint, request, count_native=False)
-            source_tokens = self._count_native_input(endpoint, prepared.request, control=control)
-            if endpoint.context_window and source_tokens >= endpoint.context_window:
+            source_tokens = self._count_native_input(endpoint, prepared.request, control=control, compact_source=True)
+            if (source_tokens > (provider_input_maximum(endpoint) or physical_window(endpoint))
+                    or source_tokens >= physical_window(endpoint)):
                 raise LLMRequestPreparationError("Native compact source exceeds the model context window")
             encoded = invoker.encode_request(endpoint, prepared.request)
+            if next_request is not None:
+                pending = self._compile_request(endpoint, next_request, count_native=False)
+                if (pending.compact_required and
+                        self._count_native_input(endpoint, pending.request, control=control) >= pending.target_input_budget):
+                    raise LLMRequestPreparationError("Pending input already fills the next request budget")
+            price = standard_input_limit(endpoint)
+            above_tier = price is not None and source_tokens > price
+            if above_tier and request.metadata.get("compact_includes_right_tail"):
+                raise LLMRequestPreparationError("Native compact tail exceeds the standard input tier")
+            premium_submitted = above_tier
             result = invoker.invoke_operation(endpoint, adapter.compact_payload(encoded.payload),
                 operation="compact", timeout_seconds=timeout_seconds, stream_control=control)
             output = result.get("output")
@@ -333,7 +377,12 @@ class LLMRuntime:
                 **replay.payload[NATIVE_WINDOW_KEY], "input_token_upper_bound": tokens}})
             return replay, tokens, thaw_json(result.get("usage") or {})
 
-        return await self._await_native_job(perform, control)
+        try:
+            return await self._await_native_job(perform, control)
+        except Exception as exc:
+            if premium_submitted:
+                raise PremiumCompactionError(str(exc)) from exc
+            raise
 
     async def _await_native_job(self, perform, control):
         task = asyncio.create_task(asyncio.to_thread(perform))
@@ -405,6 +454,9 @@ class LLMRuntime:
         return session
 
     def release_context(self, context_id: str) -> None:
+        for key in tuple(self._usage_boundaries):
+            if key[0] == context_id:
+                self._usage_boundaries.pop(key, None)
         session = self._projection_sessions.pop(context_id, None)
         if session is not None:
             session.retire()
@@ -667,6 +719,7 @@ class LLMRuntime:
         self.model_hooks = model_hooks
         self.model_adapters = adapters
         self._native_token_counts.clear()
+        self._usage_boundaries.clear()
         if isinstance(self.endpoint_invoker, ModelAdapterInvokerPort):
             self.endpoint_invoker.configure_model_hooks(model_hooks)
         self.provider_response_hooks = response_hooks
@@ -715,6 +768,8 @@ class LLMRuntime:
         if not any(endpoint.endpoint_id == normalized for endpoint in self.endpoint_resolver.endpoints):
             raise ValueError(f"unknown enabled LLM endpoint: {normalized}")
         self.settings_repository.set_active_llm_endpoint_id(normalized)
+        if self.active_endpoint_id != normalized:
+            self._usage_boundaries.clear()
         self.active_endpoint_id = normalized
         self._observed_configured_selection = normalized
         self.think_level = self._effective_thinking_level(self.active_endpoint()) or ""
@@ -840,13 +895,14 @@ class LLMRuntime:
             target_input_budget=prepared.target_input_budget,
             reserved_output_tokens=prepared.request.policy.max_output_tokens,
             breakdown={
+                **(prepared.budget_details or {}),
                 "estimated_input_tokens": prepared.estimated_input_tokens,
                 "target_input_budget": prepared.target_input_budget,
             },
         )
 
     async def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        if any(is_native_window(m) for m in request.request.messages):
+        if any(counting_shape(LLMEndpointSpec.from_value(ep)) for ep in self._enabled_endpoints(request.request)):
             control = LLMStreamControl()
             return await self._await_native_job(lambda: self._preflight_response(request, stream_control=control), control)
         return self._preflight_response(request)
@@ -910,8 +966,8 @@ class LLMRuntime:
         if requested is not None:
             if requested < 1:
                 raise ValueError("Requested output budget must be positive")
-            return min(requested, limit) if limit is not None else requested
-        return limit if limit is not None else self.config.fallback_max_output_tokens
+            return min(requested, limit or OUTPUT_LIMIT, OUTPUT_LIMIT)
+        return min(limit or self.config.fallback_max_output_tokens, OUTPUT_LIMIT)
 
     def resolve_max_output_tokens(
         self,
@@ -1004,7 +1060,8 @@ class LLMRuntime:
             if _is_stub_endpoint(endpoint):
                 response = _text_response("stub response", LLMFinishReason.STUB)
                 return self._success(endpoint, response)
-            for attempt in range(self.endpoint_retry_attempts):
+            attempt_limit = 1 if effective.metadata.get("single_compaction_attempt") else self.endpoint_retry_attempts
+            for attempt in range(attempt_limit):
                 try:
                     invoke_kwargs: dict[str, Any] = {
                         "stream": False,
@@ -1038,9 +1095,10 @@ class LLMRuntime:
                         self.last_projection_receipt = receipt
                         if (facts := _CALL_FACTS.get()) is not None:
                             facts["projection_receipt"] = receipt
+                    self._remember_usage(endpoint, effective, response)
                     return self._success(endpoint, response, projection_receipt=receipt)
                 except LLMEndpointSpecStaleError as exc:
-                    if allow_stale_refresh:
+                    if allow_stale_refresh and not effective.metadata.get("single_compaction_attempt"):
                         self._emit(
                             "llm_endpoint_spec_refresh",
                             endpoint=endpoint,
@@ -1079,7 +1137,7 @@ class LLMRuntime:
                     failure_attempts.append({"endpoint_id": endpoint.endpoint_id, "error": exception_report(exc)})
                     error_kind = self._record_failure(endpoint, exc, attempt)
                     retryable = _retryable_error_kind(error_kind)
-                    if retryable and attempt + 1 < self.endpoint_retry_attempts:
+                    if retryable and attempt + 1 < attempt_limit:
                         time.sleep(_retry_delay(attempt + 1))
                         continue
                     self._emit(
@@ -1232,7 +1290,8 @@ class LLMRuntime:
                 yield LLMResponseUpdate(result.response, delta_kind=LLMResponseDeltaKind.STATE, completion=result)
                 return
             semantic_seen = False
-            for attempt in range(self.endpoint_retry_attempts):
+            attempt_limit = 1 if effective.metadata.get("single_compaction_attempt") else self.endpoint_retry_attempts
+            for attempt in range(attempt_limit):
                 last_update: LLMResponseUpdate | None = None
                 attempt_projection = None
                 try:
@@ -1298,6 +1357,7 @@ class LLMRuntime:
                         self.last_projection_receipt = receipt
                         if (facts := _CALL_FACTS.get()) is not None:
                             facts["projection_receipt"] = receipt
+                    self._remember_usage(endpoint, effective, completed)
                     self._record_success(endpoint, completed)
                     self.last_endpoint_id = endpoint.endpoint_id
                     if (facts := _CALL_FACTS.get()) is not None:
@@ -1307,7 +1367,7 @@ class LLMRuntime:
                         facts["preferred_model_id"] = endpoint.model_id
                     return
                 except LLMEndpointSpecStaleError as exc:
-                    if allow_stale_refresh and not semantic_seen and not bool(
+                    if allow_stale_refresh and not effective.metadata.get("single_compaction_attempt") and not semantic_seen and not bool(
                         stream_control is not None
                         and stream_control.provider_started
                     ):
@@ -1376,7 +1436,7 @@ class LLMRuntime:
                         return
                     if (
                         _retryable_error_kind(error_kind)
-                        and attempt + 1 < self.endpoint_retry_attempts
+                        and attempt + 1 < attempt_limit
                     ):
                         time.sleep(_retry_delay(attempt + 1))
                         continue
@@ -1684,7 +1744,7 @@ class LLMRuntime:
         count_native: bool = True,
         stream_control: LLMStreamControl | None = None,
     ) -> PreparedLLMRequest:
-        LLMEndpointSpec.from_value(endpoint)
+        endpoint = LLMEndpointSpec.from_value(endpoint)
         endpoint_request = replace(request, model_hint=endpoint.model_id)
         hooked = (
             endpoint_request
@@ -1725,7 +1785,7 @@ class LLMRuntime:
                 f"thinking_level={level.value!r} is not declared by endpoint "
                 f"{endpoint.endpoint_id}; available={list(levels)}"
             )
-        max_output = hooked.policy.max_output_tokens
+        max_output = min(hooked.policy.max_output_tokens, OUTPUT_LIMIT)
         if endpoint.max_output_tokens is not None:
             max_output = min(max_output, int(endpoint.max_output_tokens))
         if budget is not None:
@@ -1771,15 +1831,69 @@ class LLMRuntime:
         for message in prepared.messages:
             if message.replay is not None and has_opaque_continuation(message):
                 validate_native_for_send(message)
-        target = self._target_input_budget(endpoint, prepared.policy.max_output_tokens)
-        return PreparedLLMRequest(
-            endpoint=LLMEndpointSpec.from_value(endpoint),
-            request=prepared,
-            estimated_input_tokens=(self._count_native_input(endpoint, prepared, control=stream_control)
-                if check_replay and count_native and any(is_native_window(m) for m in prepared.messages)
-                else _estimate_request_tokens(prepared)),
-            target_input_budget=target,
-        )
+        return self._budget_request(endpoint, prepared, verify=check_replay and count_native, control=stream_control)
+
+    def _boundary_key(self, endpoint, request):
+        scope = (request.metadata.get("projection_scope_id") or request.logical_scope_id
+                 or request.metadata.get("prompt_cache_scope_id"))
+        if not scope:
+            return None
+        return (scope, self.cache_profile_generation, self._endpoint_config_digest(endpoint),
+                request.policy.tool_choice, request.policy.thinking_level, request.policy.thinking_budget_tokens)
+
+    def _remember_usage(self, endpoint, request, response):
+        usage = response.usage
+        if (response.provider_response_count != 1 or request.metadata.get("compaction_policy")
+                or usage.usage_anomaly or response.finish_reason not in {LLMFinishReason.STOP, LLMFinishReason.TOOL_CALLS, LLMFinishReason.LENGTH}
+                or not usage.has("input_tokens") or not usage.has("output_tokens")):
+            return
+        key = self._boundary_key(endpoint, request)
+        if not key:
+            return
+        prefix = tuple(message_fingerprint(m) for m in (*request.messages, response.message))
+        if len(self._usage_boundaries) >= 256 and key not in self._usage_boundaries:
+            self._usage_boundaries.pop(next(iter(self._usage_boundaries), None), None)
+        self._usage_boundaries[key] = UsageBoundary(prefix, request.tools, request.policy.reasoning_context,
+                                                     usage.input_tokens + usage.output_tokens)
+
+    def _budget_request(self, endpoint, request, *, verify, control=None):
+        physical = self._physical_input_budget(endpoint, request.policy.max_output_tokens)
+        price = standard_input_limit(endpoint)
+        target = min((cap for cap in (physical, price, endpoint.context_window) if cap), default=0)
+        boundary = self._usage_boundaries.get(self._boundary_key(endpoint, request))
+        tail = boundary.tail(request) if boundary else None
+        delta = replace(request, messages=tail, tools=()) if tail is not None else request
+        growth = _estimate_request_tokens(delta) if delta.messages or delta.tools else 0
+        estimate = growth + (boundary.tokens if tail is not None else 0)
+        details = {"local_input_tokens": estimate, "increment_tokens": growth,
+                   "baseline_tokens": boundary.tokens if tail is not None else 0,
+                   "standard_input_limit": price, "physical_input_budget": physical,
+                   "compact_watermark": endpoint.context_window,
+                   "budget_source": "usage_delta" if tail is not None else "local"}
+        margin = min(self.safety_margin_tokens, max(1024, physical_window(endpoint) // 20))
+        native = any(is_native_window(m) for m in request.messages)
+        # A large uncovered suffix can tokenize far more densely than average.
+        # Probe the full request when even a byte-per-token suffix could cross the line.
+        near = target and estimate + 3 * growth >= max(1, target - margin)
+        uncertain = _request_has_image_input(delta)
+        counter = counting_shape(endpoint)
+        if verify and counter and (near or uncertain or (native and tail is None)):
+            try:
+                estimate = self._count_native_input(endpoint, request, control=control)
+                details["budget_source"] = "provider"
+            except Exception as exc:
+                if (native and tail is None) or (control and control.cancelled):
+                    raise
+                details["budget_source"] = "local_after_count_failure"
+                details["count_error"] = type(exc).__name__
+                estimate = max(estimate, target + 1) if uncertain else estimate + 3 * growth + margin
+        elif verify and price and not counter and price <= (physical or price):
+            target = min(target, max(1, price - margin))
+        if (request.metadata.get("purpose") == "memory_compaction_engine" and request.metadata.get("compaction_policy")
+                and price and estimate > price and details["budget_source"] != "local_after_count_failure"):
+            details["premium_compact"] = True
+            target = physical
+        return PreparedLLMRequest(endpoint, request, estimate, target, details)
 
     def _enabled_endpoints(self, request: LLMRequestIR | None) -> list[LLMEndpointModel]:
         metadata = dict(request.metadata) if request is not None else {}
@@ -1831,21 +1945,26 @@ class LLMRuntime:
         return next((endpoint for endpoint in self.endpoint_resolver.endpoints if endpoint.endpoint_id == normalized), None)
 
     def _needs_compaction(self, endpoint: LLMEndpointModel, request: LLMRequestIR) -> bool:
-        target = self._target_input_budget(endpoint, request.policy.max_output_tokens)
-        return target > 0 and _estimate_request_tokens(request) > target
+        return self._budget_request(LLMEndpointSpec.from_value(endpoint), request, verify=True).compact_required
 
-    def _target_input_budget(self, endpoint: LLMEndpointModel, output_tokens: int) -> int:
-        context_window = int(endpoint.context_window or 0)
-        if context_window <= 0:
+    def _physical_input_budget(self, endpoint, output_tokens: int) -> int:
+        window = physical_window(endpoint)
+        if not window:
             return 0
-        margin = min(self.safety_margin_tokens, max(1024, int(context_window * 0.05)))
-        return max(1, context_window - int(output_tokens) - margin)
+        margin = min(self.safety_margin_tokens, max(1024, window // 20))
+        return min(provider_input_maximum(endpoint) or window,
+                   max(1, window - min(output_tokens, OUTPUT_LIMIT) - margin))
+
+    def _target_input_budget(self, endpoint, output_tokens: int) -> int:
+        limits = (endpoint.context_window, self._physical_input_budget(endpoint, output_tokens),
+                  standard_input_limit(endpoint))
+        return min((limit for limit in limits if limit), default=0)
 
     def _compact_required_result(self, endpoint: LLMEndpointModel, request: LLMRequestIR) -> LLMGenerationResult:
         response = _text_response("Context compaction is required before LLM invocation.", LLMFinishReason.COMPACT_REQUIRED)
         return LLMGenerationResult(
             response=response,
-            target_input_budget=self._target_input_budget(endpoint, request.policy.max_output_tokens),
+            target_input_budget=self._target_input_budget(LLMEndpointSpec.from_value(endpoint), request.policy.max_output_tokens),
             reserved_output_tokens=request.policy.max_output_tokens,
             preferred_endpoint_id=endpoint.endpoint_id,
             preferred_model_id=endpoint.model_id,
@@ -2271,13 +2390,14 @@ def _estimate_request_tokens(request: LLMRequestIR) -> int:
         if message.replay is not None:
             # The continuation replaces the semantic representation on the
             # wire. Count it once; source_payload is local provenance only.
-            chars += len(json.dumps(thaw_json(message.replay.payload), ensure_ascii=False))
+            chars += len(json.dumps(thaw_json(message.replay.payload), ensure_ascii=False).encode())
             continue
-        chars += len(message.text) + len(message.reasoning_text)
+        chars += len(message.text.encode()) + len(message.reasoning_text.encode()) + 16
+        native_tokens += 2048 * sum(isinstance(part, ImagePartIR) for part in message.parts)
         for call in message.tool_calls:
-            chars += len(call.name) + len(json.dumps(thaw_json(call.arguments), ensure_ascii=False))
+            chars += len(call.name) + len(json.dumps(thaw_json(call.arguments), ensure_ascii=False).encode())
     for tool in request.tools:
-        chars += len(tool.name) + len(tool.description) + len(json.dumps(thaw_json(tool.input_schema), ensure_ascii=False))
+        chars += len(tool.name) + len(tool.description) + len(json.dumps(thaw_json(tool.input_schema), ensure_ascii=False).encode())
     return max(1, native_tokens + (chars + 3) // 4)
 
 

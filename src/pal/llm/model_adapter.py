@@ -13,6 +13,7 @@ from pal.llm.response_hooks import ProviderResponseHookRegistry
 COMPACTION_STRATEGIES = ("auto", "semantic_checkpoint", "openai_responses")
 NATIVE_MODELS = frozenset({
     "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra",
+    "gpt-6.2-astra", "gpt-6.2-sol",
 })
 
 

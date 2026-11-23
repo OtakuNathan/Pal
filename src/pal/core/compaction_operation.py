@@ -12,7 +12,6 @@ from pal.foundation.diagnostics import exception_report
 from pal.llm.compaction_engine import CompactionClockKind, CompactionRunResult
 from pal.llm.compaction_contracts import CompactionService
 from pal.llm.conversions import tool_definition_ir_from_dict
-from pal.llm.history_projection import CompactionSourceUnavailable
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.shared.tool_protocol import ToolResultIR
 
@@ -246,15 +245,30 @@ class CompactionOperation:
                 tools=tuple(tool_definition_ir_from_dict(tool) for tool in self._build_llm_tool_contracts()),
                 metadata={**shell.metadata, **metadata, "preferred_endpoint_id": endpoint_id})
 
-        try:
-            source = self.projection.prepare_compaction_source(
+        def prepare_source(left_snapshot):
+            return self.projection.prepare_compaction_source(
                 memory_service, llm_runtime, left_snapshot,
                 logical_scope_id=logical_scope_id, preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
                 active_turn_id=str(continuation.turn_id) if continuation is not None else "",
                 strategy=plan.strategy, build_request=build_compaction_request,
                 response_continuation=plan.response_continuation)
-        except CompactionSourceUnavailable as exc:
+        try:
+            source = prepare_source(left_snapshot)
+            while (plan.include_completed_tail and left_snapshot.cut != root.cut
+                    and source.replay_request is not None
+                    and await asyncio.wait_for(llm_runtime.native_source_over_standard_limit(source.replay_request),
+                                               timeout=max(0, deadline_at - _time.monotonic()))):
+                left_snapshot = root.restrict_compaction_to_left(run_id)
+                source = prepare_source(left_snapshot)
+            if plan.include_completed_tail and left_snapshot.cut != root.cut and source.replay_request is not None:
+                replay = source.replay_request
+                source = replace(source, replay_request=replace(replay, metadata={
+                    **replay.metadata, "compact_includes_right_tail": True}))
+        except asyncio.CancelledError:
+            memory_service.close_compaction(run_id, cancelled=True, reason="source_selection_cancelled")
+            raise
+        except Exception as exc:
             memory_service.close_compaction(run_id, cancelled=False, reason="source_unavailable")
             return CompactionRunResult(status="source_unavailable", failures=(exception_report(exc),),
                                        clock_kind=engine.policy.clock_kind, clock_value=clock_value)

@@ -63,8 +63,8 @@ class OperationTransport:
                  "content": [{"type": "output_text", "text": _valid_pal_payload("handoff 47"), "annotations": []}]}]})
 
 
-def runtime():
-    ep = endpoint(model="gpt-6-luna")
+def runtime(model="gpt-6-luna", **options):
+    ep = endpoint(model=model, transport="http", **options)
     transport = OperationTransport()
     invoker = ShapeEndpointInvoker(transport=transport)
     rt = LLMRuntime(EndpointResolver(endpoints=(ep, endpoint("b", "another-model"))),
@@ -84,7 +84,7 @@ def assistant(text="answer", **kwargs):
     return LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR(text),), **kwargs)
 
 
-@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra"])
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.2-astra", "gpt-6.2-sol"])
 def test_verified_official_models_bind_native(model):
     assert bind_model_adapter(LLMEndpointSpec.from_value(endpoint(model=model))).compaction_strategy == "openai_responses"
 
@@ -440,3 +440,199 @@ def test_native_snapshot_files_survive_until_semantic_handoff_or_reset(tmp_path)
     result = asyncio.run(execute_compaction(engine, snap, llm_runtime=rt, memory_service=memory))
     assert result.success, result.failures
     assert not Path(ref.path).exists()
+
+
+@pytest.mark.parametrize(("count", "compact"), [(272_000, False), (272_001, True)])
+def test_sol_watermark_admits_full_standard_tier(count, compact):
+    rt, ep, transport = runtime("gpt-6.2-sol", context_window=320_384, max_output_tokens=128_000)
+    transport.count = count
+    prompt = replace(request(user("x" * 1_066_000)), policy=GenerationPolicyIR(max_output_tokens=128_000))
+    prepared = rt._compile_request(ep, prompt)
+    assert prepared.request.policy.max_output_tokens == 65_535
+    assert prepared.target_input_budget == 272_000
+    assert prepared.compact_required == compact
+    assert prepared.budget_details["budget_source"] == "provider"
+    assert [r.operation for r in transport.requests] == ["input_tokens"]
+    ep.capabilities_blob["allow_long_context_pricing"] = True
+    assert rt._target_input_budget(ep, 65_535) == 320_384
+    ep.capabilities_blob["physical_context_window"] = 300_000
+    assert rt._target_input_budget(ep, 65_535) == 300_000 - 65_535 - 15_000
+
+
+def test_standard_tier_on_openrouter_skips_remote_counter():
+    from pal.llm.context_budget import counting_shape, standard_input_limit
+    rt, ep, transport = runtime("openai/gpt-6.2-astra", context_window=1_050_000, base_url="https://openrouter.ai/api/v1")
+    assert standard_input_limit(ep) == 272_000
+    assert counting_shape(ep) is None
+    assert rt._compile_request(ep, request(user("x" * 1_088_004))).compact_required
+    assert transport.requests == []
+    ep.model_id += "-alias"
+    assert standard_input_limit(ep) is None
+    ep.base_url = "https://example.com/v1"
+    ep.model_id = "gpt-6.2-sol"
+    assert counting_shape(ep) is None
+    assert standard_input_limit(ep) is None
+
+
+def test_usage_baseline_covers_matching_prefix_and_estimates_only_new_messages():
+    from pal.llm.ir import LLMResponseIR, LLMFinishReason, LLMUsageIR
+    from pal.shared.tool_protocol import ToolDefinitionIR
+    rt, ep, transport = runtime()
+    ep.context_window = 320_384
+    initial = replace(request(user("history")), logical_scope_id="resident")
+    initial = rt._compile_request(ep, initial).request
+    accepted = LLMResponseIR(assistant("done"), LLMFinishReason.STOP,
+        usage=LLMUsageIR(input_tokens=100_000, output_tokens=6_000, cached_input_tokens=72_000,
+                         reported_fields=("input_tokens", "output_tokens")))
+    rt._remember_usage(ep, initial, accepted)
+    prompt = replace(initial, messages=(*initial.messages, accepted.message, user("continue")))
+    budget = rt._budget_request(ep, prompt, verify=True)
+    assert budget.budget_details["budget_source"] == "usage_delta"
+    assert 106_000 < budget.estimated_input_tokens < 106_020
+    assert transport.requests == []
+    tool = ToolDefinitionIR("read", "read", {"type": "object"})
+    for changed in (replace(prompt, messages=(user("edited"), *prompt.messages[1:])),
+                    replace(prompt, tools=(tool,)), replace(prompt, logical_scope_id="another")):
+        assert rt._budget_request(ep, changed, verify=True).budget_details["budget_source"] == "local"
+    rt.release_context("resident")
+    assert rt._budget_request(ep, prompt, verify=True).budget_details["baseline_tokens"] == 0
+
+
+def test_native_compact_preserves_completed_right_tail_when_only_the_tail_crosses_price():
+    from tests.test_control_plane import PalControlFlowTests
+
+    async def scenario():
+        fixture = PalControlFlowTests()
+        await fixture.asyncSetUp()
+        rt, ep, transport = runtime()
+        ep.context_window = 320_384
+        fixture.core.context.port_registry["llm:llm"] = rt
+        memory = fixture.memory_service
+        for turn, text in (("old", "LEFT_268K"), ("recent", "RIGHT_8K")):
+            memory.begin_l1_turn(turn, user_text=text)
+            memory.upsert_l1_assistant(turn, assistant())
+            memory.settle_l1_turn(turn)
+            if turn == "old":
+                memory.history_root.promote()
+
+        original = transport.frames
+        def frames(endpoint, req):
+            sent = json.dumps(thaw_json(req.payload))
+            if req.operation == "input_tokens":
+                transport.count = ((268_000 if "LEFT_268K" in sent else 0)
+                                   + (8_000 if "RIGHT_8K" in sent else 0) + 10)
+            yield from original(endpoint, req)
+
+        with patch.object(transport, "frames", frames):
+            result = await fixture.core.turn_executor.compaction.run(memory,
+                target_input_budget=272_000, reserved_output_tokens=512, max_attempts=2)
+        assert result.success, result.failures
+        paid = [r for r in transport.requests if r.operation == "compact"]
+        assert len(paid) == 1
+        assert "LEFT_268K" in str(paid[0].payload)
+        assert "RIGHT_8K" not in str(paid[0].payload)
+        assert any("RIGHT_8K" in m.text for m in memory.history_root.right_messages())
+
+    asyncio.run(scenario())
+
+
+def test_legacy_over_tier_native_source_gets_one_paid_attempt_on_failure():
+    rt, ep, transport = runtime()
+    transport.count = 280_000
+    transport.error = True
+    memory = source_memory()
+    before = memory.history_root.all_turns(), memory.history_root.cut
+    _, snap = snapshot(memory)
+    result = asyncio.run(execute_compaction(CompactionEngine(PalCompactionPolicy(), max_attempts=3),
+        snap, llm_runtime=rt, memory_service=memory))
+    assert result.status == "failed" and result.attempts == 1
+    assert sum(r.operation == "compact" for r in transport.requests) == 1
+    assert (memory.history_root.all_turns(), memory.history_root.cut) == before
+
+
+def test_gemini_count_payload_preserves_system_tools_and_declines_unknown_replay():
+    from pal.llm.context_budget import count_payload
+    wire = {"model": "gemini-3.1-pro-preview", "system_instruction": "system",
+            "input": [{"type": "function_call", "id": "call", "name": "read", "arguments": {}, "signature": "sig"}],
+            "tools": [{"type": "function", "name": "read", "description": "read", "parameters": {"type": "object"}}]}
+    counted = count_payload(WireShape.GEMINI_INTERACTIONS, wire)["generateContentRequest"]
+    assert counted["contents"][0]["parts"][0]["thoughtSignature"] == "sig"
+    assert counted["systemInstruction"]["parts"] == [{"text": "system"}]
+    assert counted["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"] == {"type": "object"}
+    wire["input"].append({"type": "thought", "signature": "opaque"})
+    assert count_payload(WireShape.GEMINI_INTERACTIONS, wire) is None
+
+
+@pytest.mark.parametrize(("shape", "url", "model", "limit", "count_field"), [
+    (WireShape.ANTHROPIC_MESSAGES, "https://api.anthropic.com", "claude-haiku-5-5", 100_000, "input_tokens"),
+    (WireShape.GEMINI_INTERACTIONS, "https://generativelanguage.googleapis.com/v1beta",
+     "gemini-3.1-pro-preview", 200_000, "totalTokens"),
+])
+def test_first_party_counts_effective_system_messages_and_tools(shape, url, model, limit, count_field):
+    from pal.shared.tool_protocol import ToolDefinitionIR
+    rt, ep, transport = runtime(model, base_url=url, wire_shape=shape, context_window=limit,
+        provider="anthropic" if shape == WireShape.ANTHROPIC_MESSAGES else "google")
+    prompt = replace(request(LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("fixed prompt"),)),
+                             user("x" * limit * 4)), tools=(ToolDefinitionIR("read", "read", {"type": "object"}),))
+    def frames(endpoint, req):
+        assert req.operation == "input_tokens"
+        body = str(req.payload)
+        assert all(item in body for item in ("fixed prompt", "read", "xxxx"))
+        yield _JSONFrame(0, {count_field: limit})
+
+    with patch.object(transport, "frames", frames):
+        result = rt._compile_request(ep, prompt)
+    assert result.budget_details["budget_source"] == "provider"
+    assert result.target_input_budget == limit
+    assert not result.compact_required
+
+
+def test_count_failure_keeps_large_semantic_request_under_normal_admission_rules():
+    rt, ep, transport = runtime("gpt-6.2-sol", context_window=320_384)
+    prompt = replace(request(user("x" * 1_088_008)), metadata={
+        "purpose": "memory_compaction_engine", "compaction_policy": "pal"})
+    with patch.object(transport, "frames", side_effect=TimeoutError("unavailable")):
+        prepared = rt._compile_request(ep, prompt)
+    assert prepared.compact_required
+    assert prepared.budget_details["budget_source"] == "local_after_count_failure"
+    assert "premium_compact" not in prepared.budget_details
+
+
+def test_smaller_first_compact_source_ends_after_complete_pair():
+    memory = source_memory()
+    root = memory.history_root
+    # Start from an empty cut, with a complete tool group followed by pending input.
+    empty = MemoryService()
+    for turn in root.all_turns():
+        empty.history_root.store.append(turn)
+    before = empty.history_root.all_turns()
+    snap = empty.begin_left_compaction("first", reason="test", include_completed_tail=True)
+    smaller = empty.history_root.restrict_compaction_to_left("first")
+    assert 0 < len(smaller.message_ids()) < len(snap.message_ids())
+    assert smaller.turns[-1].messages[-1].role == MessageRole.ASSISTANT
+    empty.history_root.cancel("first")
+    assert empty.history_root.all_turns() == before and not empty.history_root.left_messages()
+
+
+def test_over_tier_semantic_handoff_does_not_repeat_a_paid_invalid_checkpoint():
+    rt, _, transport = runtime("gpt-6.2-sol", context_window=320_384)
+    transport.count = 280_000
+    memory = source_memory()
+    _, snap = snapshot(memory, native=False)
+    snap = replace(snap, replay_request=request(user("x" * 1_088_008), assistant()))
+    original = transport.frames
+
+    def frames(endpoint, req):
+        if req.operation != "generate":
+            yield from original(endpoint, req)
+            return
+        transport.requests.append(req)
+        yield _JSONFrame(0, {"id": "response", "status": "completed", "output": [{
+            "type": "message", "id": "m", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "invalid checkpoint", "annotations": []}]}]})
+
+    with patch.object(transport, "frames", frames):
+        result = asyncio.run(execute_compaction(CompactionEngine(PalCompactionPolicy(), max_attempts=3),
+            snap, llm_runtime=rt, memory_service=memory))
+    assert result.status == "failed" and result.attempts == 1
+    assert sum(r.operation == "generate" for r in transport.requests) == 1

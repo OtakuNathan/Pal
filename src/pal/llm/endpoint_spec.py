@@ -6,6 +6,7 @@ from dataclasses import dataclass, fields
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from pal.llm.context_budget import physical_window
 from pal.llm.ir import ThinkingLevel, WireShape
 from pal.shared.json_values import thaw_json
 
@@ -100,15 +101,12 @@ class LLMEndpointSpec:
             field_name="max_output_tokens",
             endpoint_id=endpoint_id,
         )
-        if (
-            context_window is not None
-            and max_output_tokens is not None
-            and max_output_tokens > context_window
-        ):
-            raise LLMEndpointSpecError(
-                f"endpoint {endpoint_id} max_output_tokens exceeds context_window"
-            )
         capabilities = _json_mapping(source.get("capabilities_blob"))
+        declared_window = capabilities.get("physical_context_window")
+        if declared_window is not None and (type(declared_window) is not int or declared_window < 1):
+            raise LLMEndpointSpecError("physical_context_window must be a positive integer")
+        if "allow_long_context_pricing" in capabilities and not isinstance(capabilities["allow_long_context_pricing"], bool):
+            raise LLMEndpointSpecError("allow_long_context_pricing must be a boolean")
         if capabilities.get("compaction_strategy", "auto") not in {"auto", "semantic_checkpoint", "openai_responses"}:
             raise LLMEndpointSpecError("invalid capabilities_blob.compaction_strategy")
         if capabilities.get("continuation_mode", "auto") not in ("auto", "full"):
@@ -160,7 +158,7 @@ class LLMEndpointSpec:
                     field_name="capabilities_blob.unsupported_request_parameters",
                 )
             )
-        return cls(
+        spec = cls(
             endpoint_id=endpoint_id,
             provider=provider,
             model_id=model_id,
@@ -190,6 +188,10 @@ class LLMEndpointSpec:
             notes=_optional_text(source.get("notes")),
             transport=transport,
         )
+        capacity = physical_window(spec)
+        if capacity and max_output_tokens and max_output_tokens > capacity:
+            raise LLMEndpointSpecError(f"endpoint {endpoint_id} max_output_tokens exceeds context_window capacity")
+        return spec
 
     def to_payload(self) -> dict[str, Any]:
         return {

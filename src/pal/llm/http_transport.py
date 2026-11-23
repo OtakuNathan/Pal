@@ -92,7 +92,7 @@ class SDKJSONTransport:
                 payload["extra_body"] = extra_body
         if request.operation == "generate":
             payload["stream"] = bool(request.stream)
-        elif request.operation not in {"compact", "input_tokens"} or request.wire_shape != WireShape.OPENAI_RESPONSE:
+        elif request.operation != "input_tokens" and not (request.operation == "compact" and request.wire_shape == WireShape.OPENAI_RESPONSE):
             raise LLMTransportError("unsupported endpoint operation")
         if request.stream and request.wire_shape == WireShape.OPENAI_COMPLETION:
             payload.setdefault("stream_options", {"include_usage": True})
@@ -298,16 +298,17 @@ def _open_sdk_response(
         _open_gemini_response(graph, request, payload)
         return
     resource = graph.resource
-    method = "create"
-    if request.operation == "compact":
-        method = "compact"
-    elif request.operation == "input_tokens":
+    if request.operation == "input_tokens" and request.wire_shape == WireShape.OPENAI_RESPONSE:
         resource = resource.input_tokens
-        method = "count"
     streaming_response = getattr(resource, "with_streaming_response", None)
+    target = streaming_response if streaming_response is not None else resource
+    if request.operation == "compact":
+        invoke = target.compact
+    elif request.operation == "input_tokens":
+        invoke = target.count_tokens if request.wire_shape == WireShape.ANTHROPIC_MESSAGES else target.count
+    else:
+        invoke = target.create
     if streaming_response is not None:
-        invoke = streaming_response.compact if method == "compact" else (
-            streaming_response.count if method == "count" else streaming_response.create)
         manager = invoke(**payload)
         raw = manager.__enter__()
         graph.response_context = manager
@@ -321,8 +322,6 @@ def _open_sdk_response(
         # rather than round-tripping unknown items through SDK union models.
         response = raw.parse() if request.operation == "generate" else raw.json()
     else:
-        invoke = resource.compact if method == "compact" else (
-            resource.count if method == "count" else resource.create)
         response = invoke(**payload)
         if request.on_submitted is not None:
             request.on_submitted()
@@ -332,6 +331,15 @@ def _open_sdk_response(
 
 
 def _open_gemini_response(graph: _SDKClientGraph, request: SDKTransportRequest, payload: dict) -> None:
+    if request.operation == "input_tokens":
+        model = payload["generateContentRequest"]["model"]
+        manager = graph.client.stream("POST", model + ":countTokens", json=payload)
+        response = manager.__enter__()
+        graph.response_context = manager
+        graph.response = response
+        response.raise_for_status()
+        graph.frames = _gemini_frames(response, False)
+        return
     prefix = request.response_prefix
     while True:
         body = dict(payload)

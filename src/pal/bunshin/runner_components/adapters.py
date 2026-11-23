@@ -3,9 +3,9 @@ from pal.bunshin.runner_components.progress_text import _preview_text
 from pal.llm.projection_contracts import ProjectionSendReceipt
 import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
-from pal.llm.contracts import LLMService, LLMPreflightAdvice, LLMPreflightRequest
+from pal.llm.contracts import LLMService, NativeCompactionService, LLMPreflightAdvice, LLMPreflightRequest
 from pal.llm.ir import LLMRequestIR
 from pal.shared import ResponseHandle, TurnDeliveryBinding
 from pal.bunshin.runner_components.reporter import Reporter
@@ -24,6 +24,12 @@ class _BunshinLLMRuntimeAdapter:
     def plan_compaction(self, endpoint_id=None, *, force_semantic=False):
         from pal.llm.contracts import LLMCompactionPlan
         return self._base.plan_compaction(endpoint_id, force_semantic=force_semantic)
+
+    async def native_source_over_standard_limit(self, request):
+        return await cast(NativeCompactionService, self._base).native_source_over_standard_limit(request)
+
+    async def acompact_native(self, request, *, timeout_seconds=180.0, next_request=None):
+        return await cast(NativeCompactionService, self._base).acompact_native(request, timeout_seconds=timeout_seconds, next_request=next_request)
 
     def release_context(self, context_id):
         self._base.release_context(context_id)

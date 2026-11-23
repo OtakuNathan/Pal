@@ -17,12 +17,12 @@ route keeps the existing semantic checkpoint behavior.
 
 ## Model and route audit
 
-The configured models were checked against official documentation on 2026-11-11.
-No GPT-6.2 endpoint was configured. New model IDs require a fresh capability audit;
+New model IDs require a capability audit;
 a shared vendor or OpenAI-compatible wire format is not proof of support.
 
 | Configured model | Native compact route | Other configured routes |
 | --- | --- | --- |
+| `gpt-6.2-astra`, `gpt-6.2-sol` | Official OpenAI HTTP Responses, API-key authentication | OpenRouter uses semantic checkpoints |
 | `gpt-6-astra` | Official OpenAI HTTP Responses, API-key authentication | ChatGPT OAuth/WebSocket and OpenRouter use semantic checkpoints |
 | `gpt-6-luna` | Official OpenAI HTTP Responses, API-key authentication | ChatGPT OAuth/WebSocket and OpenRouter use semantic checkpoints |
 | `gpt-6.1-sol` | Official OpenAI HTTP Responses, API-key authentication | ChatGPT OAuth/WebSocket and OpenRouter use semantic checkpoints |
@@ -49,6 +49,38 @@ for this standalone compact contract on the configured routes:
 [OpenRouter Responses](https://openrouter.ai/docs/api/reference/responses/overview).
 The stored DeepSeek `deepseek-v4.1-pro` ID was not renamed: published model naming
 did not establish that this configured alias should be replaced.
+
+## When Pal requests compaction
+
+Pal admits input up to the smallest of the configured compact watermark
+(`--context-window`), the standard-price input ceiling where known, and the
+physical context window less output and safety reserves. Equality fits.
+For official GPT-6.2 Sol, a 320,384 watermark and a 1,050,000 physical
+window both permit the full 272,000 standard-price input tokens. The output
+reserve is capped at 65,535 per call, including recovery calls. A smaller
+deployment can set `--physical-context-window`. For routes without a known or
+declared physical capacity, Pal conservatively uses the configured window as
+the capacity as well.
+
+The standard-price policy covers the listed official OpenAI models at 272,000,
+official Gemini 3.1 Pro Preview at 200,000, and official Claude Haiku 5.5 at
+100,000. On the OpenRouter API it covers the exact OpenAI IDs for GPT-6.2
+Sol/Astra, GPT-6 Sol/Luna/Astra and GPT-6.1 Sol/Terra at 272,000. Compatibility endpoints
+use local estimates, with extra headroom on a known price tier. An endpoint
+can opt into premium input via `pal llm add --allow-long-context-pricing`.
+The provider's separate input maximum still applies, including the 922,000 cap
+on GPT-6.2 Sol and Astra. See the [Sol model specification](https://developers.openai.com/api/docs/models/gpt-6.2-sol),
+[OpenRouter endpoint pricing overrides](https://openrouter.ai/api/v1/models/openai/gpt-6.2-sol/endpoints),
+[Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing) and
+[Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing).
+
+For a matching conversation prefix and endpoint, Pal starts with the preceding
+response's normalized input plus output usage and estimates the uncovered
+suffix. A changed prefix or tool schema starts a fresh estimate. Close to a
+limit, first-party API routes count the complete encoded input, including tools.
+Gemini counts only requests that can be represented by its countTokens API.
+An unavailable counter uses a conservative local estimate. Pal requires an
+exact count for opaque native history without a matching usage baseline.
 
 ## Gemini Interactions and Responses WebSocket continuation
 
@@ -81,7 +113,10 @@ after a native attempt fails. Automatic server-side compaction and configuration
 update items are outside this implementation.
 
 Native capture consists of L plus a continuous, accepted, protocol-complete R
-prefix. Unanswered inputs, incomplete assistant output, and unpaired tool calls
+prefix. If including the completed tail would exceed the standard price tier,
+Pal counts and compacts the original L while keeping R for the successor.
+An already oversized L may require one premium attempt within physical capacity.
+Unanswered inputs, incomplete assistant output, and unpaired tool calls
 stay outside it. Capturing records a prospective cut; failure and cancellation
 leave the live cut and history untouched. Commit validates the entire captured
 prefix and atomically replaces it, retaining the remaining R and active turn ID.
@@ -102,7 +137,7 @@ Native input budgets use the
 cached by endpoint configuration and effective input digest. Ciphertext length
 is never treated as token count. Before install, the successor input includes
 the pending tail, prompt shell, and tools in its token check. A counted upper
-bound is retained for read-only switch advice; generation counts the effective
+bound is retained for read-only switch advice. Exact checks count the effective
 request exactly.
 
 Native compaction does not make an extra text-generation call or produce memory

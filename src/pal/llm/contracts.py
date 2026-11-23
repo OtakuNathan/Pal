@@ -5,6 +5,7 @@ from pal.shared.tool_protocol import ToolCallIR as _ToolCallIR
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, AsyncIterator, Callable, Protocol, Mapping
 
+from pal.llm.ir import ReplayEnvelope
 from pal.llm.ir import LLMRequestIR, LLMResponseIR, LLMResponseUpdate, LLMMessageIR, LLMUsageIR, MessageRole, ReasoningPartIR, TextPartIR
 from pal.llm.conversions import request_ir_from_prompt
 from pal.llm.projection_contracts import ProjectionSendReceipt
@@ -166,7 +167,7 @@ class LLMPreflightAdvice:
     fallback_chain: list[str] = field(default_factory=list)
     target_input_budget: int = 0
     reserved_output_tokens: int = 0
-    breakdown: dict[str, int | bool] = field(default_factory=dict)
+    breakdown: dict[str, int | bool | str | None] = field(default_factory=dict)
 
 
 class LLMProjectionPort(Protocol):
@@ -192,6 +193,13 @@ class LLMTurnSettings:
     def to_payload(self) -> dict[str, Any]:
         from pal.shared.json_values import thaw_json
         return {"think_levels": dict(self.thinking_levels), "cache_policy_snapshot": thaw_json(self.cache_policy)}
+
+
+class NativeCompactionService(Protocol):
+    async def native_source_over_standard_limit(self, request: LLMRequestIR) -> bool: ...
+
+    async def acompact_native(self, request: LLMRequestIR, *, timeout_seconds: float = 180.0,
+                              next_request: LLMRequestIR | None = None) -> tuple[ReplayEnvelope, int, dict[str, Any]]: ...
 
 
 class LLMService(Protocol):

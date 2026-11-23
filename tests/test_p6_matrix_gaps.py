@@ -287,9 +287,8 @@ def test_b03_boundary_equality_fits_one_token_over_rejects():
 
     runtime = LLMRuntime.__new__(LLMRuntime)
     runtime.safety_margin_tokens = 1024
-    endpoint = SimpleNamespace(
-        context_window=8192, max_output_tokens=None, endpoint_id="b03",
-    )
+    from pal.llm.models import LLMEndpointModel
+    endpoint = LLMEndpointModel(endpoint_id="b03", context_window=8192)
     target = runtime._target_input_budget(endpoint, output_tokens=2048)
     # window 8192 - output 2048 - margin max(1024, 5%) = 5120.
     assert target == 5120
@@ -330,9 +329,8 @@ def test_b04_output_reservation_counts_against_total_window():
 
     runtime = LLMRuntime.__new__(LLMRuntime)
     runtime.safety_margin_tokens = 1024
-    endpoint = SimpleNamespace(
-        context_window=8192, max_output_tokens=None, endpoint_id="b04",
-    )
+    from pal.llm.models import LLMEndpointModel
+    endpoint = LLMEndpointModel(endpoint_id="b04", context_window=8192)
     small_output = runtime._target_input_budget(endpoint, output_tokens=1024)
     large_output = runtime._target_input_budget(endpoint, output_tokens=4096)
     # The output reservation (thinking included, since the thinking
@@ -346,7 +344,7 @@ def test_b04_output_reservation_counts_against_total_window():
     # knowledge there is no budget to enforce (nothing is rejected on a
     # made-up number).
     assert runtime._target_input_budget(
-        SimpleNamespace(context_window=0), output_tokens=512,
+        LLMEndpointModel(endpoint_id="unknown", context_window=None), output_tokens=512,
     ) == 0
     unknown = PreparedLLMRequest(
         endpoint=endpoint,

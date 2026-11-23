@@ -97,6 +97,8 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     add_parser.add_argument("--wire-shape", choices=tuple(item.value for item in WireShape), default=None)
     add_parser.add_argument("--transport", choices=("http", "websocket"), default=None)
     add_parser.add_argument("--base-url", default=None)
+    add_parser.add_argument("--allow-long-context-pricing", action=argparse.BooleanOptionalAction, default=None,
+                            help="Allow requests above the verified standard input price tier")
     add_parser.add_argument("--compaction-strategy", choices=("auto", "semantic_checkpoint", "openai_responses"), default=None)
     add_parser.add_argument("--continuation-mode", choices=("auto", "full"), default=None)
     add_parser.add_argument("--cache-mode", choices=("implicit", "hybrid", "explicit"), default=None,
@@ -128,6 +130,8 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Read the API key from stdin and store it; never place secrets in argv",
     )
+    add_parser.add_argument("--physical-context-window", type=_positive_int, default=None,
+                            help="Deployment capacity shared by input and output tokens")
     add_parser.add_argument("--context-window", type=_positive_int, default=None)
     add_parser.add_argument("--max-output-tokens", type=_positive_int, default=None)
     add_parser.add_argument(
@@ -275,6 +279,10 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
     )
     if args.continuation_mode is not None:
         capabilities["continuation_mode"] = args.continuation_mode
+    if args.physical_context_window is not None:
+        capabilities["physical_context_window"] = args.physical_context_window
+    if args.allow_long_context_pricing is not None:
+        capabilities["allow_long_context_pricing"] = args.allow_long_context_pricing
     if args.compaction_strategy is not None:
         capabilities["compaction_strategy"] = args.compaction_strategy
     for name, value in dict(model_defaults.get("capabilities") or {}).items():

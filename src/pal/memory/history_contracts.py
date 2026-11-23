@@ -270,6 +270,9 @@ class HistoryRootPort(Protocol):
     def begin_compact(self, run_id: str, *, reason: str, parent_turn_id: str='', deadline_at: float | None=None) -> LeftSnapshot:
         ...
 
+    def restrict_compaction_to_left(self, run_id: str) -> LeftSnapshot:
+        ...
+
     def mark_ready(self, run_id: str, candidate: Any, *, candidate_id: str='') -> None:
         ...
 

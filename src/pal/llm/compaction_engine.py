@@ -21,7 +21,7 @@ from pal.llm.contracts import (
     collect_generation,
 )
 from pal.llm.conversions import request_ir_from_prompt
-from pal.llm.compaction import is_native_window
+from pal.llm.compaction import PremiumCompactionError, is_native_window
 from pal.memory.compaction_candidate import CompactionCandidate
 from pal.llm.ir import (
     LLMMessageIR,
@@ -295,7 +295,8 @@ class CompactionEngine:
                 snapshot.replay_request is None or not replay_guard()
             )
 
-        while attempts < max(1, int(self.max_attempts or 1)):
+        premium_attempted = False
+        while not premium_attempted and attempts < max(1, int(self.max_attempts or 1)):
             # Preflight failures must not inherit the preceding model response.
             outcome = None
             attempt_started_at = time.monotonic()
@@ -411,6 +412,9 @@ class CompactionEngine:
                     snapshot, status="hot_cache_unavailable", attempts=attempts,
                     source_sizes=source_sizes, failures=failures,
                 )
+            if advice and advice.breakdown.get("premium_compact"):
+                premium_attempted = True
+                request = replace(request, metadata={**request.metadata, "single_compaction_attempt": True})
             source_sizes.append(len(source))
             attempts += 1
             attempt_started_at = time.monotonic()
@@ -570,7 +574,8 @@ class CompactionEngine:
                     **({"next_request": snapshot.next_request} if snapshot.next_request is not None else {}))
                 headroom = int(snapshot.metadata.get("next_round_headroom_tokens") or 0)
                 if snapshot.target_input_budget and tokens + headroom > snapshot.target_input_budget:
-                    raise ValueError("native compact output does not fit the next input budget")
+                    return self._result(snapshot, status="failed", attempts=attempt,
+                        failures=(*failures, "native compact output does not fit the next input budget"))
                 refs = {}
                 call_ids = set(snapshot.metadata.get("retained_result_call_ids") or ())
                 for transcript in snapshot.memory_items:
@@ -589,6 +594,8 @@ class CompactionEngine:
                 raise
             except Exception as exc:
                 failures.append(f"native:{type(exc).__name__}: {exc}")
+                if isinstance(exc, PremiumCompactionError):
+                    return self._result(snapshot, status="failed", attempts=attempt, failures=failures)
                 _LOGGER.warning("native compact attempt=%s failed: %s", attempt, type(exc).__name__)
                 continue
             return replace(self._result(snapshot, status="candidate", attempts=attempt,

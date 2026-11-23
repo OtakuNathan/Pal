@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pal.llm.context_budget import OUTPUT_LIMIT
 from pal.shared.tool_protocol import ToolCallIR
 
 from dataclasses import dataclass, replace
@@ -57,13 +58,13 @@ def recovery_settings(
     endpoint_default = _positive_int(getattr(endpoint, "max_output_tokens", None))
     if (
         endpoint_default is not None
-        and request.policy.max_output_tokens < endpoint_default
+        and request.policy.max_output_tokens < min(OUTPUT_LIMIT, endpoint_default)
         and explicit is not True
     ):
         enabled = False
 
     upper_limit = endpoint_output_upper_limit(endpoint) or request.policy.max_output_tokens
-    upper_limit = max(request.policy.max_output_tokens, upper_limit)
+    upper_limit = min(OUTPUT_LIMIT, max(request.policy.max_output_tokens, upper_limit))
     raw_continuations = recovery.get(
         "max_continuations",
         capabilities.get("max_output_recovery_attempts", default_attempts),

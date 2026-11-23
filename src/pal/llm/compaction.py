@@ -11,6 +11,10 @@ from pal.shared.json_values import thaw_json
 NATIVE_WINDOW_KEY = "_pal_compaction"
 
 
+class PremiumCompactionError(RuntimeError):
+    """The single allowed above-tier compact call was already submitted."""
+
+
 def is_native_window(message: LLMMessageIR) -> bool:
     return message.replay is not None and NATIVE_WINDOW_KEY in message.replay.payload
 

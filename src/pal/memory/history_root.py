@@ -640,6 +640,40 @@ class HistoryRoot:
         )
         return snapshot
 
+    def restrict_compaction_to_left(self, run_id: str) -> LeftSnapshot:
+        """Narrow the prospective capture to L, or a shorter complete prefix when L is a seed."""
+        run = self._require_current_run(run_id)
+        if run.phase != CompactPhase.RUNNING or run.snapshot.stamp != self._snapshot_stamp(run.snapshot.cut):
+            raise StaleRun("captured history changed before source selection", run_id=run_id)
+        cut = self._cut
+        turns = self._turns_through(cut)
+        if not turns or all(self._is_summary_only(turn) for turn in turns):
+            # A first compact can have only a seed in L. Try a smaller
+            # complete prefix of the captured R, never an open tool group.
+            candidates = []
+            for i, turn in enumerate(run.snapshot.turns):
+                if self._is_summary_only(turn):
+                    continue
+                calls, results = set(), set()
+                for n, message in enumerate(turn.messages, 1):
+                    if message.state in {MessageState.IN_PROGRESS, MessageState.INCOMPLETE}:
+                        break
+                    added_calls, added_results = _protocol_ids((message,))
+                    calls.update(added_calls)
+                    results.update(added_results)
+                    if calls != results or message.role not in {MessageRole.ASSISTANT, MessageRole.TOOL}:
+                        continue
+                    pos = (i + 1, 0) if i < run.snapshot.cut.turn_count and n == len(turn.messages) else (i, n)
+                    if (cut.turn_count, cut.intra_messages) < pos < (run.snapshot.cut.turn_count, run.snapshot.cut.intra_messages):
+                        candidates.append(pos)
+            if not candidates:
+                raise NoBeneficialCompaction("no smaller complete source fits the standard tier", run_id=run_id)
+            whole, intra = candidates[len(candidates) // 2]
+            cut = replace(cut, turn_count=whole, intra_messages=intra)
+            turns = self._turns_through(cut)
+        run.snapshot = LeftSnapshot(run_id, cut, turns, self._snapshot_stamp(cut))
+        return run.snapshot
+
     def _snapshot_stamp(self, cut: CutPosition) -> str:
         return left_span_stamp(self._turns_through(cut)) + f"@{self._cut.revision}:{self._cut.cut_id}"
 

@@ -30,6 +30,7 @@ class PreparedLLMRequest:
     request: LLMRequestIR
     estimated_input_tokens: int
     target_input_budget: int
+    budget_details: Mapping[str, Any] | None = None
 
     @property
     def compact_required(self) -> bool:
