@@ -27,7 +27,10 @@ def send(coordinator, request, ctx, identity):
     return plan, encoded, diagnostics
 
 
-@pytest.mark.parametrize("model", ["openai/gpt-6-luna", "openai/gpt-6-sol"])
+@pytest.mark.parametrize("model", [
+    "openai/gpt-6-luna", "openai/gpt-6-sol", "openai/gpt-6.2-terra",
+    "openai/gpt-6x2-astra", "openai/gpt-6.2-solar", "other/gpt-6.2-astra",
+])
 def test_unverified_openrouter_models_do_not_enable_explicit_controls(model):
     ctx = replace(context("hybrid", provider="openrouter"), model_id=model)
     assert available_modes(ctx) == ("implicit",)
@@ -38,9 +41,12 @@ def test_unverified_openrouter_models_do_not_enable_explicit_controls(model):
 
 @pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
 @pytest.mark.parametrize("provider", ["openai", "openrouter"])
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.2-astra", "gpt-6.2-sol"])
 @pytest.mark.parametrize("mode,count", [("implicit", 0), ("hybrid", 2), ("explicit", 3)])
-def test_modes_final_payload(shape, provider, mode, count):
-    ctx, co = context(mode, shape, provider), PromptCacheCoordinator()
+def test_modes_final_payload(shape, provider, model, mode, count):
+    model_id = f"openai/{model}" if provider == "openrouter" else model
+    ctx = replace(context(mode, shape, provider), model_id=model_id)
+    co = PromptCacheCoordinator()
     request = _active_tool_request(_request())
     plan, encoded, _ = send(co, request, ctx, "first")
     found = [path for path, node in protocol_nodes(thaw_json(encoded.payload)) if "prompt_cache_breakpoint" in node]

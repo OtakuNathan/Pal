@@ -56,7 +56,8 @@ in-flight turns retain their policy snapshot. Changing the endpoint identity
 under a snapshot is rejected.
 
 The three modes are available for the recognized OpenAI GPT-5.6 and GPT-6 Astra
-families on Responses and Chat Completions, directly or through OpenRouter.
+families, plus `gpt-6.2-astra` and `gpt-6.2-sol`, on Responses and Chat
+Completions, directly or through OpenRouter (using the `openai/` model prefix).
 Unknown compatible endpoints/models get only `implicit`; schema resemblance
 does not establish support. Anthropic Messages retains its existing explicit
 strategy behind the shared selector, with `implicit` also available. Anthropic

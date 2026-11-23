@@ -106,7 +106,7 @@ def _default_capabilities(
         explicit = (PromptCacheDialect.OPENROUTER_ANTHROPIC_EXPLICIT if gateway
                     else PromptCacheDialect.ANTHROPIC_EXPLICIT)
     elif ((gateway or provider == "openai")
-          and re.fullmatch(r"gpt-5\.6(?:-[a-z0-9.-]+)?|gpt-6-astra(?:-[a-z0-9.-]+)?",
+          and re.fullmatch(r"(?:gpt-5\.6|gpt-6-astra)(?:-[a-z0-9.-]+)?|gpt-6\.2-(?:astra|sol)",
                            model_id.lower().removeprefix("openai/"))
           and shape in (WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION)):
         explicit = (PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT if gateway else
