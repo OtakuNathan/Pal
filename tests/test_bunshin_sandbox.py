@@ -274,7 +274,8 @@ else:
     raise AssertionError("the worker could write a read-only dependency")
 """
             argv, env = build_sandboxed_runner_invocation(
-                runtime_root=root, pack=pack, argv=[sys.executable, "-c", command, str(target)],
+                runtime_root=root, pack=pack,
+                argv=[str(Path(sys.executable).resolve(strict=True)), "-c", command, str(target)],
                 runtime_mounts=(ReadOnlyBind(source, target),
                                 ReadOnlyBind(root / "absent", target.with_name("optional"), required=False)),
             )

@@ -110,7 +110,7 @@ def test_private_editor_projects_atomic_updates_and_retires_with_role(tmp_path, 
     def invocation(script):
         return build_sandboxed_runner_invocation(
             runtime_root=tmp_path / "runtime", pack=pack,
-            argv=[sys.executable, "-c", script], env={"PATH": os.defpath},
+            argv=[str(Path(sys.executable).resolve(strict=True)), "-c", script], env={"PATH": os.defpath},
         )
 
     from pal.bunshin.process_lifecycle import WorkerProcessOwner
