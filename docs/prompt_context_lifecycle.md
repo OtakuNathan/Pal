@@ -14,13 +14,14 @@ working-method defaults.
 
 Resident and learned behavior remains advisory. Ordinary edit-and-test work does not
 require a checklist; use phases for multi-deliverable, long-running or resumable work.
-Reuse valid tool contracts and loaded manuals. Maintenance guidance is relevant to
-configuration, deployment, activation and unfamiliar runtime constraints, rather than
-a compulsory discovery round before each source edit.
+Reuse valid tool contracts and loaded manuals. For a known plugin, use
+`pal.plugin.development` for development, updates and reloads. Use
+`pal.self.maintenance` for resident or cross-module changes, runtime configuration
+and unclear ownership. Inject a known manual directly when needed.
 
 For a task that already needs remote execution, prefer configured native targets when
-the user has not chosen a connection method. `list_remote` resolves unknown target IDs;
-`run_shell(target=...)` executes there. Configuring a remote never changes target 0's
+the user has not chosen a connection method. Use the `remote` plugin's `list_targets`
+if the target ID is unknown; `run_shell(target=...)` executes there. Configuring a remote never changes target 0's
 local meaning, and an explicit request for SSH takes precedence over the default route.
 
 `read_file`, `edit_file` and `write_file` are directly exposed file tools. Direct editing

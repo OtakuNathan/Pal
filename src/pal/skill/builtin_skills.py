@@ -11,8 +11,9 @@ PAL_SELF_MAINTENANCE_SKILL_ID = "pal.self.maintenance"
 
 PAL_SELF_MAINTENANCE_MANUAL = """# Pal Self Maintenance
 
-Use this entry manual to explain how to configure Pal, or to carry out requested
-self-modification, repair, extension development, and deployment. Pal is its own
+Use this manual for Pal configuration, resident code, shared contracts, coordinated
+upgrades, or maintenance whose owner is unclear. For work confined to a known
+plugin, go directly to `pal.plugin.development`. Pal is its own
 configuration documentation: answer the user directly in their language with the
 relevant commands, parameter meanings, where to run them, when changes take
 effect, and how to verify them. Read contracts and CLI help yourself; do not make
@@ -304,10 +305,10 @@ requires an external host restart.
 
 ## Route to specialist manuals
 
-Search and inject only the matching manual if it is not already in context:
+Reuse the applicable manual or inject it directly by its skill ID.
 
-- `pal.plugin.development`: plugin layout, build_plugin/start(scope), capability
-  contracts, packaging/private dependencies, RAII cleanup and hot reload.
+- `pal.plugin.development` covers installed plugin updates, reload and verification,
+  plugin layout, build_plugin/start(scope), capability contracts, packaging and cleanup.
 - `pal.channel.provider.development`: transport communication plus provider.toml,
   provider registration, matching channel_endpoints records, auth, ingress/replies,
   control interactions and endpoint/provider lifecycle. Implementing transport
@@ -381,9 +382,32 @@ already effective. Store repair lessons or procedures only through the appropria
 knowledge tools and authorization; live state is not durable truth.
 """
 
-PAL_PLUGIN_DEVELOPMENT_MANUAL = """# Pal Plugin Development
+PAL_PLUGIN_DEVELOPMENT_MANUAL = """# Pal Plugin Development and Maintenance
 
-Use this skill when Pal needs to create, review, repair, or explain a Pal plugin and cannot rely on direct source-code access.
+Use this manual to update, diagnose, create or review a Pal plugin. It includes
+the public contracts needed to develop one without access to the host source.
+
+## Update an installed plugin
+
+Identify the plugin in the selected runtime root. Check its installed path,
+version and attachment state. A source checkout may differ from the installed
+copy. Preserve an intentionally disabled or detached plugin.
+
+- For a packaged update, use `install_package` with the new `.palpkg`. Inspect
+  preparation and activation in the result. If the job schedules a completion
+  notice, await it. Use `inspect_package_status` if notification is unavailable
+  or diagnostics are needed. Successful activation completes the reload.
+- For edits to the installed files of an attached plugin, use
+  `manage_plugin(name=..., operation="reload")`. Rescan with `rescan_plugins`
+  first if manifest metadata changed. Built-in plugins and channel providers
+  use this lifecycle too. Reconnecting a channel endpoint reuses its loaded code.
+- Check cleanup and load errors, the resulting attachment state and a
+  representative operation. For an execution extension, also exercise an
+  unrelated read-only tool to verify the existing tool surface still works.
+
+A plugin-provided memory backend follows the same update path. For changes to
+shared host interfaces or a migration of persisted embeddings to a new model
+or dimension, use `pal.self.maintenance` for the coordinated change.
 
 ## Goal
 
@@ -1195,7 +1219,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
             skill_id=PAL_SELF_MAINTENANCE_SKILL_ID,
             module_id=module_id,
             title="Pal Self Maintenance",
-            summary="Explain Pal configuration directly to users and carry out authorized self-modification with precise CLI, reload, and restart guidance.",
+            summary="Configure Pal and maintain resident code, shared contracts and coordinated deployments using the CLI and activation guide.",
             manual_text=PAL_SELF_MAINTENANCE_MANUAL,
             activation_terms=(
                 "pal self maintenance", "self maintenance", "repair pal", "pal source repair",
@@ -1224,12 +1248,14 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
         SkillDescriptor(
             skill_id=PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
             module_id=module_id,
-            title="Pal Plugin Development",
-            summary="Develop, review, and hot-refresh Pal plugins without direct source-code access.",
+            title="Pal Plugin Development and Maintenance",
+            summary="Develop and repair Pal plugins, update installed packages, reload plugin code and verify live capabilities.",
             manual_text=PAL_PLUGIN_DEVELOPMENT_MANUAL,
             activation_terms=(
                 "pal plugin",
                 "plugin development",
+                "plugin maintenance", "update plugin", "reload plugin", "install palpkg",
+                "插件维护", "更新插件", "重载插件", "开发插件",
                 "develop plugin",
                 "create plugin",
                 "extend capability",
@@ -1240,15 +1266,15 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "capability_action",
                 "hot refresh",
             ),
-            capability_refs=('rescan_plugins', 'manage_plugin', 'search_tools', 'call_tool'),
+            capability_refs=('install_package', 'inspect_package_status', 'rescan_plugins', 'manage_plugin', 'search_tools', 'call_tool'),
             applicability_star=SkillApplicabilitySTAR(
-                situation="Pal needs to extend itself through a plugin or understand an existing plugin boundary.",
-                task="Create or repair a detachable plugin with capabilities and clean lifecycle behavior.",
-                action="Use the plugin layout, build_plugin contract, ModuleHandle surfaces, and verification checklist.",
-                result="The plugin attaches cleanly, exposes discoverable capabilities, and hot-refreshes without core edits.",
+                situation="A capability belongs to an installed plugin or needs a new plugin.",
+                task="Develop, update or repair the plugin and verify its intended activation state.",
+                action="Use the package or plugin lifecycle for updates and the public plugin contracts for development.",
+                result="The intended generation and its affected capabilities are verified.",
             ),
             use_when=(
-                "Use when the user asks Pal to add a plugin, extend capabilities, repair plugin hot refresh, "
+                "Use to install, update, reload or debug a plugin, add a plugin, extend its capabilities, "
                 "or explain how a Pal plugin should be structured."
             ),
             avoid_when="Avoid when the change clearly belongs in core runtime contracts or security policy.",

@@ -511,9 +511,11 @@ Run the workflow.
         self.assertIn("build_plugin", skill.manual_text)
         self.assertIn("manage_plugin", skill.capability_refs)
 
-        search = SkillSearchTool(service=self.service).invoke({"query": "create plugin capability extension", "top_k": 3})
-        self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.plugin.development")
-        self.assertTrue(search.structured["hits"][0]["injectable"])
+        for query in ("create plugin capability extension", "update plugin", "更新插件", "重载插件"):
+            with self.subTest(query=query):
+                search = SkillSearchTool(service=self.service).invoke({"query": query, "top_k": 3})
+                self.assertEqual(search.structured["hits"][0]["skill_id"], skill.skill_id)
+                self.assertTrue(search.structured["hits"][0]["injectable"])
 
         injected = SkillInjectTool(service=self.service).invoke({"skill_id": "pal.plugin.development"})
         self.assertEqual(injected.status, "ok")

@@ -68,7 +68,7 @@ class PromptCompiler:
             from pal.execution.discovery_terms import search_domain_catalog
             catalog = search_domain_catalog(runtime.registry_generation.search_records)
             if catalog:
-                lines = ["Available search_tools domains in the current registry (strict owner buckets):"]
+                lines = ["Available search_tools domains (search filters, not plugin names):"]
                 for domain, entry in sorted(catalog.items()):
                     aliases = " (also: " + ", ".join(entry["aliases"][:8]) + ")" if entry["aliases"] else ""
                     description = ": " + entry["description"][:160] if entry["description"] else ""

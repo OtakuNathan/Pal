@@ -15,9 +15,11 @@ TOOL_DISCOVERY_STOP_HINT = (
 
 
 TOOL_EXECUTION_SYSTEM_POLICY = (
-    "Runtime self-maintenance: consult or reuse pal.self.maintenance before changing Pal configuration, "
-    "plugins, channel endpoints, or memory backends; use supported tools or the official `pal` / `pal memory` CLI "
-    "with an explicit `--runtime-root` rather than editing runtime storage directly.\n"
+    "Plugins provide most extensible capabilities, including channel providers and some memory backends. "
+    "For development, updates or repairs owned by a known plugin, use pal.plugin.development. "
+    "Most plugins support hot reload. Verify the affected capability after activation.\n"
+    "For Pal configuration, resident code, shared contracts or unclear ownership, use pal.self.maintenance. "
+    "Use supported tools or the official `pal` / `pal memory` CLI with an explicit `--runtime-root`.\n"
     "Tool execution and error recovery:\n"
     "- Treat each tool call as one RPC. On timeout, crash, or incomplete output, side effects may be uncertain—never "
     "infer success from a missing result and never blindly retry a mutation. Prefer result-specific recovery affordances.\n"

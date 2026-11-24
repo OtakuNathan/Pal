@@ -4526,6 +4526,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("verification scope", priority.content)
         self.assertIn("result-specific recovery affordances", tool_policy.content)
         self.assertIn("pal.self.maintenance", tool_policy.content)
+        self.assertIn("pal.plugin.development", tool_policy.content)
+        self.assertIn("pal.plugin.development", operating_guidance.content)
         self.assertIn("Tool result metadata", tool_policy.content)
         self.assertIn("affirmative English task description", tool_routing.content)
         self.assertIn("suggested next tool only when", tool_routing.content)
