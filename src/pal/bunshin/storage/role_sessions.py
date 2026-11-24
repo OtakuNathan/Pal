@@ -78,7 +78,7 @@ class RoleSessionsStore:
         now = utc_now()
         with self.database.write_connection() as connection:
             existing = connection.execute(
-                "SELECT * FROM bunshin_v2_role_sessions WHERE session_id = ?",
+                "SELECT * FROM bunshin_role_sessions WHERE session_id = ?",
                 (values["session_id"],),
             ).fetchone()
             identity = (
@@ -103,20 +103,20 @@ class RoleSessionsStore:
                 if str(existing["mode"] or "") != values["mode"]:
                     connection.execute(
                         """
-                        UPDATE bunshin_v2_role_sessions
+                        UPDATE bunshin_role_sessions
                         SET mode = ?, updated_at = ?
                         WHERE session_id = ?
                         """,
                         (values["mode"], now, values["session_id"]),
                     )
                     existing = connection.execute(
-                        "SELECT * FROM bunshin_v2_role_sessions WHERE session_id = ?",
+                        "SELECT * FROM bunshin_role_sessions WHERE session_id = ?",
                         (values["session_id"],),
                     ).fetchone()
                 return _decode_role_session(existing)
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_role_sessions(
+                INSERT INTO bunshin_role_sessions(
                     session_id, workflow_id, aggregate_type, aggregate_id, role, mode,
                     role_profile_id, preferred_harness_id,
                     preferred_harness_generation, family_binding_sha,
@@ -142,7 +142,7 @@ class RoleSessionsStore:
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_sessions WHERE session_id = ?",
+                "SELECT * FROM bunshin_role_sessions WHERE session_id = ?",
                 (values["session_id"],),
             ).fetchone()
             return _decode_role_session(row)
@@ -162,7 +162,7 @@ class RoleSessionsStore:
         An acknowledged worker may do semantic work only after both succeed.
         """
         session = connection.execute(
-            "SELECT * FROM bunshin_v2_role_sessions WHERE session_id = ?",
+            "SELECT * FROM bunshin_role_sessions WHERE session_id = ?",
             (str(session_id),),
         ).fetchone()
         if session is None:
@@ -200,7 +200,7 @@ class RoleSessionsStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_sessions WHERE session_id = ?",
+                "SELECT * FROM bunshin_role_sessions WHERE session_id = ?",
                 (str(session_id),),
             ).fetchone()
         return _decode_role_session(row) if row is not None else None
@@ -213,11 +213,11 @@ class RoleSessionsStore:
         completed = False
         with self.database.write_connection() as connection:
             invocation = connection.execute(
-                "SELECT * FROM bunshin_v2_role_invocations WHERE invocation_id = ?",
+                "SELECT * FROM bunshin_role_invocations WHERE invocation_id = ?",
                 (str(session_id),),
             ).fetchone()
             session = connection.execute(
-                "SELECT * FROM bunshin_v2_role_sessions WHERE session_id = ?",
+                "SELECT * FROM bunshin_role_sessions WHERE session_id = ?",
                 (str(session_id),),
             ).fetchone()
             if invocation is None and session is None:
@@ -230,7 +230,7 @@ class RoleSessionsStore:
             else:
                 owner = session if session is not None else invocation
                 assignments = connection.execute(
-                    "SELECT state FROM bunshin_v2_role_assignments WHERE session_id = ?",
+                    "SELECT state FROM bunshin_role_assignments WHERE session_id = ?",
                     (str(session_id),),
                 ).fetchall()
                 states = {str(row["state"]) for row in assignments}
@@ -262,7 +262,7 @@ class RoleSessionsStore:
                 now = utc_now()
                 if invocation is not None:
                     connection.execute(
-                        "UPDATE bunshin_v2_role_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
+                        "UPDATE bunshin_role_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
                         (normalized, now, str(session_id)),
                     )
                 if session is not None:
@@ -300,14 +300,14 @@ class RoleSessionsStore:
         now: str,
     ) -> RoleSessionState:
         session = connection.execute(
-            "SELECT status FROM bunshin_v2_role_sessions WHERE session_id = ?",
+            "SELECT status FROM bunshin_role_sessions WHERE session_id = ?",
             (str(session_id),),
         ).fetchone()
         if session is None:
             raise KeyError(f"unknown role session: {session_id}")
         target = role_session_target(str(session["status"]), action)
         connection.execute(
-            "UPDATE bunshin_v2_role_sessions SET status = ?, updated_at = ? WHERE session_id = ?",
+            "UPDATE bunshin_role_sessions SET status = ?, updated_at = ? WHERE session_id = ?",
             (target.value, str(now), str(session_id)),
         )
         return target

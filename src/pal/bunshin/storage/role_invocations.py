@@ -46,7 +46,7 @@ class RoleInvocationsStore:
             self.artifacts.assert_artifact_refs_durable(connection, prompt_pack_ref)
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_role_invocations(
+                INSERT INTO bunshin_role_invocations(
                     invocation_id, workflow_id, aggregate_type, aggregate_id, lease_resource_key,
                     fencing_token, role, mode, role_profile_id, harness_id,
                     harness_generation, family_binding_sha,
@@ -94,7 +94,7 @@ class RoleInvocationsStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_invocations WHERE invocation_id = ?",
+                "SELECT * FROM bunshin_role_invocations WHERE invocation_id = ?",
                 (str(invocation_id),),
             ).fetchone()
         if row is None:
@@ -117,7 +117,7 @@ class RoleInvocationsStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             invocation = connection.execute(
-                "SELECT * FROM bunshin_v2_role_invocations WHERE invocation_id = ?",
+                "SELECT * FROM bunshin_role_invocations WHERE invocation_id = ?",
                 (str(invocation_id),),
             ).fetchone()
             if invocation is None:
@@ -131,7 +131,7 @@ class RoleInvocationsStore:
             now = utc_now()
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_invocations
+                UPDATE bunshin_role_invocations
                 SET status = ?, updated_at = ?
                 WHERE invocation_id = ?
                 """,
@@ -152,7 +152,7 @@ class RoleInvocationsStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             invocation = connection.execute(
-                "SELECT * FROM bunshin_v2_role_invocations WHERE invocation_id = ?",
+                "SELECT * FROM bunshin_role_invocations WHERE invocation_id = ?",
                 (str(invocation_id),),
             ).fetchone()
             if invocation is None:
@@ -164,7 +164,7 @@ class RoleInvocationsStore:
                 int(fencing_token),
             )
             connection.execute(
-                "UPDATE bunshin_v2_role_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
+                "UPDATE bunshin_role_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
                 (normalized, utc_now(), str(invocation_id)),
             )
             self.projections.rebuild_workflow_projection_locked(connection, str(invocation["workflow_id"]), "")

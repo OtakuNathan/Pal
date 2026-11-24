@@ -28,7 +28,7 @@ def _insert_role_invocation(
 ) -> None:
     connection.execute(
         """
-        INSERT INTO bunshin_v2_role_invocations(
+        INSERT INTO bunshin_role_invocations(
             invocation_id, workflow_id, aggregate_type, aggregate_id,
             lease_resource_key, fencing_token, role, prompt_pack_ref_json,
             status, created_at, updated_at
@@ -48,7 +48,7 @@ def _insert_role_turn(
 ) -> None:
     connection.execute(
         """
-        INSERT INTO bunshin_v2_role_turns(
+        INSERT INTO bunshin_role_turns(
             invocation_id, turn_index, llm_request_ref_json, llm_response_ref_json,
             input_tokens, output_tokens, latency_ms, completed_at
         ) VALUES (?, ?, '{}', '{}', ?, ?, ?, '2024-01-01T00:00:01Z')
@@ -65,7 +65,7 @@ def _insert_worker_event(
 ) -> None:
     connection.execute(
         """
-        INSERT INTO bunshin_v2_worker_events(
+        INSERT INTO bunshin_worker_events(
             invocation_id, event_kind, round_index, tool_call_count, created_at
         ) VALUES (?, 'round_completed', ?, ?, '2024-01-01T00:00:02Z')
         """,
@@ -196,7 +196,7 @@ def test_read_workflow_telemetry_legacy_tables_absent_yield_empty_tuples(
     try:
         connection.execute(
             """
-            CREATE TABLE bunshin_v2_role_invocations (
+            CREATE TABLE bunshin_role_invocations (
                 invocation_id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 aggregate_type TEXT NOT NULL,
@@ -213,7 +213,7 @@ def test_read_workflow_telemetry_legacy_tables_absent_yield_empty_tuples(
         )
         connection.execute(
             """
-            INSERT INTO bunshin_v2_role_invocations VALUES (
+            INSERT INTO bunshin_role_invocations VALUES (
                 'inv-legacy', 'wf-legacy', 'module', 'm1', 'lease:k', 1,
                 'architect', '{}', 'completed',
                 '2023-01-01T00:00:00Z', '2023-01-01T00:00:00Z'
@@ -252,7 +252,7 @@ def test_read_workflow_telemetry_leaves_storage_byte_identical(tmp_path: Path) -
     before = _file_digest(db_path)
     read_workflow_telemetry(db_path, "wf-1")
     with open_readonly(db_path) as readonly_connection:
-        readonly_connection.execute("SELECT count(*) FROM bunshin_v2_role_turns").fetchall()
+        readonly_connection.execute("SELECT count(*) FROM bunshin_role_turns").fetchall()
     assert _file_digest(db_path) == before
 
 

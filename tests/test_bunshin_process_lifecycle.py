@@ -537,7 +537,7 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(semaphore.active_count, 1)
             self.assertTrue(self.locks.is_held(owner.lock_key))
             self.assertFalse(owner.resources_released)
-            retry = asyncio.create_task(shell.close())
+            retry = asyncio.create_task(owner.close())
             await asyncio.sleep(.02)
             self.assertFalse(retry.done())
             self.assertEqual(events, ["memory-acquired"])
@@ -729,6 +729,24 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, "completed")
         self.assertFalse(state.summary()["run_active"])
         self.assertTrue(state.ended_at)
+
+    async def test_late_question_cannot_reopen_a_run_with_a_terminal_receipt(self) -> None:
+        state = BunshinRunState("session", "run", BunshinInvocationPack(invocation_id="session"))
+        self.manager.runs[state.run_id] = state
+        with patch.object(self.manager, "_queue_task_delivery_event") as deliver:
+            await self.manager._publish_worker_event({
+                "run_id": "run", "event_kind": "terminal", "payload": {"status": "unexpected"},
+            })
+            await self.manager._publish_worker_event({
+                "run_id": "run", "event_kind": "clarification_requested", "payload": {"clarification_id": "late"},
+            })
+            self.assertEqual(deliver.call_count, 1)
+            self.assertEqual(deliver.call_args.args[0]["payload"]["status"], "failed")
+        self.assertEqual(state.last_event["event_kind"], "terminal")
+        self.assertFalse(state.pending_clarification)
+        self.manager._unregister_broker_run("run", True)
+        self.assertEqual(state.summary()["status"], "failed")
+        self.assertIn("unexpected", state.last_error)
 
     async def test_worker_event_history_is_written_only_for_logged_role_run(self) -> None:
         recorded: list[dict[str, object]] = []

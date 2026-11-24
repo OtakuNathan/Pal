@@ -1,10 +1,13 @@
 from __future__ import annotations
 from pal.bunshin.workspace_resources import exclusive_workspace_lock as exclusive_workspace_lock
 from dataclasses import dataclass
+from pal.bunshin.machine_dsl import ControlDisposition, ControlIntent
+from pal.bunshin.machines import machine_spec_for
+from pal.bunshin.coroutine_runtime import NodeSlot
 from pathlib import Path
 from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
-from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.execution_values import _action
@@ -16,6 +19,119 @@ from pal.bunshin.dependency_baselines import prepare_node_verification_baseline
 @dataclass
 class DagScheduler:
     repository: BunshinRepository
+
+    def control_nodes(self, intent: ControlIntent | None, epoch: AggregateSnapshot, effect_key: str) -> None:
+        snapshots = self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
+        nodes = [
+            item
+            for item in snapshots
+            if item.aggregate_type == AggregateType.DAG_NODE_RUN
+            and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
+        ]
+        node_machine = machine_spec_for(AggregateType.DAG_NODE_RUN)
+        for node in nodes:
+            if intent is None:
+                action_type = "RESUME"
+                if action_type not in self.repository.transitions.legal_actions(
+                    AggregateType.DAG_NODE_RUN,
+                    node.state,
+                ):
+                    continue
+            else:
+                if (
+                    node_machine.control_disposition(intent, node.state)
+                    != ControlDisposition.REQUEST
+                ):
+                    continue
+                action_type = node_machine.control_policies[intent].request_action
+            self.repository.transitions.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=epoch.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node.aggregate_id,
+                    actor="bunshin-control",
+                    expected_version=node.version,
+                    idempotency_key=f"effect:{effect_key}:{node.aggregate_id}",
+                )
+            )
+
+    def predecessor_settled(self, assignment_id: str) -> bool:
+        assignment = self.repository.role_assignments.read_role_assignment(assignment_id)
+        return assignment is not None and assignment["state"] == "settled"
+
+    def retain_node_slot(self, slot: NodeSlot) -> bool:
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, slot.epoch_id)
+        if epoch is None or epoch.state != "RUNNING":
+            return False
+        node = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, slot.node_id)
+        if (node is None or node.workflow_id != slot.workflow_id
+                or node.payload.get("epoch_id") != slot.epoch_id):
+            return False
+        graph = self.repository.cycles.read_graph_execution(workflow_id=slot.workflow_id)
+        if graph is None or graph.graph.generation != slot.generation or graph.state.value != "RUNNING":
+            return False
+        name = str(node.payload.get("module_name") or node.payload.get("unit_id") or "")
+        if self.repository.queries.node_effect_in_backoff(slot.node_id):
+            return False
+        if name in graph.pending_scope:
+            return False
+        if node.state == "REVIEW_BLOCKED_BY_DEPS":
+            return name in graph.runnable_nodes()
+        return node.state in {
+            "PRODUCING", "QUIESCING", "SNAPSHOTTING", "REVIEW_QUEUED", "REVIEWING",
+            "REVIEW_QUIESCING", "REVIEW_SNAPSHOTTING", "REPAIR_QUEUED", "REPAIRING",
+        }
+
+    def advance(self, *, workflow_id: str, epoch_id: str, generation: int) -> None:
+        """Use the same graph publication boundary for node wakes and recovery."""
+        if generation:
+            installed = self.repository.cycles.read_graph_execution(workflow_id=workflow_id)
+            if installed is None or installed.graph.generation != generation:
+                return
+        self.schedule_ready_nodes(workflow_id=workflow_id, epoch_id=epoch_id)
+        with self.repository.transaction() as work:
+            epoch = work.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+            if epoch is None or epoch.state != "RUNNING":
+                return
+            workflow = work.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+            if (workflow is None or workflow.state != "ACTIVE" or epoch.workflow_id != workflow_id
+                    or workflow.payload.get("execution_epoch_id", epoch_id) != epoch_id):
+                return
+            graph = work.cycles.read_graph_execution(workflow_id=workflow_id)
+            if graph is None or graph.state.value != "COMPLETED":
+                return
+            if generation and graph.graph.generation != generation:
+                return
+            nodes = [
+                node for node in work.queries.list_workflow_snapshots(workflow_id)
+                if node.aggregate_type == AggregateType.DAG_NODE_RUN
+                and node.payload.get("epoch_id") == epoch_id
+            ]
+            names = {node.payload.get("module_name") or node.payload.get("unit_id") for node in nodes}
+            if len(nodes) != len(names) or names != set(graph.graph.nodes):
+                return
+            sinks = [node for node in nodes if node.payload.get("graph_sink")]
+            if len(sinks) != 1 or any(node.state != "ACCEPTED" for node in nodes):
+                return
+            sink = sinks[0].payload
+            if (sink.get("module_name") or sink.get("unit_id")) != graph.graph.sink:
+                return
+            candidate = dict(sink.get("candidate_ref") or {})
+            if not graph.published_sink_ref or candidate.get("sha256") != graph.published_sink_ref:
+                return
+            work.transitions.dispatch(ActionEnvelope(
+                action_type="ALL_REQUIRED_NODES_ACCEPTED", workflow_id=workflow_id,
+                aggregate_type=AggregateType.EXECUTION_EPOCH, aggregate_id=epoch_id,
+                actor="bunshin-outbox", expected_version=epoch.version,
+                idempotency_key=f"graph-complete:{epoch_id}:{graph.graph.generation}:{graph.published_sink_ref}",
+                payload={
+                    "sink_candidate_ref": candidate,
+                    "accepted_candidate_refs": [dict(node.payload["candidate_ref"]) for node in nodes],
+                    "verification_artifact_refs": [dict(node.payload["verification_artifact_ref"])
+                                                   for node in nodes if node.payload.get("verification_artifact_ref")],
+                },
+            ))
 
     def schedule_ready_nodes(
         self,
@@ -43,9 +159,8 @@ class DagScheduler:
         }
         accepted_ids, ready_checkers, ready_producers = self.ready_assignments(epoch, node_by_id, workflow_id)
         scheduled: list[str] = []
-        # Readiness creates durable logical coroutine work. It does not reserve
-        # an OS process slot: the process shell owns the only execution
-        # semaphore and acquires it immediately before materialization.
+        # Queue durable work here. Role admission acquires or reuses the
+        # node's slot when the assignment is ready to materialize.
         for node in ready_producers:
             producer_dependencies = {
                 str(item)

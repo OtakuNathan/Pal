@@ -23,7 +23,7 @@ from pal.execution.tool_facade import ToolExecutionError
 
 def pack(role):
     return BunshinInvocationPack(invocation_id='recovery-audit', goal='Complete the bound work',
-                                metadata={'bunshin_v2': {'role': role}})
+                                metadata={'bunshin': {'role': role}})
 
 
 @pytest.fixture
@@ -148,7 +148,7 @@ def test_worker_browser_errors_preserve_cause_but_route_recovery_to_available_au
 ])
 def test_current_legacy_and_custom_architect_contracts_receive_one_submission_rule(original):
     value = pack('architect')
-    value.metadata['bunshin_v2']['submission_receipt_required'] = True
+    value.metadata['bunshin']['submission_receipt_required'] = True
     value.resolved_profile['output_contract_fragment'] = original
     context = PromptContext(SimpleNamespace(visible_capability_aliases=['submit_contract']), value, Path('/tmp'))
     result = context.output_contract()

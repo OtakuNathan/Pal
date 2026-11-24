@@ -95,7 +95,7 @@ class ProcessResult:
                 )
             if permanent:
                 raise PermanentEffectError(details)
-            raise RuntimeError(f"V2 worker exited {owner.returncode}: {details}")
+            raise RuntimeError(f"Bunshin worker exited {owner.returncode}: {details}")
         terminal = next((item for item in reversed(events) if str(item.get("event_kind") or "") == "terminal"), None)
         if terminal is None and not has_submission_receipt:
             terminal = next(iter(reversed(fallback_events)), None)
@@ -136,7 +136,7 @@ class ProcessResult:
                     fencing_token=fencing_token,
                     status="failed",
                 )
-            raise RuntimeError("V2 semantic worker ended without terminal event: " + details)
+            raise RuntimeError("Bunshin semantic worker ended without terminal event: " + details)
         terminal_payload = dict(terminal.get("payload") or {})
         if owner.returncode != 0 or worker_error or fallback_worker_error:
             terminal_payload["process_error"] = {

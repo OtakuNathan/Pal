@@ -37,14 +37,14 @@ class DeliveriesStore:
         delivery_id = f"delivery_{uuid4().hex}"
         with self.database.write_connection() as connection:
             binding = connection.execute(
-                "SELECT 1 FROM bunshin_v2_task_delivery_bindings WHERE task_id = ?",
+                "SELECT 1 FROM bunshin_task_delivery_bindings WHERE task_id = ?",
                 (normalized_task_id,),
             ).fetchone()
             if binding is None:
                 raise ValueError("task delivery requires an existing delivery binding")
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_delivery_outbox(
+                INSERT INTO bunshin_delivery_outbox(
                     delivery_id, dedup_key, task_id, workflow_id, event_kind,
                     payload_json, status, attempt_count, next_attempt_at,
                     last_error, created_at, updated_at
@@ -64,7 +64,7 @@ class DeliveriesStore:
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_delivery_outbox WHERE dedup_key = ?",
+                "SELECT * FROM bunshin_delivery_outbox WHERE dedup_key = ?",
                 (normalized_key,),
             ).fetchone()
             if row is not None:
@@ -80,14 +80,28 @@ class DeliveriesStore:
                     )
         return _delivery_outbox_row(row)
 
+    def pending_interaction_deliveries(self, task_id: str) -> tuple[dict[str, Any], ...]:
+        """Find the original notification for each still-actionable tool call."""
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                """SELECT d.* FROM bunshin_delivery_outbox d
+                   JOIN bunshin_interaction_waits w ON d.dedup_key = 'role-interaction:' || w.wait_id
+                   JOIN bunshin_role_assignments a ON w.assignment_id = a.assignment_id
+                   WHERE d.task_id = ? AND w.state = 'open'
+                     AND a.state IN ('queued','claimed','running','retry_queued')
+                   ORDER BY d.created_at, d.delivery_id""", (task_id,),
+            ).fetchall()
+        return tuple(_delivery_outbox_row(row) for row in rows)
+
     def list_pending_task_deliveries(self, *, limit: int = 50) -> tuple[dict[str, Any], ...]:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT d.*, b.current_binding_json, b.binding_version
-                FROM bunshin_v2_delivery_outbox AS d
-                JOIN bunshin_v2_task_delivery_bindings AS b ON b.task_id = d.task_id
+                FROM bunshin_delivery_outbox AS d
+                JOIN bunshin_task_delivery_bindings AS b ON b.task_id = d.task_id
                 WHERE d.status = 'pending' AND d.next_attempt_at <= ?
                 ORDER BY d.created_at, d.delivery_id
                 LIMIT ?
@@ -101,7 +115,7 @@ class DeliveriesStore:
         with self.database.write_connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE bunshin_v2_delivery_outbox
+                UPDATE bunshin_delivery_outbox
                 SET status = 'delivered', updated_at = ?
                 WHERE delivery_id = ? AND status = 'pending'
                 """,
@@ -116,7 +130,7 @@ class DeliveriesStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT part_key FROM bunshin_v2_delivery_parts
+                SELECT part_key FROM bunshin_delivery_parts
                 WHERE delivery_id = ?
                 ORDER BY part_key
                 """,
@@ -139,7 +153,7 @@ class DeliveriesStore:
         with self.database.write_connection() as connection:
             pending = connection.execute(
                 """
-                SELECT 1 FROM bunshin_v2_delivery_outbox
+                SELECT 1 FROM bunshin_delivery_outbox
                 WHERE delivery_id = ? AND status = 'pending'
                 """,
                 (normalized_delivery_id,),
@@ -148,7 +162,7 @@ class DeliveriesStore:
                 return False
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_delivery_parts(
+                INSERT INTO bunshin_delivery_parts(
                     delivery_id, part_key, delivered_at
                 ) VALUES (?, ?, ?)
                 ON CONFLICT(delivery_id, part_key) DO NOTHING
@@ -164,7 +178,7 @@ class DeliveriesStore:
         with self.database.write_connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE bunshin_v2_delivery_outbox
+                UPDATE bunshin_delivery_outbox
                 SET attempt_count = attempt_count + 1,
                     next_attempt_at = ?, last_error = ?, updated_at = ?
                 WHERE delivery_id = ? AND status = 'pending'
@@ -189,7 +203,7 @@ class DeliveriesStore:
         with self.database.read_connection() as connection:
             row = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_delivery_outbox
+                SELECT * FROM bunshin_delivery_outbox
                 WHERE task_id = ? AND workflow_id = ? AND event_kind = ?
                 ORDER BY created_at DESC, delivery_id DESC
                 LIMIT 1
@@ -207,7 +221,7 @@ class DeliveriesStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_delivery_outbox WHERE delivery_id = ?",
+                "SELECT * FROM bunshin_delivery_outbox WHERE delivery_id = ?",
                 (str(delivery_id),),
             ).fetchone()
         if row is None:

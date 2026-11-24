@@ -15,6 +15,8 @@ from pathlib import Path
 import tempfile
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
+from collections.abc import Callable
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
@@ -92,6 +94,12 @@ def read_utf8_text_exact(file_path: str | Path) -> str:
         return handle.read()
 
 
+# Scoped hosts can commit a single named file while keeping its parent
+# read-only for subprocesses. Read authority and CAS semantics stay in the
+# ordinary file tools. The default uses the local filesystem.
+file_commit_port: ContextVar[Callable[..., None] | None] = ContextVar("file_commit_port", default=None)
+
+
 def atomic_compare_and_swap_utf8(
     file_path: str | Path,
     *,
@@ -110,6 +118,10 @@ def atomic_compare_and_swap_utf8(
     """
 
     resolved = resolve_file_path(file_path)
+    port = file_commit_port.get()
+    if port is not None:
+        port(resolved, expected_content=expected_content, new_content=new_content)
+        return
     key = file_cache_key(resolved)
     lock_bucket = _mutation_lock_bucket(key)
     process_lock = _MUTATION_LOCKS[lock_bucket]

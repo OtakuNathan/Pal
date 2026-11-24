@@ -67,7 +67,7 @@ def bound_verification_policy(workspace: Mapping[str, Any]) -> dict[str, Any]:
     prompt pack supplies this immutable contract, not the submitted payload.
     Older/test workspaces may instead expose the bound reference directly.
     """
-    binding = dict(workspace.get("bunshin_v2") or {})
+    binding = dict(workspace.get("bunshin") or {})
     contract = dict(binding.get("verification_tool_contract") or {})
     policy = contract.get("verification_policy")
     if isinstance(policy, Mapping):

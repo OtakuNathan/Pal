@@ -65,7 +65,7 @@ class ArchitectureSnapshot:
                 workflow_id=revision.workflow_id,
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                 aggregate_id=revision.aggregate_id,
-                actor="bunshin-v2-manager",
+                actor="bunshin-manager",
                 expected_version=current.version,
                 idempotency_key=f"effect:{effect['effect_key']}:quiesced",
                 payload={
@@ -159,7 +159,7 @@ class ArchitectureSnapshot:
                             workflow_id=revision.workflow_id,
                             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                             aggregate_id=revision.aggregate_id,
-                            actor="bunshin-v2-manager",
+                            actor="bunshin-manager",
                             expected_version=current.version,
                             idempotency_key=(
                                 f"architecture-snapshot-rejected:{revision.aggregate_id}:{finding_ref.sha256}"
@@ -219,7 +219,7 @@ class ArchitectureSnapshot:
                     workflow_id=revision.workflow_id,
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                     aggregate_id=revision.aggregate_id,
-                    actor="bunshin-v2-manager",
+                    actor="bunshin-manager",
                     expected_version=current.version,
                     idempotency_key=f"architecture-snapshot:{revision.aggregate_id}:{manifest_ref.sha256}",
                     payload={

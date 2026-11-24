@@ -47,16 +47,16 @@ class BunshinDatabase:
 
     def ensure_task_fts_index_locked(self, connection: sqlite3.Connection) -> None:
         row = connection.execute(
-            "SELECT schema_value FROM bunshin_v2_schema_meta WHERE schema_key = 'task_fts_index_version'"
+            "SELECT schema_value FROM bunshin_schema_meta WHERE schema_key = 'task_fts_index_version'"
         ).fetchone()
         if row is not None and str(row[0]) == _TASK_FTS_INDEX_VERSION:
             return
-        connection.execute("DELETE FROM bunshin_v2_tasks_fts")
-        for task in connection.execute("SELECT * FROM bunshin_v2_task_projection").fetchall():
+        connection.execute("DELETE FROM bunshin_tasks_fts")
+        for task in connection.execute("SELECT * FROM bunshin_task_projection").fetchall():
             self.sync_task_fts_locked(connection, str(task["task_id"]), row=task)
         connection.execute(
             """
-            INSERT INTO bunshin_v2_schema_meta(schema_key, schema_value)
+            INSERT INTO bunshin_schema_meta(schema_key, schema_value)
             VALUES ('task_fts_index_version', ?)
             ON CONFLICT(schema_key) DO UPDATE SET schema_value = excluded.schema_value
             """,
@@ -70,15 +70,15 @@ class BunshinDatabase:
         *,
         row: sqlite3.Row | None = None,
     ) -> None:
-        connection.execute("DELETE FROM bunshin_v2_tasks_fts WHERE task_id = ?", (str(task_id),))
+        connection.execute("DELETE FROM bunshin_tasks_fts WHERE task_id = ?", (str(task_id),))
         task = row or connection.execute(
-            "SELECT * FROM bunshin_v2_task_projection WHERE task_id = ?", (str(task_id),)
+            "SELECT * FROM bunshin_task_projection WHERE task_id = ?", (str(task_id),)
         ).fetchone()
         if task is None:
             return
         connection.execute(
             """
-            INSERT INTO bunshin_v2_tasks_fts(task_id, title, objective, workspace)
+            INSERT INTO bunshin_tasks_fts(task_id, title, objective, workspace)
             VALUES (?, ?, ?, ?)
             """,
             (

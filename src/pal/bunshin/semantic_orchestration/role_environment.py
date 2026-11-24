@@ -4,7 +4,6 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.skill_context import normalized_skill_injection
-from pal.bunshin.harnesses import PAL_HARNESS_ID, BunshinHarnessRegistryGeneration, BunshinHarnessSpec
 from pal.bunshin.sandbox import with_bunshin_sandbox_metadata
 from pal.bunshin.adapters import prepare_role_workspace
 from pal.bunshin.contracts import PermanentEffectError, SubmissionInvariantError
@@ -277,28 +276,3 @@ def _role_submission_kind(activation: RoleActivation, *, contract_authoring: boo
     if activation.role == OrchestrationRole.VERIFIER:
         return "verification"
     raise ValueError(f"unsupported role activation: {activation.to_dict()}")
-
-
-def _select_attempt_harness(
-    generation: BunshinHarnessRegistryGeneration,
-    *,
-    role: str,
-    prior_attempts: tuple[Mapping[str, Any], ...] = (),
-) -> BunshinHarnessSpec:
-    preferred = generation.select(role)
-    if preferred.harness_id == PAL_HARNESS_ID:
-        return preferred
-    failed_preferred = [
-        attempt
-        for attempt in prior_attempts
-        if str(attempt.get("harness_id") or "") == preferred.harness_id
-        and str(attempt.get("status") or "")
-        in {"failed", "interrupted", "cancelled", "lost"}
-    ]
-    if len(failed_preferred) < 2:
-        return preferred
-    return next(
-        spec
-        for spec in generation.specs
-        if spec.harness_id == PAL_HARNESS_ID and spec.supports(role)
-    )

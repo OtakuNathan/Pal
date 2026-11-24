@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, SOFTWARE_GIT_ADAPTER, ArtifactBundleAdapter, artifact_tree_fingerprint
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateType, LeaseConflict, StaleFencingToken, SubmissionInvariantError
+from pal.bunshin.execution_values import workspace_content_fingerprint
 from pal.bunshin.candidate_snapshots import CandidateSnapshotService
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
@@ -63,6 +64,13 @@ class ImplementationSnapshot:
                 manager_snapshot_lock=lock_path,
             )
             fingerprint = self.workflow_facts.workspace_fingerprint(node, workspace)
+            producer = node.payload.get("producer_report_ref")
+            if producer and self.workflow_facts.execution_adapter(node) == SOFTWARE_GIT_ADAPTER:
+                precheck = self.artifacts.read_json(producer).get("repair_precheck") or {}
+                if precheck.get("status") == "passed" and (
+                    precheck.get("workspace_fingerprint") != workspace_content_fingerprint(workspace, include_symlinks=True)
+                ):
+                    raise ValueError("repair Candidate changed after its verifier suite passed")
         except BaseException:
             self.workspace_locks.release(node.aggregate_id)
             raise
@@ -73,7 +81,7 @@ class ImplementationSnapshot:
                 workflow_id=node.workflow_id,
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id=node.aggregate_id,
-                actor="bunshin-v2-manager",
+                actor="bunshin-manager",
                 expected_version=current.version,
                 idempotency_key=f"effect:{effect['effect_key']}:quiesced",
                 payload={
@@ -174,7 +182,7 @@ class ImplementationSnapshot:
                         workflow_id=node.workflow_id,
                         aggregate_type=AggregateType.DAG_NODE_RUN,
                         aggregate_id=node.aggregate_id,
-                        actor="bunshin-v2-manager",
+                        actor="bunshin-manager",
                         expected_version=current.version,
                         idempotency_key=f"candidate:{candidate_ref.sha256}",
                         payload={

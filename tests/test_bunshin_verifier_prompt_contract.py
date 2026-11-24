@@ -101,7 +101,7 @@ async def _bound_pack(root, *, sink, legacy_playbook=False):
 
 
 def _render(pack, root):
-    contract = pack.metadata["bunshin_v2"]["verification_tool_contract"]
+    contract = pack.metadata["bunshin"]["verification_tool_contract"]
     aliases = [
         spec["alias"] for capability, spec in VERIFICATION_BUILDER_TOOL_SPECS.items()
         if capability in contract["allowed_capabilities"] and capability in pack.allowed_capabilities
@@ -174,13 +174,13 @@ def test_current_candidate_reuses_analysis_and_cases_without_second_attack_phase
     ):
         assert rule in developer, rule
     assert "ordinary file, shell, and LSP tools" in user
-    steps = pack.metadata["bunshin_v2"]["role_protocol"]["playbook"]["steps"]
+    steps = pack.metadata["bunshin"]["role_protocol"]["playbook"]["steps"]
     assert [step["key"] for step in steps] == ["regress", "changed_boundary", "verdict"]
     assert "independently challenge material boundaries" in steps[1]["instruction"]
     assert "Existing independent cases may cover multiple risks" in steps[1]["done_when"]
     assert "mark this checklist item complete before submission" in steps[2]["done_when"]
 
-    workspace = {**pack.workspace, "bunshin_v2": pack.metadata["bunshin_v2"]}
+    workspace = {**pack.workspace, "bunshin": pack.metadata["bunshin"]}
     reordered = update_checklist_tool_result(new_tool_call(
         name="op_bunshin_update_checklist", call_id="reorder-risk-before-history",
         args={"plan": [
@@ -201,13 +201,13 @@ def test_sink_retains_every_system_scenario_and_real_entrypoint_gate(tmp_path):
     assert "invoke the real CLI" in developer
     assert "start the real service and use its client" in developer
     assert "reference:system_delivery_view" in user
-    seed = pack.metadata["bunshin_v2"]["work_item_seed"]
+    seed = pack.metadata["bunshin"]["work_item_seed"]
     assert [item["summary"] for item in seed] == [
         "regress", "changed boundary", "verdict",
         "verify system scenario: leading TAB rejected", "verify system scenario: valid input",
     ]
     assert all(item["required"] for item in seed)
-    workspace = {**pack.workspace, "bunshin_v2": pack.metadata["bunshin_v2"]}
+    workspace = {**pack.workspace, "bunshin": pack.metadata["bunshin"]}
     omitted_scenario = update_checklist_tool_result(new_tool_call(
         name="op_bunshin_update_checklist", call_id="omit-sink-scenario",
         args={"plan": [{"step": item["summary"], "status": "completed"} for item in seed[:-1]]},
@@ -237,8 +237,8 @@ def test_distinct_brief_acceptance_and_non_verifier_invocations_are_preserved(tm
     assert "Additional bound acceptance." in developer
     assert pack.acceptance_criteria[0] in user
     value["metadata"]["requirements_brief"].pop("acceptance_criteria")
-    value["metadata"]["bunshin_v2"]["role"] = "implementation"
-    value["metadata"]["bunshin_v2"]["mode"] = "produce"
+    value["metadata"]["bunshin"]["role"] = "implementation"
+    value["metadata"]["bunshin"]["mode"] = "produce"
     developer, user, _ = _render(BunshinInvocationPack.from_dict(value), tmp_path)
     assert pack.instruction in developer and pack.instruction in user
 
@@ -248,11 +248,11 @@ def test_old_pinned_playbook_keeps_its_required_phase(tmp_path):
     developer, user, _ = _render(pack, tmp_path)
     assert "Preserve every phase in the bound playbook" in user
     assert "do not add a separate adversarial phase" not in user
-    seed = pack.metadata["bunshin_v2"]["work_item_seed"]
+    seed = pack.metadata["bunshin"]["work_item_seed"]
     assert [item["summary"] for item in seed] == [
         "regress", "changed boundary", "smash green", "verdict",
     ]
-    workspace = {**pack.workspace, "bunshin_v2": pack.metadata["bunshin_v2"]}
+    workspace = {**pack.workspace, "bunshin": pack.metadata["bunshin"]}
     omitted_phase = update_checklist_tool_result(new_tool_call(
         name="op_bunshin_update_checklist", call_id="omit-pinned-phase",
         args={"plan": [

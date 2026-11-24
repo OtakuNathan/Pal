@@ -22,7 +22,7 @@ from tests.test_bunshin_completion_resume import make_bundle, make_runner
 
 @pytest.fixture
 def role():
-    fixture = protocol_fixture.BunshinV2RoleProtocolTests()
+    fixture = protocol_fixture.BunshinRoleProtocolTests()
     fixture.setUp()
     return fixture
 
@@ -136,7 +136,7 @@ def test_cancellation_before_first_checkpoint_keeps_fresh_admission(role):
 @pytest.mark.parametrize("state", ["active", "suspended"])
 def test_legacy_established_session_missing_checkpoint_fails_closed(role, state):
     with role.repository.database.write_connection() as connection:
-        connection.execute("UPDATE bunshin_v2_role_sessions SET status = ?", (state,))
+        connection.execute("UPDATE bunshin_role_sessions SET status = ?", (state,))
     restart(role)
     with pytest.raises(AgentSessionCheckpointError, match="requires.*missing"):
         prepare(role)
@@ -359,5 +359,210 @@ def test_required_resume_restores_prior_fence_without_initial_ack(role):
             assert json.loads(restore.read_text())["producer_fencing_token"] == 1
         finally:
             bundle.execution_runtime.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.fixture
+def workflow_with_delivery(role):
+    service = BunshinWorkflowService(role.runtime_root)
+    service.create_task({
+        "task_id": "task-router", "title": "Router", "objective": "Implement router",
+        "profile": "software_engineering.v2_coder", "actor": "test",
+        "workspace": {"kind": "new_project", "project_name": "router"},
+    })
+    repository = role.repository
+    repository.delivery_bindings.bind_task_delivery(task_id="task-router", binding={
+        "channel_kind": "socket", "channel_id": "test", "reply_target": {"session_id": "first"},
+    })
+    with repository.database.write_connection() as db:
+        db.execute("UPDATE bunshin_aggregate_snapshots SET payload_json = json_set(payload_json,"
+                   "'$.task_id','task-router','$.owner','test') WHERE aggregate_type='workflow'")
+    return service
+
+
+def test_parked_approval_survives_manager_replacement_and_has_one_consumer(role, workflow_with_delivery):
+    from pal.bunshin.manager import BunshinManager
+
+    service = workflow_with_delivery
+    repository = role.repository
+    assignment, attempt, fence, token = launch(role)
+    write_initial(role, attempt, fence)
+    gateway = RoleAssignmentGateway(service)
+    wait_id = "approval_operation"
+    command = {"access_token": token, "kind": "approval", "wait_id": wait_id, "sequence": 1,
+               "request": {"title": "Approve router edit"}}
+    delivery = gateway.call("interaction_park", command)["delivery"]
+    assert gateway.call("interaction_park", command)["delivery"]["delivery_id"] == delivery["delivery_id"]
+    repository.deliveries.acknowledge_task_delivery(delivery["delivery_id"])
+    key = assignment["assignment_id"]
+    repository.role_retries.queue_role_attempt_retry(
+        assignment_id=key, attempt_id_value=attempt["attempt_id"],
+        error_kind="waiting_for_user", error_text=wait_id,
+    )
+    repository.leases.release_lease(f"assignment:{key}", attempt["attempt_id"], fence)
+    from pal.bunshin.contracts import DeferredEffectError
+    with pytest.raises(DeferredEffectError):
+        repository.role_assignments.claim_role_assignment(key)
+    manager = BunshinManager(role.runtime_root)
+    state = manager._task_status("task-router", workflow_id="workflow-router")
+    assert state["workflow"]["pending_approval_count"] == 1
+    assert state["task"]["workflow_count"] == 1
+    result = asyncio.run(manager._call_method("rebind_task_delivery", {
+        "task_id": "task-router", "binding": {"channel_kind": "socket", "channel_id": "other",
+                                             "reply_target": {"session_id": "second"}},
+    }))
+    assert result["changed"]
+    pending = repository.deliveries.list_pending_task_deliveries()
+    assert [item["dedup_key"] for item in pending] == [f"rebind-replay:task-router:2:{delivery['delivery_id']}"]
+    decision = {"approval_id": wait_id, "decision": "accept"}
+    asyncio.run(manager.send_decision(decision))
+    asyncio.run(manager.send_decision(decision))
+    with pytest.raises(ValueError, match="different answer"):
+        asyncio.run(manager.send_decision({**decision, "decision": "reject"}))
+    next_attempt, next_fence = role.start_attempt(key)
+    next_key = next_attempt["attempt_id"]
+    next_token = repository.role_access.issue_role_attempt_access_token(
+        assignment_id=key, attempt_id_value=next_key, fencing_token=next_fence,
+    )
+    resumed_gateway = RoleAssignmentGateway(manager.workflow_service)
+    with pytest.raises(StaleFencingToken):
+        resumed_gateway.call("interaction_resume", {"access_token": token, "wait_id": wait_id})
+    args = {"access_token": next_token, "wait_id": wait_id}
+    assert resumed_gateway.call("interaction_resume", args)["answer"]["decision"] == decision
+    with pytest.raises(ValueError):
+        resumed_gateway.call("interaction_resume", args)
+    _, output = prepare(role, next_key)
+    output.write_text(json.dumps(checkpoint(role, next_fence, sequence=2)))
+    resumed_gateway.call("interaction_consumed", {**args, "sequence": 2})
+    assert repository.interaction_waits.get(wait_id)["state"] == "consumed"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_clarification_during_workflow_control(role, workflow_with_delivery, cancel):
+    from pal.bunshin.manager import BunshinManager
+
+    service = workflow_with_delivery
+    _, attempt, fence, token = launch(role)
+    write_initial(role, attempt, fence)
+    gateway = RoleAssignmentGateway(service)
+    wait_id = "clarification_router"
+    gateway.call("interaction_park", {
+        "access_token": token, "kind": "clarification", "wait_id": wait_id, "sequence": 1,
+        "request": {"questions": [{"id": "scope", "question": "Which routes?", "options": []}]},
+    })
+    manager = BunshinManager(role.runtime_root)
+    assert manager._task_status("task-router", workflow_id="workflow-router")["workflow"]["pending_question"]["question"] == "Which routes?"
+    service.control_workflow(
+        workflow_id="workflow-router", actor="test", source_channel="socket",
+        command="cancel" if cancel else "pause",
+    )
+    role.repository.role_cancellation.cancel_role_assignments(
+        workflow_id="workflow-router", aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id="node-router",
+        reason="workflow control", preserve_interactions=not cancel,
+    )
+    answer = {"clarification_id": wait_id, "answers": [{"question_id": "scope", "answer": "Public"}]}
+    if cancel:
+        with pytest.raises(ValueError, match="superseded"):
+            asyncio.run(manager.send_clarification(answer))
+        assert role.repository.interaction_waits.get(wait_id)["state"] == "cancelled"
+    else:
+        asyncio.run(manager.answer_workflow_question({"workflow_id": "workflow-router", "answer": "Public"}))
+        asyncio.run(manager.send_clarification(answer))
+        deliveries = role.repository.deliveries.list_pending_task_deliveries()
+        assert sum(row["event_kind"] == "clarification_resolved" for row in deliveries) == 1
+        assert role.repository.interaction_waits.get(wait_id)["state"] == "answered"
+
+
+async def _interactive_worker(options):
+    """Subprocess fixture using the built-in tool loop and authenticated gateway."""
+    from contextlib import ExitStack
+    from pathlib import Path
+    from pal.bunshin.interaction_suspend import InteractionParked
+    from pal.llm import generation_result_from_values
+    from pal.shared.tool_protocol import ToolCallIR, ToolExecutionResult
+
+    root = Path(options["root"])
+    bundle = make_bundle()
+    runner = make_runner(root, output=Path(options["output"]), restore=options["restore"], token=options["fence"])
+    runner.pack.metadata["agent_session"].update({
+        "session_id": "session-router", "workflow_id": "workflow-router",
+        "stage_key": "module:router:implementation", "response_key": options["assignment"],
+        "durable_tool_interactions": True, "checkpoint_initialization_required": True,
+    })
+    calls = [ToolCallIR(name="op_read_file", call_id=key, args={"path": key}) for key in ("first", "approval", "last")]
+
+    async def perform(_state, _continuation, call, **_kwargs):
+        if call.call_id == "approval":
+            assert await runner.components.control.request_approval(call.name, call) == "accept"
+        with (root / "observed-calls").open("a") as observed:
+            observed.write(call.call_id + "\n")
+        return ToolExecutionResult(name=call.name, call_id=call.call_id, ok=True, llm_text="ok")
+
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(runner.components.agent_runtime.tool_observation,
+                "execute_bunshin_tool_with_observation", side_effect=perform))
+            if not options["restore"]:
+                stack.enter_context(patch.object(bundle.llm_runtime, "_generate_response",
+                    return_value=generation_result_from_values(tool_calls=calls, finish_reason="tool_calls")))
+                with pytest.raises(InteractionParked):
+                    await runner.components.agent_session.run_agent_loop(bundle)
+            else:
+                await runner.components.agent_session.run_agent_loop(bundle)
+    finally:
+        bundle.execution_runtime.shutdown()
+
+
+def test_fresh_worker_process_resumes_through_manager_socket(role, workflow_with_delivery):
+    import os
+    import sys
+    from pal.bunshin.manager import BunshinManager
+    from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV, start_role_gateway_server, cleanup_role_gateway_endpoint
+
+    async def worker(manager, assignment, attempt, fence, token):
+        restore, output = prepare(role, attempt["attempt_id"])
+        options = {"root": str(role.runtime_root), "restore": str(restore) if restore else None,
+                   "output": str(output), "assignment": assignment, "fence": fence}
+        server, _ = await start_role_gateway_server(role.runtime_root, manager._handle_role_client)
+        try:
+            async with server:
+                child = await asyncio.create_subprocess_exec(
+                    sys.executable, "-c",
+                    "import asyncio,json,sys; from tests.test_bunshin_checkpoint_lifecycle import _interactive_worker; "
+                    "asyncio.run(_interactive_worker(json.load(sys.stdin)))",
+                    stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    env={**os.environ, ROLE_GATEWAY_TOKEN_ENV: token},
+                )
+                try:
+                    _, stderr = await asyncio.wait_for(child.communicate(json.dumps(options).encode()), timeout=90)
+                    assert child.returncode == 0, stderr.decode(errors="replace")
+                finally:
+                    if child.returncode is None:
+                        child.kill()
+                        await child.wait()
+        finally:
+            await cleanup_role_gateway_endpoint(role.runtime_root)
+
+    async def scenario():
+        assignment, attempt, fence, token = launch(role)
+        key = assignment["assignment_id"]
+        await worker(BunshinManager(role.runtime_root), key, attempt, fence, token)
+        observed = role.runtime_root / "observed-calls"
+        assert observed.read_text().splitlines() == ["first"]
+        row, = role.repository.interaction_waits.pending(assignment_id=key)
+        role.repository.role_retries.queue_role_attempt_retry(
+            assignment_id=key, attempt_id_value=attempt["attempt_id"], error_kind="waiting_for_user", error_text=row["wait_id"],
+        )
+        role.repository.leases.release_lease(f"assignment:{key}", attempt["attempt_id"], fence)
+        replacement = BunshinManager(role.runtime_root)
+        await replacement.send_decision({"approval_id": row["wait_id"], "decision": "accept"})
+        successor, next_fence = role.start_attempt(key)
+        next_token = role.repository.role_access.issue_role_attempt_access_token(
+            assignment_id=key, attempt_id_value=successor["attempt_id"], fencing_token=next_fence,
+        )
+        await worker(replacement, key, successor, next_fence, next_token)
+        assert observed.read_text().splitlines() == ["first", "approval", "last"]
+        assert role.repository.interaction_waits.get(row["wait_id"])["state"] == "consumed"
 
     asyncio.run(scenario())

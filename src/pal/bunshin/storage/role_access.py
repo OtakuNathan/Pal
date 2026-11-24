@@ -50,7 +50,7 @@ class RoleAccessStore:
             )
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_attempts
+                UPDATE bunshin_role_attempts
                 SET access_token_hash = ?, updated_at = ?
                 WHERE attempt_id = ? AND status = ?
                 """,
@@ -79,8 +79,8 @@ class RoleAccessStore:
                     t.lease_resource_key AS authenticated_lease_resource_key,
                     t.fencing_token AS authenticated_fencing_token,
                     t.status AS authenticated_attempt_status
-                FROM bunshin_v2_role_attempts AS t
-                JOIN bunshin_v2_role_assignments AS a
+                FROM bunshin_role_attempts AS t
+                JOIN bunshin_role_assignments AS a
                   ON a.assignment_id = t.assignment_id
                 WHERE t.access_token_hash = ?
                 """,

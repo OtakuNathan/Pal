@@ -7,7 +7,7 @@ from typing import Any
 from pal.lsp.ipc import LspManagerClient
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.workspace_resources import workspace_process_holders
-from pal.bunshin.orchestration import reconcile_control_requests
+from pal.bunshin.workflow_control import reconcile_control_requests
 from pal.bunshin.replan import architecture_revision_finding_value
 from pal.bunshin.service import BunshinWorkflowService
 
@@ -65,7 +65,7 @@ class BunshinRecovery:
                             workflow_id=snapshot.workflow_id,
                             aggregate_type=aggregate_type,
                             aggregate_id=aggregate_id,
-                            actor="bunshin-v2-recovery",
+                            actor="bunshin-recovery",
                             expected_version=snapshot.version,
                             idempotency_key=f"recovery:{lease['resource_key']}:{lease['fencing_token']}",
                             payload={
@@ -88,7 +88,7 @@ class BunshinRecovery:
                 item["aggregate_id"]
                 for item in self.service.triage_orphaned_work_aggregates(
                     workflow_id=workflow_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                 )
             )
         rebuilt = self.repository.projections.rebuild_workflow_projections()
@@ -107,7 +107,7 @@ class BunshinRecovery:
                     workflow_id=workflow_id,
                     aggregate_type=aggregate_type,
                     aggregate_id=aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=snapshot.version,
                     idempotency_key=f"orphan-triage:{aggregate_type.value}:{aggregate_id}:{snapshot.version}",
                     payload={"blocker": {"kind": "orphaned_workflow", "reason": "no live lease, pending outbox effect, or explicit wait"}},
@@ -168,7 +168,7 @@ class BunshinRecovery:
                                 workflow_id=workflow_id,
                                 aggregate_type=AggregateType.EXECUTION_EPOCH,
                                 aggregate_id=epoch.aggregate_id,
-                                actor="bunshin-v2-recovery",
+                                actor="bunshin-recovery",
                                 expected_version=epoch.version,
                                 idempotency_key=f"duplicate-accepted-replan:{epoch.aggregate_id}:{epoch.version}",
                                 payload={
@@ -197,7 +197,7 @@ class BunshinRecovery:
                             workflow_id=workflow_id,
                             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                             aggregate_id=revision.aggregate_id,
-                            actor="bunshin-v2-recovery",
+                            actor="bunshin-recovery",
                             expected_version=revision.version,
                             idempotency_key=f"recover-duplicate-replan:{revision.aggregate_id}:{revision.version}",
                         )
@@ -211,7 +211,7 @@ class BunshinRecovery:
                         workflow_id=workflow_id,
                         aggregate_type=AggregateType.EXECUTION_EPOCH,
                         aggregate_id=epoch.aggregate_id,
-                        actor="bunshin-v2-recovery",
+                        actor="bunshin-recovery",
                         expected_version=epoch.version,
                         idempotency_key=f"recover-duplicate-replan:{epoch.aggregate_id}:{epoch.version}",
                         payload={"finding_entries": finding_entries},
@@ -235,7 +235,7 @@ class BunshinRecovery:
                         workflow_id=workflow_id,
                         aggregate_type=AggregateType.EXECUTION_EPOCH,
                         aggregate_id=snapshot.aggregate_id,
-                        actor="bunshin-v2-recovery",
+                        actor="bunshin-recovery",
                         expected_version=snapshot.version,
                         idempotency_key=f"recover-replan-collection:{snapshot.aggregate_id}:{snapshot.version}",
                     )

@@ -62,7 +62,7 @@ def review_submit_tool_result(
         ledger = assert_work_items_complete(workspace)
         findings = findings_from_work_items(workspace)
         blocking, advisories = partition_findings(findings)
-        binding = dict(workspace.get("bunshin_v2") or {})
+        binding = dict(workspace.get("bunshin") or {})
         role = str(binding.get("role") or "")
         mode = str(binding.get("mode") or "")
         if role != "reviewer":

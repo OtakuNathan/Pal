@@ -18,6 +18,7 @@ class BunshinUserInteractionPort:
     invocation_id: str
     workflow_id: str = ""
     auto_accept_approvals: bool = False
+    exchange: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
 
     def should_request_approval(self, capability_name: str, approval_policy: dict[str, Any]) -> bool:
         if self.auto_accept_approvals:
@@ -40,24 +41,23 @@ class BunshinUserInteractionPort:
         approval_id = f"appr_{uuid4().hex[:16]}"
         event_metadata = {"approval_kind": str(approval_kind or "approval")}
         event_metadata.update(dict(metadata or {}))
-        await self.emit_event(
-            "approval_requested",
-            {
-                "approval_id": approval_id,
-                "workflow_id": self.workflow_id,
-                "title": title or "Bunshin high-risk operation",
-                "requested_action": capability_name,
-                "risk": risk,
-                "impact": impact or "Bunshin requested permission before running a high-risk operation.",
-                "target": capability_name,
-                "args_summary": dict(args_summary),
-                "metadata": event_metadata,
-            },
-        )
-        # Approval belongs to the durable logical role session. Wall-clock
-        # expiry would terminate a live coroutine merely because the user
-        # answered later; cancellation/supersession is handled by Manager.
-        response = await self.read_response(None)
+        request = {
+            "approval_id": approval_id,
+            "workflow_id": self.workflow_id,
+            "title": title or "Bunshin high-risk operation",
+            "requested_action": capability_name,
+            "risk": risk,
+            "impact": impact or "Bunshin requested permission before running a high-risk operation.",
+            "target": capability_name,
+            "args_summary": dict(args_summary),
+            "metadata": event_metadata,
+        }
+        if self.exchange:
+            response = await self.exchange("approval", request)
+            approval_id = str(response["decision"]["approval_id"])
+        else:
+            await self.emit_event("approval_requested", request)
+            response = await self.read_response(None)
         decision = str(((response or {}).get("decision") or {}).get("decision") or "").strip().lower()
         if decision == "accept_all":
             self.auto_accept_approvals = True
@@ -88,8 +88,12 @@ class BunshinUserInteractionPort:
                 },
             )
             return {}
-        await self.emit_event("clarification_requested", payload)
-        response = await self.read_response(None)
+        if self.exchange:
+            response = await self.exchange("clarification", payload)
+            clarification_id = str(response["clarification"]["clarification_id"])
+        else:
+            await self.emit_event("clarification_requested", payload)
+            response = await self.read_response(None)
         if not isinstance(response, dict):
             return {}
         clarification = response.get("clarification") if isinstance(response.get("clarification"), dict) else response

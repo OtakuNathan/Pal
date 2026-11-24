@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.storage.serialization import _LEGACY_ACTION_ACTORS
 from pal.bunshin.storage.serialization import _action_request_payload
 from pal.bunshin.storage.serialization import _encode_dispatch_result
 from pal.bunshin.storage.serialization import _decode_dispatch_result
@@ -17,6 +18,7 @@ from pal.bunshin.storage.artifacts import ArtifactsStore
 from pal.bunshin.storage.connection_contracts import DatabasePort
 from pal.bunshin.storage.human_decisions import HumanDecisionsStore
 from pal.bunshin.storage.projections import ProjectionsStore
+from pal.bunshin.role_protocol import RoleSettlement
 from pal.bunshin.storage.role_submissions import RoleSubmissionsStore
 from pal.bunshin.storage.snapshots import SnapshotsStore
 
@@ -48,27 +50,33 @@ class TransitionsStore:
             raise ValueError(
                 "role submission settlement requires assignment id and payload hash"
             )
+        settlement = RoleSettlement(
+            role_assignment_id=role_assignment_id, role_submission_payload_hash=role_submission_payload_hash,
+        ) if role_assignment_id else None
         if _connection is None:
             self.database.ensure_schema()
-        request_hash = _stable_hash(_action_request_payload(action))
+        request = _action_request_payload(action)
+        request_hash = _stable_hash(request)
         transaction = self.database.write_connection() if _connection is None else nullcontext(_connection)
         with transaction as connection:
             duplicate = connection.execute(
                 """
                 SELECT request_hash, result_json
-                FROM bunshin_v2_action_dedup
+                FROM bunshin_action_dedup
                 WHERE aggregate_type = ? AND aggregate_id = ? AND idempotency_key = ?
                 """,
                 (action.aggregate_type.value, action.aggregate_id, action.dedup_key),
             ).fetchone()
             if duplicate is not None:
                 if str(duplicate["request_hash"]) != request_hash:
-                    raise ValueError("idempotency key was reused with a different action request")
-                if role_assignment_id:
+                    legacy_actor = action.actor.replace("bunshin-", "bunshin-v2-", 1)
+                    if (action.actor not in _LEGACY_ACTION_ACTORS or duplicate["request_hash"]
+                            != _stable_hash({**request, "actor": legacy_actor})):
+                        raise ValueError("idempotency key was reused with a different action request")
+                if settlement is not None:
                     self.role_submissions.settle_role_assignment_locked(
                         connection,
-                        assignment_id=str(role_assignment_id),
-                        submission_payload_hash=str(role_submission_payload_hash),
+                        settlement=settlement,
                         workflow_id=action.workflow_id,
                         aggregate_type=action.aggregate_type.value,
                         aggregate_id=action.aggregate_id,
@@ -109,7 +117,7 @@ class TransitionsStore:
                 effect_request_hash = _stable_hash({"effect_type": effect.effect_type, "payload": payload})
                 connection.execute(
                     """
-                    INSERT INTO bunshin_v2_outbox(
+                    INSERT INTO bunshin_outbox(
                         effect_id, effect_key, workflow_id, aggregate_type, aggregate_id,
                         event_id, effect_index, effect_type, request_hash, payload_json,
                         status, attempt_count, max_attempts, next_retry_at, created_at, updated_at
@@ -142,7 +150,7 @@ class TransitionsStore:
             encoded_result = _encode_dispatch_result(result)
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_action_dedup(
+                INSERT INTO bunshin_action_dedup(
                     aggregate_type, aggregate_id, idempotency_key, action_id,
                     request_hash, result_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -157,11 +165,10 @@ class TransitionsStore:
                     action.created_at,
                 ),
             )
-            if role_assignment_id:
+            if settlement is not None:
                 self.role_submissions.settle_role_assignment_locked(
                     connection,
-                    assignment_id=str(role_assignment_id),
-                    submission_payload_hash=str(role_submission_payload_hash),
+                    settlement=settlement,
                     workflow_id=action.workflow_id,
                     aggregate_type=action.aggregate_type.value,
                     aggregate_id=action.aggregate_id,
@@ -187,13 +194,13 @@ class TransitionsStore:
         with self.database.write_connection() as connection:
             result = self.dispatch(action, _connection=connection)
             existing = connection.execute(
-                "SELECT * FROM bunshin_v2_task_delivery_bindings WHERE task_id = ?",
+                "SELECT * FROM bunshin_task_delivery_bindings WHERE task_id = ?",
                 (action.aggregate_id,),
             ).fetchone()
             if existing is None:
                 connection.execute(
                     """
-                    INSERT INTO bunshin_v2_task_delivery_bindings(
+                    INSERT INTO bunshin_task_delivery_bindings(
                         task_id, origin_binding_json, current_binding_json,
                         binding_version, created_at, updated_at
                     ) VALUES (?, ?, ?, 1, ?, ?)
@@ -232,7 +239,7 @@ class TransitionsStore:
             )
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_domain_events(
+                INSERT INTO bunshin_domain_events(
                     event_id, workflow_id, aggregate_type, aggregate_id, aggregate_version,
                     event_type, payload_json, action_id, correlation_id, causation_id, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

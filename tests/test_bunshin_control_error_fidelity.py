@@ -281,9 +281,10 @@ def test_cancelled_workflow_retains_failed_effect_evidence(monkeypatch):
     outbox = BunshinOutboxProcessor(service,
         semantic_effects=SimpleNamespace(execute_semantic_effect=AsyncMock(side_effect=failure())))
     monkeypatch.setattr(outbox, "_effect_snapshot", lambda effect: SimpleNamespace(state="CANCELLED"))
-    for name in ("_reconcile_control_requests", "_reconcile_replan_collections", "_publish_terminal_workflow_if_any"):
-        monkeypatch.setattr(outbox, name, MagicMock())
-    monkeypatch.setattr(outbox, "_heartbeat", AsyncMock())
+    monkeypatch.setattr(outbox.replanning, "reconcile_replan_collections", MagicMock())
+    monkeypatch.setattr(outbox.publication, "publish_terminal", MagicMock())
+    monkeypatch.setattr(outbox, "_reconcile_control_requests", MagicMock())
+    monkeypatch.setattr(outbox.dispatcher, "_heartbeat", AsyncMock())
     assert asyncio.run(outbox._process_effect({"effect_id": "e", "effect_type": "test_role", "workflow_id": "w"})) == "completed"
     stored = service.artifacts.put_json.call_args.args[0]
     assert stored["status"] == "superseded_after_failure"

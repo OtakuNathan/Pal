@@ -220,9 +220,6 @@ class StandaloneReview:
                 idempotency_key=f"standalone-report:{report_ref.sha256}",
                 payload={"verification_artifact_ref": report_ref.to_dict()},
             ),
-            **self.assignment_identity.role_submission_settlement(
-                effect,
-                assignment_id=self.assignment_identity.terminal_role_assignment_id(terminal),
-            ),
+            **self.assignment_identity.settlement_from_terminal(terminal),
         )
         return report_ref

@@ -4,7 +4,7 @@ from pal.bunshin.semantic_orchestration.role_inputs import _durable_workspace_pr
 from pal.bunshin.semantic_orchestration.role_environment import _prepare_role_workspace_before_environment
 from dataclasses import dataclass
 from pathlib import Path
-from pal.bunshin.harnesses import BunshinHarnessRegistry
+from pal.bunshin.harnesses import builtin_harness_generation
 from pal.bunshin.adapters import prepare_workspace_environment
 from pal.bunshin.lsp_prewarm import prewarm_workspace_lsp
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
@@ -20,7 +20,6 @@ from pal.bunshin.semantic_orchestration.attempt_models import PreparedRoleWorksp
 class WorkspacePreparation:
     artifacts: ContentAddressedArtifactStore
     attempt_inputs: AttemptInputs
-    harness_registry: BunshinHarnessRegistry
     repository: BunshinRepository
     requests: WorkflowRequests
     runtime_root: Path
@@ -55,7 +54,7 @@ class WorkspacePreparation:
         ).strip()
         role = activation.role.value
         mode = activation.mode.value
-        harness_generation = self.harness_registry.snapshot()
+        harness_generation = builtin_harness_generation()
         preferred_harness = harness_generation.select(role)
         if activation.role == OrchestrationRole.IMPLEMENTATION:
             workspace["manager_owned_submission_paths"] = [
@@ -72,7 +71,7 @@ class WorkspacePreparation:
             fencing_token=fencing_token,
             prepare_workspace=prepare_workspace,
         )
-        if not bool(workspace.get("v2_role_workspace")):
+        if not bool(workspace.get("role_workspace_prepared")):
             invocation_dir = invocation_root(self.runtime_root) / invocation_id
             attempt_dir = invocation_dir / "attempts" / f"fence-{fencing_token}"
             workspace.update(

@@ -68,7 +68,7 @@ class TelegramInteractionPresentationTests(unittest.IsolatedAsyncioTestCase):
         self.directory.cleanup()
 
     def review(self, **changes):
-        spec = InteractionMessageSpec("review", "bunshin_v2_architecture_review",
+        spec = InteractionMessageSpec("review", "bunshin_architecture_review",
             text="# Architecture review\n\n" + "Long exact content 中文\n" * 700,
             buttons=((InteractionButtonSpec("Accept", "review.accept", {"decision": "accept"}),
                       InteractionButtonSpec("Reject", "review.reject", {"decision": "reject"})),))

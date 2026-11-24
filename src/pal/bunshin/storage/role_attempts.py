@@ -74,7 +74,7 @@ class RoleAttemptsStore:
                 # Keep the immutable ownership witness reachable through the
                 # exact prompt artifact used by this attempt.
                 connection.execute(
-                    "INSERT OR IGNORE INTO bunshin_v2_artifact_refs(parent_sha256, child_sha256, relation, created_at) "
+                    "INSERT OR IGNORE INTO bunshin_artifact_refs(parent_sha256, child_sha256, relation, created_at) "
                     "VALUES (?, ?, ?, ?)",
                     (str(prompt_pack_ref["sha256"]), str(ownership["artifact_ref"]["sha256"]),
                      "role_attempt_business_lease", utc_now()),
@@ -82,7 +82,7 @@ class RoleAttemptsStore:
             now = utc_now()
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_attempts
+                UPDATE bunshin_role_attempts
                 SET lease_resource_key = ?, fencing_token = ?, status = ?,
                     prompt_pack_ref_json = ?, updated_at = ?
                 WHERE attempt_id = ?
@@ -98,7 +98,7 @@ class RoleAttemptsStore:
             )
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_assignments
+                UPDATE bunshin_role_assignments
                 SET state = ?, updated_at = ? WHERE assignment_id = ?
                 """,
                 (
@@ -114,7 +114,7 @@ class RoleAttemptsStore:
                 now=now,
             )
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_attempts WHERE attempt_id = ?",
+                "SELECT * FROM bunshin_role_attempts WHERE attempt_id = ?",
                 (str(attempt_id_value),),
             ).fetchone()
             return _decode_role_attempt(row)
@@ -125,6 +125,8 @@ class RoleAttemptsStore:
         assignment_id: str,
         attempt_id_value: str,
         fencing_token: int,
+        allow_submitted: bool = False,
+        expected_sequence: int | None = None,
     ) -> dict[str, Any]:
         """Acknowledge only this authenticated live attempt's first safe point."""
         self.database.ensure_schema()
@@ -136,7 +138,10 @@ class RoleAttemptsStore:
                 connection, str(attempt["lease_resource_key"]),
                 str(attempt_id_value), int(fencing_token),
             )
-            if str(attempt["status"]) != RoleAttemptState.RUNNING.value:
+            allowed = {RoleAttemptState.RUNNING.value}
+            if allow_submitted:
+                allowed.add(RoleAttemptState.SUBMITTED.value)
+            if str(attempt["status"]) not in allowed:
                 raise AgentSessionCheckpointError("checkpoint initialization requires a running attempt")
             # Paths come only from durable Manager identities, never worker
             # parameters or sandbox path aliases.
@@ -151,6 +156,8 @@ class RoleAttemptsStore:
                 raise AgentSessionCheckpointError("initial worker checkpoint is unreadable") from exc
             if not isinstance(payload, dict):
                 raise AgentSessionCheckpointError("initial worker checkpoint is not an object")
+            if expected_sequence is not None and payload.get("sequence") != expected_sequence:
+                raise AgentSessionCheckpointError("interaction checkpoint sequence changed")
             return self.role_sessions.publish_role_session_checkpoint_locked(
                 connection, session_id=str(assignment["session_id"]),
                 fencing_token=fencing_token, checkpoint=payload,
@@ -166,7 +173,7 @@ class RoleAttemptsStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_attempts WHERE attempt_id = ?",
+                "SELECT * FROM bunshin_role_attempts WHERE attempt_id = ?",
                 (str(attempt_id_value),),
             ).fetchone()
             return _decode_role_attempt(row) if row is not None else None
@@ -184,8 +191,8 @@ class RoleAttemptsStore:
             row = connection.execute(
                 """
                 SELECT attempt.*
-                FROM bunshin_v2_role_attempts AS attempt
-                JOIN bunshin_v2_role_assignments AS assignment
+                FROM bunshin_role_attempts AS attempt
+                JOIN bunshin_role_assignments AS assignment
                   ON assignment.assignment_id = attempt.assignment_id
                 WHERE assignment.session_id = ?
                   AND attempt.harness_id = ?
@@ -214,8 +221,8 @@ class RoleAttemptsStore:
             row = connection.execute(
                 """
                 SELECT attempt.harness_state_json
-                FROM bunshin_v2_role_attempts AS attempt
-                JOIN bunshin_v2_role_assignments AS assignment
+                FROM bunshin_role_attempts AS attempt
+                JOIN bunshin_role_assignments AS assignment
                   ON assignment.assignment_id = attempt.assignment_id
                 WHERE assignment.session_id = ? AND attempt.harness_id = ?
                   AND attempt.harness_generation = ?
@@ -263,7 +270,7 @@ class RoleAttemptsStore:
                 raise ValueError("harness continuation exceeds 64 KiB")
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_attempts
+                UPDATE bunshin_role_attempts
                 SET harness_state_json = ?, updated_at = ?
                 WHERE attempt_id = ?
                 """,
@@ -276,7 +283,7 @@ class RoleAttemptsStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_role_attempts
+                SELECT * FROM bunshin_role_attempts
                 WHERE assignment_id = ?
                 ORDER BY attempt_index
                 """,
@@ -292,14 +299,14 @@ class RoleAttemptsStore:
         attempt_id_value: str,
     ) -> tuple[sqlite3.Row, sqlite3.Row]:
         assignment = connection.execute(
-            "SELECT * FROM bunshin_v2_role_assignments WHERE assignment_id = ?",
+            "SELECT * FROM bunshin_role_assignments WHERE assignment_id = ?",
             (str(assignment_id),),
         ).fetchone()
         if assignment is None:
             raise KeyError(f"unknown role assignment: {assignment_id}")
         attempt = connection.execute(
             """
-            SELECT * FROM bunshin_v2_role_attempts
+            SELECT * FROM bunshin_role_attempts
             WHERE attempt_id = ? AND assignment_id = ?
             """,
             (str(attempt_id_value), str(assignment_id)),

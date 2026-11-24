@@ -302,7 +302,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
 
     def test_workspace_binding_requires_explicit_authoring_contract_version(self) -> None:
         binding = {
-            "bunshin_v2": {
+            "bunshin": {
                 "workflow_id": "wf_1",
                 "invocation_id": self.invocation,
                 "lease_resource_key": self.resource,
@@ -315,7 +315,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "authoring_contract_version"):
             SubmissionDraftContext.from_workspace(binding, draft_kind="verification")
 
-        binding["bunshin_v2"]["authoring_contract_version"] = AUTHORING_CONTRACT_VERSION
+        binding["bunshin"]["authoring_contract_version"] = AUTHORING_CONTRACT_VERSION
         context = SubmissionDraftContext.from_workspace(
             binding,
             draft_kind="verification",

@@ -194,7 +194,7 @@ def work_item_context(workspace: Mapping[str, Any]) -> SubmissionDraftContext:
 
 
 def work_item_seed(workspace: Mapping[str, Any]) -> dict[str, Any]:
-    binding = dict(workspace.get("bunshin_v2") or {})
+    binding = dict(workspace.get("bunshin") or {})
     raw_seed = list(binding.get("work_item_seed") or [])
     items: list[dict[str, Any]] = []
     for ordinal, raw in enumerate(raw_seed):
@@ -391,7 +391,7 @@ def add_finding_tool_result(
 
 def _prepare_add_finding(workspace: Mapping[str, Any], args: Mapping[str, Any], operation_key: str):
     finding = normalize_finding(dict(args))
-    binding = dict(workspace.get("bunshin_v2") or {})
+    binding = dict(workspace.get("bunshin") or {})
     role = str(binding.get("role") or "")
     mode = str(binding.get("mode") or "")
     if role == "reviewer" and mode == "architecture" and finding["finding_kind"] not in {
@@ -533,6 +533,8 @@ def render_work_item_context(workspace: Mapping[str, Any]) -> str:
         if str(item.get("kind") or "") in {"phase", "task"}
     ]
     if not items:
+        if workspace.get("repair_precheck"):
+            return "Use the complete bound RepairBill. An optional checklist can hold recovery notes."
         text = (
             "Work checklist is not initialized. Call update_checklist as soon "
             "as the bounded assignment is understood."
@@ -607,7 +609,7 @@ def _next_action(
         unfinished[0],
     )
     summary = str(current.get("step") or "")
-    binding = dict(workspace.get("bunshin_v2") or {})
+    binding = dict(workspace.get("bunshin") or {})
     protocol = dict(binding.get("role_protocol") or {})
     for raw in list(
         dict(protocol.get("playbook") or {}).get("steps") or []

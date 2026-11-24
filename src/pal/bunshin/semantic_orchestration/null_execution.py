@@ -119,7 +119,7 @@ class NullExecution:
                     workflow_id=node.workflow_id,
                     aggregate_type=AggregateType.DAG_NODE_RUN,
                     aggregate_id=node.aggregate_id,
-                    actor="bunshin-v2-manager",
+                    actor="bunshin-manager",
                     expected_version=node.version,
                     idempotency_key=(
                         f"effect:{effect['effect_key']}:null-execution"

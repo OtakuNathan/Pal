@@ -17,8 +17,8 @@ from pal.bunshin.scoped_execution import (
     BunshinScopedExecutionShellInput,
 )
 from pal.bunshin.workflow_capabilities import (
-    BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
+    BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput,
+    BunshinCapabilitiesBunshinPublicProviderSubmitHumanDecisionInput,
 )
 from pal.bunshin.work_items import (
     BunshinAddFindingInput,
@@ -48,12 +48,12 @@ DECLARED_INPUT_MODELS = tuple(sorted({
         ("BunshinAddFindingInput", BunshinAddFindingInput),
         ("BunshinUpdateChecklistInput", BunshinUpdateChecklistInput),
         (
-            "BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput",
-            BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
+            "BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput",
+            BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput,
         ),
         (
-            "BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput",
-            BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
+            "BunshinCapabilitiesBunshinPublicProviderSubmitHumanDecisionInput",
+            BunshinCapabilitiesBunshinPublicProviderSubmitHumanDecisionInput,
         ),
         (
             "BunshinScopedExecutionOpBunshinArtifactEditInput",

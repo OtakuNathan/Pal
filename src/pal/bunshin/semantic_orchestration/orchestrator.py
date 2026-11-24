@@ -11,11 +11,11 @@ from pal.bunshin.semantic_orchestration.callbacks import SkillInjector
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
-from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.worker_processes import WorkerProcesses
 from pal.bunshin.service import BunshinWorkflowService
+from pal.bunshin.coroutine_runtime import CoroutineRunSemaphore
 from pal.bunshin.role_runtime import RoleSupervisor
 from pal.bunshin.semantic_orchestration.routes import SEMANTIC_EFFECT_TYPES
 
@@ -26,15 +26,13 @@ class SemanticOrchestrator:
     service: BunshinWorkflowService
     max_parallel_workers: int = 5
     runtime_db_path: Path | None = None
-    harness_registry: BunshinHarnessRegistry = field(
-        default_factory=lambda: BunshinHarnessRegistry(include_pal=True)
-    )
     publish_human_review: HumanReviewPublisher | None = None
     publish_worker_event: WorkerEventPublisher | None = None
     publish_workflow_event: WorkflowEventPublisher | None = None
     register_broker_run: BrokerRunRegistrar | None = None
     unregister_broker_run: BrokerRunUnregistrar | None = None
     inject_skill: SkillInjector | None = None
+    capacity_pool: CoroutineRunSemaphore | None = None
     prompt_log_enabled: InitVar[bool] = False
     settings: RoleRuntimeSettings = field(init=False, repr=False)
     background: BackgroundAssignments = field(default_factory=BackgroundAssignments, init=False)
@@ -45,11 +43,10 @@ class SemanticOrchestrator:
 
     def __post_init__(self, prompt_log_enabled: bool) -> None:
         self.settings = RoleRuntimeSettings(prompt_log_enabled)
-        self.supervisor = RoleSupervisor(max_active_runs=max(1, int(self.max_parallel_workers)))
+        self.supervisor = RoleSupervisor(max_active_runs=max(1, int(self.max_parallel_workers)), capacity_pool=self.capacity_pool)
         self.requests = WorkflowRequests(self.service.artifacts)
         self.components = build_semantic_components(
             background=self.background,
-            harness_registry=self.harness_registry,
             inject_skill=self.inject_skill,
             processes=self.processes,
             publish_human_review=self.publish_human_review,

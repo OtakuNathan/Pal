@@ -312,9 +312,9 @@ def test_durable_cap_survives_gateway_and_repository_reconstruction(tmp_path):
         for _ in range(MAX_GIT_GATEWAY_DIAGNOSTICS):
             invoke(gateway)
     with service.repository.database.read_connection() as connection:
-        rows = connection.execute("SELECT invocation_id, payload_json FROM bunshin_v2_worker_events "
+        rows = connection.execute("SELECT invocation_id, payload_json FROM bunshin_worker_events "
             "WHERE event_kind='git_gateway_diagnostic'").fetchall()
-        progress = connection.execute("SELECT last_completed_turn FROM bunshin_v2_role_invocations "
+        progress = connection.execute("SELECT last_completed_turn FROM bunshin_role_invocations "
             "WHERE invocation_id=?", (SESSION,)).fetchone()[0]
     assert len(rows) == MAX_GIT_GATEWAY_DIAGNOSTICS
     assert all(row["invocation_id"] == SESSION for row in rows)

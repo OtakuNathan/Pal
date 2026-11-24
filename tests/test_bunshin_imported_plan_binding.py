@@ -82,9 +82,9 @@ def test_import_binding_rejects_unproven_current_product_atomically(tmp_path, co
     else:
         with case.repo.database.write_connection() as connection:
             if corruption == "non_durable":
-                connection.execute("UPDATE bunshin_v2_artifacts SET durable=0 WHERE sha256=?", (case.product["sha256"],))
+                connection.execute("UPDATE bunshin_artifacts SET durable=0 WHERE sha256=?", (case.product["sha256"],))
             else:
-                connection.execute("DELETE FROM bunshin_v2_domain_events WHERE aggregate_id='revision-import'")
+                connection.execute("DELETE FROM bunshin_domain_events WHERE aggregate_id='revision-import'")
     if corruption == "missing_import":
         assert not case.bind()  # ordinary authored reviews get no import privilege
     else:

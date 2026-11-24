@@ -87,9 +87,9 @@ def _valid_report_yaml(
 
 
 def _setup_unbound_verifier(tmp_path: Path, *, with_test_file: bool = True, scratch_only: bool = False):
-    from tests.test_bunshin_verification import BunshinV2VerificationTests
+    from tests.test_bunshin_verification import BunshinVerificationTests
 
-    fixture = BunshinV2VerificationTests()
+    fixture = BunshinVerificationTests()
     fixture.setUp()
     repo, digest = fixture._git_repo("unbound-verifier")
     if not with_test_file:
@@ -118,8 +118,8 @@ def _setup_unbound_verifier(tmp_path: Path, *, with_test_file: bool = True, scra
         },
         role="verifier",
     )
-    workspace["bunshin_v2"]["verification_tool_contract"] = contract
-    workspace["invocation_id"] = workspace["bunshin_v2"]["invocation_id"]
+    workspace["bunshin"]["verification_tool_contract"] = contract
+    workspace["invocation_id"] = workspace["bunshin"]["invocation_id"]
     workspace = bind_verification_report_file(
         workspace,
         work_view=view,
@@ -682,7 +682,7 @@ def test_terminal_workflow_event_attaches_verification_report_yaml(tmp_path):
         )
     )
     events = []
-    BunshinOutboxProcessor(service, publish_workflow_event=events.append)._publish_terminal_workflow_if_any(workflow_id)
+    BunshinOutboxProcessor(service, publish_workflow_event=events.append).publication.publish_terminal(workflow_id)
     assert len(events) == 1
     attachments = events[0]["attachments"]
     assert len(attachments) == 2
@@ -690,3 +690,26 @@ def test_terminal_workflow_event_attaches_verification_report_yaml(tmp_path):
     assert attachments[1]["file_name"] == "direct_verification_report.yaml"
     assert attachments[1]["mime_type"] == "text/yaml"
     assert Path(attachments[1]["path"]).read_bytes() == report_bytes
+
+
+def test_failed_lsp_is_explained_but_cannot_replace_strong_evidence():
+    from pal.bunshin.verification_readiness import final_verification_errors, report_evidence_errors
+
+    from pal.bunshin.verification_report import validate_verification_report
+
+    command = {"kind": "command", "tool_name": "run_shell", "args": {"cmd": "python -m unittest"}, "ok": True}
+    lsp = {"kind": "lsp", "tool_name": "op_lsp_diagnostics", "call_id": "diagnostics", "ok": False}
+    report = {"verdict_summary": "Tests passed.", "focus_areas": {
+        "regressions": {"status": "pass", "commands": ["python -m unittest"]},
+        "lsp": {"status": "unknown", "notes": "The language server was unavailable."},
+    }}
+    workspace = {"verification_report_focus_areas": ["regressions", "lsp"]}
+    assert not final_verification_errors([command, lsp], outcome="pass", changed=False)
+    assert not report_evidence_errors(report, [command, lsp], workspace)
+    assert not validate_verification_report(report, outcome="pass")
+    report["focus_areas"]["lsp"]["notes"] = ""
+    assert any("lsp.notes" in error for error in report_evidence_errors(report, [command, lsp], workspace))
+    lsp["ok"] = True
+    assert final_verification_errors([lsp], outcome="pass", changed=False)
+    report["focus_areas"]["regressions"]["commands"] = ["diagnostics"]
+    assert report_evidence_errors(report, [command, lsp], workspace)

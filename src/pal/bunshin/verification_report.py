@@ -135,7 +135,7 @@ def render_verification_report_template(
         "#",
         "# Allowed focus_areas.<name>.status values: pass | fail | not_applicable | unknown",
         "# For PASS, required areas need passing evidence. Explain any inapplicable adversarial checks in notes.",
-        "# An unresolved failed run needs a successful rerun of the same check.",
+        "# Rerun unresolved failed shell checks. Explain failed LSP checks in focus_areas.lsp.notes.",
     ]
     if focus_hints:
         lines.append("# Suggested focus points for this scope: " + "; ".join(focus_hints))
@@ -272,11 +272,11 @@ def validate_verification_report(
                 f"{', '.join(sorted(VALID_REPORT_STATUSES))} (got {status or '<empty>'!r})"
             )
             continue
-        if status in {"not_applicable", "unknown"} and not notes:
+        if (status in {"not_applicable", "unknown"} or name == "lsp" and status == "fail") and not notes:
             errors.append(
                 f"verification_report.yaml focus_areas.{name} with status={status} requires non-empty notes"
             )
-        if outcome == "pass" and status in {"fail", "unknown"}:
+        if outcome == "pass" and name != "lsp" and status in {"fail", "unknown"}:
             errors.append(
                 f"PASS cannot be submitted while verification_report.yaml focus_areas.{name}.status is {status}"
             )

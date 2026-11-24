@@ -87,7 +87,7 @@ class DependencyRepairRuntime:
             work.transitions.dispatch(ActionEnvelope(
                 action_type="REGISTER_DEPENDENCY_REPAIR", workflow_id=node.workflow_id,
                 aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=node.aggregate_id,
-                actor="bunshin-v2-manager", expected_version=current.version,
+                actor="bunshin-manager", expected_version=current.version,
                 idempotency_key=f"dependency-repair:prepare:{capture_ref.sha256}",
                 payload={"dependency_repair_capture_ref": capture_ref.to_dict(),
                          "dependency_repair_incarnation_ref": frozen_ref.to_dict(),
@@ -178,7 +178,7 @@ class DependencyRepairRuntime:
         work.transitions.dispatch(ActionEnvelope(
             action_type="REQUEST_STALE", workflow_id=node.workflow_id,
             aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=node.aggregate_id,
-            actor="bunshin-v2-manager", expected_version=node.version,
+            actor="bunshin-manager", expected_version=node.version,
             idempotency_key=f"dependency-repair:freeze:{frozen_ref.sha256}",
             payload={"stale_reason_ref": reason_ref.to_dict(),
                      "dependency_repair_incarnation_ref": frozen_ref.to_dict()},
@@ -353,7 +353,7 @@ class DependencyRepairRuntime:
             work.transitions.dispatch(ActionEnvelope(
                 action_type="CAPTURE_DEPENDENCY_REPAIR", workflow_id=workflow_id,
                 aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=current.aggregate_id,
-                actor="bunshin-v2-manager", expected_version=current.version,
+                actor="bunshin-manager", expected_version=current.version,
                 idempotency_key=f"dependency-repair:capture:{incarnation.key}",
                 payload={"dependency_repair_capture_ref": capture_value,
                          "historical_repair_bill_refs": append_refs(current.payload.get("historical_repair_bill_refs"),
@@ -379,7 +379,7 @@ class DependencyRepairRuntime:
                 work.transitions.dispatch(ActionEnvelope(
                     action_type="CANCEL_CONFIRMED", workflow_id=workflow_id,
                     aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=current.aggregate_id,
-                    actor="bunshin-v2-manager", expected_version=current.version,
+                    actor="bunshin-manager", expected_version=current.version,
                     idempotency_key=f"dependency-repair:closed:{incarnation.key}"))
             elif current.state != "STALE":
                 raise SubmissionInvariantError("dependency closure cannot acknowledge another control state")

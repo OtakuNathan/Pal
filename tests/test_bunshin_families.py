@@ -51,7 +51,7 @@ from tests.capability_fixture import mount_test_capability
 from pal.shared import ToolExecutionResult
 
 
-class BunshinV2FamilyBindingTests(unittest.TestCase):
+class BunshinFamilyBindingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_v2_family_"))
         self.repository = BunshinRepository(self.root)
@@ -863,7 +863,7 @@ workspace_policy: {}
             workspace={
                 "run_id": "verifier-shell-test",
                 "repo_path": str(self.root),
-                "bunshin_v2": {"role": "verifier"},
+                "bunshin": {"role": "verifier"},
             },
             capability_guidance_overrides={
                 "op_exec_shell": {
@@ -1005,7 +1005,7 @@ workspace_policy: {}
             "Purpose: Submit the current module Candidate for independent verification.",
             submit,
         )
-        self.assertIn("Use when: Use after every checklist item is completed", submit)
+        self.assertIn("Use when: Use after focused checks pass", submit)
         self.assertIn("submit an unchanged baseline", submit)
         self.assertIn("must have at least one contracted product file", submit)
 
@@ -1319,7 +1319,8 @@ workspace_policy: {}
                 self.assertIn("when it already satisfies the bound contract", description)
                 self.assertIn("do not manufacture changes for submission", description)
                 self.assertIn("An artifact-bundle unit must have at least one contracted product file", description)
-                self.assertIn("every checklist item is completed, focused checks pass", description)
+                self.assertIn("Complete the initial implementation checklist", description)
+                self.assertIn("address the full RepairBill", description)
                 self.assertIn("Never add submit_candidate itself to the checklist", description)
                 self.assertNotIn("without a contracted product delta", description)
 

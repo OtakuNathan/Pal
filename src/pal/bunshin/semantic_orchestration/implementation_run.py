@@ -76,11 +76,7 @@ class ImplementationRun:
                     ["reproduce RepairBill", "apply minimal repair", "run focused regression"]
                     if repair
                     else [
-                        (
-                            "inspect ModuleWorkView"
-                            if skeleton_manifest
-                            else "inspect UnitWorkView"
-                        ),
+                        "inspect ModuleWorkView" if skeleton_manifest else "inspect UnitWorkView",
                         "implement contract",
                         "run focused self-checks",
                     ]
@@ -108,6 +104,8 @@ class ImplementationRun:
                 "workspace_binding": "canonical",
                 "project_name": str(node.payload.get("unit_id") or "unit"),
                 **_workspace_tooling_from_work_view(work_view),
+                **({"coder_repository_read": True, "repair_precheck": repair,
+                    "repair_corpus_scope": dict(path_policy.get("verification_corpus") or {})} if skeleton_manifest else {}),
                 "write_path_scopes": list(compiled_module_write_scopes(path_policy)),
                 "read_only_overlay_paths": coder_read_only_overlays,
             },
@@ -142,8 +140,7 @@ class ImplementationRun:
                         payload={"finding_artifact_ref": report_ref.to_dict(),
                                  "blocker": task_requirement_blocker(self.artifacts, report_ref)},
                     ),
-                    **self.assignment_identity.role_submission_settlement(
-                        effect, assignment_id=self.assignment_identity.terminal_role_assignment_id(terminal)),
+                    **self.assignment_identity.settlement_from_terminal(terminal),
                 )
             self.repository.leases.release_lease(lease_resource, invocation_id, fencing_token)
             return {"provider_request_id": invocation_id, "result_artifact_ref": report_ref.to_dict()}
@@ -164,10 +161,7 @@ class ImplementationRun:
                     ),
                     payload={"finding_artifact_ref": report_ref.to_dict()},
                 ),
-                **self.assignment_identity.role_submission_settlement(
-                    effect,
-                    assignment_id=self.assignment_identity.terminal_role_assignment_id(terminal),
-                ),
+                **self.assignment_identity.settlement_from_terminal(terminal),
             )
             self.repository.leases.release_lease(lease_resource, invocation_id, fencing_token)
             return {"provider_request_id": invocation_id, "result_artifact_ref": report_ref.to_dict()}
@@ -193,10 +187,7 @@ class ImplementationRun:
                     "unit_work_view_ref": view_ref.to_dict(),
                 },
             ),
-            **self.assignment_identity.role_submission_settlement(
-                effect,
-                assignment_id=self.assignment_identity.terminal_role_assignment_id(terminal),
-            ),
+            **self.assignment_identity.settlement_from_terminal(terminal),
         )
         return {"provider_request_id": invocation_id, "result_artifact_ref": report_ref.to_dict()}
 
@@ -335,9 +326,8 @@ class ImplementationRun:
         )
         if skeleton_manifest:
             instruction = (
-                "Read reference:module_work_view and the bound RepairBill once, then immediately call update_checklist with the complete "
-                "repair micro-plan; Manager appends every finding item. Use that checklist as the work driver, make the smallest local "
-                "contract-preserving repair, run the affected durable regressions, and submit a new Candidate. Use reference:task only as "
+                "Read the complete work view and RepairBill. Address the entire batch of findings. A checklist is optional. "
+                "Make the smallest contract-preserving repair and submit it for the full verifier suite. Use reference:task only as "
                 "the final fallback for exact product intent that the local contract does not resolve. An earlier submission does not settle this cycle."
                 if repair
                 else "Read reference:module_work_view once, then immediately call update_checklist with the complete implementation "
@@ -350,7 +340,7 @@ class ImplementationRun:
                                dict(work_view.get("direct_reference_refs") or {}).items()})
             instruction = (
                 "Read reference:task and reference:module_work_view as the complete task and repository binding. "
-                "Use a compact checklist, perform the task within its scope, run focused checks and submit_candidate. "
+                "Perform the task within its scope, run focused checks and submit_candidate. "
                 "Repair every routed finding when present. Report task contradictions with report_task_blocker."
             )
         path_policy = dict(node.payload.get("path_policy") or {})
@@ -365,6 +355,7 @@ class ImplementationRun:
             if corpus_path:
                 _ensure_workspace_directory(coder_workspace, corpus_path)
         coder_read_only_overlays = [
+            *(list(path_policy.get("reference_only") or []) if skeleton_manifest else []),
             *(
                 list(path_policy.get("contract_paths") or [])
                 if str(path_policy.get("contract_mode") or "review_guarded")

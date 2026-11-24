@@ -83,7 +83,7 @@ class RoleSessionChecksStore:
         if scope_kind == "architecture_cycle":
             rows = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_aggregate_snapshots
+                SELECT * FROM bunshin_aggregate_snapshots
                 WHERE workflow_id = ? AND aggregate_type = ?
                 ORDER BY created_at, aggregate_id
                 """,
@@ -126,7 +126,7 @@ class RoleSessionChecksStore:
     ) -> bool:
         epoch_row = connection.execute(
             """
-            SELECT * FROM bunshin_v2_aggregate_snapshots
+            SELECT * FROM bunshin_aggregate_snapshots
             WHERE workflow_id = ? AND aggregate_type = ?
             ORDER BY created_at DESC, aggregate_id DESC
             LIMIT 1
@@ -138,7 +138,7 @@ class RoleSessionChecksStore:
         epoch = _snapshot_from_row(epoch_row)
         node_rows = connection.execute(
             """
-            SELECT * FROM bunshin_v2_aggregate_snapshots
+            SELECT * FROM bunshin_aggregate_snapshots
             WHERE workflow_id = ? AND aggregate_type = ?
             """,
             (str(workflow_id), AggregateType.DAG_NODE_RUN.value),

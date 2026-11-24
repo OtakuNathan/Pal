@@ -39,8 +39,8 @@ def call(name="submit_candidate", args=None):
 
 
 def pack(role="implementation", **metadata):
-    return BunshinInvocationPack(invocation_id="session", bunshin_profile="bunshin_v2.coder", metadata={
-        "bunshin_v2": {"role": role}, "prompt_log_enabled": False, **metadata})
+    return BunshinInvocationPack(invocation_id="session", bunshin_profile="bunshin.coder", metadata={
+        "bunshin": {"role": role}, "prompt_log_enabled": False, **metadata})
 
 
 def payload(**updates):
@@ -130,7 +130,7 @@ def test_known_rejection_codes_without_details(code):
 def test_only_explicit_implementation_binding_authorizes_diagnostics(role):
     invocation = pack(role)
     assert not is_producer_pack(invocation)
-    invocation.metadata["bunshin_v2"] = {"role": "implementation"}
+    invocation.metadata["bunshin"] = {"role": "implementation"}
     assert is_producer_pack(invocation)
 
 
@@ -381,7 +381,7 @@ def test_manager_owns_identity_and_rejects_wrong_roles_and_untyped_payloads(tmp_
                         {"_owner_run_id": None}, {"_owner_run_id": ["run"]}):
             await manager._publish_worker_event({**event, **changes})
         for wrong_role in ("coder", "reviewer", "verifier", "", "implementation" if role == "architect" else "architect"):
-            state.pack.metadata["bunshin_v2"]["role"] = wrong_role
+            state.pack.metadata["bunshin"]["role"] = wrong_role
             await manager._publish_worker_event(event)
         assert len(recorded) == 1
         assert state.producer_diagnostic_count == 1
@@ -444,7 +444,7 @@ def test_process_owner_binds_producer_identity_despite_forged_worker_run(tmp_pat
         recorded = []
         manager.workflow_service.repository.role_events.record_worker_event = recorded.append
         source_pack = BunshinInvocationPack(invocation_id="source-session", metadata={
-            "bunshin_v2": {"role": owner_role}})
+            "bunshin": {"role": owner_role}})
         manager.runs["source-run"] = BunshinRunState("source-session", "source-run", source_pack)
         manager.runs["target-run"] = BunshinRunState("target-session", "target-run", pack())
         forged = {"kind": "event", "event": {"event_kind": "producer_tool_diagnostic",
@@ -509,9 +509,9 @@ def test_durable_retention_survives_manager_reconstruction_without_affecting_pro
                 "invocation_id": "session", "_attempt_id": ATTEMPT, "_owner_run_id": "run",
                 "payload": {"phase": "llm_round_completed", "round": 90 + cycle, "tool_call_count": 90}})
         with repository.database.read_connection() as connection:
-            rows = connection.execute("SELECT payload_json FROM bunshin_v2_worker_events "
+            rows = connection.execute("SELECT payload_json FROM bunshin_worker_events "
                 "WHERE event_kind='producer_tool_diagnostic' ORDER BY event_id").fetchall()
-            completed = connection.execute("SELECT last_completed_turn FROM bunshin_v2_role_invocations "
+            completed = connection.execute("SELECT last_completed_turn FROM bunshin_role_invocations "
                 "WHERE invocation_id='session'").fetchone()[0]
         assert len(rows) == MAX_PRODUCER_TOOL_DIAGNOSTICS
         assert completed == 91

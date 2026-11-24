@@ -80,6 +80,7 @@ class WorkerProcessOwner:
     on_reserved: WorkerOwnerCallback | None = None
     reap_timeout_seconds: float = 5.0
     memory_read_lease_factory: Callable[[], contextlib.AbstractContextManager[None]] | None = None
+    on_closed: Callable[[], Awaitable[None]] | None = field(default=None, init=False, repr=False)
     _memory_read_lease: contextlib.AbstractContextManager[None] | None = field(default=None, init=False, repr=False)
     _process: asyncio.subprocess.Process | None = field(default=None, init=False, repr=False)
     _spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = field(default=None, init=False, repr=False)
@@ -385,6 +386,9 @@ class WorkerProcessOwner:
             if self.lock_path is not None:
                 self.workspace_locks.release(self.lock_key)
             self._closed = True
+            if self.on_closed is not None:
+                await self.on_closed()
+                self.on_closed = None
 
     async def write_control(self, message: bytes) -> bool:
         process = self._process
@@ -431,6 +435,10 @@ class RoleProcessShell:
             self._permit = permit
         else:
             self._permit = await self.semaphore.acquire(self.run_id)
+        self._permit.shell_owns_cleanup = True
+        # Retirement can retry cleanup through the process registry after the
+        # role coroutine has unwound. That retry must close the same permit.
+        self.owner.on_closed = self._release_permit
         try:
             result = await self.owner.__aenter__()
         except BaseException:
@@ -462,4 +470,6 @@ class RoleProcessShell:
         if permit is None:
             return
         self._permit = None
-        await permit.release()
+        permit.shell_owns_cleanup = False
+        if permit.node is None or self.preacquired_permit is None or permit.attempt_finished:
+            await permit.release()

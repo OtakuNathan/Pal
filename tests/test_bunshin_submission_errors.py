@@ -41,7 +41,7 @@ def test_submit_errors_preserve_failure_meaning(module, phase, exc, category, ef
         result = getattr(module, name + '_tool_result')(
             new_tool_call(name=alias, args={}, call_id='test'),
             {'runtime_root': '/unused', 'architect_path': '/unused/architect.yaml',
-             'bunshin_v2': {'role': 'reviewer', 'mode': 'architecture'}},
+             'bunshin': {'role': 'reviewer', 'mode': 'architecture'}},
         )
     assert not result.ok
     assert result.structured['error_category'] == category

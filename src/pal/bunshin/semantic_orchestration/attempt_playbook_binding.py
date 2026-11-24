@@ -53,8 +53,8 @@ class PlaybookBinding:
         if playbook_steps:
             pack_value = pack.to_dict()
             metadata = dict(pack_value.get("metadata") or {})
-            bunshin_v2 = dict(metadata.get("bunshin_v2") or {})
-            bunshin_v2["role_protocol"] = role_protocol
+            bunshin = dict(metadata.get("bunshin") or {})
+            bunshin["role_protocol"] = role_protocol
             work_item_seed = [
                 {
                     "kind": "phase",
@@ -64,7 +64,7 @@ class PlaybookBinding:
                     "required": True,
                 }
                 for item in playbook_steps
-                if str(item.get("key") or "").strip()
+                if str(item.get("key") or "").strip() and not pack.workspace.get("repair_precheck")
             ]
             routed_seen: set[str] = set()
             for reference_name in (
@@ -76,9 +76,9 @@ class PlaybookBinding:
                 reference = bound_reference_refs.get(reference_name)
                 if reference is None:
                     continue
-                payload = dict(
-                    self.artifacts.read_json(reference)
-                )
+                if pack.workspace.get("repair_precheck"):
+                    continue  # The bound RepairBill already lists all findings.
+                payload = dict(self.artifacts.read_json(reference))
                 for finding in _manager_routed_findings(payload):
                     identity = str(
                         finding.get("finding_id")
@@ -107,8 +107,8 @@ class PlaybookBinding:
                 work_item_seed.extend(
                     _manager_required_system_scenario_work_items(system_delivery)
                 )
-            bunshin_v2["work_item_seed"] = work_item_seed
-            metadata["bunshin_v2"] = bunshin_v2
+            bunshin["work_item_seed"] = work_item_seed
+            metadata["bunshin"] = bunshin
             # Keep derived role protocol data in the invocation workspace as
             # well as metadata.  The runner merges both projections for live
             # tools, but a checkpoint/recovery probe and the model's visible
@@ -116,15 +116,15 @@ class PlaybookBinding:
             # assignment binding prevents a missing checklist seed or role
             # protocol from masquerading as a submission/orchestration bug.
             workspace_value = dict(pack_value.get("workspace") or {})
-            workspace_bunshin_v2 = dict(workspace_value.get("bunshin_v2") or {})
-            workspace_bunshin_v2.update(
+            workspace_bunshin = dict(workspace_value.get("bunshin") or {})
+            workspace_bunshin.update(
                 {
                     key: value
-                    for key, value in bunshin_v2.items()
-                    if key not in workspace_bunshin_v2
+                    for key, value in bunshin.items()
+                    if key not in workspace_bunshin
                 }
             )
-            workspace_value["bunshin_v2"] = workspace_bunshin_v2
+            workspace_value["bunshin"] = workspace_bunshin
             pack = BunshinInvocationPack.from_dict(
                 {**pack_value, "workspace": workspace_value, "metadata": metadata}
             )

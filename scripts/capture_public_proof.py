@@ -143,12 +143,16 @@ def collect_proof(
         raise FileNotFoundError(f"Bunshin database not found: {database}")
 
     with closing(_connect_read_only(database)) as connection:
+        legacy = connection.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name = 'bunshin_v2_schema_meta'"
+        ).fetchone()
+        prefix = "bunshin_v2" if legacy else "bunshin"
         workflow = _row(
             connection,
-            """
+            f"""
             SELECT aggregate_type, aggregate_id, workflow_id, state, version,
                    payload_json, created_at, updated_at
-            FROM bunshin_v2_aggregate_snapshots
+            FROM {prefix}_aggregate_snapshots
             WHERE aggregate_type = 'workflow' AND aggregate_id = ?
             """,
             (workflow_id,),
@@ -167,29 +171,29 @@ def collect_proof(
 
         task = _row(
             connection,
-            """
+            f"""
             SELECT task_id, state, title, objective, profile_id, family_id,
                    task_revision_sha, owner, updated_at
-            FROM bunshin_v2_task_projection WHERE task_id = ?
+            FROM {prefix}_task_projection WHERE task_id = ?
             """,
             (task_id,),
         )
         projection = _row(
             connection,
-            """
+            f"""
             SELECT workflow_id, current_phase, workflow_state,
                    active_aggregate_type, active_aggregate_id,
                    active_worker_id, waiting_for_user, liveness, updated_at
-            FROM bunshin_v2_workflow_projection WHERE workflow_id = ?
+            FROM {prefix}_workflow_projection WHERE workflow_id = ?
             """,
             (workflow_id,),
         )
         snapshots = _rows(
             connection,
-            """
+            f"""
             SELECT aggregate_type, aggregate_id, state, version,
                    payload_json, created_at, updated_at
-            FROM bunshin_v2_aggregate_snapshots
+            FROM {prefix}_aggregate_snapshots
             WHERE workflow_id = ?
             ORDER BY created_at, aggregate_type, aggregate_id
             """,
@@ -197,10 +201,10 @@ def collect_proof(
         )
         events = _rows(
             connection,
-            """
+            f"""
             SELECT event_id, aggregate_type, aggregate_id, aggregate_version,
                    event_type, action_id, correlation_id, causation_id, created_at
-            FROM bunshin_v2_domain_events
+            FROM {prefix}_domain_events
             WHERE workflow_id = ?
             ORDER BY created_at, event_id
             """,
@@ -208,38 +212,38 @@ def collect_proof(
         )
         roles = _rows(
             connection,
-            """
+            f"""
             SELECT invocation_id, aggregate_type, aggregate_id, role, mode,
                    role_profile_id, harness_id, harness_generation, status,
                    last_completed_turn, total_input_tokens, total_output_tokens,
                    total_latency_ms, total_tool_latency_ms, total_wall_latency_ms,
                    created_at, updated_at
-            FROM bunshin_v2_role_invocations
+            FROM {prefix}_role_invocations
             WHERE workflow_id = ? ORDER BY created_at, invocation_id
             """,
             (workflow_id,),
         )
         assignments = _rows(
             connection,
-            """
+            f"""
             SELECT assignment_id, session_id, aggregate_type, aggregate_id,
                    role, mode, role_profile_id, state, active_attempt_id,
                    submission_kind, submission_artifact_ref_json,
                    created_at, updated_at
-            FROM bunshin_v2_role_assignments
+            FROM {prefix}_role_assignments
             WHERE workflow_id = ? ORDER BY created_at, assignment_id
             """,
             (workflow_id,),
         )
         attempts = _rows(
             connection,
-            """
+            f"""
             SELECT a.attempt_id, a.assignment_id, a.attempt_index,
                    a.fencing_token, a.harness_id, a.harness_generation,
                    a.status, a.error_kind, a.started_at, a.finished_at,
                    a.updated_at
-            FROM bunshin_v2_role_attempts AS a
-            JOIN bunshin_v2_role_assignments AS s
+            FROM {prefix}_role_attempts AS a
+            JOIN {prefix}_role_assignments AS s
               ON s.assignment_id = a.assignment_id
             WHERE s.workflow_id = ?
             ORDER BY a.started_at, a.attempt_index
@@ -248,17 +252,17 @@ def collect_proof(
         )
         deliveries = _rows(
             connection,
-            """
+            f"""
             SELECT delivery_id, event_kind, status, attempt_count,
                    created_at, updated_at
-            FROM bunshin_v2_delivery_outbox
+            FROM {prefix}_delivery_outbox
             WHERE workflow_id = ? ORDER BY created_at, delivery_id
             """,
             (workflow_id,),
         )
         schema_meta = _rows(
             connection,
-            "SELECT * FROM bunshin_v2_schema_meta ORDER BY 1",
+            f"SELECT * FROM {prefix}_schema_meta ORDER BY 1",
         )
 
         if task and not include_task_text:
@@ -283,10 +287,10 @@ def collect_proof(
         for sha256 in sorted(referenced_hashes):
             artifact = _row(
                 connection,
-                """
+                f"""
                 SELECT sha256, artifact_type, schema_version, media_type,
                        byte_size, storage_path, durable, created_at
-                FROM bunshin_v2_artifacts WHERE sha256 = ?
+                FROM {prefix}_artifacts WHERE sha256 = ?
                 """,
                 (sha256,),
             )

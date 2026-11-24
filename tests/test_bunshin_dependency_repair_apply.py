@@ -211,7 +211,7 @@ def test_registration_and_capture_are_not_final_verdict_events(tmp_path):
     assert len(result.outbox_effect_ids) == 1
     import json
     with case.repository.database.read_connection() as connection:
-        row = connection.execute("SELECT payload_json FROM bunshin_v2_outbox WHERE effect_id = ?",
+        row = connection.execute("SELECT payload_json FROM bunshin_outbox WHERE effect_id = ?",
                                  (result.outbox_effect_ids[0],)).fetchone()
     effect_payload = json.loads(row["payload_json"])
     assert effect_payload["graph_generation"] == 1
@@ -228,10 +228,10 @@ def test_unclosed_graph_cannot_publish_repairs(tmp_path):
     from pal.bunshin.storage.serialization import _json
     from pal.bunshin.storage.serialization import _cycle_payload
     with case.repository.database.write_connection() as connection:
-        connection.execute("UPDATE bunshin_v2_graph_generations SET execution_json = ? WHERE graph_id = ?", (
+        connection.execute("UPDATE bunshin_graph_generations SET execution_json = ? WHERE graph_id = ?", (
             _json({"state": "RUNNING", "dependency_repairs": case.unclosed.dependency_repairs.to_dict()}), "graph"))
         for cycle in case.unclosed.cycles.values():
-            connection.execute("UPDATE bunshin_v2_node_cycles SET state = ?, payload_json = ? WHERE cycle_id = ?",
+            connection.execute("UPDATE bunshin_node_cycles SET state = ?, payload_json = ? WHERE cycle_id = ?",
                                (cycle.state.value, _json(_cycle_payload(cycle)), cycle.cycle_id))
     with pytest.raises(SubmissionInvariantError, match="no exact closure"):
         case.apply()
@@ -242,7 +242,7 @@ def test_applied_replay_requires_exact_source_settlement_not_current_packet(tmp_
     case = Case(tmp_path)
     case.apply()
     with case.repository.database.write_connection() as connection:
-        connection.execute("DELETE FROM bunshin_v2_domain_events WHERE aggregate_id = ? AND event_type = ?",
+        connection.execute("DELETE FROM bunshin_domain_events WHERE aggregate_id = ? AND event_type = ?",
                            ("aggregate-C", "dag_node_run.settle_dependency_repair"))
     with pytest.raises(SubmissionInvariantError, match="lost its exact settlement receipt"):
         case.apply()

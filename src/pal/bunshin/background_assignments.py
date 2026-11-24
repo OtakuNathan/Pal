@@ -175,7 +175,7 @@ class BackgroundAssignments:
         self._ready[effect_key] = ready
         task = asyncio.create_task(
             run_loop(effect, runner),
-            name=f"bunshin-v2-assignment-{hashlib.sha256(effect_key.encode()).hexdigest()[:12]}",
+            name=f"bunshin-assignment-{hashlib.sha256(effect_key.encode()).hexdigest()[:12]}",
         )
         self._tasks[effect_key] = task
         task.add_done_callback(

@@ -29,7 +29,6 @@ from pal.llm import (
 )
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
-from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.plugins.host import PluginHost
 from pal.shared.text_search import warmup_jieba
 from pal.wizard import PalRegistration, WizardService
@@ -140,14 +139,12 @@ def compose_runtime(
         review_storage=memory_storage,
 
     )
-    bunshin_harness_registry = BunshinHarnessRegistry()
     runtime_settings_repository.ensure_defaults()
     plugin_host = PluginHost(
         context=core.context,
         runtime_root=registration.runtime.runtime_root,
         services={
             "memory_service": memory_service,
-            "bunshin_harness_registry": bunshin_harness_registry,
             "runtime_db_path": registration.runtime.db_path,
         },
     )

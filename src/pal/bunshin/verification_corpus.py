@@ -40,7 +40,7 @@ def verification_corpus_snapshot(workspace: Mapping[str, Any]) -> dict[str, Any]
     Relative paths agree across Manager/sandbox mounts. Races, unreadable files,
     and exceeded limits fail closed; no partial digest can qualify a receipt.
     """
-    binding = dict(workspace.get("bunshin_v2") or {})
+    binding = dict(workspace.get("bunshin") or {})
     root_value = str(workspace.get("repo_path") or "")
     root = Path(root_value).resolve() if root_value else None
     candidate = ""

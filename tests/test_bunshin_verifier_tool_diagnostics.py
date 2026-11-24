@@ -121,7 +121,7 @@ def test_observation_records_started_and_terminal_before_handler_or_early_failur
         async def heartbeat(operation, **kwargs):
             return await operation
         pack = BunshinInvocationPack(invocation_id="session", metadata={
-            "bunshin_v2": {"role": "verifier"}, "prompt_log_enabled": False})
+            "bunshin": {"role": "verifier"}, "prompt_log_enabled": False})
         reporter = Reporter("session", pack, "run", write_event)
         execute = AsyncMock(return_value=ToolExecutionResult(name="submit_verification_pass",
             ok=failure is None, status="ok" if failure is None else "error", llm_text=SECRET,
@@ -162,7 +162,7 @@ def test_manager_persists_only_typed_payload_and_manager_owned_identity(tmp_path
         manager.workflow_service.repository.role_events.record_worker_event = recorded.append
         manager.events.queue_event = Mock()
         state = BunshinRunState(bunshin_id="session", run_id="run", pack=BunshinInvocationPack(
-            invocation_id="session", metadata={"bunshin_v2": {"role": "verifier"},
+            invocation_id="session", metadata={"bunshin": {"role": "verifier"},
                                               "prompt_log_enabled": debug_enabled}))
         manager.runs["run"] = state
         event = {"event_kind": "verifier_tool_diagnostic", "run_id": "run",
@@ -176,7 +176,7 @@ def test_manager_persists_only_typed_payload_and_manager_owned_identity(tmp_path
         for changes in ({"payload": payload(error=SECRET)}, {"payload": payload(status=SECRET)},
                         {"_attempt_id": SECRET}, {"run_id": "missing"}):
             await manager._publish_worker_event({**event, **changes})
-        state.pack.metadata["bunshin_v2"]["role"] = "coder"
+        state.pack.metadata["bunshin"]["role"] = "coder"
         await manager._publish_worker_event(event)
         assert len(recorded) == 1
     asyncio.run(scenario())
@@ -192,7 +192,7 @@ def test_diagnostic_transport_failure_does_not_prevent_effect_or_mask_error(tool
         async def heartbeat(operation, **kwargs):
             return await operation
         pack = BunshinInvocationPack(invocation_id="session",
-            metadata={"bunshin_v2": {"role": "verifier"}})
+            metadata={"bunshin": {"role": "verifier"}})
         execute = AsyncMock(return_value=ToolExecutionResult(name="submit_verification_pass",
             ok=True, llm_text="done"), side_effect=original_error if tool_fails else None)
         observation = ToolObservation(SimpleNamespace(await_with_progress_heartbeat=heartbeat),
@@ -214,7 +214,7 @@ def test_diagnostic_cancellation_is_not_swallowed():
     async def scenario():
         async def write(event):
             raise asyncio.CancelledError()
-        pack = BunshinInvocationPack(invocation_id="session", metadata={"bunshin_v2": {"role": "verifier"}})
+        pack = BunshinInvocationPack(invocation_id="session", metadata={"bunshin": {"role": "verifier"}})
         observation = ToolObservation(None, Reporter("session", pack, "run", write), None, ToolSession())
         with pytest.raises(asyncio.CancelledError):
             await observation.emit_verifier_diagnostic(SimpleNamespace(llm_round_count=7), call(), 0, "started")
@@ -228,7 +228,7 @@ def test_manager_storage_failure_does_not_abort_worker_reader(tmp_path):
         manager.workflow_service.repository.role_events.record_worker_event = record
         manager.runs["run"] = BunshinRunState(bunshin_id="session", run_id="run",
             pack=BunshinInvocationPack(invocation_id="session",
-                metadata={"bunshin_v2": {"role": "verifier"}}))
+                metadata={"bunshin": {"role": "verifier"}}))
         event = {"event_kind": "verifier_tool_diagnostic", "run_id": "run",
                  "_attempt_id": ATTEMPT, "payload": payload()}
         await manager._publish_worker_event(event)
@@ -257,14 +257,14 @@ def test_real_manager_storage_distinguishes_no_call_from_pre_handler_rejection(t
             family_binding_sha="binding", authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict())
         pack = BunshinInvocationPack(invocation_id="session", metadata={
-            "bunshin_v2": {"role": "verifier"}, "prompt_log_enabled": False})
+            "bunshin": {"role": "verifier"}, "prompt_log_enabled": False})
         manager.runs["run"] = BunshinRunState(bunshin_id="session", run_id="run", pack=pack)
         manager.events.queue_event = Mock()
         await manager._publish_worker_event({"event_kind": "progress", "run_id": "run",
             "invocation_id": "session", "_attempt_id": ATTEMPT,
             "payload": {"phase": "llm_round_completed", "round": 6, "tool_call_count": 0}})
         with repository.database.read_connection() as connection:
-            assert connection.execute("SELECT count(*) FROM bunshin_v2_worker_events "
+            assert connection.execute("SELECT count(*) FROM bunshin_worker_events "
                 "WHERE event_kind='verifier_tool_diagnostic'").fetchone()[0] == 0
         async def write(event):
             await manager._publish_worker_event({**event, "_attempt_id": ATTEMPT})
@@ -282,9 +282,9 @@ def test_real_manager_storage_distinguishes_no_call_from_pre_handler_rejection(t
             SimpleNamespace(pending_tool_results=[], turn_id="turn"),
             call("call_tool", {"name": "submit_verification_pass", "args": {"private": SECRET}}))
         with repository.database.read_connection() as connection:
-            rows = connection.execute("SELECT * FROM bunshin_v2_worker_events "
+            rows = connection.execute("SELECT * FROM bunshin_worker_events "
                 "WHERE event_kind='verifier_tool_diagnostic' ORDER BY event_id").fetchall()
-            completed = connection.execute("SELECT last_completed_turn FROM bunshin_v2_role_invocations "
+            completed = connection.execute("SELECT last_completed_turn FROM bunshin_role_invocations "
                 "WHERE invocation_id='session'").fetchone()[0]
         diagnostics = [json.loads(row["payload_json"]) for row in rows]
         assert [item["stage"] for item in diagnostics] == ["started", "completed"]

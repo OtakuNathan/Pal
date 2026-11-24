@@ -8,14 +8,14 @@ from pal.execution.tool_semantics import (
 from pal.execution.tool_facade import EffectOutcome, EffectReceipt, ToolGuidance
 
 from pal.execution.generated_tool_models import (
-    BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderReadInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput,
+    BunshinCapabilitiesBunshinPublicProviderAnswerQuestionInput,
+    BunshinCapabilitiesBunshinPublicProviderControlWorkflowInput,
+    BunshinCapabilitiesBunshinPublicProviderReadInput,
+    BunshinCapabilitiesBunshinPublicProviderResolveTriageInput,
+    BunshinCapabilitiesBunshinPublicProviderRestartExecutionInput,
+    BunshinCapabilitiesBunshinPublicProviderSearchInput,
+    BunshinCapabilitiesBunshinPublicProviderStatusInput,
+    BunshinCapabilitiesBunshinPublicProviderSubmitArtifactInput,
 )
 
 from dataclasses import dataclass, replace
@@ -83,7 +83,7 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
 )
 
 
-class BunshinV2StartWorkflowWorkspace(StrictToolModel):
+class BunshinStartWorkflowWorkspace(StrictToolModel):
     kind: Literal["new_project", "existing_repo"] = Field(
         description=(
             "Required workspace intent. Use new_project when Pal should create a "
@@ -110,7 +110,7 @@ class BunshinV2StartWorkflowWorkspace(StrictToolModel):
     primary_language: str | None = None
 
 
-class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolModel):
+class BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput(StrictToolModel):
     """Reloadable public contract for starting one Bunshin workflow."""
 
     task: str | None = Field(
@@ -144,7 +144,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
             "complete semantic source of truth."
         ),
     )
-    workspace: BunshinV2StartWorkflowWorkspace | None = Field(default=None, description="Required when task is omitted; omit for an existing task.")
+    workspace: BunshinStartWorkflowWorkspace | None = Field(default=None, description="Required when task is omitted; omit for an existing task.")
     task_spec: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -208,7 +208,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput(StrictToolM
     )
 
 
-class BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput(StrictToolModel):
+class BunshinCapabilitiesBunshinPublicProviderSubmitHumanDecisionInput(StrictToolModel):
     """Reloadable public contract for the architecture human-review decision."""
 
     task: str | None = Field(
@@ -226,7 +226,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput(Stric
     )
 
 
-class BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput(StrictToolModel):
+class BunshinCapabilitiesBunshinPublicProviderRebindTaskDeliveryInput(StrictToolModel):
     """Public semantic address for changing only a Task's reply target."""
 
     task: str = Field(description="Exact human-readable Task title.")
@@ -243,7 +243,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput(Strict
     scope="bunshin_workflow",
     path_module_id="bunshin_workflow",
     kind="module",
-    source="builtin:bunshin-v2",
+    source="builtin:bunshin",
     target_kind="workflow",
 )
 @capability_node(
@@ -251,7 +251,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput(Strict
     scope="bunshin_task",
     path_module_id="bunshin_task",
     kind="module",
-    source="builtin:bunshin-v2",
+    source="builtin:bunshin",
     target_kind="task",
 )
 @capability_node(
@@ -259,7 +259,7 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput(Strict
     scope="bunshin_catalog",
     path_module_id="bunshin_catalog",
     kind="module",
-    source="builtin:bunshin-v2",
+    source="builtin:bunshin",
     target_kind="catalog",
 )
 @capability_node(
@@ -267,14 +267,14 @@ class BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput(Strict
     scope="bunshin_catalog",
     path_module_id="bunshin_catalog",
     kind="module",
-    source="builtin:bunshin-v2",
+    source="builtin:bunshin",
     target_kind="catalog",
 )
 @capability_node(
     namespace=OPERATION_NAMESPACE,
     scope="bunshin",
     kind="module",
-    source="builtin:bunshin-v2",
+    source="builtin:bunshin",
     target_kind="module",
 )
 @dataclass
@@ -299,7 +299,7 @@ class BunshinPublicProvider:
             do_not_use_when="Starting a workflow (use start_bunshin_workflow). Checking task status (use read_bunshin_task_status).",
             failure_next_steps="If sidecar not responding, check list_plugins for the bunshin plugin attach status.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderReadInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderReadInput,
         aliases=("read_bunshin_catalog",),
     )
     def read_catalog(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -386,7 +386,7 @@ class BunshinPublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="bunshin",
         action_name="start_workflow",
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput,
         aliases=("start_bunshin_workflow",),
         guidance=BUNSHIN_START_WORKFLOW_GUIDANCE,
         execution=DIRECT_CONTROL,
@@ -406,7 +406,7 @@ class BunshinPublicProvider:
                     actor=actor,
                 )
             payload = self._request_manager(
-                "v2_start_workflow",
+                "start_workflow",
                 {
                     **args,
                     "actor": actor,
@@ -417,9 +417,9 @@ class BunshinPublicProvider:
             self._wake()
             return _public_result("bunshin workflow created", payload)
         except ValueError as exc:
-            return _invalid("bunshin V2 workflow request invalid", exc)
+            return _invalid("Bunshin workflow request invalid", exc)
         except Exception as exc:
-            return _error("bunshin V2 workflow start failed", exc)
+            return _error("Bunshin workflow start failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -433,7 +433,7 @@ class BunshinPublicProvider:
             do_not_use_when="This does not execute the artifact. Not for unnamed or ad-hoc content.",
             failure_next_steps="Correct invalid input; the Manager owns content hash and internal identity.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderSubmitArtifactInput,
         aliases=("submit_bunshin_artifact",),
         execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
@@ -450,9 +450,9 @@ class BunshinPublicProvider:
             )
             return _public_result("bunshin artifact published", payload)
         except ValueError as exc:
-            return _invalid("bunshin V2 artifact invalid", exc)
+            return _invalid("Bunshin artifact invalid", exc)
         except Exception as exc:
-            return _error("bunshin V2 artifact publish failed", exc)
+            return _error("Bunshin artifact publish failed", exc)
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -461,12 +461,12 @@ class BunshinPublicProvider:
         guidance=ToolGuidance(
             search_objects=('task', 'tasks'),
             search_terms=('find', 'lookup',),
-            purpose="Search the durable Bunshin V2 Task Ledger for the current actor.",
+            purpose="Search the durable Bunshin Task Ledger for the current actor.",
             use_when='Before claiming a workflow cannot be found. Empty query lists most recently updated Tasks. An empty result means no matching actor-owned Task was found; broaden the query before declaring the workflow missing.',
             do_not_use_when="Not for live workflow state (use read_bunshin_task_status).",
             failure_next_steps="Correct invalid input; try a broader query if no results.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderSearchInput,
         aliases=("search_bunshin_tasks",),
     )
     def search_tasks(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -492,20 +492,20 @@ class BunshinPublicProvider:
         except ValueError as exc:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="bunshin V2 task search invalid",
+                text="Bunshin task search invalid",
                 structured=_exception_payload(exc),
                 llm_text=render_diagnostic_record_for_llm(
-                    "Bunshin V2 task search invalid",
+                    "Bunshin task search invalid",
                     _exception_payload(exc),
                 ),
             )
         except Exception as exc:
             return IntrospectionResult(
                 status=RuntimeStatus.ERROR,
-                text="bunshin V2 task search failed",
+                text="Bunshin task search failed",
                 structured=_exception_payload(exc),
                 llm_text=render_diagnostic_record_for_llm(
-                    "Bunshin V2 task search failed",
+                    "Bunshin task search failed",
                     _exception_payload(exc),
                 ),
             )
@@ -526,7 +526,7 @@ class BunshinPublicProvider:
             do_not_use_when="Do not poll repeatedly after workflow acceptance; completion returns through system callbacks.",
             failure_next_steps="Correct the Task title; reconcile with search_bunshin_tasks if the title is uncertain.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderStatusInput,
         aliases=("read_bunshin_task_status",),
     )
     def workflow_status(self, call: CapabilityCall) -> CapabilityResult:
@@ -542,7 +542,7 @@ class BunshinPublicProvider:
                 raise ValueError("Task has no workflow waiting for human review")
             payload = (
                 self.manager_request(
-                    "v2_task_status",
+                    "task_status",
                     {"task_id": task_id, "workflow_id": workflow_id, "view": view},
                 )
                 if self.manager_request is not None
@@ -556,7 +556,7 @@ class BunshinPublicProvider:
         except ValueError as exc:
             return _invalid("bunshin task selection invalid", exc)
         except Exception as exc:
-            return _error("bunshin V2 workflow status failed", exc)
+            return _error("Bunshin workflow status failed", exc)
 
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -576,9 +576,9 @@ class BunshinPublicProvider:
             self._wake()
             return _public_result("bunshin workflow resume requested", payload)
         except ValueError as exc:
-            return _invalid("bunshin V2 workflow cannot resume", exc)
+            return _invalid("Bunshin workflow cannot resume", exc)
         except Exception as exc:
-            return _error("bunshin V2 workflow resume failed", exc)
+            return _error("Bunshin workflow resume failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -593,7 +593,7 @@ class BunshinPublicProvider:
             do_not_use_when="Not for architecture changes (start a new workflow). Not for transient failures (use resolve_bunshin_triage).",
             failure_next_steps="Correct invalid input; reconcile with read_bunshin_task_status before retrying.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderRestartExecutionInput,
         aliases=("restart_bunshin_execution",),
         execution=INDIRECT_CONTROL,
     )
@@ -616,9 +616,9 @@ class BunshinPublicProvider:
             self._wake()
             return _public_result("bunshin execution restart requested", payload)
         except ValueError as exc:
-            return _invalid("bunshin V2 execution restart invalid", exc)
+            return _invalid("Bunshin execution restart invalid", exc)
         except Exception as exc:
-            return _error("bunshin V2 execution restart failed", exc)
+            return _error("Bunshin execution restart failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -631,7 +631,7 @@ class BunshinPublicProvider:
             do_not_use_when="Does not accept a candidate, waive verification, or skip a gate.",
             failure_next_steps="Correct invalid input; reconcile with read_bunshin_task_status before retrying.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderResolveTriageInput,
         aliases=("resolve_bunshin_triage",),
         execution=INDIRECT_CONTROL,
     )
@@ -655,9 +655,9 @@ class BunshinPublicProvider:
             self._wake()
             return _public_result("bunshin triage resolved", payload)
         except ValueError as exc:
-            return _invalid("bunshin V2 triage resolution invalid", exc)
+            return _invalid("Bunshin triage resolution invalid", exc)
         except Exception as exc:
-            return _error("bunshin V2 triage resolution failed", exc)
+            return _error("Bunshin triage resolution failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -670,7 +670,7 @@ class BunshinPublicProvider:
             do_not_use_when="Not for live workflow state queries (use read_bunshin_task_status).",
             failure_next_steps="Correct invalid input; the Manager validates actor, revision, and content atomically.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderSubmitHumanDecisionInput,
         aliases=("submit_bunshin_human_decision",),
         execution=INDIRECT_CONTROL,
     )
@@ -699,15 +699,15 @@ class BunshinPublicProvider:
             self._wake()
             return _public_result("bunshin human decision accepted", payload)
         except ValueError as exc:
-            return _invalid("bunshin V2 human decision stale or invalid", exc)
+            return _invalid("Bunshin human decision stale or invalid", exc)
         except Exception as exc:
-            return _error("bunshin V2 human decision failed", exc)
+            return _error("Bunshin human decision failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="bunshin",
         action_name="rebind_task_delivery",
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderRebindTaskDeliveryInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderRebindTaskDeliveryInput,
         aliases=("rebind_bunshin_task_delivery",),
         guidance=ToolGuidance(
             search_terms=('delivery', 'destination', 'output', 'reply', 'channel', 'recipient', 'routing'),
@@ -732,7 +732,7 @@ class BunshinPublicProvider:
                 str(call.args.get("channel_name") or ""),
             )
             payload = self._request_manager(
-                "v2_rebind_task_delivery",
+                "rebind_task_delivery",
                 {"task_id": task_id, "binding": binding},
             )
             public = {
@@ -759,7 +759,7 @@ class BunshinPublicProvider:
             do_not_use_when="Not for multiple-choice answers (use inline options when available).",
             failure_next_steps="Correct invalid input; the Architect receives the answer through its existing tool call.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderAnswerQuestionInput,
         aliases=("answer_bunshin_question",),
         execution=INDIRECT_CONTROL,
     )
@@ -801,7 +801,7 @@ class BunshinPublicProvider:
             do_not_use_when="Starting a workflow (use start_bunshin_workflow), discarding an execution attempt (use restart_bunshin_execution), or resolving a specific blocker (use resolve_bunshin_triage). Read progress with read_bunshin_task_status.",
             failure_next_steps="Verify the Task title with search_bunshin_tasks and current state with read_bunshin_task_status before retrying. Active workflows must finish cancellation before archive; repeated archive reports no change.",
         ),
-        InputModel=BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput,
+        InputModel=BunshinCapabilitiesBunshinPublicProviderControlWorkflowInput,
         aliases=("control_bunshin_workflow",),
         execution=INDIRECT_CONTROL,
     )
@@ -812,7 +812,7 @@ class BunshinPublicProvider:
         if operation == "archive":
             return self.archive_workflow(call)
         if operation not in ("pause", "cancel"):
-            return _invalid("bunshin V2 workflow control invalid", ValueError(
+            return _invalid("Bunshin workflow control invalid", ValueError(
                 "operation must be pause, resume, cancel or archive"))
         return self._pause_or_cancel_workflow(call)
 
@@ -836,9 +836,9 @@ class BunshinPublicProvider:
             self._wake()
             return _public_result("bunshin workflow control requested", payload)
         except ValueError as exc:
-            return _invalid("bunshin V2 workflow control invalid", exc)
+            return _invalid("Bunshin workflow control invalid", exc)
         except Exception as exc:
-            return _error("bunshin V2 workflow control failed", exc)
+            return _error("Bunshin workflow control failed", exc)
 
     def archive_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -860,9 +860,9 @@ class BunshinPublicProvider:
                 result = replace(result, effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE, receipt={"already_archived": True}))
             return result
         except ValueError as exc:
-            return _invalid("bunshin V2 workflow archive invalid", exc)
+            return _invalid("Bunshin workflow archive invalid", exc)
         except Exception as exc:
-            return _error("bunshin V2 workflow archive failed", exc)
+            return _error("Bunshin workflow archive failed", exc)
 
     def _actor_and_channel(self, call: CapabilityCall) -> tuple[str, str]:
         actor = str(call.meta.get("actor_id") or call.meta.get("persona_id") or "pal")

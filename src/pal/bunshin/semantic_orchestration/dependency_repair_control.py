@@ -65,5 +65,5 @@ async def retire_repair_control(*, node: AggregateSnapshot, execution: GraphExec
         if action:
             repository.transitions.dispatch(ActionEnvelope(action_type=action, workflow_id=node.workflow_id,
                 aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=node.aggregate_id,
-                actor="bunshin-v2-manager", expected_version=current.version,
+                actor="bunshin-manager", expected_version=current.version,
                 idempotency_key=f"dependency-repair:control:{incarnation.key}:{current.version}:{action}"))

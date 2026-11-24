@@ -31,7 +31,7 @@ class LeasesStore:
         expires_at = now + timedelta(seconds=max(1, ttl_seconds))
         with self.database.write_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_leases WHERE resource_key = ?",
+                "SELECT * FROM bunshin_leases WHERE resource_key = ?",
                 (resource_key,),
             ).fetchone()
             if row is not None and str(row["owner_id"]) and _parse_datetime(str(row["expires_at"])) > now:
@@ -39,7 +39,7 @@ class LeasesStore:
             fencing_token = (int(row["fencing_token"]) if row is not None else 0) + 1
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_leases(
+                INSERT INTO bunshin_leases(
                     resource_key, owner_id, fencing_token, acquired_at, renewed_at, expires_at, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(resource_key) DO UPDATE SET
@@ -75,12 +75,12 @@ class LeasesStore:
         expires_at = now + timedelta(seconds=max(1, ttl_seconds))
         with self.database.write_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_leases WHERE resource_key = ?",
+                "SELECT * FROM bunshin_leases WHERE resource_key = ?",
                 (resource_key,),
             ).fetchone()
             self.assert_lease_row(row, owner_id=owner_id, fencing_token=fencing_token, now=now)
             connection.execute(
-                "UPDATE bunshin_v2_leases SET renewed_at = ?, expires_at = ? WHERE resource_key = ?",
+                "UPDATE bunshin_leases SET renewed_at = ?, expires_at = ? WHERE resource_key = ?",
                 (now.isoformat(), expires_at.isoformat(), resource_key),
             )
             return LeaseGrant(resource_key, owner_id, fencing_token, str(row["acquired_at"]), expires_at.isoformat())
@@ -90,7 +90,7 @@ class LeasesStore:
         now = _utc_datetime()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_leases WHERE resource_key = ?",
+                "SELECT * FROM bunshin_leases WHERE resource_key = ?",
                 (resource_key,),
             ).fetchone()
             self.assert_lease_row(row, owner_id=owner_id, fencing_token=fencing_token, now=now)
@@ -99,21 +99,34 @@ class LeasesStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_leases WHERE resource_key = ?",
+                "SELECT * FROM bunshin_leases WHERE resource_key = ?",
                 (resource_key,),
             ).fetchone()
             self.assert_lease_row(row, owner_id=owner_id, fencing_token=fencing_token, now=None)
             connection.execute(
-                "UPDATE bunshin_v2_leases SET owner_id = '', renewed_at = ?, expires_at = ? WHERE resource_key = ?",
+                "UPDATE bunshin_leases SET owner_id = '', renewed_at = ?, expires_at = ? WHERE resource_key = ?",
                 (utc_now(), utc_now(), resource_key),
             )
+
+    def inherited_role_workspaces(self) -> tuple[tuple[str, str, str], ...]:
+        """One row per potentially materialized role at Manager startup."""
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT json_extract(metadata_json, '$.run_id'),
+                       json_extract(metadata_json, '$.aggregate_id'), json_extract(metadata_json, '$.workspace_path')
+                   FROM bunshin_leases WHERE owner_id != ''
+                     AND coalesce(json_extract(metadata_json, '$.run_id'), '') != ''
+                     AND coalesce(json_extract(metadata_json, '$.workspace_path'), '') != ''"""
+            ).fetchall()
+        return tuple((str(run), str(aggregate), str(workspace)) for run, aggregate, workspace in rows)
 
     def expired_leases(self) -> tuple[dict[str, Any], ...]:
         self.database.ensure_schema()
         now = utc_now()
         with self.database.read_connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM bunshin_v2_leases WHERE owner_id != '' AND expires_at <= ? ORDER BY expires_at",
+                "SELECT * FROM bunshin_leases WHERE owner_id != '' AND expires_at <= ? ORDER BY expires_at",
                 (now,),
             ).fetchall()
             result = []
@@ -128,7 +141,7 @@ class LeasesStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_leases WHERE resource_key = ?",
+                "SELECT * FROM bunshin_leases WHERE resource_key = ?",
                 (str(resource_key),),
             ).fetchone()
             if row is None:
@@ -147,12 +160,12 @@ class LeasesStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_leases WHERE resource_key = ?",
+                "SELECT * FROM bunshin_leases WHERE resource_key = ?",
                 (resource_key,),
             ).fetchone()
             self.assert_lease_row(row, owner_id=owner_id, fencing_token=fencing_token, now=_utc_datetime())
             connection.execute(
-                "UPDATE bunshin_v2_leases SET metadata_json = ?, renewed_at = ? WHERE resource_key = ?",
+                "UPDATE bunshin_leases SET metadata_json = ?, renewed_at = ? WHERE resource_key = ?",
                 (_json(dict(metadata)), utc_now(), resource_key),
             )
 
@@ -161,7 +174,7 @@ class LeasesStore:
         with self.database.write_connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE bunshin_v2_leases
+                UPDATE bunshin_leases
                 SET owner_id = '', renewed_at = ?, expires_at = ?
                 WHERE resource_key = ? AND fencing_token = ? AND expires_at <= ?
                 """,
@@ -177,7 +190,7 @@ class LeasesStore:
         fencing_token: int,
     ) -> None:
         row = connection.execute(
-            "SELECT * FROM bunshin_v2_leases WHERE resource_key = ?",
+            "SELECT * FROM bunshin_leases WHERE resource_key = ?",
             (resource_key,),
         ).fetchone()
         self.assert_lease_row(row, owner_id=owner_id, fencing_token=fencing_token, now=_utc_datetime())

@@ -79,7 +79,7 @@ class ToolExecution:
             ),
         )
         bound_execution = (
-            dict(evidence_workspace.get("bunshin_v2") or {}).get("role") == "verifier"
+            dict(evidence_workspace.get("bunshin") or {}).get("role") == "verifier"
             and (target_name == "op_exec_shell" or target_name.startswith("op_lsp_"))
         )
         result = await approval_runtime.execute_tool_async(

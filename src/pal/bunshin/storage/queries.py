@@ -22,7 +22,7 @@ class QueriesStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_aggregate_snapshots
+                SELECT * FROM bunshin_aggregate_snapshots
                 WHERE workflow_id = ?
                 ORDER BY created_at, aggregate_type, aggregate_id
                 """,
@@ -30,11 +30,35 @@ class QueriesStore:
             ).fetchall()
             return tuple(_snapshot_from_row(row) for row in rows)
 
+    def control_reconciliation_needed(self, workflow_id: str) -> bool:
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """SELECT 1 FROM bunshin_aggregate_snapshots WHERE workflow_id = ?
+                   AND state IN ('PAUSE_REQUESTED','CANCEL_REQUESTED','PAUSED','TRIAGE_REQUIRED','CANCELLED')
+                   LIMIT 1""", (workflow_id,),
+            ).fetchone() is not None
+
+    def collecting_replan_epochs(self, workflow_id: str) -> tuple[AggregateSnapshot, ...]:
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                """SELECT * FROM bunshin_aggregate_snapshots WHERE workflow_id = ?
+                   AND aggregate_type = 'execution_epoch' AND state = 'REPLAN_COLLECTING'
+                   ORDER BY created_at, aggregate_id""", (workflow_id,),
+            ).fetchall()
+        return tuple(_snapshot_from_row(row) for row in rows)
+
+    def node_effect_in_backoff(self, node_id: str) -> bool:
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM bunshin_outbox WHERE aggregate_id=? AND aggregate_type='dag_node_run' "
+                "AND status='pending' AND attempt_count>0 AND next_retry_at>? LIMIT 1", (node_id, utc_now()),
+            ).fetchone() is not None
+
     def workflow_ids(self) -> tuple[str, ...]:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             rows = connection.execute(
-                "SELECT aggregate_id FROM bunshin_v2_aggregate_snapshots WHERE aggregate_type = ? ORDER BY created_at, aggregate_id",
+                "SELECT aggregate_id FROM bunshin_aggregate_snapshots WHERE aggregate_type = ? ORDER BY created_at, aggregate_id",
                 (AggregateType.WORKFLOW.value,),
             ).fetchall()
             return tuple(str(row["aggregate_id"]) for row in rows)
@@ -43,7 +67,7 @@ class QueriesStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             existing = connection.execute(
-                "SELECT last_progress_event_id FROM bunshin_v2_workflow_projection WHERE workflow_id = ?",
+                "SELECT last_progress_event_id FROM bunshin_workflow_projection WHERE workflow_id = ?",
                 (str(workflow_id),),
             ).fetchone()
             self.projections.rebuild_workflow_projection_locked(
@@ -52,7 +76,7 @@ class QueriesStore:
                 str(existing["last_progress_event_id"] or "") if existing is not None else "",
             )
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_workflow_projection WHERE workflow_id = ?",
+                "SELECT * FROM bunshin_workflow_projection WHERE workflow_id = ?",
                 (str(workflow_id),),
             ).fetchone()
             if row is None:
@@ -75,7 +99,7 @@ class QueriesStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_node_projection
+                SELECT * FROM bunshin_node_projection
                 WHERE workflow_id = ?
                 ORDER BY updated_at, node_run_id
                 """,
@@ -106,7 +130,7 @@ class QueriesStore:
                        total_input_tokens, total_output_tokens,
                        total_latency_ms, total_tool_latency_ms,
                        total_wall_latency_ms, created_at, updated_at
-                FROM bunshin_v2_role_invocations
+                FROM bunshin_role_invocations
                 WHERE workflow_id = ?
                 ORDER BY created_at, invocation_id
                 """,
@@ -131,10 +155,10 @@ class QueriesStore:
                        draft.status AS checklist_status,
                        draft.payload_json AS checklist_payload_json,
                        draft.updated_at AS checklist_updated_at
-                FROM bunshin_v2_role_assignments AS assignment
-                LEFT JOIN bunshin_v2_role_attempts AS attempt
+                FROM bunshin_role_assignments AS assignment
+                LEFT JOIN bunshin_role_attempts AS attempt
                   ON attempt.attempt_id = assignment.active_attempt_id
-                LEFT JOIN bunshin_v2_submission_drafts AS draft
+                LEFT JOIN bunshin_submission_drafts AS draft
                   ON draft.invocation_id = attempt.attempt_id
                  AND draft.workflow_id = assignment.workflow_id
                  AND draft.draft_kind = 'work_items'
@@ -188,7 +212,7 @@ class QueriesStore:
             row = connection.execute(
                 """
                 SELECT event_type, aggregate_type, created_at
-                FROM bunshin_v2_domain_events
+                FROM bunshin_domain_events
                 WHERE workflow_id = ?
                 ORDER BY created_at DESC, event_id DESC
                 LIMIT 1
@@ -203,7 +227,7 @@ class QueriesStore:
         with self.database.read_connection() as connection:
             row = connection.execute(
                 "SELECT json_extract(payload_json, '$.action_payload.architecture_manifest_ref') AS ref "
-                "FROM bunshin_v2_domain_events WHERE aggregate_type = ? AND aggregate_id = ? "
+                "FROM bunshin_domain_events WHERE aggregate_type = ? AND aggregate_id = ? "
                 "AND aggregate_version = 1 AND event_type = 'architecture_revision.import_architecture_revision'",
                 (AggregateType.ARCHITECTURE_REVISION.value, str(revision_id)),
             ).fetchone()
@@ -214,7 +238,7 @@ class QueriesStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT aggregate_version FROM bunshin_v2_domain_events WHERE event_id = ?",
+                "SELECT aggregate_version FROM bunshin_domain_events WHERE event_id = ?",
                 (str(event_id or "").strip(),),
             ).fetchone()
         return int(row["aggregate_version"]) if row is not None else None
@@ -226,7 +250,7 @@ class QueriesStore:
         with self.database.read_connection() as connection:
             row = connection.execute(
                 "SELECT aggregate_version, payload_json "
-                "FROM bunshin_v2_domain_events WHERE event_id = ?",
+                "FROM bunshin_domain_events WHERE event_id = ?",
                 (str(event_id or "").strip(),),
             ).fetchone()
         if row is None:
@@ -249,8 +273,8 @@ class QueriesStore:
             row = connection.execute(
                 """
                 SELECT json_extract(submit.payload_json, '$.action_payload.pending_verification_ref') AS pending_ref
-                FROM bunshin_v2_domain_events AS cause
-                JOIN bunshin_v2_domain_events AS submit
+                FROM bunshin_domain_events AS cause
+                JOIN bunshin_domain_events AS submit
                   ON submit.aggregate_type = cause.aggregate_type
                  AND submit.aggregate_id = cause.aggregate_id
                  AND submit.aggregate_version <= cause.aggregate_version
@@ -266,7 +290,7 @@ class QueriesStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_outbox WHERE workflow_id = ? "
+                "SELECT * FROM bunshin_outbox WHERE workflow_id = ? "
                 "AND effect_type = 'reconcile_dependency_repairs' "
                 "AND json_extract(payload_json, '$.dependency_repair_capture_ref.sha256') = ? "
                 "ORDER BY created_at, effect_id LIMIT 1", (workflow_id, capture_sha256),
@@ -282,7 +306,7 @@ class QueriesStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             rows = connection.execute(
-                "SELECT payload_json FROM bunshin_v2_domain_events WHERE aggregate_type = ? AND aggregate_id = ? "
+                "SELECT payload_json FROM bunshin_domain_events WHERE aggregate_type = ? AND aggregate_id = ? "
                 "ORDER BY aggregate_version DESC",
                 (AggregateType.DAG_NODE_RUN.value, aggregate_id),
             ).fetchall()
@@ -298,9 +322,9 @@ class QueriesStore:
         with self.database.read_connection() as connection:
             row = connection.execute(
                 """SELECT o.effect_id, o.effect_key, o.payload_json
-                   FROM bunshin_v2_action_dedup AS a
-                   JOIN bunshin_v2_domain_events AS e ON e.action_id = a.action_id
-                   JOIN bunshin_v2_outbox AS o ON o.event_id = e.event_id
+                   FROM bunshin_action_dedup AS a
+                   JOIN bunshin_domain_events AS e ON e.action_id = a.action_id
+                   JOIN bunshin_outbox AS o ON o.event_id = e.event_id
                    WHERE a.aggregate_type = ? AND a.aggregate_id = ? AND a.idempotency_key = ?
                      AND o.effect_type IN ('run_implementation_role', 'run_verifier_role')
                    ORDER BY e.aggregate_version DESC LIMIT 1""",
@@ -317,7 +341,7 @@ class QueriesStore:
             row = connection.execute(
                 """
                 SELECT json_extract(payload_json, '$.action_payload.verification_artifact_ref') AS report_ref
-                FROM bunshin_v2_domain_events
+                FROM bunshin_domain_events
                 WHERE aggregate_type = ? AND aggregate_id = ?
                   AND json_extract(payload_json, '$.action_payload.source_pending_verification_ref.sha256') = ?
                   AND json_extract(payload_json, '$.action_payload.verification_artifact_ref.sha256') IS NOT NULL
@@ -333,7 +357,7 @@ class QueriesStore:
         with self.database.read_connection() as connection:
             return connection.execute(
                 """
-                SELECT 1 FROM bunshin_v2_domain_events
+                SELECT 1 FROM bunshin_domain_events
                 WHERE aggregate_type = ? AND aggregate_id = ? AND event_type = ?
                   AND json_extract(payload_json, '$.action_payload.source_repair_packet_ref.sha256') = ?
                 LIMIT 1
@@ -346,7 +370,7 @@ class QueriesStore:
         with self.database.read_connection() as connection:
             row = connection.execute(
                 """
-                SELECT 1 FROM bunshin_v2_aggregate_snapshots
+                SELECT 1 FROM bunshin_aggregate_snapshots
                 WHERE aggregate_type = ?
                   AND json_extract(payload_json, '$.task_id') = ?
                   AND state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')
@@ -360,7 +384,7 @@ class QueriesStore:
         self.projections.rebuild_workflow_projections()
         with self.database.read_connection() as connection:
             rows = connection.execute(
-                "SELECT workflow_id FROM bunshin_v2_workflow_projection WHERE liveness = 'orphaned' ORDER BY workflow_id"
+                "SELECT workflow_id FROM bunshin_workflow_projection WHERE liveness = 'orphaned' ORDER BY workflow_id"
             ).fetchall()
             return tuple(str(row["workflow_id"]) for row in rows)
 
@@ -391,7 +415,7 @@ def _read_liveness_sources(
     if lease_resource_key:
         lease = connection.execute(
             """
-            SELECT 1 FROM bunshin_v2_leases
+            SELECT 1 FROM bunshin_leases
             WHERE resource_key = ? AND owner_id != '' AND expires_at > ?
             LIMIT 1
             """,
@@ -401,7 +425,7 @@ def _read_liveness_sources(
             sources.append("live_lease")
     pending_effect = connection.execute(
         """
-        SELECT 1 FROM bunshin_v2_outbox
+        SELECT 1 FROM bunshin_outbox
         WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
           AND status IN ('pending', 'inflight')
         LIMIT 1
@@ -412,7 +436,7 @@ def _read_liveness_sources(
         sources.append("outbox")
     durable_assignment = connection.execute(
         """
-        SELECT 1 FROM bunshin_v2_role_assignments
+        SELECT 1 FROM bunshin_role_assignments
         WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
           AND state IN (?, ?, ?, ?, ?)
         LIMIT 1

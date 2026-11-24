@@ -103,7 +103,7 @@ class ProducerToolDiagnostic(BaseModel):
 
 def is_producer_pack(pack: BunshinInvocationPack, tool_alias: str | None = None) -> bool:
     # Profiles are presentation, not authority; other roles use checklists too.
-    binding = (pack.metadata or {}).get("bunshin_v2")
+    binding = (pack.metadata or {}).get("bunshin")
     if not isinstance(binding, dict):
         return False
     if binding.get("role") == "implementation":

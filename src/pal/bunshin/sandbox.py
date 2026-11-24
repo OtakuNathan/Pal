@@ -10,15 +10,21 @@ import sys
 import sysconfig
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any
 
 from pal.foundation.log_paths import pal_log_root
-from pal.foundation.encryption import ensure_runtime_snapshot_key
+from pal.foundation.bwrap_permissions import ReadOnlyBind, append_bind_path, append_dir_scaffold
 from pal.foundation.sidecar import python_subprocess_env
 from pal.bunshin.ipc import (
     BUNSHIN_RUNTIME_DB_PATH_ENV,
     ROLE_GATEWAY_TOKEN_ENV,
-    bunshin_role_socket_path,
+)
+from pal.bunshin.permissions import (
+    BUNSHIN_SANDBOX_REFERENCE_ROOT,
+    mount_role_references,
+    mount_role_runtime,
+    mount_role_runtime_dependencies,
+    mount_role_workspace,
 )
 from pal.bunshin.workspace_tools import _normalized_reference_paths
 from pal.shared import BunshinInvocationPack
@@ -30,7 +36,6 @@ PAL_BUNSHIN_SANDBOX_MAX_RUN_DIRS_ENV = "PAL_BUNSHIN_SANDBOX_MAX_RUN_DIRS"
 PAL_BUNSHIN_RUNTIME_ROOT_ENV = "PAL_BUNSHIN_RUNTIME_ROOT"
 DEFAULT_BUNSHIN_SANDBOX_MIN_FREE_MB = 256
 DEFAULT_BUNSHIN_SANDBOX_MAX_RUN_DIRS = 128
-BUNSHIN_SANDBOX_REFERENCE_ROOT = PurePosixPath("/pal/references")
 
 _GIT_CORE_ROOTS = (Path("/usr/lib/git-core"), Path("/usr/libexec/git-core"))
 
@@ -201,7 +206,11 @@ def build_sandboxed_runner_invocation(
     pack: BunshinInvocationPack,
     argv: list[str],
     env: dict[str, str] | None = None,
+    role_runtime: bool = True,
+    runtime_mounts: tuple[ReadOnlyBind, ...] = (),
 ) -> tuple[list[str], dict[str, str]]:
+    if runtime_mounts and not role_runtime:
+        raise ValueError("runtime dependency mounts require a role runtime")
     metadata = dict(pack.metadata or {})
     sandbox = dict(metadata.get("sandbox") or {})
     if not bool(sandbox.get("enabled")):
@@ -215,15 +224,10 @@ def build_sandboxed_runner_invocation(
             pack=pack,
             scratch_dir=sandbox.get("scratch_dir"),
         )
-        return (
-            _build_bwrap_invocation(
-                runtime_root=runtime_root,
-                pack=pack,
-                sandbox=sandbox,
-                argv=argv,
-                env=final_env,
-            ),
-            final_env,
+        return _build_bwrap_invocation(
+            runtime_root=runtime_root, pack=pack, sandbox=sandbox, argv=argv,
+            env=final_env, role_runtime=role_runtime,
+            runtime_mounts=runtime_mounts,
         )
     if backend == "docker":
         raise RuntimeError("macOS Docker bunshin sandbox requires PAL_BUNSHIN_DOCKER_IMAGE; the Docker launcher is not wired yet")
@@ -437,25 +441,7 @@ def _prune_sandbox_run_dirs(root: Path, *, keep_run_id: str) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def _build_bwrap_invocation(
-    *,
-    runtime_root: Path,
-    pack: BunshinInvocationPack,
-    sandbox: dict[str, Any],
-    argv: list[str],
-    env: dict[str, str],
-) -> list[str]:
-    bwrap = shutil.which("bwrap")
-    if not bwrap:
-        raise RuntimeError("bubblewrap is required for Linux bunshin sandboxing")
-    run_id = str(sandbox.get("run_id") or (pack.metadata or {}).get("run_id") or "run")
-    scratch, shim_dir = ensure_sandbox_files(
-        runtime_root,
-        run_id=run_id,
-        scratch_dir=sandbox.get("scratch_dir"),
-    )
-    workspace_path = Path(str(sandbox.get("workspace_path") or _workspace_path_from_pack(pack) or "")).expanduser()
-
+def _python_sandbox(bwrap: str, tmp_mount: list[str]) -> list[str]:
     args: list[str] = [
         bwrap,
         "--die-with-parent",
@@ -469,9 +455,7 @@ def _build_bwrap_invocation(
         "/proc",
         "--dev",
         "/dev",
-        "--bind",
-        str(scratch / "tmp"),
-        "/tmp",
+        *tmp_mount,
     ]
     for link_name, target_name in (("/bin", "usr/bin"), ("/sbin", "usr/sbin"), ("/lib", "usr/lib")):
         if Path(link_name).is_symlink():
@@ -484,46 +468,50 @@ def _build_bwrap_invocation(
     # The harness runs the resolved current interpreter, which may live outside
     # /usr. Project its code and loaded libpython before narrower binds.
     for python_path in _python_runtime_paths():
-        _append_bind_path(args, python_path, read_only=True)
-    _append_dir_scaffold(args, Path(runtime_root))
-    _append_runtime_root_binds(args, Path(runtime_root), pack, env=env)
+        append_bind_path(args, python_path, read_only=True)
+    return args
+
+
+def _build_bwrap_invocation(
+    *,
+    runtime_root: Path,
+    pack: BunshinInvocationPack,
+    sandbox: dict[str, Any],
+    argv: list[str],
+    env: dict[str, str],
+    role_runtime: bool = True,
+    runtime_mounts: tuple[ReadOnlyBind, ...] = (),
+) -> tuple[list[str], dict[str, str]]:
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        raise RuntimeError("bubblewrap is required for Linux bunshin sandboxing")
+    run_id = str(sandbox.get("run_id") or (pack.metadata or {}).get("run_id") or "run")
+    scratch, shim_dir = ensure_sandbox_files(
+        runtime_root,
+        run_id=run_id,
+        scratch_dir=sandbox.get("scratch_dir"),
+    )
+    workspace_path = _workspace_path_from_pack(pack)
+    if sandbox.get("workspace_path"):
+        workspace_path = Path(sandbox["workspace_path"]).expanduser()
+
+    args = _python_sandbox(bwrap, ["--bind", str(scratch / "tmp"), "/tmp"])
+    append_dir_scaffold(args, Path(runtime_root))
+    if role_runtime:
+        mount_role_runtime(args, Path(runtime_root), pack, env=env)
     source_root = _pal_source_root()
-    _append_bind_path(args, source_root, read_only=True)
+    append_bind_path(args, source_root, read_only=True)
     for python_path in _python_dependency_paths():
-        _append_bind_path(args, Path(python_path), read_only=True)
+        append_bind_path(args, Path(python_path), read_only=True)
     from pal.execution.worker_extensions import worker_dependency_paths
     for dependency_path in worker_dependency_paths(
         Path(runtime_root), env, database_path=env.get(BUNSHIN_RUNTIME_DB_PATH_ENV) or None
     ):
-        _append_bind_path(args, dependency_path, read_only=True)
+        append_bind_path(args, dependency_path, read_only=True)
     nvm_root = Path.home() / ".nvm"
     if nvm_root.exists():
-        _append_bind_path(args, nvm_root, read_only=True)
-    workspace_policy = dict(pack.workspace.get("workspace_policy") or {})
-    read_only_workspace = str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo"
-    if workspace_path and workspace_path.exists():
-        _append_bind_path(
-            args,
-            workspace_path,
-            read_only=read_only_workspace,
-        )
-        for raw_relative in list(
-            pack.workspace.get("read_only_overlay_paths") or []
-        ):
-            relative = str(raw_relative or "").strip().replace("\\", "/")
-            target = (workspace_path.resolve() / relative).resolve()
-            if not relative or not target.is_relative_to(workspace_path.resolve()):
-                raise RuntimeError(
-                    f"read-only overlay escapes its worktree: {relative}"
-                )
-            if not target.exists():
-                raise RuntimeError(
-                    f"read-only overlay does not exist: {relative}"
-                )
-            _append_bind_path(args, target, read_only=True)
-        git_marker = workspace_path / ".git"
-        if git_marker.exists() or git_marker.is_symlink():
-            _append_bind_path(args, git_marker, read_only=True)
+        append_bind_path(args, nvm_root, read_only=True)
+    files = mount_role_workspace(args, workspace_path, pack.workspace)
     reference_binds = [
         dict(item or {})
         for item in list(sandbox.get("reference_binds") or [])
@@ -531,154 +519,21 @@ def _build_bwrap_invocation(
     ]
     if not reference_binds:
         _, reference_binds = _project_sandbox_references(dict(pack.workspace or {}))
-    _append_reference_projection_binds(args, reference_binds)
+    mount_role_references(args, reference_binds)
     _append_git_shim_binds(args, shim_dir)
+    if runtime_mounts:
+        mount_role_runtime_dependencies(args, runtime_root, scratch / "tmp", runtime_mounts)
     args.extend(["--chdir", _sandbox_cwd(pack), "--"])
     args.extend(argv)
-    return args
+    if role_runtime and files:
+        from pal.execution.mounted_file_editor import with_mounted_file_editor
 
-
-def _append_reference_projection_binds(
-    args: list[str],
-    references: list[dict[str, Any]],
-) -> None:
-    created_dirs: set[str] = set()
-    for reference in references:
-        source = Path(str(reference.get("source_path") or "")).expanduser()
-        target = PurePosixPath(str(reference.get("target_path") or ""))
-        required = bool(reference.get("required", True))
-        if not source.exists() or not source.is_dir():
-            if required:
-                raise RuntimeError(
-                    f"sandbox reference source is unavailable: {reference.get('name') or source}"
-                )
-            continue
-        if not target.is_absolute() or target.parent != BUNSHIN_SANDBOX_REFERENCE_ROOT:
-            raise RuntimeError(f"invalid sandbox reference target: {target}")
-        includes = [str(item).strip() for item in list(reference.get("include") or []) if str(item).strip()]
-        _append_virtual_dirs(args, target, created_dirs)
-        if not includes:
-            args.extend(["--ro-bind", str(source.resolve()), str(target)])
-            continue
-        args.extend(["--tmpfs", str(target)])
-        matches = _reference_projection_matches(source, includes)
-        if not matches and required:
-            raise RuntimeError(
-                f"sandbox reference include set is empty: {reference.get('name') or source}"
-            )
-        bound_directories: list[Path] = []
-        for relative, resolved in matches:
-            if any(relative == parent or relative.is_relative_to(parent) for parent in bound_directories):
-                continue
-            destination = target.joinpath(*relative.parts)
-            if resolved.is_dir():
-                _append_virtual_dirs(args, destination, created_dirs)
-                args.extend(["--ro-bind", str(resolved), str(destination)])
-                bound_directories.append(relative)
-            else:
-                _append_virtual_dirs(args, destination.parent, created_dirs)
-                args.extend(["--ro-bind", str(resolved), str(destination)])
-        args.extend(["--remount-ro", str(target)])
-
-
-def _reference_projection_matches(
-    source: Path,
-    includes: list[str],
-) -> list[tuple[Path, Path]]:
-    root = source.resolve()
-    matches: dict[Path, Path] = {}
-    for pattern in includes:
-        normalized = pattern.replace("\\", "/").strip()
-        parts = PurePosixPath(normalized).parts
-        if not normalized or normalized.startswith("/") or ".." in parts:
-            raise RuntimeError(f"invalid sandbox reference include pattern: {pattern}")
-        for candidate in source.glob(normalized):
-            try:
-                resolved = candidate.resolve(strict=True)
-                relative = candidate.relative_to(source)
-            except (OSError, ValueError):
-                continue
-            if not resolved.is_relative_to(root):
-                raise RuntimeError(f"sandbox reference include escapes its source root: {candidate}")
-            if relative.parts:
-                matches[relative] = resolved
-    return sorted(matches.items(), key=lambda item: (len(item[0].parts), str(item[0])))
-
-
-def _append_virtual_dirs(
-    args: list[str],
-    path: PurePosixPath,
-    created: set[str],
-) -> None:
-    current = PurePosixPath("/")
-    for part in path.parts[1:]:
-        current /= part
-        value = str(current)
-        if value in created:
-            continue
-        args.extend(["--dir", value])
-        created.add(value)
-
-
-def _append_runtime_root_binds(
-    args: list[str],
-    runtime_root: Path,
-    pack: BunshinInvocationPack,
-    *,
-    env: Mapping[str, str],
-) -> None:
-    runtime_root = Path(runtime_root).expanduser()
-    _append_dir_scaffold(args, runtime_root)
-    snapshot_key = ensure_runtime_snapshot_key(runtime_root)
-    _append_bind_path(args, snapshot_key, read_only=True)
-    configured_db_path = str(env.get(BUNSHIN_RUNTIME_DB_PATH_ENV) or "").strip()
-    database_path = (
-        Path(configured_db_path).expanduser()
-        if configured_db_path
-        else runtime_root / "pal.sqlite3"
-    )
-    for path in (
-        database_path,
-        Path(f"{database_path}-shm"),
-        Path(f"{database_path}-wal"),
-        runtime_root / "config.toml",
-    ):
-        if path.exists():
-            _append_bind_path(args, path, read_only=True)
-    for dir_name in ("data/lsp", "plugins", "SKILL", "llm/models", "llm/providers", "llm/endpoints"):
-        path = runtime_root / dir_name
-        if path.exists():
-            _append_dir_scaffold(args, path)
-            args.extend(["--ro-bind", str(path), str(path)])
-    memory_root = runtime_root / "memory"
-    if memory_root.is_dir():
-        _append_bind_path(args, memory_root, read_only=True)
-    run_dir_value = str(pack.workspace.get("run_dir") or "").strip()
-    run_dir = Path(run_dir_value).expanduser() if run_dir_value else None
-    if run_dir is not None and run_dir.is_dir():
-        _append_bind_path(args, run_dir, read_only=False)
-    endpoint_path = bunshin_role_socket_path(runtime_root)
-    if not endpoint_path.exists():
-        raise RuntimeError(
-            "sandboxed Bunshin requires the assignment-scoped Unix role gateway"
+        editor = _python_sandbox(bwrap, ["--tmpfs", "/tmp"])
+        return with_mounted_file_editor(
+            args, editor, env, files=files,
+            python_paths=[str(source_root), *_python_dependency_paths()], shadow_root=Path("/tmp/pal/bunshin"),
         )
-    _append_bind_path(args, endpoint_path, read_only=True)
-
-
-def _append_bind_path(args: list[str], path: Path, *, read_only: bool) -> None:
-    path = Path(path).expanduser()
-    _append_dir_scaffold(args, path if path.is_dir() else path.parent)
-    args.extend(["--ro-bind" if read_only else "--bind", str(path), str(path)])
-
-
-def _append_dir_scaffold(args: list[str], path: Path) -> None:
-    parts = Path(path).expanduser().parts
-    if not parts or parts[0] != "/":
-        return
-    current = Path("/")
-    for part in parts[1:]:
-        current = current / part
-        args.extend(["--dir", str(current)])
+    return args, env
 
 
 def _command_targets(command: str) -> tuple[Path, ...]:

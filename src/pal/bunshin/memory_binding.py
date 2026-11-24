@@ -70,7 +70,7 @@ def reconcile_workflow_memory_references(runtime_root):
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
         if not pins:
             return
-        workflows = dict(connection.execute("""SELECT aggregate_id,state FROM bunshin_v2_aggregate_snapshots
+        workflows = dict(connection.execute("""SELECT aggregate_id,state FROM bunshin_aggregate_snapshots
             WHERE aggregate_type='workflow'"""))
         terminal = ('COMPLETED', 'REJECTED', 'CANCELLED')
         released = False
@@ -84,7 +84,7 @@ def reconcile_workflow_memory_references(runtime_root):
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     continue  # The creating transaction still owns this reference.
-                workflow = connection.execute("""SELECT state FROM bunshin_v2_aggregate_snapshots
+                workflow = connection.execute("""SELECT state FROM bunshin_aggregate_snapshots
                     WHERE aggregate_type='workflow' AND aggregate_id=?""", (workflow_id,)).fetchone()
                 if workflow is None:
                     if not managed:
@@ -103,9 +103,9 @@ def reconcile_workflow_memory_references(runtime_root):
                             SELECT workflow_id FROM workflow_pins WHERE workflow_id=? AND released=0""",
                             (workflow_id,))
                 if workflow[0] in terminal:
-                    active = connection.execute("""SELECT 1 FROM bunshin_v2_role_sessions
+                    active = connection.execute("""SELECT 1 FROM bunshin_role_sessions
                         WHERE workflow_id=? AND status NOT IN ('completed','cancelled')
-                        UNION ALL SELECT 1 FROM bunshin_v2_role_assignments
+                        UNION ALL SELECT 1 FROM bunshin_role_assignments
                         WHERE workflow_id=? AND state NOT IN ('settled','cancelled') LIMIT 1""",
                         (workflow_id, workflow_id)).fetchone()
                     if active is None:

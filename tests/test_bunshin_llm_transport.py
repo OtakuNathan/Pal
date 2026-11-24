@@ -144,6 +144,65 @@ def _params(endpoint, *, request_id: str = "request-1") -> dict:
 
 
 class BunshinLLMTransportTests(unittest.TestCase):
+    def test_retried_role_cannot_settle_the_previous_attempts_request(self) -> None:
+        async def scenario(root: Path) -> None:
+            database, manager = _manager(root)
+            self.addCleanup(database.close)
+            endpoint = _register_endpoint()
+            pack = BunshinInvocationPack(invocation_id="session")
+            state = BunshinRunState("session", "run-1", pack, assignment_id="assignment", attempt_id="first")
+            manager.runs["run-1"] = state
+            manager.llm_proxy.transport = _CapturingTransport()
+            params = _params(endpoint)
+            with patch.object(manager.role_gateway, "authorize", return_value={
+                "assignment": {"session_id": "session"}, "attempt_id": "first",
+            }):
+                authorized = await manager._authorize_worker_broker_params(params)
+                frames = [item async for item in manager.llm_transport_stream_frames(authorized)]
+                self.assertTrue(frames)
+                manager._unregister_broker_run("run-1", True)
+                manager.runs["run-1"] = BunshinRunState("session", "run-1", pack, assignment_id="assignment", attempt_id="second")
+                with self.assertRaises(PermissionError):
+                    await manager._authorize_worker_broker_params(params)
+                with self.assertRaises(PermissionError):
+                    await anext(manager.llm_transport_stream_frames(authorized))
+            with self.assertRaisesRegex(KeyError, "unknown LLM transport request receipt"):
+                await manager.llm_usage_receipt(params)
+            self.assertFalse(manager.llm_proxy.requests[params["request_id"]].usage_received)
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(Path(directory)))
+
+    def test_refresh_drains_admitted_stream_and_preserves_the_next_transport(self) -> None:
+        async def scenario(root: Path) -> None:
+            database, manager = _manager(root)
+            self.addCleanup(database.close)
+            endpoint = _register_endpoint()
+            manager.runs["run-1"] = BunshinRunState("session", "run-1", BunshinInvocationPack(invocation_id="session"))
+            old, new = _CapturingTransport(), _CapturingTransport()
+            manager.llm_proxy.transport = old
+            stream = manager.llm_transport_stream_frames(_params(endpoint, request_id="old"))
+            async for item in stream:
+                if "frame" in item:
+                    break
+            with patch.object(old, "close", wraps=old.close) as close:
+                retiring = asyncio.create_task(manager.refresh_llm_endpoints())
+                try:
+                    await asyncio.sleep(0)
+                    self.assertIsNone(manager.llm_proxy.transport)
+                    manager.llm_proxy.transport = new
+                    frames = [item async for item in manager.llm_transport_stream_frames(_params(endpoint, request_id="new"))]
+                    self.assertTrue(any("frame" in item for item in frames))
+                    close.assert_not_called()
+                finally:
+                    await stream.aclose()
+                    self.assertTrue((await asyncio.wait_for(retiring, 5))["refreshed"])
+                close.assert_called_once_with()
+            self.assertIs(manager.llm_proxy.transport, new)
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(Path(directory)))
+
     def test_role_budgets_do_not_rebuild_the_configured_endpoint_composition(self) -> None:
         async def scenario():
             with tempfile.TemporaryDirectory() as directory:
@@ -162,7 +221,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                         pass
 
                 direct = DirectEndpointTransport(lambda ep: None, sdk_transport=Port())
-                manager._llm_json_transport = direct
+                manager.llm_proxy.transport = direct
                 bound = direct.bind(configured)
                 try:
                     for budget in (128, 256):
@@ -205,7 +264,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                     bunshin_id="bunshin-1", run_id="run-1", pack=pack,
                 )
                 capture = _CapturingTransport()
-                manager._llm_json_transport = capture
+                manager.llm_proxy.transport = capture
                 server, _ = await start_manager_server(root, manager._handle_client)
                 runtime = build_role_llm(
                     llm_authority="manager_proxy", runtime_root=root, run_id="run-1",
@@ -301,7 +360,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 pack=BunshinInvocationPack(invocation_id="bunshin-1"),
             )
             transport = _BackpressureTransport()
-            manager._llm_json_transport = transport  # type: ignore[assignment]
+            manager.llm_proxy.transport = transport  # type: ignore[assignment]
             stream = manager.llm_transport_stream_frames(
                 _params(endpoint, request_id="backpressure")
             )
@@ -343,7 +402,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 pack=BunshinInvocationPack(invocation_id="bunshin-1"),
             )
             transport = _ThreadRecordingTransport()
-            manager._llm_json_transport = transport  # type: ignore[assignment]
+            manager.llm_proxy.transport = transport  # type: ignore[assignment]
             event_loop_thread = threading.get_ident()
 
             frames = [
@@ -390,7 +449,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
             )
             direct_capture = _CapturingTransport()
             proxy_capture = _CapturingTransport()
-            manager._llm_json_transport = proxy_capture  # type: ignore[assignment]
+            manager.llm_proxy.transport = proxy_capture  # type: ignore[assignment]
             server, _ = await start_manager_server(root, manager._handle_client)
             request = LLMRequestIR(
                 messages=(
@@ -458,7 +517,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 ),
             )
             capture = _CapturingTransport()
-            manager._llm_json_transport = capture  # type: ignore[assignment]
+            manager.llm_proxy.transport = capture  # type: ignore[assignment]
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
                 proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
@@ -486,7 +545,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                     ),
                     provider_response_count=1,
                 )
-                record = manager._llm_transport_requests["request-1"]
+                record = manager.llm_proxy.requests["request-1"]
                 self.assertTrue(record.transport_terminal)
                 self.assertTrue(record.usage_received)
                 duplicate = await manager.llm_usage_receipt(
@@ -508,7 +567,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 )
                 self.assertTrue(duplicate["duplicate"])
                 self.assertEqual(
-                    manager._llm_usage_ledger.snapshot()["successful_request_count"],
+                    manager.llm_proxy.usage.snapshot()["successful_request_count"],
                     1,
                 )
                 with self.assertRaisesRegex(ValueError, "changed its payload"):
@@ -548,7 +607,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 pack=BunshinInvocationPack(invocation_id="bunshin-1",
                     metadata={"preferred_endpoint_id": endpoint.endpoint_id}),
             )
-            manager._llm_json_transport = _CapturingTransport()
+            manager.llm_proxy.transport = _CapturingTransport()
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
                 from pal.llm.attempts import LLMAttemptResult
@@ -567,13 +626,13 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 )
                 await asyncio.to_thread(proxy.report_attempt, endpoint, attempt)
                 await asyncio.to_thread(proxy.report_attempt, endpoint, attempt)
-                snapshot = manager._llm_usage_ledger.snapshot()
+                snapshot = manager.llm_proxy.usage.snapshot()
                 self.assertEqual(snapshot["cost"], 0.125)
                 self.assertTrue(snapshot["cost_complete"])
                 self.assertEqual(snapshot["cache_partition_unknown_attempt_count"], 1)
                 self.assertEqual(snapshot["failed_attempt_count"], 1)
                 self.assertEqual(snapshot["successful_request_count"], 0)
-                self.assertTrue(manager._llm_transport_requests[request.request_id].usage_received)
+                self.assertTrue(manager.llm_proxy.requests[request.request_id].usage_received)
             finally:
                 server.close()
                 await server.wait_closed()
@@ -602,7 +661,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 ),
             )
             capture = _CapturingTransport()
-            manager._llm_json_transport = capture  # type: ignore[assignment]
+            manager.llm_proxy.transport = capture  # type: ignore[assignment]
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
                 old_endpoint = LLMEndpointModel(**dict(endpoint.__data__))
@@ -655,7 +714,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 pack=BunshinInvocationPack(invocation_id="bunshin-1"),
             )
             capture = _CapturingTransport()
-            manager._llm_json_transport = capture  # type: ignore[assignment]
+            manager.llm_proxy.transport = capture  # type: ignore[assignment]
 
             first = [
                 item
@@ -688,7 +747,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
             )
             manager.runs["run-1"] = state
             capture = _CapturingTransport()
-            manager._llm_json_transport = capture  # type: ignore[assignment]
+            manager.llm_proxy.transport = capture  # type: ignore[assignment]
 
             changed_model = _params(endpoint, request_id="changed-model")
             changed_model["payload"] = {
@@ -745,7 +804,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 pack=BunshinInvocationPack(invocation_id="bunshin-1"),
             )
             capture = _CapturingTransport(block=True)
-            manager._llm_json_transport = capture  # type: ignore[assignment]
+            manager.llm_proxy.transport = capture  # type: ignore[assignment]
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
                 proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
@@ -796,7 +855,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 pack=BunshinInvocationPack(invocation_id="bunshin-1"),
             )
             capture = _CapturingTransport()
-            manager._llm_json_transport = capture  # type: ignore[assignment]
+            manager.llm_proxy.transport = capture  # type: ignore[assignment]
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
                 proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
@@ -817,7 +876,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 self.assertEqual(capture.requests, [])
                 self.assertNotIn(
                     "pre-cancelled-request",
-                    manager._llm_transport_requests,
+                    manager.llm_proxy.requests,
                 )
             finally:
                 server.close()
@@ -838,7 +897,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 run_id="run-1",
                 pack=BunshinInvocationPack(invocation_id="bunshin-1"),
             )
-            manager._llm_json_transport = _FailingAfterStartTransport()  # type: ignore[assignment]
+            manager.llm_proxy.transport = _FailingAfterStartTransport()  # type: ignore[assignment]
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
                 proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)

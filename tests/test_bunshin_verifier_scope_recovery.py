@@ -247,7 +247,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
             "artifact_dir": str(self.root / "artifacts-out"), "artifact_stage_dir": str(self.root / "stage"),
             "review_scratch_dir": str(self.root / "scratch"), "write_path_scopes": [corpus],
             "review_tool_evidence_refs": [],
-            "bunshin_v2": {
+            "bunshin": {
                 "workflow_id": self.workflow_id, "invocation_id": invocation,
                 "lease_resource_key": invocation, "fencing_token": lease.fencing_token,
                 "role": "verifier", "mode": "module", "authoring_input_fingerprint": invocation,
@@ -557,7 +557,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
             return await PlaybookBinding(self.artifacts).execute(command, prompt, prepared)
 
         pack = asyncio.run(bind()).pack
-        seeds = pack.metadata["bunshin_v2"]["work_item_seed"]
+        seeds = pack.metadata["bunshin"]["work_item_seed"]
         tasks = [item for item in seeds if item["origin"] == "manager_routed_finding"]
         self.assertEqual({item["summary"] for item in tasks}, {"resolve finding: finding_fifo", "resolve finding: finding_stub"})
         self.assertTrue(all(item["required"] and item["status"] == "pending" for item in tasks))
@@ -636,7 +636,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
     def _stored_effect(self, node, *, effect_type="snapshot_verifier_result"):
         with self.repository.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT o.* FROM bunshin_v2_outbox AS o JOIN bunshin_v2_domain_events AS e ON e.event_id = o.event_id "
+                "SELECT o.* FROM bunshin_outbox AS o JOIN bunshin_domain_events AS e ON e.event_id = o.event_id "
                 "WHERE o.aggregate_id = ? AND o.effect_type = ? ORDER BY e.aggregate_version DESC LIMIT 1",
                 (node.aggregate_id, effect_type),
             ).fetchone()
@@ -782,7 +782,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         repair_ref = self.artifacts.put_json({"findings": [self.fifo, self.stub]}, artifact_type="RepairPacketArtifact")
         before = self.repository.queries.list_workflow_snapshots(self.workflow_id)
         with self.repository.database.read_connection() as connection:
-            effects_before = connection.execute("SELECT count(*) FROM bunshin_v2_outbox").fetchone()[0]
+            effects_before = connection.execute("SELECT count(*) FROM bunshin_outbox").fetchone()[0]
         with self.assertRaisesRegex(ValueError, "repair target is not accepted: node-manifest_model"):
             DefectPropagationService(self.repository).propagate_dependency_defects(
                 workflow_id=self.workflow_id, epoch_id="epoch-scope",
@@ -790,7 +790,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
             )
         self.assertEqual(self.repository.queries.list_workflow_snapshots(self.workflow_id), before)
         with self.repository.database.read_connection() as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM bunshin_v2_outbox").fetchone()[0], effects_before)
+            self.assertEqual(connection.execute("SELECT count(*) FROM bunshin_outbox").fetchone()[0], effects_before)
 
     def test_delayed_provider_packet_replay_does_not_overwrite_a_newer_repair(self):
         from pal.bunshin.verification import DefectPropagationService
@@ -888,7 +888,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
             return await PlaybookBinding(self.artifacts).execute(command, prompt, prepared)
 
         pack = asyncio.run(bind()).pack
-        tasks = [item for item in pack.metadata["bunshin_v2"]["work_item_seed"] if item["origin"] == "manager_routed_finding"]
+        tasks = [item for item in pack.metadata["bunshin"]["work_item_seed"] if item["origin"] == "manager_routed_finding"]
         self.assertEqual([item["summary"] for item in tasks], ["resolve finding: finding_cli"])
         self.assertTrue(tasks[0]["required"])
         self.assertEqual(tasks[0]["status"], "pending")

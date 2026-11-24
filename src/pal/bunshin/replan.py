@@ -129,7 +129,7 @@ def collect_architecture_finding_batch(
     artifact_ref = artifacts.put_json(
         payload,
         artifact_type=ARCHITECTURE_FINDING_BATCH_ARTIFACT,
-        provenance={"owner": "bunshin-v2-manager", "source": "execution-replan"},
+        provenance={"owner": "bunshin-manager", "source": "execution-replan"},
         child_refs=tuple(child_refs),
     )
     return ArchitectureFindingBatch(

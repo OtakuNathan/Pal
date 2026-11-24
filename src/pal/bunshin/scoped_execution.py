@@ -1,7 +1,7 @@
 from __future__ import annotations
+from pal.bunshin.permissions import coder_file_commit, workspace_write_denial
 
 from pal.execution.tool_facade import LifecycleAccess
-from pal.bunshin.workspace_paths import path_scope_matches
 from pal.bunshin.review_receipts import _review_tool_evidence_ref
 
 from pal.shared.tool_protocol import ToolCallIR
@@ -215,8 +215,8 @@ def _scoped_workspace_tool_spec(
     value = dict(spec)
     if name != ADD_FINDING_CAPABILITY:
         return value
-    role = str(dict(workspace.get("bunshin_v2") or {}).get("role") or "")
-    mode = str(dict(workspace.get("bunshin_v2") or {}).get("mode") or "")
+    role = str(dict(workspace.get("bunshin") or {}).get("role") or "")
+    mode = str(dict(workspace.get("bunshin") or {}).get("mode") or "")
     examples = tuple(dict(item) for item in list(value.get("examples") or []))
     if role == "reviewer" and mode == "architecture":
         base_model = value["InputModel"]
@@ -414,7 +414,7 @@ _VERIFIER_WRITER_GUIDANCE = (
 
 
 def _bound_verifier_context(workspace: dict[str, Any]) -> SubmissionDraftContext | None:
-    if dict(workspace.get("bunshin_v2") or {}).get("role") != "verifier":
+    if dict(workspace.get("bunshin") or {}).get("role") != "verifier":
         return None
     try:
         return SubmissionDraftContext.from_workspace(workspace, draft_kind="verification")
@@ -458,7 +458,7 @@ def _with_verifier_writer_guidance(descriptor: CapabilityDescriptor) -> Capabili
 
 
 def _requires_verifier_authoring_lock(runtime: "BunshinScopedExecutionRuntime", name: str) -> bool:
-    binding = dict(runtime.workspace.get("bunshin_v2") or {})
+    binding = dict(runtime.workspace.get("bunshin") or {})
     if binding.get("role") != "verifier" or not any(key in binding for key in (
         "workflow_id", "invocation_id", "fencing_token", "lease_resource_key",
         "lease_resource", "authoring_input_fingerprint", "authoring_contract_version",
@@ -508,7 +508,7 @@ def _capture_legacy_finding_generation(runtime: ExecutionRuntime, subtree: Mount
 
 
 def _scoped_tool_destination(name: str, workspace: dict[str, Any], primary: Any, legacy: Any) -> Any:
-    if name == ADD_FINDING_CAPABILITY and dict(workspace.get("bunshin_v2") or {}).get("role") == "verifier":
+    if name == ADD_FINDING_CAPABILITY and dict(workspace.get("bunshin") or {}).get("role") == "verifier":
         return legacy if _bound_verifier_context(workspace) is not None else None
     return primary
 
@@ -692,7 +692,7 @@ class BunshinScopedExecutionRuntime:
             self.allowed_capabilities = [name for name in self.allowed_capabilities if name != ADD_FINDING_CAPABILITY]
 
         verification_contract = dict(
-            dict(self.workspace.get("bunshin_v2") or {}).get("verification_tool_contract") or {}
+            dict(self.workspace.get("bunshin") or {}).get("verification_tool_contract") or {}
         )
         verification_allowed = {
             str(item) for item in list(verification_contract.get("allowed_capabilities") or [])
@@ -959,6 +959,11 @@ class BunshinScopedExecutionRuntime:
                     guarded_call, target_name=admission.target_name,
                     budget=budget, turn_id=effective_turn_id,
                 )
+        path = effective_bunshin_tool_args(guarded_call).get("file_path")
+        if path and admission.target_name in _SCOPED_FILE_MUTATIONS and self.workspace.get("coder_repository_read"):
+            target = Path(path).resolve()
+            with coder_file_commit(self.workspace, target):
+                return await self._execute_admitted(guarded_call, budget=budget, turn_id=effective_turn_id)
         return await self._execute_admitted(guarded_call, budget=budget, turn_id=effective_turn_id)
 
     async def _execute_verifier_authoring(
@@ -1084,46 +1089,13 @@ def _guard_scoped_workspace_mutation(
             relative_path="",
             reason="path_outside_workspace",
         )
-    has_compiled_write_scopes = "write_path_scopes" in workspace
-    has_read_only_overlays = "read_only_overlay_paths" in workspace
-    if not has_compiled_write_scopes and not has_read_only_overlays:
-        args["file_path"] = str(target)
-        return _tool_call_with_effective_args(call, args), None
-    overlays = [
-        str(item or "").replace("\\", "/").strip("/")
-        for item in list(workspace.get("read_only_overlay_paths") or [])
-        if str(item or "").strip()
-    ]
-    if any(
-        relative == overlay or relative.startswith(overlay + "/")
-        for overlay in overlays
-    ):
+    reason = workspace_write_denial(workspace, relative)
+    if reason is not None:
         return call, _path_not_writable_result(
-            call,
-            raw_path=raw_path,
-            relative_path=relative,
-            reason="read_only_overlay",
-        )
-    scopes = [
-        dict(item or {})
-        for item in list(workspace.get("write_path_scopes") or [])
-        if isinstance(item, dict)
-    ]
-    if has_compiled_write_scopes and not any(
-        _workspace_scope_matches(relative, scope) for scope in scopes
-    ):
-        return call, _path_not_writable_result(
-            call,
-            raw_path=raw_path,
-            relative_path=relative,
-            reason="outside_write_scope",
+            call, raw_path=raw_path, relative_path=relative, reason=reason,
         )
     args["file_path"] = str(target)
     return _tool_call_with_effective_args(call, args), None
-
-
-def _workspace_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
-    return path_scope_matches(path, scope)
 
 
 def _tool_call_with_effective_args(

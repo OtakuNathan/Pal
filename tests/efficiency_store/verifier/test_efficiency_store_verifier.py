@@ -39,7 +39,7 @@ def _seed_workflow(db_path: Path, workflow_id: str = "wf-v") -> None:
     try:
         connection.execute(
             """
-            INSERT INTO bunshin_v2_role_invocations(
+            INSERT INTO bunshin_role_invocations(
                 invocation_id, workflow_id, aggregate_type, aggregate_id,
                 lease_resource_key, fencing_token, role, prompt_pack_ref_json,
                 status, created_at, updated_at
@@ -68,7 +68,7 @@ def test_readonly_open_on_live_wal_database(tmp_path: Path) -> None:
         ensure_bunshin_schema(writer)
         writer.execute(
             """
-            INSERT INTO bunshin_v2_role_invocations(
+            INSERT INTO bunshin_role_invocations(
                 invocation_id, workflow_id, aggregate_type, aggregate_id,
                 lease_resource_key, fencing_token, role, prompt_pack_ref_json,
                 status, created_at, updated_at
@@ -114,7 +114,7 @@ def test_legacy_turns_table_with_drifted_schema_aborts(
     try:
         connection.execute(
             """
-            CREATE TABLE bunshin_v2_role_invocations (
+            CREATE TABLE bunshin_role_invocations (
                 invocation_id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 aggregate_type TEXT NOT NULL,
@@ -131,11 +131,11 @@ def test_legacy_turns_table_with_drifted_schema_aborts(
         )
         # Legacy turns table exists but lacks turn_index used by the query.
         connection.execute(
-            "CREATE TABLE bunshin_v2_role_turns (invocation_id TEXT NOT NULL)"
+            "CREATE TABLE bunshin_role_turns (invocation_id TEXT NOT NULL)"
         )
         connection.execute(
             """
-            INSERT INTO bunshin_v2_role_invocations VALUES (
+            INSERT INTO bunshin_role_invocations VALUES (
                 'inv-d', 'wf-drift', 'module', 'm1', 'lease:d', 1,
                 'architect', '{}', 'completed',
                 '2023-01-01T00:00:00Z', '2023-01-01T00:00:00Z'

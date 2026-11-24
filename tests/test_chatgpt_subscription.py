@@ -692,7 +692,7 @@ def test_bunshin_proxy_preserves_subscription_failure(tmp_path):
             def frames(self, ep, req):
                 raise ChatGPTError(QUOTA_CODE, status=429, request_id="request-id")
                 yield
-        manager._llm_json_transport = Transport()
+        manager.llm_proxy.transport = Transport()
         server, _ = await start_manager_server(tmp_path, manager._handle_client)
         try:
             proxy = ShapeEndpointInvoker(transport=ManagerProxyTransport(tmp_path, "run-1", request_timeout_seconds=2))

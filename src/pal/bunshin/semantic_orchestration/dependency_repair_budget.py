@@ -32,7 +32,7 @@ def triage_captured_no_progress(*, artifacts: ContentAddressedArtifactStore, wor
     pending = dict(capture.get("source_pending_ref") or capture.get("pending_ref") or {})
     work.transitions.dispatch(ActionEnvelope(action_type="ENTER_TRIAGE", workflow_id=node.workflow_id,
         aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id=node.aggregate_id,
-        actor="bunshin-v2-manager", expected_version=node.version,
+        actor="bunshin-manager", expected_version=node.version,
         idempotency_key=f"dependency-repair:no-progress:{capture['incarnation_key']}",
         payload={"source_pending_verification_ref": pending,
                  "verification_artifact_ref": dict(capture["report_ref"]), "verification_status": "FAIL",

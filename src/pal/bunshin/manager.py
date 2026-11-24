@@ -2,18 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
-import json
 import logging
 import os
 import signal
-import threading
-import time
-from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping
 
 from pal.execution import CapabilityCall
 from pal.foundation import utc_now
@@ -21,25 +16,16 @@ from pal.foundation.lifecycle_gate import WriterPreferredRWGate
 from pal.foundation.workers import join_owned_task
 from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import dispatch_sidecar_request, pack_sidecar_message, read_sidecar_message
-from pal.llm.credentials import LLMCredentialResolver
-from pal.llm.endpoint_spec import endpoint_spec_fingerprint
-from pal.llm.ir import LLMUsageIR, WireShape
-from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
-from pal.llm.secret_store import EncryptedFileSecretStore
-from pal.llm.transport import (
-    DirectEndpointTransport,
-    EncodedTransportRequest,
-    LLMStreamControl,
-)
 from pal.foundation.fd_lease import fd_lease_snapshot
-from pal.llm.usage import LLMUsageLedger
 from pydantic import ValidationError
 from pal.bunshin.verifier_tool_diagnostics import VerifierToolDiagnostic, is_verifier_pack
 from pal.bunshin.producer_tool_diagnostics import (
     MAX_PRODUCER_TOOL_DIAGNOSTICS, ProducerToolDiagnostic, is_producer_pack,
 )
 from pal.bunshin.catalog import BunshinCatalogService
-from pal.bunshin.llm_output_budget import with_role_output_budget
+from pal.bunshin.llm_admission import authorize_role_request
+from pal.bunshin.llm_proxy import LLMProxy, serve_llm_stream
+from pal.bunshin.run_ledger import BunshinRunState, ProcessStatusView, RunLedger
 from pal.bunshin.config import effective_bunshin_runtime_config
 from pal.bunshin.event_delivery import BunshinEventDelivery
 from pal.bunshin.ipc import (
@@ -48,299 +34,26 @@ from pal.bunshin.ipc import (
     start_manager_server,
     start_role_gateway_server,
 )
-from pal.bunshin.harnesses import BunshinHarnessRegistry
+from pal.bunshin.harnesses import builtin_harness_generation
 from pal.bunshin.web_broker import web_result_to_payload
 from pal.bunshin.contracts import AggregateType
-from pal.bunshin.orchestration import BunshinOutboxProcessor
+from pal.bunshin.coroutine_runtime import CoroutineRunSemaphore
+from pal.bunshin.dag_scheduling import DagScheduler
+from pal.bunshin.effect_dispatcher import WorkflowEffectDispatcher
+from pal.bunshin.orchestration import WorkflowEffects
 from pal.bunshin.recovery import BunshinRecovery
+from pal.bunshin.workflow_status import pending_clarification_status
 from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.semantic_orchestration import SemanticOrchestrator
+from pal.bunshin.interaction_gateway import record_clarification_answer
 from pal.bunshin.role_gateway import RoleAssignmentGateway
 from pal.bunshin.submission_errors import role_gateway_error_kind
 from pal.shared import BunshinApprovalDecision, BunshinInvocationPack, RuntimeStatus
-from pal.shared.json_values import thaw_json
 
 
 _DEFAULT_MAX_PARALLEL_NODES = 5
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600.0
-_TERMINAL_RUN_STATUSES = frozenset(
-    {"completed", "failed", "cancelled", "killed", "timeout", "suspended", "interrupted", "blocked"}
-)
-_LLM_TRANSPORT_REQUEST_TTL_SECONDS = 30.0 * 60.0
-_LLM_TRANSPORT_REQUEST_MAX_ENTRIES = 2048
-_LLM_TRANSPORT_MAX_TIMEOUT_SECONDS = 3900.0
 
-
-class _ManagerTransportError(RuntimeError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        kind: str = "manager_transport",
-        provider_started: bool = False,
-        chatgpt_failure: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.chatgpt_failure = chatgpt_failure
-        self.kind = kind
-        self.provider_started = bool(provider_started)
-
-
-@dataclass
-class _LLMTransportRequestState:
-    request_id: str
-    run_id: str
-    endpoint_id: str
-    model_id: str
-    provider: str
-    created_at: float = field(default_factory=time.monotonic)
-    provider_started: bool = False
-    transport_terminal: bool = False
-    usage_received: bool = False
-    receipt_fingerprint: str = ""
-
-
-@dataclass(frozen=True)
-class _TransportWorkerResult:
-    error: BaseException | None = None
-    close_error: Exception | None = None
-
-
-def _consume_transport_iterator(
-    iterator: Iterator[Any],
-    publish: Callable[[str, Any], bool],
-) -> _TransportWorkerResult:
-    """Consume and close one provider iterator on one stable owner thread."""
-
-    error: BaseException | None = None
-    close_error: Exception | None = None
-    try:
-        for frame in iterator:
-            if not publish("frame", frame):
-                break
-    except BaseException as exc:
-        error = exc
-    close = getattr(iterator, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception as exc:
-            close_error = exc
-    result = _TransportWorkerResult(error=error, close_error=close_error)
-    publish("terminal", result)
-    return result
-
-
-def _bounded_transport_timeout(value: Any) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise _ManagerTransportError("LLM transport timeout must be numeric") from exc
-    if parsed <= 0 or parsed > _LLM_TRANSPORT_MAX_TIMEOUT_SECONDS:
-        raise _ManagerTransportError(
-            "LLM transport timeout must be within "
-            f"(0, {_LLM_TRANSPORT_MAX_TIMEOUT_SECONDS:g}]"
-        )
-    return parsed
-
-
-def _validate_transport_payload_authority(
-    endpoint: Any,
-    payload: Mapping[str, Any],
-    extra_body: Mapping[str, Any],
-) -> None:
-    if str(payload.get("model") or "").strip() != str(endpoint.model_id):
-        raise _ManagerTransportError(
-            "encoded LLM payload changed endpoint model identity"
-        )
-    continuation_ids = {"previous_response_id", "previous_interaction_id"}
-    if continuation_ids.intersection(payload) or continuation_ids.intersection(extra_body):
-        raise _ManagerTransportError("encoded LLM payload supplied an unbound continuation ID")
-    if "extra_body" in payload:
-        raise _ManagerTransportError(
-            "encoded LLM payload must use the separate extra_body field"
-        )
-    protected = {
-        "model",
-        "max_output_tokens",
-        "max_completion_tokens",
-        "max_tokens",
-        "generation_config",
-        "stream",
-    }
-    overridden = sorted(protected.intersection(extra_body))
-    if overridden:
-        raise _ManagerTransportError(
-            f"encoded LLM extra_body overrides transport authority: {overridden}"
-        )
-    maximum = getattr(endpoint, "max_output_tokens", None)
-    if maximum is None:
-        return
-    if endpoint.wire_shape == "gemini_interactions":
-        payload = payload.get("generation_config", {})
-        if not isinstance(payload, Mapping):
-            raise _ManagerTransportError("Gemini generation_config must be an object")
-    for key in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
-        if key not in payload:
-            continue
-        try:
-            requested = int(payload[key])
-        except (TypeError, ValueError) as exc:
-            raise _ManagerTransportError(
-                f"encoded LLM {key} must be an integer"
-            ) from exc
-        if requested <= 0 or requested > int(maximum):
-            raise _ManagerTransportError(
-                f"encoded LLM {key} exceeds endpoint output authority"
-            )
-
-
-def _normalize_usage_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    integer_fields = (
-        "input_tokens",
-        "uncached_input_tokens",
-        "cached_input_tokens",
-        "cache_write_input_tokens",
-        "output_tokens",
-        "reasoning_tokens",
-    )
-    for key in integer_fields:
-        try:
-            parsed = int(value.get(key, 0))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"LLM usage receipt {key} must be an integer") from exc
-        if parsed < 0:
-            raise ValueError(f"LLM usage receipt {key} must be non-negative")
-        normalized[key] = parsed
-    try:
-        cost = float(value.get("cost", 0.0))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("LLM usage receipt cost must be numeric") from exc
-    if cost < 0:
-        raise ValueError("LLM usage receipt cost must be non-negative")
-    normalized["cost"] = cost
-    normalized["reported"] = bool(value.get("reported", False))
-    normalized["reasoning_tokens_reported"] = bool(
-        value.get("reasoning_tokens_reported", False)
-    )
-    fields = value.get("reported_fields", ())
-    allowed = {*integer_fields, "cost"}
-    if not isinstance(fields, (list, tuple)) or any(item not in allowed for item in fields):
-        raise ValueError("invalid usage field-presence map")
-    normalized["reported_fields"] = tuple(fields)
-    accounting = value.get("input_accounting", "unknown")
-    if accounting not in {"unknown", "inclusive_cache", "exclusive_cache", "aggregate"}:
-        raise ValueError("invalid input accounting")
-    normalized["input_accounting"] = accounting
-    normalized["final"] = bool(value.get("final", False))
-    normalized["usage_anomaly"] = str(value.get("usage_anomaly") or "")[:256]
-    raw_input = value.get("raw_input_tokens")
-    normalized["raw_input_tokens"] = int(raw_input) if raw_input is not None else None
-    raw = value.get("raw_counters", ())
-    from pal.llm.usage_normalization import USAGE_FIELD_PATHS
-    import math
-    paths = {path for entries in USAGE_FIELD_PATHS.values() for path in entries}
-    if not isinstance(raw, (list, tuple)) or len(raw) > len(paths):
-        raise ValueError("invalid raw usage counters")
-    counters = []
-    for item in raw:
-        if not isinstance(item, (list, tuple)) or len(item) != 2 or item[0] not in paths:
-            raise ValueError("invalid raw usage counter")
-        if not isinstance(item[1], (int, float)) or not math.isfinite(item[1]):
-            raise ValueError("raw usage counter must be finite")
-        counters.append(tuple(item))
-    normalized["raw_counters"] = tuple(counters)
-    return normalized
-
-
-def _pending_clarification_status(payload: Mapping[str, Any]) -> dict[str, Any]:
-    questions = [
-        dict(item)
-        for item in list(payload.get("questions") or [])
-        if isinstance(item, Mapping)
-    ]
-    question = questions[0] if questions else {}
-    options = [
-        {
-            "label": str(option.get("label") or option.get("answer") or "").strip(),
-            "description": str(
-                option.get("description")
-                or option.get("label")
-                or option.get("answer")
-                or ""
-            ).strip(),
-        }
-        for option in list(question.get("options") or [])
-        if isinstance(option, Mapping)
-    ]
-    return {
-        "title": str(
-            question.get("title") or payload.get("title") or "Architecture question"
-        ).strip(),
-        "question": str(
-            question.get("question")
-            or payload.get("question")
-            or payload.get("summary")
-            or "Bunshin needs clarification."
-        ).strip(),
-        "options": options[:3],
-    }
-
-
-@dataclass
-class BunshinRunState:
-    bunshin_id: str
-    run_id: str
-    pack: BunshinInvocationPack
-    process: "ProcessStatusView | None" = None
-    status: str = "running"
-    started_at: str = field(default_factory=utc_now)
-    ended_at: str = ""
-    last_error: str = ""
-    last_event: dict[str, Any] = field(default_factory=dict)
-    last_event_at: str = ""
-    pending_approval: dict[str, Any] = field(default_factory=dict)
-    pending_clarification: dict[str, Any] = field(default_factory=dict)
-    pending_terminal_status: str = ""
-    process_group_reaped: bool = False
-    producer_diagnostic_count: int = field(default=0, init=False, repr=False)
-
-    def summary(self) -> dict[str, Any]:
-        active = self.status not in _TERMINAL_RUN_STATUSES
-        return {
-            "bunshin_id": self.bunshin_id,
-            "run_id": self.run_id,
-            "invocation_id": self.pack.invocation_id,
-            "bunshin_profile": self.pack.bunshin_profile,
-            "status": self.status,
-            "run_active": active,
-            "pid": self.process.pid if active and self.process is not None else None,
-            "returncode": self.process.returncode if self.process is not None else None,
-            "instruction": self.pack.instruction,
-            "started_at": self.started_at,
-            "ended_at": self.ended_at,
-            "last_error": self.last_error,
-            "last_event_at": self.last_event_at,
-            "last_event": dict(self.last_event),
-            "pending_approval": dict(self.pending_approval),
-            "pending_clarification": dict(self.pending_clarification),
-            "pending_terminal_status": self.pending_terminal_status,
-            "process_group_reaped": self.process_group_reaped,
-        }
-
-    def detail(self) -> dict[str, Any]:
-        return {**self.summary(), "task_context_pack": self.pack.to_dict()}
-
-
-class ProcessStatusView(Protocol):
-    """Read-only scalar process projection; carries no I/O authority."""
-
-    @property
-    def pid(self) -> int: ...
-
-    @property
-    def returncode(self) -> int | None: ...
 
 @dataclass
 class BunshinManager:
@@ -359,35 +72,17 @@ class BunshinManager:
     catalog_bootstrap: dict[str, Any] = field(init=False, default_factory=dict)
     events: BunshinEventDelivery = field(init=False)
     workflow_service: BunshinWorkflowService = field(init=False)
-    workflow_outbox: BunshinOutboxProcessor = field(init=False)
+    capacity_pool: CoroutineRunSemaphore = field(init=False)
+    workflow_outbox: WorkflowEffectDispatcher = field(init=False)
     semantic_orchestrator: SemanticOrchestrator = field(init=False)
     role_gateway: RoleAssignmentGateway = field(init=False)
-    harness_registry: BunshinHarnessRegistry = field(init=False)
     _host_tool_bundle: Any | None = field(default=None, init=False, repr=False)
     _host_tool_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _host_tool_gate: WriterPreferredRWGate = field(default_factory=WriterPreferredRWGate, init=False, repr=False)
     _host_tools_closing: bool = field(default=False, init=False, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
-    _llm_json_transport: DirectEndpointTransport | None = field(
-        default=None,
-        init=False,
-        repr=False,
-    )
-    _llm_transport_requests: OrderedDict[str, _LLMTransportRequestState] = field(
-        default_factory=OrderedDict,
-        init=False,
-        repr=False,
-    )
-    _llm_transport_workers: set[asyncio.Task[_TransportWorkerResult]] = field(
-        default_factory=set,
-        init=False,
-        repr=False,
-    )
-    _llm_usage_ledger: LLMUsageLedger = field(
-        default_factory=lambda: LLMUsageLedger(scope="bunshin_manager_transport"),
-        init=False,
-        repr=False,
-    )
+    run_ledger: RunLedger = field(init=False, repr=False)
+    llm_proxy: LLMProxy = field(init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _drain_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -403,6 +98,8 @@ class BunshinManager:
         self.runtime_root = Path(self.runtime_root)
         if self.runtime_db_path is not None:
             self.runtime_db_path = Path(self.runtime_db_path)
+        self.run_ledger = RunLedger(self.runs)
+        self.llm_proxy = LLMProxy(self.runtime_root)
         self.catalog = BunshinCatalogService(Path(self.runtime_root))
         self.catalog_bootstrap = self.catalog.bootstrap()
         config = effective_bunshin_runtime_config(Path(self.runtime_root))
@@ -421,11 +118,14 @@ class BunshinManager:
             load_backlog=self._pending_task_delivery_events,
         )
         self.role_gateway = RoleAssignmentGateway(self.workflow_service)
-        self.harness_registry = BunshinHarnessRegistry(include_pal=True)
+        dag = DagScheduler(self.workflow_service.repository)
+        self.capacity_pool = CoroutineRunSemaphore(
+            self.max_parallel_modules, dag.retain_node_slot, dag.predecessor_settled,
+        )
         self.semantic_orchestrator = SemanticOrchestrator(
             self.workflow_service,
-            harness_registry=self.harness_registry,
             max_parallel_workers=self.max_parallel_modules,
+            capacity_pool=self.capacity_pool,
             runtime_db_path=self.runtime_db_path,
             publish_human_review=self._publish_human_review,
             publish_worker_event=self._publish_worker_event,
@@ -434,11 +134,13 @@ class BunshinManager:
             unregister_broker_run=self._unregister_broker_run,
             inject_skill=self._inject_skill_for_role,
         )
-        self.workflow_outbox = BunshinOutboxProcessor(
+        handlers = WorkflowEffects(
             self.workflow_service,
             semantic_effects=self.semantic_orchestrator,
             publish_workflow_event=self._publish_workflow_event,
         )
+
+        self.workflow_outbox = WorkflowEffectDispatcher(handlers)
 
     @property
     def event_queue(self) -> list[dict[str, Any]]:
@@ -454,6 +156,8 @@ class BunshinManager:
         await run_worker(lambda: prepare_workflow_memory_references(self.runtime_root))
         recovery = await asyncio.to_thread(BunshinRecovery(self.workflow_service).recover)
         await run_worker(lambda: reconcile_workflow_memory_references(self.runtime_root))
+        workspaces = await asyncio.to_thread(self.workflow_service.repository.leases.inherited_role_workspaces)
+        await self.capacity_pool.recover_occupancy(workspaces)
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
         self.role_server, self.role_endpoint_info = await start_role_gateway_server(
             self.runtime_root,
@@ -478,7 +182,7 @@ class BunshinManager:
                     "recovered %s durable role assignment(s)",
                     recovered_assignments,
                 )
-            self._outbox_task = asyncio.create_task(self._run_outbox(), name="bunshin-v2-outbox")
+            self._outbox_task = asyncio.create_task(self._run_outbox(), name="bunshin-outbox")
             try:
                 await self._shutdown_event.wait()
             finally:
@@ -634,7 +338,10 @@ class BunshinManager:
         if method in broker_handlers:
             payload = await self._authorize_worker_broker_params(params)
             return await broker_handlers[method](payload)
-        return await asyncio.to_thread(self.role_gateway.call, method, params)
+        result = await asyncio.to_thread(self.role_gateway.call, method, params)
+        if method == "interaction_park" and "delivery" in result:
+            self.events.queue_event(_delivery_event_from_row(result.pop("delivery")))
+        return result
 
     async def _call_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         handlers = {
@@ -653,14 +360,8 @@ class BunshinManager:
         if method == "reload_runtime_config":
             return self.reload_runtime_config()
         if method == "replace_harness_registry":
-            generation = self.harness_registry.replace_external(
-                dict(params.get("generation") or {})
-            )
-            self._wake_event.set()
-            return {
-                "ok": True,
-                "generation": generation.to_dict(),
-            }
+            # Older core processes synchronize their registry during attachment.
+            return {"ok": True, "mode": "builtin_only", "generation": builtin_harness_generation().to_dict()}
         if method == "catalog_snapshot":
             return self.catalog.snapshot(
                 kind=str(params.get("kind") or "all"),
@@ -695,21 +396,22 @@ class BunshinManager:
                 actor=str(params.get("actor") or "pal"),
                 if_generation=str(params.get("if_generation") or ""),
             )
-        if method == "v2_wake":
+        workflow_method = method.removeprefix("v2_")  # Older client processes can finish pending deliveries.
+        if workflow_method == "wake":
             self._wake_event.set()
             return {"ok": True, "status": "woken"}
-        if method == "v2_task_status":
+        if workflow_method == "task_status":
             return self._task_status(
                 str(params.get("task_id") or ""),
                 workflow_id=str(params.get("workflow_id") or ""),
                 view=str(params.get("view") or "status"),
             )
-        if method == "v2_start_workflow":
+        if workflow_method == "start_workflow":
             from pal.foundation.workers import run_worker
             result = await run_worker(lambda: self.workflow_service.start_workflow(params))
             self._wake_event.set()
             return result
-        if method == "v2_rebind_task_delivery":
+        if workflow_method == "rebind_task_delivery":
             result = self.workflow_service.repository.delivery_bindings.rebind_task_delivery(
                 task_id=str(params.get("task_id") or ""),
                 binding=dict(params.get("binding") or {}),
@@ -721,15 +423,15 @@ class BunshinManager:
                 )
             self._wake_event.set()
             return result
-        if method == "v2_ack_task_delivery":
+        if workflow_method == "ack_task_delivery":
             return {
                 "acknowledged": self.workflow_service.repository.deliveries.acknowledge_task_delivery(
                     str(params.get("delivery_id") or "")
                 )
             }
-        if method == "v2_validate_memory_proposal_source":
+        if workflow_method == "validate_memory_proposal_source":
             return {"valid": self._validate_memory_proposal_source(dict(params.get("source") or {}))}
-        if method == "v2_list_task_delivery_parts":
+        if workflow_method == "list_task_delivery_parts":
             return {
                 "parts": list(
                     self.workflow_service.repository.deliveries.delivered_task_delivery_parts(
@@ -737,14 +439,14 @@ class BunshinManager:
                     )
                 )
             }
-        if method == "v2_ack_task_delivery_part":
+        if workflow_method == "ack_task_delivery_part":
             return {
                 "acknowledged": self.workflow_service.repository.deliveries.acknowledge_task_delivery_part(
                     str(params.get("delivery_id") or ""),
                     str(params.get("part_key") or ""),
                 )
             }
-        if method == "v2_defer_task_delivery":
+        if workflow_method == "defer_task_delivery":
             return {
                 "deferred": self.workflow_service.repository.deliveries.defer_task_delivery(
                     str(params.get("delivery_id") or ""),
@@ -752,7 +454,7 @@ class BunshinManager:
                 )
             }
         if method == "list_runs":
-            return {"items": [item.summary() for item in sorted(self.runs.values(), key=lambda run: run.started_at)]}
+            return {"items": self.run_ledger.summaries()}
         if method == "read_run":
             run_id = str(params.get("run_id") or "")
             if run_id not in self.runs:
@@ -764,7 +466,7 @@ class BunshinManager:
                 timeout_seconds=float(params.get("timeout_seconds") or self.graceful_shutdown_timeout_seconds),
                 graceful=bool(params.get("graceful", True)),
             )
-        raise ValueError(f"unknown Bunshin V2 manager method: {method}")
+        raise ValueError(f"unknown Bunshin manager method: {method}")
 
     async def _authorize_worker_broker_params(
         self,
@@ -783,6 +485,9 @@ class BunshinManager:
             raise PermissionError(
                 "role assignment token does not own the requested broker run"
             )
+        if run.attempt_id and run.attempt_id != authenticated.get("attempt_id"):
+            raise PermissionError("role assignment token does not own the current broker attempt")
+        payload["_broker_attempt_id"] = run.attempt_id
         return payload
 
     async def _serve_llm_stream_request(
@@ -793,86 +498,19 @@ class BunshinManager:
         *,
         worker: bool,
     ) -> None:
-        request_id = str(request.get("id") or "")
-        method = str(request.get("method") or "")
-        disconnect: asyncio.Task[bytes] | None = None
-        stream: AsyncIterator[dict[str, Any]] | None = None
-        try:
+        async def open_stream() -> AsyncGenerator[dict[str, Any], None]:
+            method = request.get("method")
             if method != "llm_transport_stream":
                 raise ValueError(f"sidecar method is not streamable: {method}")
             params = dict(request.get("params") or {})
             if worker:
                 params = await self._authorize_worker_broker_params(params)
-            stream = self.llm_transport_stream_frames(params).__aiter__()
-            disconnect = asyncio.create_task(reader.read(1))
-            while True:
-                advance = asyncio.create_task(anext(stream))
-                done, _ = await asyncio.wait(
-                    {advance, disconnect},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if disconnect in done:
-                    advance.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
-                        await advance
-                    return
-                try:
-                    item = advance.result()
-                except StopAsyncIteration:
-                    disconnect.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await disconnect
-                    break
-                writer.write(
-                    pack_sidecar_message(
-                        {
-                            "type": "stream_item",
-                            "id": request_id,
-                            "ok": True,
-                            "result": dict(item),
-                        }
-                    )
-                )
-                await writer.drain()
-            terminal = {
-                "type": "stream_end",
-                "id": request_id,
-                "ok": True,
-                "result": {},
-            }
-        except Exception as exc:
-            self.logger.exception("sidecar stream request failed: %s", method)
-            terminal = {
-                "type": "stream_end",
-                "id": request_id,
-                "ok": False,
-                "error": {
-                    "kind": str(
-                        getattr(
-                            exc,
-                            "kind",
-                            "role_gateway" if worker else "manager",
-                        )
-                    ),
-                    "message": f"{exc.__class__.__name__}: {exc}",
-                    "provider_started": bool(
-                        getattr(exc, "provider_started", False)
-                    ),
-                    "chatgpt_failure": exc.chatgpt_failure if isinstance(exc, _ManagerTransportError) else None,
-                },
-            }
-        finally:
-            if disconnect is not None and not disconnect.done():
-                disconnect.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await disconnect
-            if stream is not None:
-                close = getattr(stream, "aclose", None)
-                if callable(close):
-                    with contextlib.suppress(Exception):
-                        await close()
-        writer.write(pack_sidecar_message(terminal))
-        await writer.drain()
+            return self.llm_transport_stream_frames(params)
+
+        await serve_llm_stream(
+            reader, writer, open_stream, request_id=str(request.get("id") or ""),
+            error_kind="role_gateway" if worker else "manager", logger=self.logger,
+        )
 
     async def _run_outbox(self) -> None:
         while not self._shutdown_event.is_set():
@@ -883,6 +521,10 @@ class BunshinManager:
                 from pal.bunshin.memory_binding import reconcile_workflow_memory_references
                 from pal.foundation.workers import run_worker
                 await run_worker(lambda: reconcile_workflow_memory_references(self.runtime_root))
+                if self.capacity_pool.capacity != self.max_parallel_modules:
+                    await self.capacity_pool.resize(self.max_parallel_modules)
+                await self.capacity_pool.recheck_occupancy()
+                await self.capacity_pool.reconcile_reservations()
                 await self.semantic_orchestrator.recover_background_assignments()
                 if self.workflow_outbox.start_available(max_concurrency=self.max_parallel_modules + 8):
                     await asyncio.sleep(0)
@@ -890,7 +532,7 @@ class BunshinManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self.logger.exception("bunshin V2 outbox tick failed")
+                self.logger.exception("Bunshin outbox tick failed")
             self._wake_event.clear()
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=0.25)
@@ -904,9 +546,9 @@ class BunshinManager:
             "bunshin_id": "",
             "run_id": "",
             "workflow_id": str(payload.get("workflow_id") or ""),
-            "bunshin_profile": "bunshin_v2.reviewer",
+            "bunshin_profile": "bunshin.reviewer",
             "role_mode": "standalone" if standalone else "architecture",
-            "payload": {**dict(payload), "bunshin_v2": True, **({"status": "completed"} if standalone else {})},
+            "payload": {**dict(payload), "bunshin": True, **({"status": "completed"} if standalone else {})},
             "created_at": utc_now(),
         }
         self._queue_task_delivery_event(
@@ -929,9 +571,9 @@ class BunshinManager:
                 "bunshin_id": "",
                 "run_id": "",
                 "workflow_id": workflow_id,
-                "bunshin_profile": "bunshin_v2.reviewer",
+                "bunshin_profile": "bunshin.reviewer",
                 "role_mode": "architecture",
-                "payload": {**dict(payload), "bunshin_v2": True},
+                "payload": {**dict(payload), "bunshin": True},
                 "created_at": str(payload.get("resolved_at") or utc_now()),
             }
             self._queue_task_delivery_event(
@@ -947,9 +589,9 @@ class BunshinManager:
             "bunshin_id": "",
             "run_id": "",
             "workflow_id": workflow_id,
-            "bunshin_profile": "bunshin_v2.workflow",
+            "bunshin_profile": "bunshin.workflow",
             "role_mode": "workflow",
-            "payload": {**dict(payload), "bunshin_v2": True},
+            "payload": {**dict(payload), "bunshin": True},
             "created_at": str(payload.get("terminal_at") or utc_now()),
         }
         self._queue_task_delivery_event(
@@ -972,6 +614,7 @@ class BunshinManager:
             # identity. Keep this operational record out of chat and role state.
             state = self.runs.get(owner_run_id) if isinstance(owner_run_id, str) else None
             if (state is None or not delivery_attempt_id
+                    or (state.attempt_id and state.attempt_id != delivery_attempt_id)
                     or state.producer_diagnostic_count >= MAX_PRODUCER_TOOL_DIAGNOSTICS):
                 return
             try:
@@ -992,6 +635,8 @@ class BunshinManager:
                 })
             except Exception:
                 pass
+            return
+        if state is not None and delivery_attempt_id and state.attempt_id and state.attempt_id != delivery_attempt_id:
             return
         if item.get("event_kind") == "verifier_tool_diagnostic":
             # This operational record has its own strict contract even with
@@ -1019,8 +664,7 @@ class BunshinManager:
             payload = dict(item.get("payload") or {})
             payload.pop("route", None)
             payload.pop("control_route", None)
-            kind = str(item.get("event_kind") or "")
-            binding = dict(dict(state.pack.metadata or {}).get("bunshin_v2") or {})
+            binding = dict(dict(state.pack.metadata or {}).get("bunshin") or {})
             # Assignment identity is Manager-owned; worker output cannot change it.
             payload.pop("source_dependencies", None)
             if payload.get("memory_candidates"):
@@ -1037,50 +681,8 @@ class BunshinManager:
             if workflow_id and not item.get("workflow_id"):
                 item["workflow_id"] = workflow_id
             item["payload"] = payload
-            if kind == "approval_requested":
-                state.pending_approval = payload
-                state.status = "approval_pending"
-            elif kind == "clarification_requested":
-                state.pending_clarification = payload
-                state.status = "clarification_pending"
-            elif kind == "terminal":
-                resolved_interactions: list[dict[str, str]] = []
-                approval_id = str(state.pending_approval.get("approval_id") or "").strip()
-                if approval_id:
-                    resolved_interactions.append(
-                        {
-                            "interaction_id": approval_id,
-                            "interaction_kind": "bunshin_approval",
-                        }
-                    )
-                clarification_id = str(
-                    state.pending_clarification.get("clarification_id") or ""
-                ).strip()
-                if clarification_id:
-                    resolved_interactions.append(
-                        {
-                            "interaction_id": clarification_id,
-                            "interaction_kind": "bunshin_clarification",
-                        }
-                    )
-                if resolved_interactions:
-                    payload["resolved_interactions"] = resolved_interactions
-                state.pending_approval = {}
-                state.pending_clarification = {}
-                # A terminal IPC receipt means the worker has finished its
-                # logical work, not that its process owner has finished
-                # cleanup. Keep the run active until the owner confirms its
-                # direct child has been reaped.
-                terminal_status = str(payload.get("status") or "completed")
-                if state.process_group_reaped:
-                    state.status = terminal_status
-                    state.pending_terminal_status = ""
-                    state.ended_at = state.ended_at or utc_now()
-                else:
-                    state.pending_terminal_status = terminal_status
-                    state.status = "exiting"
-            state.last_event = item
-            state.last_event_at = str(item.get("created_at") or utc_now())
+            if not state.record_event(item, payload):
+                return
         kind = str(item.get("event_kind") or "")
         event_payload = dict(item.get("payload") or {})
         debug_enabled = (
@@ -1112,6 +714,8 @@ class BunshinManager:
                     },
                 }
             )
+        if kind == "terminal" and event_payload.get("status") == "suspended" and event_payload.get("interaction_id"):
+            return
         if kind in {"approval_requested", "clarification_requested", "terminal"}:
             self._queue_task_delivery_event(
                 item,
@@ -1203,7 +807,7 @@ class BunshinManager:
         for state in self.runs.values():
             if not state.pending_clarification and not state.pending_approval:
                 continue
-            binding = dict(dict(state.pack.metadata or {}).get("bunshin_v2") or {})
+            binding = dict(dict(state.pack.metadata or {}).get("bunshin") or {})
             workflow_id = str(binding.get("workflow_id") or "")
             workflow = self.workflow_service.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
@@ -1215,13 +819,16 @@ class BunshinManager:
                 candidates.add((workflow_id, "clarification_requested"))
             if state.pending_approval:
                 candidates.add((workflow_id, "approval_requested"))
+        deliveries = self.workflow_service.repository.deliveries
+        sources = list(deliveries.pending_interaction_deliveries(task_id))
         for workflow_id, event_kind in sorted(candidates):
-            source = self.workflow_service.repository.deliveries.latest_task_delivery(
-                task_id=task_id,
-                workflow_id=workflow_id,
-                event_kind=event_kind,
+            source = deliveries.latest_task_delivery(
+                task_id=task_id, workflow_id=workflow_id, event_kind=event_kind,
             )
-            if source is None or str(source.get("status") or "") == "pending":
+            if source:
+                sources.append(source)
+        for source in sources:
+            if source["status"] == "pending":
                 continue
             replay = self.workflow_service.repository.deliveries.replay_task_delivery(
                 delivery_id=str(source["delivery_id"]),
@@ -1239,7 +846,7 @@ class BunshinManager:
         pack: BunshinInvocationPack,
         process: ProcessStatusView,
     ) -> None:
-        self.runs[run_id] = BunshinRunState(bunshin_id=bunshin_id, run_id=run_id, pack=pack, process=process)
+        self.run_ledger.register(run_id, bunshin_id, pack, process)
 
     def _unregister_broker_run(
         self,
@@ -1253,20 +860,18 @@ class BunshinManager:
             raise RuntimeError(
                 "cannot unregister worker before its process owner completes cleanup"
             )
-        state = self.runs.get(run_id)
-        if state is not None:
-            state.process_group_reaped = True
-            state.status = (
-                state.pending_terminal_status
-                # A clean OS exit without a terminal IPC receipt is still a
-                # worker protocol failure.
-                or "failed"
-            )
-            state.pending_terminal_status = ""
-            state.ended_at = utc_now()
+        self.run_ledger.reap(run_id)
 
     async def send_decision(self, payload: dict[str, Any]) -> dict[str, Any]:
         decision = BunshinApprovalDecision.from_dict(payload)
+        waits = self.workflow_service.repository.interaction_waits
+        wait = waits.get(decision.approval_id)
+        if wait is not None:
+            if wait["kind"] != "approval" or (decision.run_id and decision.run_id != wait["request"]["run_id"]):
+                raise ValueError("approval target does not match the suspended role")
+            waits.answer(decision.approval_id, {"decision": {"approval_id": decision.approval_id, "decision": decision.decision}})
+            self._wake_event.set()
+            return {"ok": True, "decision": decision.to_dict()}
         state = next(
             (
                 item
@@ -1281,21 +886,30 @@ class BunshinManager:
             state.run_id,
             {"type": "decision", "decision": decision.to_dict()},
         ):
-            raise RuntimeError("V2 worker is no longer available for approval")
-        # The control write can overlap terminal cleanup or the next request.
-        if str(state.pending_approval.get("approval_id") or "") == decision.approval_id:
-            state.pending_approval = {}
-            if (
-                state.status == "approval_pending"
-                and not state.process_group_reaped
-                and not state.pending_terminal_status
-            ):
-                state.status = "running"
+            raise RuntimeError("Bunshin worker is no longer available for approval")
+        state.acknowledge("approval", decision.approval_id)
         return {"ok": True, "run": state.summary(), "decision": decision.to_dict()}
 
     async def send_clarification(self, payload: dict[str, Any]) -> dict[str, Any]:
         clarification_id = str(payload.get("clarification_id") or "")
         run_id = str(payload.get("run_id") or "")
+        waits = self.workflow_service.repository.interaction_waits
+        wait = waits.get(clarification_id)
+        if wait is not None:
+            if wait["kind"] != "clarification" or (run_id and wait["request"].get("run_id") != run_id):
+                raise ValueError("clarification target does not match the suspended role")
+            answers = list(payload.get("answers") or ())
+            if not answers or any(not str(item.get("answer") or "").strip() for item in answers):
+                raise ValueError("clarification requires a non-empty answer")
+            wanted = [q.get("id") or q.get("question_id") for q in wait["request"]["questions"]]
+            if [item.get("question_id") for item in answers] != wanted:
+                raise ValueError("clarification answer does not match the requested questions")
+            answer = {"clarification_id": clarification_id, "answers": answers}
+            delivery = record_clarification_answer(self.workflow_service, clarification_id, answer)
+            if delivery:
+                self.events.queue_event(_delivery_event_from_row(delivery))
+            self._wake_event.set()
+            return {"ok": True, "clarification": answer}
         state = self.runs.get(run_id) if run_id else next(
             (
                 item
@@ -1321,16 +935,8 @@ class BunshinManager:
             state.run_id,
             {"type": "clarification", "clarification": clarification},
         ):
-            raise RuntimeError("V2 worker is no longer available for clarification")
-        # Only acknowledge this question; preserve concurrent lifecycle updates.
-        if str(state.pending_clarification.get("clarification_id") or "") == clarification_id:
-            state.pending_clarification = {}
-            if (
-                state.status == "clarification_pending"
-                and not state.process_group_reaped
-                and not state.pending_terminal_status
-            ):
-                state.status = "running"
+            raise RuntimeError("Bunshin worker is no longer available for clarification")
+        state.acknowledge("clarification", clarification_id)
         return {"ok": True, "run": state.summary(), "clarification": clarification}
 
     def _append_architect_clarification(
@@ -1338,7 +944,7 @@ class BunshinManager:
         state: BunshinRunState,
         clarification: Mapping[str, Any],
     ) -> dict[str, Any]:
-        binding = dict(dict(state.pack.metadata or {}).get("bunshin_v2") or {})
+        binding = dict(dict(state.pack.metadata or {}).get("bunshin") or {})
         if (
             str(binding.get("role") or "") != "architect"
             or str(binding.get("aggregate_type") or "") != "architecture_revision"
@@ -1392,9 +998,9 @@ class BunshinManager:
     def _pending_clarification_runs(self, workflow_id: str) -> list[BunshinRunState]:
         matches: list[BunshinRunState] = []
         for state in self.runs.values():
-            binding = dict(dict(state.pack.metadata or {}).get("bunshin_v2") or {})
+            binding = dict(dict(state.pack.metadata or {}).get("bunshin") or {})
             if (
-                state.status not in _TERMINAL_RUN_STATUSES
+                state.active
                 and state.pending_clarification
                 and str(binding.get("workflow_id") or "") == workflow_id
             ):
@@ -1430,7 +1036,7 @@ class BunshinManager:
                 "waiting_for_user": True,
                 "liveness": "human_wait",
                 "pending_question_count": len(matches),
-                "pending_question": _pending_clarification_status(
+                "pending_question": pending_clarification_status(
                     matches[0].pending_clarification
                 ),
             },
@@ -1441,13 +1047,21 @@ class BunshinManager:
         answer = str(payload.get("answer") or "").strip()
         if not workflow_id or not answer:
             raise ValueError("workflow_id and answer are required")
+        durable = [wait for wait in self.workflow_service.repository.interaction_waits.pending(workflow_id=workflow_id)
+                   if wait["kind"] == "clarification"]
         matches = self._pending_clarification_runs(workflow_id)
-        if len(matches) != 1:
+        if len(durable) + len(matches) != 1:
             raise ValueError(
-                f"workflow has {len(matches)} pending worker questions; expected exactly one"
+                f"workflow has {len(durable) + len(matches)} pending worker questions; expected exactly one"
             )
-        state = matches[0]
-        pending = dict(state.pending_clarification)
+        if durable:
+            pending = durable[0]["request"]
+            run_id = pending["run_id"]
+            bunshin_id = pending.get("bunshin_id", "")
+        else:
+            pending = matches[0].pending_clarification
+            run_id = matches[0].run_id
+            bunshin_id = matches[0].bunshin_id
         questions = [
             dict(item) for item in list(pending.get("questions") or []) if isinstance(item, dict)
         ]
@@ -1459,19 +1073,21 @@ class BunshinManager:
         result = await self.send_clarification(
             {
                 "clarification_id": str(pending.get("clarification_id") or ""),
-                "run_id": state.run_id,
-                "bunshin_id": state.bunshin_id,
+                "run_id": run_id,
+                "bunshin_id": bunshin_id,
                 "answers": [{"question_id": question_id, "answer": answer}],
             }
         )
+        if durable:
+            return result
         event = {
             "event_kind": "clarification_resolved",
-            "bunshin_id": state.bunshin_id,
-            "run_id": state.run_id,
+            "bunshin_id": bunshin_id,
+            "run_id": run_id,
             "workflow_id": workflow_id,
             "bunshin_profile": "",
             "payload": {
-                "bunshin_v2": True,
+                "bunshin": True,
                 "clarification_id": str(pending.get("clarification_id") or ""),
                 "summary": "Bunshin clarification recorded.",
             },
@@ -1486,349 +1102,25 @@ class BunshinManager:
         )
         return result
 
-    async def llm_transport_stream_frames(
-        self,
-        params: dict[str, Any],
-    ) -> AsyncIterator[dict[str, Any]]:
+    async def llm_transport_stream_frames(self, params: dict[str, Any]) -> AsyncGenerator[dict[str, Any], None]:
         state = self._require_broker_run(params)
-        configured_endpoint, endpoint = self._authorize_llm_transport_endpoint(state, params)
-        request_id = str(params.get("request_id") or "").strip()
-        if not request_id:
-            raise _ManagerTransportError("LLM transport request_id is required")
-        self._prune_llm_transport_requests()
-        if request_id in self._llm_transport_requests:
-            raise _ManagerTransportError(
-                f"LLM transport request_id was already used: {request_id}",
-                kind="request_replay",
-            )
-        timeout_seconds = _bounded_transport_timeout(params.get("timeout_seconds"))
-        payload = params.get("payload")
-        extra_body = params.get("extra_body")
-        if not isinstance(payload, Mapping) or not isinstance(extra_body, Mapping):
-            raise _ManagerTransportError("encoded LLM transport payload must be an object")
-        _validate_transport_payload_authority(endpoint, payload, extra_body)
-        if endpoint.wire_shape == WireShape.GEMINI_INTERACTIONS.value:
-            # The broker receives full assignment-local history and owns no accepted parent ID.
-            payload = {**payload, "store": False}
-            extra_body = {k: v for k, v in extra_body.items() if k != "store"}
-        record = _LLMTransportRequestState(
-            request_id=request_id,
-            run_id=state.run_id,
-            endpoint_id=str(endpoint.endpoint_id),
-            model_id=str(endpoint.model_id),
-            provider=str(endpoint.provider),
-        )
-        self._llm_transport_requests[request_id] = record
-        control = LLMStreamControl()
-        iterator = self._manager_llm_json_transport().frames(
-            configured_endpoint,
-            EncodedTransportRequest(
-                request_id=request_id,
-                wire_shape=WireShape(str(endpoint.wire_shape)),
-                timeout_seconds=timeout_seconds,
-                payload=dict(payload),
-                extra_body=dict(extra_body),
-                stream=bool(params.get("stream", True)),
-                stream_control=control,
-            ),
-        )
-        provider_announced = False
-        completed = False
-        loop = asyncio.get_running_loop()
-        events: asyncio.Queue[tuple[str, Any, threading.Event | None]] = asyncio.Queue()
-
-        def publish(kind: str, value: Any) -> bool:
-            if kind == "frame" and control.cancelled:
-                return False
-            acknowledged = threading.Event() if kind == "frame" else None
-            try:
-                loop.call_soon_threadsafe(
-                    events.put_nowait,
-                    (kind, value, acknowledged),
-                )
-            except RuntimeError:
-                return False
-            if acknowledged is not None:
-                while not acknowledged.wait(0.05):
-                    if control.cancelled:
-                        return False
-            return True
-
-        worker = asyncio.create_task(
-            asyncio.to_thread(_consume_transport_iterator, iterator, publish),
-            name=f"bunshin-llm-transport:{request_id}",
-        )
-        self._llm_transport_workers.add(worker)
-
-        def worker_finished(task: asyncio.Task[_TransportWorkerResult]) -> None:
-            self._llm_transport_workers.discard(task)
-            if task.cancelled():
-                return
-            with contextlib.suppress(BaseException):
-                task.result()
-                record.provider_started = bool(
-                    record.provider_started or control.provider_started
-                )
-                record.transport_terminal = True
-
-        worker.add_done_callback(worker_finished)
-        pending_acknowledgement: threading.Event | None = None
-        try:
-            while True:
-                try:
-                    kind, value, acknowledgement = await asyncio.wait_for(
-                        events.get(),
-                        timeout=0.05,
-                    )
-                except TimeoutError:
-                    if control.provider_started and not provider_announced:
-                        provider_announced = True
-                        record.provider_started = True
-                        yield {"event": "provider_started"}
-                    continue
-                if control.provider_started and not provider_announced:
-                    provider_announced = True
-                    record.provider_started = True
-                    yield {"event": "provider_started"}
-                if kind == "terminal":
-                    result = value
-                    if not isinstance(result, _TransportWorkerResult):
-                        raise RuntimeError("LLM transport worker emitted an invalid terminal result")
-                    completed = True
-                    await asyncio.shield(worker)
-                    if result.error is not None:
-                        raise result.error
-                    if result.close_error is not None:
-                        raise result.close_error
-                    return
-                frame = value
-                pending_acknowledgement = acknowledgement
-                try:
-                    yield {
-                        "frame": {
-                            "sequence": int(frame.sequence),
-                            "payload": thaw_json(frame.payload),
-                        }
-                    }
-                finally:
-                    if acknowledgement is not None:
-                        acknowledgement.set()
-                    pending_acknowledgement = None
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            record.provider_started = bool(
-                record.provider_started or control.provider_started
-            )
-            from pal.llm.chatgpt import exception_error
-            failure = exception_error(exc)
-            raise _ManagerTransportError(
-                str(exc),
-                provider_started=record.provider_started,
-                chatgpt_failure=failure.to_dict() if failure else None,
-            ) from exc
-        finally:
-            if pending_acknowledgement is not None:
-                pending_acknowledgement.set()
-            if not completed:
-                control.cancel("proxy_consumer_closed")
-            if not worker.done():
-                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
-                    await asyncio.wait_for(asyncio.shield(worker), timeout=1.0)
-            record.provider_started = bool(
-                record.provider_started or control.provider_started
-            )
-            if worker.done() and not worker.cancelled():
-                record.transport_terminal = True
+        endpoint, request = authorize_role_request(state.pack.metadata, params)
+        async with contextlib.aclosing(self.llm_proxy.stream(state.run_id, state.attempt_id, endpoint, request)) as stream:
+            async for frame in stream:
+                yield frame
 
     async def llm_usage_receipt(self, params: dict[str, Any]) -> dict[str, Any]:
         state = self._require_broker_run(params)
-        self._prune_llm_transport_requests()
-        request_id = str(params.get("request_id") or "").strip()
-        record = self._llm_transport_requests.get(request_id)
-        if record is None or record.run_id != state.run_id:
-            raise KeyError(f"unknown LLM transport request receipt: {request_id}")
-        if not record.transport_terminal:
-            raise RuntimeError("LLM usage receipt arrived before transport terminal")
-        endpoint_id = str(params.get("endpoint_id") or "").strip()
-        if endpoint_id != record.endpoint_id:
-            raise PermissionError("LLM usage receipt changed endpoint identity")
-        usage_payload = params.get("usage")
-        if not isinstance(usage_payload, Mapping):
-            raise ValueError("LLM usage receipt has no usage object")
-        normalized_usage = _normalize_usage_receipt(usage_payload)
-        try:
-            provider_response_count = int(
-                params.get("provider_response_count") or 0
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "LLM usage receipt provider_response_count must be an integer"
-            ) from exc
-        if provider_response_count < 1:
-            raise ValueError(
-                "LLM usage receipt provider_response_count must be positive"
-            )
-        status = str(params.get("status") or "success")
-        if status not in {"success", "failed", "cancelled"}:
-            raise ValueError("invalid attempt settlement status")
-        receipt_payload = {
-            "status": status,
-            "provider_generation_id": str(params.get("provider_generation_id") or ""),
-            "returned_model": str(params.get("returned_model") or ""),
-            "actual_provider": str(params.get("actual_provider") or ""),
-            "service_tier": str(params.get("service_tier") or ""),
-            "request_id": request_id,
-            "endpoint_id": endpoint_id,
-            "model_id": str(params.get("model_id") or ""),
-            "provider": str(params.get("provider") or ""),
-            "provider_response_count": provider_response_count,
-            "usage": normalized_usage,
-        }
-        receipt_fingerprint = hashlib.sha256(
-            json.dumps(
-                receipt_payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        if record.usage_received:
-            if record.receipt_fingerprint != receipt_fingerprint:
-                raise ValueError("LLM usage receipt replay changed its payload")
-            return {"ok": True, "duplicate": True}
-        if receipt_payload["model_id"] != record.model_id:
-            raise ValueError("LLM usage receipt changed model identity")
-        if receipt_payload["provider"] != record.provider:
-            raise ValueError("LLM usage receipt changed provider identity")
-        from pal.llm.attempts import LLMAttemptResult
-        usage = LLMUsageIR(**normalized_usage)
-        if "status" in params:
-            self._llm_usage_ledger.record_attempt(LLMAttemptResult(
-                attempt_id=request_id, endpoint_id=record.endpoint_id,
-                model_id=record.model_id, provider=record.provider, status=status, usage=usage,
-                provider_generation_id=receipt_payload["provider_generation_id"],
-                returned_model=receipt_payload["returned_model"], actual_provider=receipt_payload["actual_provider"],
-                service_tier=receipt_payload["service_tier"],
-            ))
-        if status == "success":
-            self._llm_usage_ledger.record_success(
-                endpoint_id=record.endpoint_id, model_id=record.model_id, provider=record.provider,
-                usage=usage, provider_response_count=provider_response_count,
-                usage_accounted="status" in params,
-            )
-        record.usage_received = True
-        record.receipt_fingerprint = receipt_fingerprint
-        return {"ok": True, "duplicate": False}
+        return self.llm_proxy.record_usage(state.run_id, state.attempt_id, params)
 
-    def _authorize_llm_transport_endpoint(
-        self,
-        state: BunshinRunState,
-        params: Mapping[str, Any],
-    ) -> tuple[Any, Any]:
-        endpoint_id = str(params.get("endpoint_id") or "").strip()
-        if not endpoint_id:
-            raise _ManagerTransportError("LLM transport endpoint_id is required")
-        pack_metadata = dict(state.pack.metadata or {})
-        preferred = str(pack_metadata.get("preferred_endpoint_id") or "").strip()
-        if preferred and endpoint_id != preferred:
-            raise PermissionError(
-                f"role assignment does not allow LLM endpoint {endpoint_id}"
-            )
-        if not preferred:
-            active = str(
-                RuntimeSettingRepository().get_active_llm_endpoint_id() or ""
-            ).strip()
-            if active and endpoint_id != active:
-                raise _ManagerTransportError(
-                    "active LLM endpoint changed before provider start",
-                    kind="endpoint_spec_stale",
-                )
-        endpoint = LLMEndpointRepository().get(endpoint_id)
-        if endpoint is None or not bool(endpoint.enabled):
-            raise _ManagerTransportError(
-                f"LLM endpoint is unavailable: {endpoint_id}",
-                kind="endpoint_spec_stale",
-            )
-        configured_endpoint = endpoint
-        endpoint = with_role_output_budget(endpoint, pack_metadata.get("max_output_tokens"))
-        requested_shape = str(params.get("wire_shape") or "").strip()
-        if requested_shape != str(endpoint.wire_shape):
-            raise _ManagerTransportError(
-                "LLM endpoint wire shape changed before provider start",
-                kind="endpoint_spec_stale",
-            )
-        requested_fingerprint = str(
-            params.get("endpoint_spec_fingerprint") or ""
-        ).strip()
-        if requested_fingerprint != endpoint_spec_fingerprint(endpoint):
-            raise _ManagerTransportError(
-                "LLM endpoint specification changed before provider start",
-                kind="endpoint_spec_stale",
-            )
-        return configured_endpoint, endpoint
-
-    def _manager_llm_json_transport(self) -> DirectEndpointTransport:
-        if self._llm_json_transport is None:
-            credentials = LLMCredentialResolver(
-                secret_store=EncryptedFileSecretStore(
-                    secrets_path=str(Path(self.runtime_root) / "secrets.json")
-                )
-            )
-            transport = DirectEndpointTransport(
-                credential_resolver=credentials.resolve_api_key
-            )
-            transport.prepare_endpoints(LLMEndpointRepository().list_enabled())
-            self._llm_json_transport = transport
-        return self._llm_json_transport
-
-    def _prune_llm_transport_requests(self) -> None:
-        now = time.monotonic()
-        for request_id, record in tuple(self._llm_transport_requests.items()):
-            if (
-                record.transport_terminal
-                and now - record.created_at > _LLM_TRANSPORT_REQUEST_TTL_SECONDS
-            ):
-                self._llm_transport_requests.pop(request_id, None)
-        while (
-            len(self._llm_transport_requests)
-            > _LLM_TRANSPORT_REQUEST_MAX_ENTRIES
-        ):
-            terminal_id = next(
-                (
-                    request_id
-                    for request_id, record in self._llm_transport_requests.items()
-                    if record.transport_terminal
-                ),
-                "",
-            )
-            if not terminal_id:
-                break
-            self._llm_transport_requests.pop(terminal_id, None)
-
-    async def refresh_llm_endpoints(
-        self,
-        _params: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Retire transport clients; Bunshins refresh semantic state at safe points."""
-
-        refreshed = self._llm_json_transport is not None
-        if self._llm_json_transport is not None:
-            await asyncio.to_thread(self._llm_json_transport.close)
-            self._llm_json_transport = None
-        return {
-            "ok": True,
-            "runtime_loaded": False,
-            "refreshed": refreshed,
-        }
+    async def refresh_llm_endpoints(self, _params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        refreshed = await self.llm_proxy.retire_transport()
+        return {"ok": True, "runtime_loaded": False, "refreshed": refreshed}
 
     def _require_broker_run(self, params: Mapping[str, Any]) -> BunshinRunState:
-        run_id = str(params.get("run_id") or "")
-        state = self.runs.get(run_id)
-        if state is None:
-            raise KeyError(f"unknown bunshin run: {run_id}")
-        if state.status in _TERMINAL_RUN_STATUSES:
-            raise RuntimeError(f"bunshin run is terminal: {run_id}")
+        state = self.run_ledger.require_active(str(params.get("run_id") or ""))
+        if params.get("_broker_attempt_id", state.attempt_id) != state.attempt_id:
+            raise PermissionError("broker attempt changed after authorization")
         return state
 
     async def _host_tool_runtime_bundle(self) -> Any:
@@ -1914,16 +1206,10 @@ class BunshinManager:
         return {"ok": True, "result": web_result_to_payload(result)}
 
     def health(self) -> dict[str, Any]:
-        active = [item for item in self.runs.values() if item.status not in _TERMINAL_RUN_STATUSES]
-        self._prune_llm_transport_requests()
-        usage_unreported = sum(
-            1
-            for item in self._llm_transport_requests.values()
-            if item.transport_terminal and not item.usage_received
-        )
+        active = self.run_ledger.active()
         return {
             "ok": True,
-            "health_source": "bunshin_v2_manager",
+            "health_source": "bunshin_manager",
             "lifecycle_protocol": "plugin_raii.v1",
             "manager_pid": os.getpid(),
             "started_at": self.started_at,
@@ -1933,24 +1219,25 @@ class BunshinManager:
             "shutdown_requested": self._drain_requested.is_set() or self._shutdown_event.is_set(),
             "draining": self._drain_requested.is_set() and not self._shutdown_event.is_set(),
             "shutdown_reason": self._shutdown_reason,
+            "materialized_role_count": self.semantic_orchestrator.processes.materialized_count,
+            "inherited_role_count": self.capacity_pool.inherited_count,
+            "reserved_node_count": len(self.capacity_pool.reserved_nodes),
+            "max_parallel_nodes": self.max_parallel_modules,
             "max_parallel_llm_nodes": self.max_parallel_modules,
             "prompt_log_enabled": self.prompt_log_enabled,
             "pending_event_count": len(self.event_queue),
-            "llm_transport_request_count": len(self._llm_transport_requests),
-            "llm_transport_worker_count": len(self._llm_transport_workers),
+            **self.llm_proxy.health(),
             "fd_leases": fd_lease_snapshot(resource_kind=None),
-            "llm_usage_unreported_count": usage_unreported,
-            "llm_usage": self._llm_usage_ledger.snapshot(),
             "event_subscriber_count": len(self.event_subscribers),
             "bunshin_db_path": str(self.workflow_service.repository.database.db_path),
             "log_sink": current_service_log_sink_description(),
             "catalog_generation": str(self.catalog.snapshot()["generation"]),
             "harness_generation": (
-                self.harness_registry.snapshot().generation_hash
+                builtin_harness_generation().generation_hash
             ),
             "harnesses": [
                 spec.to_dict()
-                for spec in self.harness_registry.snapshot().specs
+                for spec in builtin_harness_generation().specs
             ],
             **dict(self.endpoint_info),
         }
@@ -2009,7 +1296,7 @@ class BunshinManager:
                 process = state.process
                 if (
                     run_id in notified_runs
-                    or state.status in _TERMINAL_RUN_STATUSES
+                    or not state.active
                     or process is None
                     or process.returncode is not None
                 ):
@@ -2034,7 +1321,7 @@ class BunshinManager:
                 for state in self.runs.values()
                 if state.process is not None
                 and state.process.returncode is None
-                and state.status not in _TERMINAL_RUN_STATUSES
+                and state.active
             ]
             background_count = (
                 self.workflow_outbox.active_background_count
@@ -2069,7 +1356,7 @@ class BunshinManager:
         active = [
             state.run_id
             for state in self.runs.values()
-            if state.status not in _TERMINAL_RUN_STATUSES
+            if state.active
             or (
                 state.process is not None
                 and state.process.returncode is None
@@ -2085,9 +1372,7 @@ class BunshinManager:
                 if self._host_tool_bundle is not None:
                     await self._host_tool_bundle.close()
                     self._host_tool_bundle = None
-        if self._llm_json_transport is not None:
-            await asyncio.to_thread(self._llm_json_transport.close)
-            self._llm_json_transport = None
+        await self.llm_proxy.retire_transport()
 
     def _install_signal_handlers(self):
         loop = asyncio.get_running_loop()

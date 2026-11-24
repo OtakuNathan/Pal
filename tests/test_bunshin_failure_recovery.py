@@ -105,7 +105,7 @@ def test_receipt_failure_reports_root_error_and_requests_reconciliation(tmp_path
         template = make_runner(tmp_path, output=tmp_path / "checkpoint.json")
         pack = replace(template.pack, metadata={
             **template.pack.metadata,
-            "bunshin_v2": {"submission_receipt_required": True},
+            "bunshin": {"submission_receipt_required": True},
         })
         runner = BunshinRunner(
             runtime_root=tmp_path, pack=pack, bunshin_id=pack.invocation_id,

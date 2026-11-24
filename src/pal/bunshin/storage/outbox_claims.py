@@ -20,7 +20,7 @@ class OutboxClaimsStore:
         with self.database.write_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_outbox
+                SELECT * FROM bunshin_outbox
                 WHERE next_retry_at <= ?
                   AND (
                     (status = 'pending' AND attempt_count < max_attempts)
@@ -35,7 +35,7 @@ class OutboxClaimsStore:
             for row in rows:
                 cursor = connection.execute(
                     """
-                    UPDATE bunshin_v2_outbox
+                    UPDATE bunshin_outbox
                     SET status = 'inflight',
                         attempt_count = CASE
                             WHEN status = 'pending' THEN attempt_count + 1
@@ -54,7 +54,7 @@ class OutboxClaimsStore:
                     if str(row["status"]) == "inflight":
                         connection.execute(
                             """
-                            UPDATE bunshin_v2_effect_attempts
+                            UPDATE bunshin_effect_attempts
                             SET status = 'lost', error_kind = 'lease_expired',
                                 error_text = 'outbox claim expired before settlement',
                                 finished_at = ?
@@ -65,7 +65,7 @@ class OutboxClaimsStore:
                     attempt_row = connection.execute(
                         """
                         SELECT COALESCE(MAX(attempt_index), 0) + 1 AS next_attempt_index
-                        FROM bunshin_v2_effect_attempts
+                        FROM bunshin_effect_attempts
                         WHERE effect_id = ?
                         """,
                         (str(row["effect_id"]),),
@@ -73,7 +73,7 @@ class OutboxClaimsStore:
                     effect_attempt_index = int(attempt_row["next_attempt_index"])
                     connection.execute(
                         """
-                        INSERT INTO bunshin_v2_effect_attempts(
+                        INSERT INTO bunshin_effect_attempts(
                             effect_id, attempt_index, worker_id, status, started_at
                         ) VALUES (?, ?, ?, 'running', ?)
                         """,
@@ -109,7 +109,7 @@ class OutboxClaimsStore:
         with self.database.write_connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE bunshin_v2_outbox
+                UPDATE bunshin_outbox
                 SET locked_until = ?, updated_at = ?
                 WHERE effect_id = ? AND status = 'inflight' AND locked_by = ?
                 """,
@@ -123,7 +123,7 @@ class OutboxClaimsStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_effect_attempts
+                SELECT * FROM bunshin_effect_attempts
                 WHERE effect_id = ?
                 ORDER BY attempt_index
                 """,

@@ -14,6 +14,10 @@ class WorkerProcesses:
     _owners: dict[str, WorkerProcessOwner] = field(default_factory=dict, init=False)
     _invocations_by_run: dict[str, str] = field(default_factory=dict, init=False)
 
+    @property
+    def materialized_count(self) -> int:
+        return len(self._owners)
+
     def contains(self, invocation_id: str) -> bool:
         return invocation_id in self._owners
 

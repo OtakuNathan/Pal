@@ -22,7 +22,7 @@ def runner_at(root: Path, *, bound: bool = False) -> BunshinRunner:
         pack=BunshinInvocationPack(
             invocation_id="progress-test",
             workspace={"architect_path": str(root / "architect.yaml")},
-            metadata={"bunshin_v2": {"role": "architect"}} if bound else {},
+            metadata={"bunshin": {"role": "architect"}} if bound else {},
         ),
         bunshin_id="progress-test", run_id="attempt-test",
         write_event=noop, read_decision=noop,

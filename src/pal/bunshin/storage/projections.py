@@ -23,7 +23,7 @@ class ProjectionsStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             rows = connection.execute(
-                "SELECT aggregate_id FROM bunshin_v2_aggregate_snapshots WHERE aggregate_type = ?",
+                "SELECT aggregate_id FROM bunshin_aggregate_snapshots WHERE aggregate_type = ?",
                 (AggregateType.WORKFLOW.value,),
             ).fetchall()
             for row in rows:
@@ -36,7 +36,7 @@ class ProjectionsStore:
         payload = dict(snapshot.payload)
         connection.execute(
             """
-            INSERT INTO bunshin_v2_node_projection(
+            INSERT INTO bunshin_node_projection(
                 node_run_id, workflow_id, epoch_id, unit_id, node_kind, state,
                 dependency_node_ids_json, active_worker_id, candidate_digest, blocker_json, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -70,7 +70,7 @@ class ProjectionsStore:
         revision_ref = dict(payload.get("task_revision_ref") or {})
         connection.execute(
             """
-            INSERT INTO bunshin_v2_task_projection(
+            INSERT INTO bunshin_task_projection(
                 task_id, state, title, objective, profile_id, family_id, workspace_key,
                 task_revision_sha, owner, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -106,7 +106,7 @@ class ProjectionsStore:
         last_event_id: str,
     ) -> None:
         rows = connection.execute(
-            "SELECT * FROM bunshin_v2_aggregate_snapshots WHERE workflow_id = ? ORDER BY updated_at DESC",
+            "SELECT * FROM bunshin_aggregate_snapshots WHERE workflow_id = ? ORDER BY updated_at DESC",
             (workflow_id,),
         ).fetchall()
         snapshots = [_snapshot_from_row(row) for row in rows]
@@ -116,7 +116,14 @@ class ProjectionsStore:
         active = _active_projection_snapshot(snapshots, workflow)
         phase = _current_phase(workflow, active)
         next_actions = self.engine.legal_actions(active.aggregate_type, active.state) if active is not None else ()
-        waiting_for_user = bool(active is not None and active.state in _HUMAN_WAIT_STATES)
+        review_pending = active is not None and active.state in _HUMAN_WAIT_STATES
+        waiting_sessions = {row[0] for row in connection.execute(
+            """SELECT a.session_id FROM bunshin_interaction_waits w
+               JOIN bunshin_role_assignments a ON a.assignment_id = w.assignment_id
+               WHERE a.workflow_id = ? AND w.state = 'open'
+                 AND a.state IN ('queued','claimed','running','retry_queued')""", (workflow_id,),
+        )}
+        waiting_for_user = review_pending or (workflow.state == "ACTIVE" and bool(waiting_sessions))
         liveness = self.metrics.liveness_locked(
             connection,
             workflow,
@@ -127,7 +134,7 @@ class ProjectionsStore:
         blocker = dict((active.payload if active is not None else workflow.payload).get("blocker") or {})
         active_worker_id = (
             ""
-            if waiting_for_user
+            if review_pending
             else str((active.payload if active is not None else {}).get("active_worker_id") or "")
         )
         if (
@@ -153,9 +160,11 @@ class ProjectionsStore:
             )
             if draining:
                 active_worker_id = str(draining[0].payload.get("active_worker_id") or "")
+        if active_worker_id in waiting_sessions:
+            active_worker_id = ""
         connection.execute(
             """
-            INSERT INTO bunshin_v2_workflow_projection(
+            INSERT INTO bunshin_workflow_projection(
                 workflow_id, current_phase, workflow_state, active_aggregate_type,
                 active_aggregate_id, active_worker_id, blocker_json, next_legal_actions_json,
                 waiting_for_user, liveness, metrics_json, last_progress_event_id, updated_at

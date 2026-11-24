@@ -37,7 +37,7 @@ class Invocation:
     ) -> int:
         payload = {
             "phase": "invocation_started",
-            "summary": "Bunshin V2 worker invocation started",
+            "summary": "Bunshin worker invocation started",
         }
         if prompt_observation_tag:
             payload["prompt_observation_tag"] = prompt_observation_tag
@@ -81,6 +81,6 @@ class Invocation:
         self.artifacts.finalize_produced_artifacts()
         await self.reporter.emit(
             "terminal",
-            self.results.terminal_payload("completed", final_text or "Bunshin V2 invocation completed"),
+            self.results.terminal_payload("completed", final_text or "Bunshin invocation completed"),
         )
         return 0

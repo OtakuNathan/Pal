@@ -8,13 +8,13 @@ Operator reference for the `pal bunshin efficiency` command.
 pal bunshin efficiency WORKFLOW_ID [--json] --runtime-root RUNTIME_ROOT
 ```
 
-The command reads the Bunshin v2 workflow database **strictly read-only**
+The command reads the Bunshin workflow database **strictly read-only**
 (it opens the SQLite file in `mode=ro`, never creates or migrates it) and
 prints an efficiency report for one workflow.
 
 - `WORKFLOW_ID` is the workflow identifier to report on.
 - `--runtime-root` is required and selects the runtime root holding the
-  Bunshin v2 storage, exactly like every other `pal` subcommand. The
+  Bunshin storage, exactly like every other `pal` subcommand. The
   database file is always resolved by `bunshin_db_path(runtime_root)` to
   `RUNTIME_ROOT/data/bunshin/bunshin.sqlite3` — no environment variable or
   other flag can redirect this read path.

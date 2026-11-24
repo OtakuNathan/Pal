@@ -14,20 +14,20 @@ from typing import Any, Mapping
 from pal.bunshin.efficiency_store import WorkflowTelemetryRecords
 
 _NO_ROUND_EVENTS_REASON = (
-    "no recorded LLM round events (bunshin_v2_worker_events has no "
+    "no recorded LLM round events (bunshin_worker_events has no "
     "llm_round_completed rows for this workflow)"
 )
 _NO_ROLE_TURNS_REASON = (
-    "no recorded role turns (bunshin_v2_role_turns is empty for this workflow)"
+    "no recorded role turns (bunshin_role_turns is empty for this workflow)"
 )
 _NO_ROLE_INVOCATIONS_REASON = "no recorded role invocations for this workflow"
 _NO_TOOL_BATCHES_REASON = "no tool batches recorded (every recorded round issued zero tool calls)"
 _NO_ROLE_TURNS_FOR_ROLE_REASON_TEMPLATE = (
-    "no recorded role turns for role {role!r} (bunshin_v2_role_turns)"
+    "no recorded role turns for role {role!r} (bunshin_role_turns)"
 )
 _CACHE_TOKEN_REASON = (
     "cache token telemetry is not recorded by this storage "
-    "(bunshin_v2_role_turns has no cache token columns)"
+    "(bunshin_role_turns has no cache token columns)"
 )
 _UNKNOWN_INVOCATION_REASON = "role turn references an unknown invocation: {invocation_id!r}"
 

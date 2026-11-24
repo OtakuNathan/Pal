@@ -114,6 +114,7 @@ class RoleCheckpoints:
             "mime_type": "application/json",
         }
         original_payload = dict(dict(original_terminal or {}).get("payload") or {})
+        legacy_timing = original_payload.pop("v2_timing", {})
         assignment_id = str(assignment.get("assignment_id") or "")
         payload_hash = str(assignment.get("submission_payload_hash") or "")
         if not assignment_id or not payload_hash:
@@ -144,7 +145,7 @@ class RoleCheckpoints:
                 "session_turn_index": int(
                     original_payload.get("session_turn_index") or 0
                 ),
-                "v2_timing": dict(original_payload.get("v2_timing") or {}),
+                "worker_timing": dict(original_payload.get("worker_timing", legacy_timing) or {}),
             },
         }
 

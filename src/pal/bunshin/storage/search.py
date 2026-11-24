@@ -48,8 +48,8 @@ class SearchStore:
                        coalesce(t.title, '') AS task_title,
                        coalesce(json_extract(s.payload_json, '$.workflow_name'), t.title, '') AS workflow_name,
                        coalesce(t.objective, '') AS task_objective
-                FROM bunshin_v2_aggregate_snapshots AS s
-                LEFT JOIN bunshin_v2_task_projection AS t
+                FROM bunshin_aggregate_snapshots AS s
+                LEFT JOIN bunshin_task_projection AS t
                   ON t.task_id = json_extract(s.payload_json, '$.task_id')
                 WHERE """
                 + " AND ".join(clauses)
@@ -57,6 +57,17 @@ class SearchStore:
                 tuple(parameters),
             ).fetchall()
         return tuple({**dict(row), "archived": bool(row["archived"])} for row in rows)
+
+    def task_workflow_counts(self, task_id: str, *, owner: str) -> dict[str, int]:
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                "SELECT state, COUNT(*) FROM bunshin_aggregate_snapshots "
+                "WHERE aggregate_type = ? AND json_extract(payload_json, '$.task_id') = ? "
+                "AND json_extract(payload_json, '$.owner') = ? GROUP BY state",
+                (AggregateType.WORKFLOW.value, task_id, owner),
+            ).fetchall()
+        return {str(state): int(count) for state, count in rows}
 
     def task_workflow_candidates(
         self,
@@ -87,7 +98,7 @@ class SearchStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 "SELECT aggregate_id AS workflow_id, state AS workflow_state "
-                "FROM bunshin_v2_aggregate_snapshots WHERE "
+                "FROM bunshin_aggregate_snapshots WHERE "
                 + " AND ".join(clauses)
                 + " ORDER BY CASE "
                 "WHEN state IN ('COMPLETED', 'REJECTED', 'CANCELLED') THEN 2 "
@@ -133,14 +144,14 @@ class SearchStore:
                     try:
                         rows = connection.execute(
                             """
-                            SELECT t.*, -bm25(bunshin_v2_tasks_fts) AS fts_score
-                            FROM bunshin_v2_tasks_fts
-                            JOIN bunshin_v2_task_projection AS t
-                              ON t.task_id = bunshin_v2_tasks_fts.task_id
-                            WHERE bunshin_v2_tasks_fts MATCH ?
+                            SELECT t.*, -bm25(bunshin_tasks_fts) AS fts_score
+                            FROM bunshin_tasks_fts
+                            JOIN bunshin_task_projection AS t
+                              ON t.task_id = bunshin_tasks_fts.task_id
+                            WHERE bunshin_tasks_fts MATCH ?
                             """
                             + fts_where
-                            + " ORDER BY bm25(bunshin_v2_tasks_fts), t.updated_at DESC LIMIT ?",
+                            + " ORDER BY bm25(bunshin_tasks_fts), t.updated_at DESC LIMIT ?",
                             (fts_query, *parameters, resolved_limit),
                         ).fetchall()
                     except sqlite3.OperationalError:
@@ -167,7 +178,7 @@ class SearchStore:
                 like_where = " WHERE " + " AND ".join(like_clauses)
                 pattern = f"%{text}%"
                 rows = connection.execute(
-                    "SELECT *, 1.0 AS score FROM bunshin_v2_task_projection"
+                    "SELECT *, 1.0 AS score FROM bunshin_task_projection"
                     + like_where
                     + " ORDER BY updated_at DESC, task_id LIMIT ?",
                     (*parameters, pattern, pattern, pattern, resolved_limit),
@@ -175,7 +186,7 @@ class SearchStore:
                 return tuple(dict(row) for row in rows)
 
             rows = connection.execute(
-                "SELECT * FROM bunshin_v2_task_projection"
+                "SELECT * FROM bunshin_task_projection"
                 + where
                 + " ORDER BY updated_at DESC, task_id LIMIT ?",
                 (*parameters, resolved_limit),

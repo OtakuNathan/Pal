@@ -31,7 +31,7 @@ def pack(root, *, harness="pal", role="architect", receipt=True):
         bunshin_profile="software_engineering.v2_architect", resolved_profile=profile,
         allowed_capabilities=["op_bunshin_contract_submit"],
         workspace={"repo_path": str(root), "architect_path": str(root / "architect.yaml")},
-        metadata={"bunshin_v2": binding},
+        metadata={"bunshin": binding},
     )
 
 

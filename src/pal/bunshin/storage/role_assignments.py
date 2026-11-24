@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.contracts import DeferredEffectError
 from pal.bunshin.storage.serialization import _decode_role_assignment
 from pal.bunshin.storage.serialization import _decode_role_attempt
 from pal.bunshin.storage.serialization import _json
@@ -55,7 +56,7 @@ def assert_semantic_role_admission_locked(
     if not owner or not resource or token <= 0 or not state:
         raise ValueError("semantic role admission has an incomplete business lease")
     current = connection.execute(
-        "SELECT workflow_id, state, payload_json FROM bunshin_v2_aggregate_snapshots "
+        "SELECT workflow_id, state, payload_json FROM bunshin_aggregate_snapshots "
         "WHERE aggregate_type = ? AND aggregate_id = ?",
         (aggregate_type, aggregate_id),
     ).fetchone()
@@ -78,7 +79,7 @@ def assert_semantic_role_admission_locked(
     ):
         raise DeferredEffectError("semantic role aggregate incarnation is frozen or replaced")
     lease = connection.execute(
-        "SELECT * FROM bunshin_v2_leases WHERE resource_key = ?", (resource,),
+        "SELECT * FROM bunshin_leases WHERE resource_key = ?", (resource,),
     ).fetchone()
     LeasesStore.assert_lease_row(lease, owner_id=owner, fencing_token=token, now=_utc_datetime())
 
@@ -99,7 +100,7 @@ class RoleAssignmentsStore:
                 execution_spec=request.execution_spec,
             )
             session = connection.execute(
-                "SELECT * FROM bunshin_v2_role_sessions WHERE session_id = ?",
+                "SELECT * FROM bunshin_role_sessions WHERE session_id = ?",
                 (request.session_id,),
             ).fetchone()
             if session is None:
@@ -130,7 +131,7 @@ class RoleAssignmentsStore:
             )
             self.artifacts.assert_artifact_refs_durable(connection, request.input_refs)
             existing = connection.execute(
-                "SELECT * FROM bunshin_v2_role_assignments WHERE assignment_key = ?",
+                "SELECT * FROM bunshin_role_assignments WHERE assignment_key = ?",
                 (request.assignment_key,),
             ).fetchone()
             if existing is not None:
@@ -140,7 +141,7 @@ class RoleAssignmentsStore:
             open_assignment = connection.execute(
                 """
                 SELECT assignment_id
-                FROM bunshin_v2_role_assignments
+                FROM bunshin_role_assignments
                 WHERE session_id = ?
                   AND state IN (
                       'queued', 'claimed', 'running', 'retry_queued',
@@ -157,7 +158,7 @@ class RoleAssignmentsStore:
                 )
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_role_assignments(
+                INSERT INTO bunshin_role_assignments(
                     assignment_id, assignment_key, request_hash, session_id,
                     workflow_id, aggregate_type, aggregate_id, role, mode,
                     role_profile_id, family_binding_sha,
@@ -188,7 +189,7 @@ class RoleAssignmentsStore:
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_assignments WHERE assignment_id = ?",
+                "SELECT * FROM bunshin_role_assignments WHERE assignment_id = ?",
                 (request.assignment_id,),
             ).fetchone()
             return _decode_role_assignment(row)
@@ -204,11 +205,14 @@ class RoleAssignmentsStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             assignment = connection.execute(
-                "SELECT * FROM bunshin_v2_role_assignments WHERE assignment_id = ?",
+                "SELECT * FROM bunshin_role_assignments WHERE assignment_id = ?",
                 (str(assignment_id),),
             ).fetchone()
             if assignment is None:
                 raise KeyError(f"unknown role assignment: {assignment_id}")
+            if connection.execute("SELECT 1 FROM bunshin_interaction_waits WHERE assignment_id=? AND state='open'",
+                                  (assignment_id,)).fetchone():
+                raise DeferredEffectError("role is waiting for user interaction")
             assert_semantic_role_admission_locked(
                 connection, workflow_id=str(assignment["workflow_id"]),
                 aggregate_type=str(assignment["aggregate_type"]),
@@ -229,7 +233,7 @@ class RoleAssignmentsStore:
                 connection.execute(
                     """
                     SELECT COALESCE(MAX(attempt_index), 0) + 1
-                    FROM bunshin_v2_role_attempts WHERE assignment_id = ?
+                    FROM bunshin_role_attempts WHERE assignment_id = ?
                     """,
                     (str(assignment_id),),
                 ).fetchone()[0]
@@ -238,7 +242,7 @@ class RoleAssignmentsStore:
             now = utc_now()
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_role_attempts(
+                INSERT INTO bunshin_role_attempts(
                     attempt_id, assignment_id, attempt_index, lease_resource_key,
                     fencing_token, harness_id, harness_generation,
                     status, started_at, updated_at
@@ -265,7 +269,7 @@ class RoleAssignmentsStore:
                 )
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_assignments
+                UPDATE bunshin_role_assignments
                 SET state = ?, active_attempt_id = ?, last_error = '', updated_at = ?
                 WHERE assignment_id = ?
                 """,
@@ -284,7 +288,7 @@ class RoleAssignmentsStore:
             # restore the Pal-authored checkpoint with that same generation.
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_sessions
+                UPDATE bunshin_role_sessions
                 SET preferred_harness_id = ?,
                     preferred_harness_generation = ?,
                     updated_at = ?
@@ -299,7 +303,7 @@ class RoleAssignmentsStore:
             )
             return _decode_role_attempt(
                 connection.execute(
-                    "SELECT * FROM bunshin_v2_role_attempts WHERE attempt_id = ?",
+                    "SELECT * FROM bunshin_role_attempts WHERE attempt_id = ?",
                     (identifier,),
                 ).fetchone()
             )
@@ -320,7 +324,7 @@ class RoleAssignmentsStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_assignments WHERE assignment_id = ?",
+                "SELECT * FROM bunshin_role_assignments WHERE assignment_id = ?",
                 (str(assignment_id),),
             ).fetchone()
             return _decode_role_assignment(row) if row is not None else None
@@ -343,7 +347,7 @@ class RoleAssignmentsStore:
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.database.read_connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM bunshin_v2_role_assignments"
+                "SELECT * FROM bunshin_role_assignments"
                 + where
                 + " ORDER BY created_at, assignment_id",
                 tuple(parameters),

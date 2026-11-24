@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import resolve_path_entry
+from pal.execution.file_state import file_commit_port, resolve_path_entry
 from pal.shared import RuntimeStatus
 from pal.shared.diagnostics import diagnostic_text, exception_reason
 
@@ -108,6 +108,8 @@ class PathDeleteTool:
         try:
             if path_kind == "directory":
                 shutil.rmtree(resolved)
+            elif (port := file_commit_port.get()) is not None:
+                port(resolved, delete_digest=sha256)
             else:
                 resolved.unlink()
         except OSError as exc:

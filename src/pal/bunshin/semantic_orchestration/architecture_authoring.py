@@ -252,10 +252,7 @@ class ArchitectureAuthoring:
                     ),
                 },
             ),
-            **self.assignment_identity.role_submission_settlement(
-                effect,
-                assignment_id=self.assignment_identity.terminal_role_assignment_id(terminal),
-            ),
+            **self.assignment_identity.settlement_from_terminal(terminal),
         )
         return submission_ref
 

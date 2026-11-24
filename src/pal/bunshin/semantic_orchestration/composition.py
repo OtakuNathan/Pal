@@ -9,7 +9,6 @@ from pal.bunshin.semantic_orchestration.callbacks import BrokerRunUnregistrar
 from pal.bunshin.semantic_orchestration.callbacks import SkillInjector
 from dataclasses import dataclass
 from pathlib import Path
-from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.worker_processes import WorkerProcesses
@@ -96,7 +95,6 @@ class SemanticComponents:
 
 def build_semantic_components(
     background: BackgroundAssignments,
-    harness_registry: BunshinHarnessRegistry,
     inject_skill: SkillInjector | None,
     processes: WorkerProcesses,
     publish_human_review: HumanReviewPublisher | None,
@@ -119,7 +117,7 @@ def build_semantic_components(
         role_reports, service, workflow_facts, workspace_locks,
     )
     assignment_failures, attempt_execution, implementation_snapshot, node_admission, verification_completion, verification_settlement, architecture_authoring, architecture_review = build_role_execution(
-        assignment_identity, assignment_retries, attempt_inputs, background, effect_reads, harness_registry,
+        assignment_identity, assignment_retries, attempt_inputs, background, effect_reads,
         null_execution, plan_assignments, processes, publish_worker_event, register_broker_run, requests,
         role_checkpoints, role_cleanup, role_leases, role_reports, runtime_db_path, service, settings, supervisor,
         unregister_broker_run, verifier_tests, workflow_facts, workspace_locks,
@@ -309,7 +307,6 @@ def build_role_execution(
     attempt_inputs: AttemptInputs,
     background: BackgroundAssignments,
     effect_reads: EffectReads,
-    harness_registry: BunshinHarnessRegistry,
     null_execution: NullExecution,
     plan_assignments: PlanAssignments,
     processes: WorkerProcesses,
@@ -344,7 +341,6 @@ def build_role_execution(
         workflow_facts=workflow_facts,
         artifacts=service.artifacts,
         background=background,
-        harness_registry=harness_registry,
         processes=processes,
         settings=settings,
         publish_worker_event=publish_worker_event,

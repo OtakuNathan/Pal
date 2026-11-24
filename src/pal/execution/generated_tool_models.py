@@ -614,8 +614,8 @@ MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput = _strict_mo
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderReadInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderReadInput',
+BunshinCapabilitiesBunshinPublicProviderReadInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderReadInput',
     {
         'kind': (Literal['all', 'profiles', 'families'], Field('all')),
         'query': (str, Field('')),
@@ -623,8 +623,8 @@ BunshinV2CapabilitiesBunshinV2PublicProviderReadInput = _strict_model(
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInputChanges = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInputChanges',
+BunshinCapabilitiesBunshinPublicProviderSetProfileOverrideInputChanges = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderSetProfileOverrideInputChanges',
     {
         'display_name': (str | None, Field(None)),
         'identity_fragment': (str | None, Field(None)),
@@ -645,23 +645,23 @@ BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInputChanges = _st
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput',
+BunshinCapabilitiesBunshinPublicProviderSetProfileOverrideInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderSetProfileOverrideInput',
     {
         'profile': (str, Field(..., description='Semantic profile name, for example software_engineering.v2_coder.')),
-        'changes': (BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInputChanges, Field(..., description='Typed merge patch for the profile definition; null removes an optional field.')),
+        'changes': (BunshinCapabilitiesBunshinPublicProviderSetProfileOverrideInputChanges, Field(..., description='Typed merge patch for the profile definition; null removes an optional field.')),
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderResetProfileOverrideInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderResetProfileOverrideInput',
+BunshinCapabilitiesBunshinPublicProviderResetProfileOverrideInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderResetProfileOverrideInput',
     {
         'profile': (str, Field(...)),
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputRoleBinding = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputRoleBinding',
+BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInputRoleBinding = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInputRoleBinding',
     {
         'participant': (Literal['profile', 'null'], Field(...)),
         'profile': (str | None, Field(None)),
@@ -669,8 +669,8 @@ BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputRoleBinding = 
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputChanges = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputChanges',
+BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInputChanges = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInputChanges',
     {
         'display_name': (str | None, Field(None)),
         'domain': (str | None, Field(None)),
@@ -679,7 +679,7 @@ BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputChanges = _str
         'role_bindings': (
             dict[
                 str,
-                BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputRoleBinding
+                BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInputRoleBinding
                 | None,
             ]
             | None,
@@ -692,29 +692,29 @@ BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputChanges = _str
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput',
+BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInput',
     {
         'family': (str, Field(..., description='Semantic family name, for example software_engineering.')),
-        'changes': (BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInputChanges, Field(..., description='Typed merge patch for the family definition; null removes an optional field.')),
+        'changes': (BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInputChanges, Field(..., description='Typed merge patch for the family definition; null removes an optional field.')),
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderResetFamilyOverrideInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderResetFamilyOverrideInput',
+BunshinCapabilitiesBunshinPublicProviderResetFamilyOverrideInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderResetFamilyOverrideInput',
     {
         'family': (str, Field(...)),
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderRefreshInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderRefreshInput',
+BunshinCapabilitiesBunshinPublicProviderRefreshInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderRefreshInput',
     {
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput',
+BunshinCapabilitiesBunshinPublicProviderSubmitArtifactInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderSubmitArtifactInput',
     {
         'name': (str, Field(...)),
         'artifact_type': (str, Field(...)),
@@ -724,8 +724,8 @@ BunshinV2CapabilitiesBunshinV2PublicProviderSubmitArtifactInput = _strict_model(
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput',
+BunshinCapabilitiesBunshinPublicProviderSearchInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderSearchInput',
     {
         'query': (str, Field('')),
         'family': (str, Field(None, description='Optional semantic Family name.')),
@@ -734,24 +734,24 @@ BunshinV2CapabilitiesBunshinV2PublicProviderSearchInput = _strict_model(
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderStatusInput',
+BunshinCapabilitiesBunshinPublicProviderStatusInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderStatusInput',
     {
         'task': (str, Field(None, description='Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.')),
         'view': (Literal['status', 'human_review'], Field('status', description='status returns Task state plus its current workflow and per-module projection; human_review adds the durable pending review without internal ids or tokens.')),
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderRestartExecutionInput',
+BunshinCapabilitiesBunshinPublicProviderRestartExecutionInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderRestartExecutionInput',
     {
         'task': (str, Field(None, description='Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.')),
         'reason': (str, Field(..., description='Auditable reason the current execution must be discarded and restarted.', min_length=1)),
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput',
+BunshinCapabilitiesBunshinPublicProviderResolveTriageInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderResolveTriageInput',
     {
         'task': (str, Field(None, description='Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.')),
         'subject': (str, Field(None, description='Exact semantic subject reported by workflow status, such as module:ohos_font or phase:architecture. Optional only when the workflow has exactly one TRIAGE_REQUIRED item.')),
@@ -759,16 +759,16 @@ BunshinV2CapabilitiesBunshinV2PublicProviderResolveTriageInput = _strict_model(
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderAnswerQuestionInput',
+BunshinCapabilitiesBunshinPublicProviderAnswerQuestionInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderAnswerQuestionInput',
     {
         'task': (str, Field(None, description='Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.')),
         'answer': (str, Field(..., min_length=1)),
     },
 )
 
-BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput = _strict_model(
-    'BunshinV2CapabilitiesBunshinV2PublicProviderControlWorkflowInput',
+BunshinCapabilitiesBunshinPublicProviderControlWorkflowInput = _strict_model(
+    'BunshinCapabilitiesBunshinPublicProviderControlWorkflowInput',
     {
         'task': (str, Field(None, description='Task title. Omit only when this actor has exactly one active Task; otherwise supply an unambiguous title.')),
         'operation': (Literal['pause', 'resume', 'cancel', 'archive'], Field(..., description='Pause/cancel are asynchronous requests. Resume may report triage blockers; archive requires a completed, rejected or cancelled workflow and keeps its Task.')),
@@ -1135,25 +1135,14 @@ BunshinScopedExecutionOpBunshinArtifactWriteInput = _strict_model(
     },
 )
 
-BunshinV2CandidateBuilderOpBunshinCandidateSubmitInput = _strict_model(
-    'BunshinV2CandidateBuilderOpBunshinCandidateSubmitInput',
+BunshinCandidateBuilderOpBunshinCandidateSubmitInput = _strict_model(
+    'BunshinCandidateBuilderOpBunshinCandidateSubmitInput',
     {
     },
 )
 
-BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput = _strict_model(
-    'BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput',
-    {
-        'summary': (str, Field(..., min_length=1)),
-        'source_file': (str, Field(None, description='Independent defect metadata; does not replace the location path.')),
-        'path': (str, Field(None)),
-        'symbol': (str, Field(None, description='Annotates path; ignored when path is absent.')),
-        'contract_section': (str, Field(None, description='Annotates path; ignored when path is absent.')),
-    },
-)
-
-BunshinV2CandidateBuilderOpBunshinCandidateRequestModuleSplitInput = _strict_model(
-    'BunshinV2CandidateBuilderOpBunshinCandidateRequestModuleSplitInput',
+BunshinCandidateBuilderOpBunshinCandidateReportArchitectureDefectInput = _strict_model(
+    'BunshinCandidateBuilderOpBunshinCandidateReportArchitectureDefectInput',
     {
         'summary': (str, Field(..., min_length=1)),
         'source_file': (str, Field(None, description='Independent defect metadata; does not replace the location path.')),
@@ -1163,8 +1152,19 @@ BunshinV2CandidateBuilderOpBunshinCandidateRequestModuleSplitInput = _strict_mod
     },
 )
 
-BunshinV2AskQuestionInput = _strict_model(
-    'BunshinV2AskQuestionInput',
+BunshinCandidateBuilderOpBunshinCandidateRequestModuleSplitInput = _strict_model(
+    'BunshinCandidateBuilderOpBunshinCandidateRequestModuleSplitInput',
+    {
+        'summary': (str, Field(..., min_length=1)),
+        'source_file': (str, Field(None, description='Independent defect metadata; does not replace the location path.')),
+        'path': (str, Field(None)),
+        'symbol': (str, Field(None, description='Annotates path; ignored when path is absent.')),
+        'contract_section': (str, Field(None, description='Annotates path; ignored when path is absent.')),
+    },
+)
+
+BunshinAskQuestionInput = _strict_model(
+    'BunshinAskQuestionInput',
     {
         'title': (str, Field(..., description='Short label for the decision.', min_length=1)),
         'question': (str, Field(..., description='One precise user-facing question.', min_length=1)),
@@ -1174,47 +1174,47 @@ BunshinV2AskQuestionInput = _strict_model(
     },
 )
 
-BunshinV2SweVerificationOpBunshinVerificationRequestModuleRepairInput = _strict_model(
-    'BunshinV2SweVerificationOpBunshinVerificationRequestModuleRepairInput',
+BunshinSweVerificationOpBunshinVerificationRequestModuleRepairInput = _strict_model(
+    'BunshinSweVerificationOpBunshinVerificationRequestModuleRepairInput',
     {
     },
 )
 
-BunshinV2SweVerificationOpBunshinVerificationRequestContractRevisionInput = _strict_model(
-    'BunshinV2SweVerificationOpBunshinVerificationRequestContractRevisionInput',
+BunshinSweVerificationOpBunshinVerificationRequestContractRevisionInput = _strict_model(
+    'BunshinSweVerificationOpBunshinVerificationRequestContractRevisionInput',
     {
     },
 )
 
-BunshinV2SweVerificationOpBunshinVerificationRequestArchitectureRevisionInput = _strict_model(
-    'BunshinV2SweVerificationOpBunshinVerificationRequestArchitectureRevisionInput',
+BunshinSweVerificationOpBunshinVerificationRequestArchitectureRevisionInput = _strict_model(
+    'BunshinSweVerificationOpBunshinVerificationRequestArchitectureRevisionInput',
     {
     },
 )
 
-BunshinV2SweVerificationOpBunshinVerificationRequestRequirementsRevisionInput = _strict_model(
-    'BunshinV2SweVerificationOpBunshinVerificationRequestRequirementsRevisionInput',
+BunshinSweVerificationOpBunshinVerificationRequestRequirementsRevisionInput = _strict_model(
+    'BunshinSweVerificationOpBunshinVerificationRequestRequirementsRevisionInput',
     {
     },
 )
 
-BunshinV2SweVerificationOpBunshinVerificationUnknownInput = _strict_model(
-    'BunshinV2SweVerificationOpBunshinVerificationUnknownInput',
+BunshinSweVerificationOpBunshinVerificationUnknownInput = _strict_model(
+    'BunshinSweVerificationOpBunshinVerificationUnknownInput',
     {
         'reason': (str, Field(..., description='Unavailable environment or platform evidence and the concrete follow-up verification plan.', min_length=1)),
     },
 )
 
-BunshinV2VerificationBuilderOpBunshinVerificationScratchWriteInput = _strict_model(
-    'BunshinV2VerificationBuilderOpBunshinVerificationScratchWriteInput',
+BunshinVerificationBuilderOpBunshinVerificationScratchWriteInput = _strict_model(
+    'BunshinVerificationBuilderOpBunshinVerificationScratchWriteInput',
     {
         'path': (str, Field(..., description='Safe relative path inside the bound verifier scratch directory.', min_length=1)),
         'content': (str, Field(..., description='Complete replacement text for the scratch file.')),
     },
 )
 
-BunshinV2VerificationBuilderOpBunshinVerificationRunLspCheckInput = _strict_model(
-    'BunshinV2VerificationBuilderOpBunshinVerificationRunLspCheckInput',
+BunshinVerificationBuilderOpBunshinVerificationRunLspCheckInput = _strict_model(
+    'BunshinVerificationBuilderOpBunshinVerificationRunLspCheckInput',
     {
         'name': (str, Field(..., description='Readable semantic case name; reusing it replaces the recorded case.', min_length=1)),
         'file': (str, Field(..., description='Source file to diagnose in the bound workspace.', min_length=1)),
@@ -1222,8 +1222,8 @@ BunshinV2VerificationBuilderOpBunshinVerificationRunLspCheckInput = _strict_mode
     },
 )
 
-BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput = _strict_model(
-    'BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput',
+BunshinVerificationBuilderOpBunshinVerificationCheckUnavailableInput = _strict_model(
+    'BunshinVerificationBuilderOpBunshinVerificationCheckUnavailableInput',
     {
         'name': (str, Field(..., description='Readable semantic name for the unavailable evidence case.', min_length=1)),
         'obligation': (Literal['focused_tests', 'warning_clean', 'consumer_probe', 'public_surface_dogfood', 'lsp', 'historical_regressions', 'platform_probe', 'candidate_delta_review'], Field(..., description='Required verification obligation that cannot be exercised.')),
@@ -1232,35 +1232,35 @@ BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput = _strict
     },
 )
 
-BunshinV2VerificationBuilderOpBunshinVerificationSetSummaryInput = _strict_model(
-    'BunshinV2VerificationBuilderOpBunshinVerificationSetSummaryInput',
+BunshinVerificationBuilderOpBunshinVerificationSetSummaryInput = _strict_model(
+    'BunshinVerificationBuilderOpBunshinVerificationSetSummaryInput',
     {
         'summary': (str, Field(..., description='Concise current verification conclusion.', min_length=1)),
     },
 )
 
-BunshinV2VerificationBuilderOpBunshinVerificationDraftStatusInput = _strict_model(
-    'BunshinV2VerificationBuilderOpBunshinVerificationDraftStatusInput',
+BunshinVerificationBuilderOpBunshinVerificationDraftStatusInput = _strict_model(
+    'BunshinVerificationBuilderOpBunshinVerificationDraftStatusInput',
     {
     },
 )
 
-BunshinV2VerificationBuilderOpBunshinVerificationRemoveCaseInput = _strict_model(
-    'BunshinV2VerificationBuilderOpBunshinVerificationRemoveCaseInput',
+BunshinVerificationBuilderOpBunshinVerificationRemoveCaseInput = _strict_model(
+    'BunshinVerificationBuilderOpBunshinVerificationRemoveCaseInput',
     {
         'name': (str, Field(..., description='Exact semantic name of the recorded case to withdraw.', min_length=1)),
         'reason': (str, Field(..., description='Audit reason why the case itself is invalid or no longer applicable.', min_length=1)),
     },
 )
 
-BunshinV2VerificationBuilderOpBunshinVerificationSubmitInput = _strict_model(
-    'BunshinV2VerificationBuilderOpBunshinVerificationSubmitInput',
+BunshinVerificationBuilderOpBunshinVerificationSubmitInput = _strict_model(
+    'BunshinVerificationBuilderOpBunshinVerificationSubmitInput',
     {
     },
 )
 
-BunshinV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput = _strict_model(
-    'BunshinV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput',
+BunshinVerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput = _strict_model(
+    'BunshinVerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput',
     {
         'name': (str, Field(..., description='Readable semantic case name; reusing it replaces the recorded case.', min_length=1)),
         'command': (str, Field(..., description='Complete shell command that exercises this verification case.', min_length=1)),

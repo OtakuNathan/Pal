@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from pal.core.runtime_state import RuntimeSnapshotIdentity
+from pal.bunshin.interaction_suspend import SuspendedToolBatch
+from pal.bunshin.runner_components.interactive_batch import bind_interaction_boundary
+from pal.memory.runtime_state import restore_pending_tool_calls
 from pal.core.turns import AgentLoopFrame, EffectResult, L1CommitPayload, TurnContinuation, TurnOutcome, agent_turn_program
 from pal.foundation import EventEnvelope
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
@@ -59,7 +62,7 @@ class AgentSession:
             self.tool_session.bind_execution(bundle.execution_runtime.create_role_session_driver())
         memory_service = bundle.memory_service
         memory_candidate_sink = self.memory_results.runner_memory_candidate_sink()
-        workspace = self.build_workspace()
+        workspace = _build_workspace(self)
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
         session_id = str(session_metadata.get("session_id") or "").strip()
         restored = await self.restore_runtime(bundle, session_id, workspace)
@@ -85,10 +88,7 @@ class AgentSession:
                 restored_state.get("pending_output_length_recovery_note") or ""
             ),
         )
-        self.tool_session.observe_count(max(
-            self.tool_session.observed_tool_call_count,
-            state.tool_call_count,
-        ))
+        self.tool_session.observe_count(state.tool_call_count)
         max_output_tokens = max(
             1,
             int(_resolve_bunshin_max_output_tokens(bundle.llm_runtime, self.pack)),
@@ -98,19 +98,23 @@ class AgentSession:
             bundle, current_channel_envelope, forced_retry_note, max_output_tokens, restored_state,
             semantic_input_is_new, session_metadata, state,
         )
-        begin_tool_results = getattr(state.execution_runtime, "begin_tool_result_turn", None)
-        if callable(begin_tool_results):
-            begin_tool_results(
-                turn_id=turn_id,
-                scope_key=session_id or f"bunshin:{self.run_id}",
-                retention_user_turns=_BUNSHIN_TOOL_RESULT_RETENTION_CALLS,
-                input_id=response_key or turn_id,
-            )
+        state.execution_runtime.begin_tool_result_turn(
+            turn_id=turn_id, scope_key=session_id or f"bunshin:{self.run_id}",
+            retention_user_turns=_BUNSHIN_TOOL_RESULT_RETENTION_CALLS, input_id=response_key or turn_id,
+        )
         if semantic_input_is_new:
             with contextlib.suppress(Exception):
                 state.memory_service.tick_heat()
         agent_turn_runtime = self.agent_runtime.build_bunshin_agent_runtime(bundle, state, continuation)
         executor = agent_turn_runtime.executor
+        await bind_interaction_boundary(
+            runtime_root=self.runtime_root, control=self.control, llm_rounds=self.llm_rounds,
+            checkpoints=self.session_checkpoints, bundle=bundle, state=state, continuation=continuation,
+            tool_session=self.tool_session, executor=executor, max_output_tokens=max_output_tokens,
+            response_key=response_key, response_keys=response_keys, initial_instruction=initial_instruction,
+            enabled=bool(session_metadata.get("durable_tool_interactions")),
+            parked=restored_state.get("parked_batch"), semantic_input_is_new=semantic_input_is_new,
+        )
         current: EffectResult | None = None
         if self.session_checkpoints.continuation_is_restart_safe(continuation, state.memory_service):
             await self.session_checkpoints.persist_agent_session_checkpoint(
@@ -381,58 +385,36 @@ class AgentSession:
         )
         if restored:
             try:
-                await bundle.runtime_state_coordinator.restore(
-                    dict(restored["runtime_snapshot"]),
-                    expected_identity=RuntimeSnapshotIdentity(
-                        logical_coroutine_id=str(restored["logical_coroutine_id"]),
-                        workflow_id=str(restored["workflow_id"]),
-                        stage_key=str(restored["stage_key"]),
-                        sequence=int(restored["sequence"]),
-                        producer_fencing_token=int(restored["producer_fencing_token"]),
-                        runtime_spec_hash=str(restored["runtime_spec_hash"]),
-                    ),
-                )
+                coroutine_state = restored["coroutine_state"]
+                parked = coroutine_state.get("parked_batch")
+                response_key = (self.pack.metadata.get("agent_session") or {}).get("response_key")
+                if parked and response_key and response_key != coroutine_state.get("active_response_key"):
+                    # A superseding assignment inherits the transcript. Normalize the
+                    # interrupted turn and discard the old assignment's tool authority.
+                    restored = {**restored, "coroutine_state": dict(coroutine_state)}
+                    restored["coroutine_state"].pop("parked_batch")
+                    parked = None
+                batch = SuspendedToolBatch.restore(parked) if parked else None
+                context = (restore_pending_tool_calls(batch.turn_id, tuple(c.call_id for c in batch.remaining))
+                           if batch else contextlib.nullcontext())
+                with context:
+                    await bundle.runtime_state_coordinator.restore(
+                        dict(restored["runtime_snapshot"]),
+                        expected_identity=RuntimeSnapshotIdentity(
+                            logical_coroutine_id=str(restored["logical_coroutine_id"]),
+                            workflow_id=str(restored["workflow_id"]),
+                            stage_key=str(restored["stage_key"]),
+                            sequence=int(restored["sequence"]),
+                            producer_fencing_token=int(restored["producer_fencing_token"]),
+                            runtime_spec_hash=str(restored["runtime_spec_hash"]),
+                        ),
+                    )
             except (TypeError, ValueError, RuntimeError) as exc:
                 raise AgentSessionCheckpointError(
                     "manager-selected agent continuation contains invalid runtime module state"
                 ) from exc
         self.runtime_initialized = True
         return restored
-
-    def build_workspace(self, ) -> Any:
-        workspace = dict(self.pack.workspace)
-        workspace.setdefault("runtime_root", str(self.runtime_root))
-        workspace.setdefault("run_id", self.run_id)
-        workspace.setdefault("bunshin_id", self.bunshin_id)
-        workspace.setdefault("bunshin_profile", self.pack.bunshin_profile)
-        workspace.setdefault("invocation_id", self.pack.invocation_id)
-        workspace.setdefault("goal", self.pack.instruction or self.pack.goal)
-        if isinstance(self.pack.metadata, dict):
-            if isinstance(self.pack.metadata.get("requirements_brief"), dict):
-                workspace.setdefault("requirements_brief", dict(self.pack.metadata.get("requirements_brief") or {}))
-            if isinstance(self.pack.metadata.get("bunshin_v2"), dict):
-                # ``workspace.bunshin_v2`` already carries the assignment-bound
-                # fields from the prompt pack.  The Manager also puts derived
-                # role contracts (for example the verifier's
-                # ``swe_verification_tool_contract``) in metadata.  A
-                # ``setdefault`` here silently discarded those derived fields
-                # whenever the workspace had any binding at all, so a verifier
-                # could record a perfectly located finding and still fail to
-                # route it because its repair-owner map was missing.  Merge the
-                # two projections, with the prompt-pack workspace remaining the
-                # authoritative value for fields that are bound there.
-                bound_bunshin_v2 = dict(workspace.get("bunshin_v2") or {})
-                bound_bunshin_v2.update(
-                    {
-                        key: value
-                        for key, value in dict(self.pack.metadata.get("bunshin_v2") or {}).items()
-                        if key not in bound_bunshin_v2
-                    }
-                )
-                workspace["bunshin_v2"] = bound_bunshin_v2
-        workspace.setdefault("review_tool_evidence_refs", self.review_evidence.review_tool_evidence_refs)
-        return workspace
-
 
 def _build_scoped_execution_runtime(
     session: AgentSession, bundle: BunshinRuntimeBundle,
@@ -456,3 +438,38 @@ def _build_scoped_execution_runtime(
         if str(dict(spec.get("function") or {}).get("name") or "").strip()
     ])
     return runtime
+
+
+def _build_workspace(session: AgentSession) -> dict[str, Any]:
+    workspace = dict(session.pack.workspace)
+    workspace.setdefault("runtime_root", str(session.runtime_root))
+    workspace.setdefault("run_id", session.run_id)
+    workspace.setdefault("bunshin_id", session.bunshin_id)
+    workspace.setdefault("bunshin_profile", session.pack.bunshin_profile)
+    workspace.setdefault("invocation_id", session.pack.invocation_id)
+    workspace.setdefault("goal", session.pack.instruction or session.pack.goal)
+    if isinstance(session.pack.metadata, dict):
+        if isinstance(session.pack.metadata.get("requirements_brief"), dict):
+            workspace.setdefault("requirements_brief", dict(session.pack.metadata.get("requirements_brief") or {}))
+        if isinstance(session.pack.metadata.get("bunshin"), dict):
+            # ``workspace.bunshin`` already carries the assignment-bound
+            # fields from the prompt pack.  The Manager also puts derived
+            # role contracts (for example the verifier's
+            # ``swe_verification_tool_contract``) in metadata.  A
+            # ``setdefault`` here silently discarded those derived fields
+            # whenever the workspace had any binding at all, so a verifier
+            # could record a perfectly located finding and still fail to
+            # route it because its repair-owner map was missing.  Merge the
+            # two projections, with the prompt-pack workspace remaining the
+            # authoritative value for fields that are bound there.
+            bound_bunshin = dict(workspace.get("bunshin") or {})
+            bound_bunshin.update(
+                {
+                    key: value
+                    for key, value in dict(session.pack.metadata.get("bunshin") or {}).items()
+                    if key not in bound_bunshin
+                }
+            )
+            workspace["bunshin"] = bound_bunshin
+    workspace.setdefault("review_tool_evidence_refs", session.review_evidence.review_tool_evidence_refs)
+    return workspace

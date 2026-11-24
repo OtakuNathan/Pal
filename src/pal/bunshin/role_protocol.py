@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Mapping, TypedDict
 
 from pal.bunshin.role_contracts import RoleActivation
 
@@ -252,6 +252,13 @@ class RoleAssignmentRequest:
             "execution_spec": dict(self.execution_spec),
             "submission_kind": self.submission_kind,
         }
+
+
+class RoleSettlement(TypedDict):
+    """Identity of the recorded receipt consumed by an aggregate transition."""
+
+    role_assignment_id: str
+    role_submission_payload_hash: str
 
 
 @dataclass(frozen=True)

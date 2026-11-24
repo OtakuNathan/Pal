@@ -3,32 +3,86 @@ from __future__ import annotations
 import sqlite3
 
 
-BUNSHIN_SCHEMA_VERSION = 29
+BUNSHIN_SCHEMA_VERSION = 30
+
+
+def schema_meta_table(connection: sqlite3.Connection) -> str:
+    legacy = connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='bunshin_v2_schema_meta'"
+    ).fetchone()
+    return "bunshin_v2_schema_meta" if legacy else "bunshin_schema_meta"
+
+
+def _rename_versioned_tables(connection: sqlite3.Connection) -> None:
+    if schema_meta_table(connection) == "bunshin_schema_meta":
+        return
+    # Acquire the writer lock before rechecking. Another Manager or CLI may
+    # have opened the same database while this connection waited.
+    nested = connection.in_transaction
+    connection.execute("SAVEPOINT bunshin_rename" if nested else "BEGIN IMMEDIATE")
+    try:
+        if schema_meta_table(connection) != "bunshin_schema_meta":
+            row = connection.execute(
+                "SELECT schema_value FROM bunshin_v2_schema_meta WHERE schema_key='schema_version'"
+            ).fetchone()
+            if row is None or str(row[0]) not in {"29", str(BUNSHIN_SCHEMA_VERSION)}:
+                raise RuntimeError("legacy Bunshin runtime schema requires archive cutover")
+            # FTS5 renames its own shadow tables. Explicit indexes retain their
+            # old names on ALTER TABLE, so recreate them in the same transaction.
+            indexes = connection.execute(
+                "SELECT name, sql FROM sqlite_schema WHERE type='index' AND name GLOB 'bunshin_v2_*'"
+            ).fetchall()
+            tables = connection.execute(
+                "SELECT name FROM pragma_table_list WHERE schema='main' "
+                "AND type IN ('table','virtual') AND name GLOB 'bunshin_v2_*'"
+            ).fetchall()
+            for name, _ in indexes:
+                quoted = name.replace('"', '""')
+                connection.execute(f'DROP INDEX "{quoted}"')
+            for (name,) in tables:
+                old = name.replace('"', '""')
+                new = old.replace("bunshin_v2_", "bunshin_", 1)
+                connection.execute(f'ALTER TABLE "{old}" RENAME TO "{new}"')
+            for _, sql in indexes:
+                connection.execute(sql.replace("bunshin_v2_", "bunshin_"))
+    except BaseException:
+        if nested:
+            connection.execute("ROLLBACK TO bunshin_rename")
+            connection.execute("RELEASE bunshin_rename")
+        else:
+            connection.rollback()
+        raise
+    if nested:
+        connection.execute("RELEASE bunshin_rename")
+    else:
+        connection.commit()
 
 
 def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
+    _rename_versioned_tables(connection)
     connection.execute(
         """
-        CREATE TABLE IF NOT EXISTS bunshin_v2_schema_meta (
+        CREATE TABLE IF NOT EXISTS bunshin_schema_meta (
             schema_key TEXT PRIMARY KEY,
             schema_value TEXT NOT NULL
         )
         """
     )
     previous_version = _schema_version(connection)
-    if previous_version not in {0, BUNSHIN_SCHEMA_VERSION}:
+    if previous_version not in {0, 29, BUNSHIN_SCHEMA_VERSION}:
         raise RuntimeError(
             "legacy Bunshin runtime schema is not migrated in place; "
-            "archive the old runtime and initialize a fresh v29 runtime"
+            "archive the old runtime and initialize a fresh Bunshin runtime"
         )
     connection.executescript(
         """
-        CREATE TABLE IF NOT EXISTS bunshin_v2_schema_meta (
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS bunshin_schema_meta (
             schema_key TEXT PRIMARY KEY,
             schema_value TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_aggregate_snapshots (
+        CREATE TABLE IF NOT EXISTS bunshin_aggregate_snapshots (
             aggregate_type TEXT NOT NULL,
             aggregate_id TEXT NOT NULL,
             workflow_id TEXT NOT NULL,
@@ -40,10 +94,10 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY (aggregate_type, aggregate_id)
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_snapshots_workflow
-        ON bunshin_v2_aggregate_snapshots(workflow_id, aggregate_type, updated_at);
+        CREATE INDEX IF NOT EXISTS bunshin_snapshots_workflow
+        ON bunshin_aggregate_snapshots(workflow_id, aggregate_type, updated_at);
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_task_projection (
+        CREATE TABLE IF NOT EXISTS bunshin_task_projection (
             task_id TEXT PRIMARY KEY,
             state TEXT NOT NULL,
             title TEXT NOT NULL,
@@ -56,17 +110,17 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_task_search
-        ON bunshin_v2_task_projection(state, family_id, updated_at);
+        CREATE INDEX IF NOT EXISTS bunshin_task_search
+        ON bunshin_task_projection(state, family_id, updated_at);
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS bunshin_v2_tasks_fts USING fts5(
+        CREATE VIRTUAL TABLE IF NOT EXISTS bunshin_tasks_fts USING fts5(
             task_id UNINDEXED,
             title,
             objective,
             workspace
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_domain_events (
+        CREATE TABLE IF NOT EXISTS bunshin_domain_events (
             event_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             aggregate_type TEXT NOT NULL,
@@ -81,10 +135,10 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             UNIQUE(aggregate_type, aggregate_id, aggregate_version, event_type)
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_events_workflow
-        ON bunshin_v2_domain_events(workflow_id, created_at, event_id);
+        CREATE INDEX IF NOT EXISTS bunshin_events_workflow
+        ON bunshin_domain_events(workflow_id, created_at, event_id);
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_action_dedup (
+        CREATE TABLE IF NOT EXISTS bunshin_action_dedup (
             aggregate_type TEXT NOT NULL,
             aggregate_id TEXT NOT NULL,
             idempotency_key TEXT NOT NULL,
@@ -95,7 +149,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY (aggregate_type, aggregate_id, idempotency_key)
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_outbox (
+        CREATE TABLE IF NOT EXISTS bunshin_outbox (
             effect_id TEXT PRIMARY KEY,
             effect_key TEXT NOT NULL UNIQUE,
             workflow_id TEXT NOT NULL,
@@ -119,10 +173,10 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_outbox_ready
-        ON bunshin_v2_outbox(status, next_retry_at, created_at);
+        CREATE INDEX IF NOT EXISTS bunshin_outbox_ready
+        ON bunshin_outbox(status, next_retry_at, created_at);
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_effect_receipts (
+        CREATE TABLE IF NOT EXISTS bunshin_effect_receipts (
             effect_key TEXT PRIMARY KEY,
             effect_id TEXT NOT NULL,
             request_hash TEXT NOT NULL,
@@ -131,7 +185,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             completed_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_leases (
+        CREATE TABLE IF NOT EXISTS bunshin_leases (
             resource_key TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL DEFAULT '',
             fencing_token INTEGER NOT NULL DEFAULT 0,
@@ -141,7 +195,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             metadata_json TEXT NOT NULL DEFAULT '{}'
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_artifacts (
+        CREATE TABLE IF NOT EXISTS bunshin_artifacts (
             sha256 TEXT PRIMARY KEY,
             artifact_type TEXT NOT NULL,
             schema_version TEXT NOT NULL,
@@ -154,7 +208,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_artifact_refs (
+        CREATE TABLE IF NOT EXISTS bunshin_artifact_refs (
             parent_sha256 TEXT NOT NULL,
             child_sha256 TEXT NOT NULL,
             relation TEXT NOT NULL,
@@ -162,7 +216,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY(parent_sha256, child_sha256, relation)
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_human_decisions (
+        CREATE TABLE IF NOT EXISTS bunshin_human_decisions (
             token_hash TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             architecture_revision_id TEXT NOT NULL,
@@ -176,10 +230,10 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             consumed_at TEXT NOT NULL DEFAULT ''
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_human_decisions_revision
-        ON bunshin_v2_human_decisions(workflow_id, architecture_revision_id, status);
+        CREATE INDEX IF NOT EXISTS bunshin_human_decisions_revision
+        ON bunshin_human_decisions(workflow_id, architecture_revision_id, status);
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_role_invocations (
+        CREATE TABLE IF NOT EXISTS bunshin_role_invocations (
             invocation_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             aggregate_type TEXT NOT NULL,
@@ -206,7 +260,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_role_sessions (
+        CREATE TABLE IF NOT EXISTS bunshin_role_sessions (
             session_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             aggregate_type TEXT NOT NULL,
@@ -224,7 +278,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_role_assignments (
+        CREATE TABLE IF NOT EXISTS bunshin_role_assignments (
             assignment_id TEXT PRIMARY KEY,
             assignment_key TEXT NOT NULL UNIQUE,
             request_hash TEXT NOT NULL,
@@ -249,18 +303,34 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             last_error TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            FOREIGN KEY(session_id) REFERENCES bunshin_v2_role_sessions(session_id)
+            FOREIGN KEY(session_id) REFERENCES bunshin_role_sessions(session_id)
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_role_assignments_ready
-        ON bunshin_v2_role_assignments(state, updated_at, assignment_id);
+        CREATE INDEX IF NOT EXISTS bunshin_role_assignments_ready
+        ON bunshin_role_assignments(state, updated_at, assignment_id);
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_role_assignments_aggregate
-        ON bunshin_v2_role_assignments(
+        CREATE INDEX IF NOT EXISTS bunshin_role_assignments_aggregate
+        ON bunshin_role_assignments(
             workflow_id, aggregate_type, aggregate_id, created_at
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_role_attempts (
+        CREATE TABLE IF NOT EXISTS bunshin_interaction_waits (
+            wait_id TEXT PRIMARY KEY,
+            assignment_id TEXT NOT NULL REFERENCES bunshin_role_assignments(assignment_id),
+            attempt_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('approval','clarification')),
+            request_json TEXT NOT NULL,
+            answer_json TEXT NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','answered','resuming','consumed','cancelled')),
+            resume_attempt_id TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS bunshin_interaction_wait_assignment
+        ON bunshin_interaction_waits(assignment_id,state);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS bunshin_interaction_wait_active
+        ON bunshin_interaction_waits(assignment_id) WHERE state IN ('open','answered','resuming');
+
+        CREATE TABLE IF NOT EXISTS bunshin_role_attempts (
             attempt_id TEXT PRIMARY KEY,
             assignment_id TEXT NOT NULL,
             attempt_index INTEGER NOT NULL,
@@ -280,13 +350,13 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             finished_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL,
             UNIQUE(assignment_id, attempt_index),
-            FOREIGN KEY(assignment_id) REFERENCES bunshin_v2_role_assignments(assignment_id)
+            FOREIGN KEY(assignment_id) REFERENCES bunshin_role_assignments(assignment_id)
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_role_attempts_assignment
-        ON bunshin_v2_role_attempts(assignment_id, attempt_index);
+        CREATE INDEX IF NOT EXISTS bunshin_role_attempts_assignment
+        ON bunshin_role_attempts(assignment_id, attempt_index);
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_effect_attempts (
+        CREATE TABLE IF NOT EXISTS bunshin_effect_attempts (
             effect_id TEXT NOT NULL,
             attempt_index INTEGER NOT NULL,
             worker_id TEXT NOT NULL,
@@ -300,7 +370,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY(effect_id, attempt_index)
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_worker_events (
+        CREATE TABLE IF NOT EXISTS bunshin_worker_events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             invocation_id TEXT NOT NULL,
             event_kind TEXT NOT NULL,
@@ -311,10 +381,10 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_worker_events_invocation
-        ON bunshin_v2_worker_events(invocation_id, event_id);
+        CREATE INDEX IF NOT EXISTS bunshin_worker_events_invocation
+        ON bunshin_worker_events(invocation_id, event_id);
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_role_turns (
+        CREATE TABLE IF NOT EXISTS bunshin_role_turns (
             invocation_id TEXT NOT NULL,
             turn_index INTEGER NOT NULL,
             llm_request_ref_json TEXT NOT NULL,
@@ -330,7 +400,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY(invocation_id, turn_index)
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_node_journals (
+        CREATE TABLE IF NOT EXISTS bunshin_node_journals (
             node_run_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             lease_resource_key TEXT NOT NULL,
@@ -340,7 +410,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_submission_drafts (
+        CREATE TABLE IF NOT EXISTS bunshin_submission_drafts (
             draft_key TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             invocation_id TEXT NOT NULL,
@@ -362,25 +432,25 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_submission_drafts_invocation
-        ON bunshin_v2_submission_drafts(invocation_id, role, draft_kind, fencing_token DESC);
+        CREATE INDEX IF NOT EXISTS bunshin_submission_drafts_invocation
+        ON bunshin_submission_drafts(invocation_id, role, draft_kind, fencing_token DESC);
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_submission_drafts_lineage
-        ON bunshin_v2_submission_drafts(
+        CREATE INDEX IF NOT EXISTS bunshin_submission_drafts_lineage
+        ON bunshin_submission_drafts(
             workflow_id, role, draft_kind, input_fingerprint, updated_at DESC
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_submission_draft_ops (
+        CREATE TABLE IF NOT EXISTS bunshin_submission_draft_ops (
             draft_key TEXT NOT NULL,
             operation_key TEXT NOT NULL,
             request_hash TEXT NOT NULL,
             result_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
             PRIMARY KEY(draft_key, operation_key),
-            FOREIGN KEY(draft_key) REFERENCES bunshin_v2_submission_drafts(draft_key)
+            FOREIGN KEY(draft_key) REFERENCES bunshin_submission_drafts(draft_key)
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_workflow_projection (
+        CREATE TABLE IF NOT EXISTS bunshin_workflow_projection (
             workflow_id TEXT PRIMARY KEY,
             current_phase TEXT NOT NULL,
             workflow_state TEXT NOT NULL,
@@ -396,17 +466,17 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_task_delivery_bindings (
+        CREATE TABLE IF NOT EXISTS bunshin_task_delivery_bindings (
             task_id TEXT PRIMARY KEY,
             origin_binding_json TEXT NOT NULL,
             current_binding_json TEXT NOT NULL,
             binding_version INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            FOREIGN KEY(task_id) REFERENCES bunshin_v2_task_projection(task_id)
+            FOREIGN KEY(task_id) REFERENCES bunshin_task_projection(task_id)
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_delivery_outbox (
+        CREATE TABLE IF NOT EXISTS bunshin_delivery_outbox (
             delivery_id TEXT PRIMARY KEY,
             dedup_key TEXT NOT NULL UNIQUE,
             task_id TEXT NOT NULL,
@@ -419,22 +489,22 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             last_error TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            FOREIGN KEY(task_id) REFERENCES bunshin_v2_task_projection(task_id)
+            FOREIGN KEY(task_id) REFERENCES bunshin_task_projection(task_id)
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_delivery_outbox_ready
-        ON bunshin_v2_delivery_outbox(status, next_attempt_at, created_at);
+        CREATE INDEX IF NOT EXISTS bunshin_delivery_outbox_ready
+        ON bunshin_delivery_outbox(status, next_attempt_at, created_at);
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_delivery_parts (
+        CREATE TABLE IF NOT EXISTS bunshin_delivery_parts (
             delivery_id TEXT NOT NULL,
             part_key TEXT NOT NULL,
             delivered_at TEXT NOT NULL,
             PRIMARY KEY (delivery_id, part_key),
-            FOREIGN KEY(delivery_id) REFERENCES bunshin_v2_delivery_outbox(delivery_id)
+            FOREIGN KEY(delivery_id) REFERENCES bunshin_delivery_outbox(delivery_id)
                 ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_artifact_aliases (
+        CREATE TABLE IF NOT EXISTS bunshin_artifact_aliases (
             actor_id TEXT NOT NULL,
             alias TEXT NOT NULL,
             artifact_sha256 TEXT NOT NULL,
@@ -442,7 +512,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY(actor_id, alias)
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_node_projection (
+        CREATE TABLE IF NOT EXISTS bunshin_node_projection (
             node_run_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             epoch_id TEXT NOT NULL DEFAULT '',
@@ -456,7 +526,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_graph_generations (
+        CREATE TABLE IF NOT EXISTS bunshin_graph_generations (
             graph_id TEXT NOT NULL,
             generation INTEGER NOT NULL,
             workflow_id TEXT NOT NULL,
@@ -471,7 +541,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             UNIQUE(generation_hash)
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_plan_cycles (
+        CREATE TABLE IF NOT EXISTS bunshin_plan_cycles (
             cycle_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL UNIQUE,
             generation INTEGER NOT NULL,
@@ -481,7 +551,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bunshin_v2_node_cycles (
+        CREATE TABLE IF NOT EXISTS bunshin_node_cycles (
             cycle_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             graph_id TEXT NOT NULL,
@@ -493,25 +563,25 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             UNIQUE(workflow_id, graph_generation, node_name),
             FOREIGN KEY(graph_id, graph_generation)
-                REFERENCES bunshin_v2_graph_generations(graph_id, generation)
+                REFERENCES bunshin_graph_generations(graph_id, generation)
         );
 
-        CREATE INDEX IF NOT EXISTS bunshin_v2_node_cycles_ready
-        ON bunshin_v2_node_cycles(workflow_id, graph_generation, state, node_name);
+        CREATE INDEX IF NOT EXISTS bunshin_node_cycles_ready
+        ON bunshin_node_cycles(workflow_id, graph_generation, state, node_name);
         """
     )
     connection.execute(
         """
-        CREATE INDEX IF NOT EXISTS bunshin_v2_submission_drafts_role_mode
-        ON bunshin_v2_submission_drafts(
+        CREATE INDEX IF NOT EXISTS bunshin_submission_drafts_role_mode
+        ON bunshin_submission_drafts(
             workflow_id, role, mode, draft_kind, input_fingerprint, updated_at DESC
         )
         """
     )
     connection.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS bunshin_v2_role_assignments_one_open
-        ON bunshin_v2_role_assignments(session_id)
+        CREATE UNIQUE INDEX IF NOT EXISTS bunshin_role_assignments_one_open
+        ON bunshin_role_assignments(session_id)
         WHERE state IN (
             'queued', 'claimed', 'running', 'retry_queued', 'result_recorded'
         )
@@ -519,7 +589,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
-        INSERT INTO bunshin_v2_schema_meta(schema_key, schema_value)
+        INSERT INTO bunshin_schema_meta(schema_key, schema_value)
         VALUES ('schema_version', ?)
         ON CONFLICT(schema_key) DO UPDATE SET schema_value = excluded.schema_value
         """,
@@ -529,7 +599,7 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
 
 def _schema_version(connection: sqlite3.Connection) -> int:
     row = connection.execute(
-        "SELECT schema_value FROM bunshin_v2_schema_meta WHERE schema_key = 'schema_version'"
+        "SELECT schema_value FROM bunshin_schema_meta WHERE schema_key = 'schema_version'"
     ).fetchone()
     try:
         return int(row[0]) if row is not None else 0

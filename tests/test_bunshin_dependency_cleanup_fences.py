@@ -481,7 +481,7 @@ class DependencyCleanupStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted.role_assignments.read_role_assignment(assignment['assignment_id'])['execution_spec']['business_lease'], self.binding)
         with self.repo.database.read_connection() as connection:
             self.assertIsNotNone(connection.execute(
-                'SELECT 1 FROM bunshin_v2_artifact_refs WHERE parent_sha256 = ? AND child_sha256 = ? AND relation = ?',
+                'SELECT 1 FROM bunshin_artifact_refs WHERE parent_sha256 = ? AND child_sha256 = ? AND relation = ?',
                 (self.prompt.sha256, actual['artifact_ref']['sha256'], 'role_attempt_business_lease'),
             ).fetchone())
 
@@ -508,7 +508,7 @@ class DependencyCleanupStorageTests(unittest.IsolatedAsyncioTestCase):
         attempt = self.repo.role_assignments.claim_role_assignment(assignment['assignment_id'])
         ownership = self.repo.role_attempts.read_role_attempt_business_lease(attempt['attempt_id'])
         with self.repo.database.write_connection() as connection:
-            connection.execute('UPDATE bunshin_v2_artifacts SET durable = 0 WHERE sha256 = ?',
+            connection.execute('UPDATE bunshin_artifacts SET durable = 0 WHERE sha256 = ?',
                                (ownership['artifact_ref']['sha256'],))
         with self.assertRaisesRegex(SubmissionInvariantError, 'not durable'):
             self.repo.role_attempts.read_role_attempt_business_lease(attempt['attempt_id'])
@@ -545,7 +545,7 @@ class DependencyRecoveryIncarnationTests(unittest.IsolatedAsyncioTestCase):
             binding = semantic_business_lease(node, owner_id=session, resource_key=resource, fencing_token=rebound.fencing_token)
             attempt = repository.role_assignments.claim_role_assignment(assignment['assignment_id'], business_lease=binding)
             attempt_lease = repository.leases.claim_lease('attempt:' + attempt['attempt_id'], attempt['attempt_id'], ttl_seconds=120)
-            workspace = {**peer['workspace'], 'bunshin_v2': {**peer['workspace']['bunshin_v2'],
+            workspace = {**peer['workspace'], 'bunshin': {**peer['workspace']['bunshin'],
                 'invocation_id': attempt['attempt_id'], 'lease_resource_key': attempt_lease.resource_key,
                 'fencing_token': attempt_lease.fencing_token}}
             prompt = case.artifacts.put_json({'workspace': workspace, 'metadata': {'agent_session': {'session_id': session}}},

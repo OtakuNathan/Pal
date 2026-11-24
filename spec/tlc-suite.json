@@ -198,6 +198,12 @@
       "kind": "positive"
     },
     {
+      "config": "spec/bunshin/ProcessCapacityLifecycleIgnoreReservation.cfg",
+      "module": "spec/bunshin/ProcessCapacityLifecycle.tla",
+      "kind": "negative",
+      "invariant": "CapacityBound"
+    },
+    {
       "config": "spec/bunshin/ProcessCapacityLifecycleReuseCheckpoint.cfg",
       "module": "spec/bunshin/ProcessCapacityLifecycle.tla",
       "kind": "negative",

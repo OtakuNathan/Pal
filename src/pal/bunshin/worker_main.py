@@ -57,7 +57,7 @@ async def _run(
             if isinstance(message, dict):
                 await decisions.put(message)
 
-    stdin_task = asyncio.create_task(read_stdin(), name=f"bunshin-v2-stdin-{run_id}")
+    stdin_task = asyncio.create_task(read_stdin(), name=f"bunshin-stdin-{run_id}")
 
     async def read_decision(timeout: float | None = None) -> dict[str, Any] | None:
         return await _read_control_message(decisions, timeout)

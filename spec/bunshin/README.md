@@ -31,11 +31,20 @@ not a second DAG scheduler or semantic lifecycle owner.
   runs in parallel from accepted contracts while its checker waits for accepted
   dependency products, plus checker acceptance, dependency-finding reverse
   propagation, repair barriers, and publication only from the accepted sink.
-- `ProcessCapacityLifecycle.tla` proves that capacity and concrete-attempt
-  leases count only materialized OS-process incarnations. Durable logical
-  sessions consume neither, and both remain owned through process-group reap
-  and checkpoint closure. Reap/checkpoint facts reset for each incarnation; a
-  negative control proves that reusing an older checkpoint violates release.
+- `ProcessCapacityLifecycle.tla` models process leases and node reservations.
+  A successful role can leave its slot reserved. The successor can take it
+  once the predecessor settles. A DAG yield frees it even before settlement.
+  The negative controls reuse an old checkpoint and overbook a reservation.
+  With the pinned TLC jar, `tests/test_bunshin_capacity_conformance.py` reads
+  every reachable state and edge of the positive TLC graph. It projects them
+  onto active nodes, held reservations and unsettled predecessors, then drives
+  the Python semaphore through acquisition, release, handoff, reconciliation
+  and yield. Every observable labelled successor must match in both directions.
+  The bound is three nodes and two slots at fixed capacity. The projection
+  hides process and checkpoint steps. Reaping and failed cleanup are exercised
+  in `test_bunshin_process_lifecycle.py`; startup occupancy is exercised in
+  `test_bunshin_node_handoff.py`. Resize and crash recovery are outside this
+  fixed-capacity transition comparison.
 - `DagLifecycle.tla` models dependency readiness, graph-wide pause/cancel, and
   architecture-defect freeze/replan propagation.
 - `ArchitectureLifecycle.tla` models Architect/Reviewer sessions that survive

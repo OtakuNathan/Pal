@@ -24,7 +24,7 @@ def row(service, identity, state, *, time=0, archived=False, owner="nathan", tas
     # Fixture storage only: materialize history shapes without running workers.
     with service.repository.database.transaction() as connection:
         connection.execute(
-            "INSERT INTO bunshin_v2_aggregate_snapshots "
+            "INSERT INTO bunshin_aggregate_snapshots "
             "(aggregate_type, aggregate_id, workflow_id, state, version, payload_json, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
             (AggregateType.WORKFLOW.value, identity, identity, state,

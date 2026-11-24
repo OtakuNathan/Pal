@@ -481,7 +481,7 @@ class ContractProtocolTests(unittest.TestCase):
             {
                 "repo_path": str(role_workspace),
                 "artifact_stage_dir": str(artifact_stage),
-                "v2_role_workspace": True,
+                "role_workspace_prepared": True,
             },
             template=definition.template,
         )
@@ -504,7 +504,7 @@ class ContractProtocolTests(unittest.TestCase):
                 invocation_id="inv-architect",
                 goal="design",
                 metadata={
-                    "bunshin_v2": {
+                    "bunshin": {
                         "workflow_id": "wf",
                         "contract_schema": {
                             "schema": {"description": sentinel},
@@ -521,7 +521,7 @@ class ContractProtocolTests(unittest.TestCase):
         serialized = str(pack.to_dict())
         self.assertNotIn(sentinel, serialized)
         self.assertEqual(
-            dict(pack.metadata["bunshin_v2"]),
+            dict(pack.metadata["bunshin"]),
             {"workflow_id": "wf"},
         )
 
@@ -541,7 +541,7 @@ class WorkItemProtocolTests(unittest.TestCase):
         self.workspace = {
             "runtime_root": str(self.root),
             "artifact_stage_dir": str(self.root / "stage"),
-            "bunshin_v2": {
+            "bunshin": {
                 "workflow_id": "wf_contract",
                 "invocation_id": self.invocation_id,
                 "lease_resource_key": self.resource,
@@ -745,7 +745,7 @@ class WorkItemProtocolTests(unittest.TestCase):
         )
         return {
             "runtime_root": str(self.root),
-            "bunshin_v2": {
+            "bunshin": {
                 "workflow_id": "wf_contract",
                 "invocation_id": invocation,
                 "lease_resource_key": resource,

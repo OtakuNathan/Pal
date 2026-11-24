@@ -238,7 +238,7 @@ class ArchitectureReview:
                     workflow_id=current.workflow_id,
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                     aggregate_id=current.aggregate_id,
-                    actor="bunshin-v2-architecture-reviewer",
+                    actor="bunshin-architecture-reviewer",
                     expected_version=current.version,
                     idempotency_key=(
                         f"architecture-review:{current.aggregate_id}:"

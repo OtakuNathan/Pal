@@ -243,12 +243,12 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             self.assertEqual(result.snapshot.state, "TRIAGE_REQUIRED")
             with self.repository.database.read_connection() as connection:
                 effects = [connection.execute(
-                    "SELECT effect_type FROM bunshin_v2_outbox WHERE effect_id = ?", (effect_id,),
+                    "SELECT effect_type FROM bunshin_outbox WHERE effect_id = ?", (effect_id,),
                 ).fetchone()[0] for effect_id in result.outbox_effect_ids]
             self.assertEqual(effects, ["quiesce_role_for_triage"])
             with self.repository.database.read_connection() as connection:
                 cleanup_effect = dict(connection.execute(
-                    "SELECT * FROM bunshin_v2_outbox WHERE effect_id = ?", (result.outbox_effect_ids[0],),
+                    "SELECT * FROM bunshin_outbox WHERE effect_id = ?", (result.outbox_effect_ids[0],),
                 ).fetchone())
             cleanup_effect["payload"] = json.loads(cleanup_effect.pop("payload_json"))
             await self.worker.execute_semantic_effect(cleanup_effect)
@@ -259,8 +259,8 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             replay = await self.prepare(self.node(), "equivalent-old-review")
             self.assertIsInstance(replay[-1], AttemptReplay)
             with self.repository.database.read_connection() as connection:
-                prior_events = connection.execute("SELECT * FROM bunshin_v2_domain_events").fetchall()
-                prior_drafts = connection.execute("SELECT * FROM bunshin_v2_submission_drafts").fetchall()
+                prior_events = connection.execute("SELECT * FROM bunshin_domain_events").fetchall()
+                prior_drafts = connection.execute("SELECT * FROM bunshin_submission_drafts").fetchall()
             provider = BunshinPublicProvider(runtime_root=self.root, wake_manager=lambda: None)
             provider.service = self.service
             with patch.object(self.service, "resolve_task_workflow_selector", return_value=("task", "wf-unknown")):
@@ -305,10 +305,10 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
                               reducer=lambda payload: (payload, {}))
             with self.repository.database.read_connection() as connection:
                 for prior in prior_events:
-                    row = connection.execute("SELECT * FROM bunshin_v2_domain_events WHERE event_id = ?", (prior["event_id"],)).fetchone()
+                    row = connection.execute("SELECT * FROM bunshin_domain_events WHERE event_id = ?", (prior["event_id"],)).fetchone()
                     self.assertEqual(dict(row), dict(prior))
                 for prior in prior_drafts:
-                    row = connection.execute("SELECT * FROM bunshin_v2_submission_drafts WHERE draft_key = ?", (prior["draft_key"],)).fetchone()
+                    row = connection.execute("SELECT * FROM bunshin_submission_drafts WHERE draft_key = ?", (prior["draft_key"],)).fetchone()
                     self.assertEqual(dict(row), dict(prior))
             self.assertEqual(self.repository.role_assignments.read_role_assignment(old_session.assignment["assignment_id"])["state"], "settled")
         asyncio.run(scenario())
@@ -436,14 +436,14 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             retry = await self.prepare(changed, "same-effect")
             self.assertEqual(retry[-1].assignment["assignment_id"], session.assignment["assignment_id"])
             self.assertEqual(retry[-1].assignment["execution_spec"]["evaluation_generation"], 0)
-            retry[-1].pack.metadata["bunshin_v2"]["verification_tool_contract"] = {"policy": "recompiled"}
+            retry[-1].pack.metadata["bunshin"]["verification_tool_contract"] = {"policy": "recompiled"}
             retry_session = await self.assignment(retry)
             bound = await HarnessBinding(self.service.artifacts, self.repository, self.worker.components.role_checkpoints).execute(
                 retry[0], retry[-1], retry_session, retry[1],
             )
             self.assertTrue(bound.durable_prompt_reused)
             self.assertEqual(bound.input_fingerprint, prepared[3].input_fingerprint)
-            self.assertEqual(bound.pack.metadata["bunshin_v2"]["verification_tool_contract"], {"policy": "unchanged"})
-            self.assertEqual(bound.pack.metadata["bunshin_v2"]["authoring_input_fingerprint"], prepared[3].input_fingerprint)
-            self.assertEqual(self.service.artifacts.read_json(prompt_ref)["metadata"]["bunshin_v2"]["verification_tool_contract"], {"policy": "unchanged"})
+            self.assertEqual(bound.pack.metadata["bunshin"]["verification_tool_contract"], {"policy": "unchanged"})
+            self.assertEqual(bound.pack.metadata["bunshin"]["authoring_input_fingerprint"], prepared[3].input_fingerprint)
+            self.assertEqual(self.service.artifacts.read_json(prompt_ref)["metadata"]["bunshin"]["verification_tool_contract"], {"policy": "unchanged"})
         asyncio.run(scenario())

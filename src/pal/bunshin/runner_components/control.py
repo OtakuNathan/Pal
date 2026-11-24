@@ -134,7 +134,7 @@ class Control:
 
     def user_interaction_port(self) -> BunshinUserInteractionPort:
         if self.user_interaction is None:
-            binding = dict(dict(self.pack.metadata or {}).get("bunshin_v2") or {})
+            binding = dict(dict(self.pack.metadata or {}).get("bunshin") or {})
             self.user_interaction = BunshinUserInteractionPort(
                 emit_event=self.reporter.emit,
                 read_response=self.read_manager_control,

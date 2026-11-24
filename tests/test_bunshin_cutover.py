@@ -20,12 +20,12 @@ class BunshinCurrentCutoverTests(unittest.TestCase):
         with sqlite3.connect(":memory:") as connection:
             ensure_bunshin_schema(connection)
             version = connection.execute(
-                "SELECT schema_value FROM bunshin_v2_schema_meta "
+                "SELECT schema_value FROM bunshin_schema_meta "
                 "WHERE schema_key = 'schema_version'"
             ).fetchone()[0]
             self.assertEqual(version, str(BUNSHIN_SCHEMA_VERSION))
             connection.execute(
-                "UPDATE bunshin_v2_schema_meta SET schema_value = '24' "
+                "UPDATE bunshin_schema_meta SET schema_value = '24' "
                 "WHERE schema_key = 'schema_version'"
             )
             with self.assertRaisesRegex(RuntimeError, "not migrated in place"):
@@ -38,11 +38,11 @@ class BunshinCurrentCutoverTests(unittest.TestCase):
             source.mkdir(parents=True)
             with sqlite3.connect(str(source / BUNSHIN_DB_FILENAME)) as connection:
                 connection.execute(
-                    "CREATE TABLE bunshin_v2_schema_meta("
+                    "CREATE TABLE bunshin_schema_meta("
                     "schema_key TEXT PRIMARY KEY, schema_value TEXT NOT NULL)"
                 )
                 connection.execute(
-                    "INSERT INTO bunshin_v2_schema_meta VALUES "
+                    "INSERT INTO bunshin_schema_meta VALUES "
                     "('schema_version', '24')"
                 )
             catalog = BunshinCatalogService(runtime_root)
@@ -88,7 +88,7 @@ class BunshinCurrentCutoverTests(unittest.TestCase):
             )
             with sqlite3.connect(str(source / BUNSHIN_DB_FILENAME)) as connection:
                 version = connection.execute(
-                    "SELECT schema_value FROM bunshin_v2_schema_meta "
+                    "SELECT schema_value FROM bunshin_schema_meta "
                     "WHERE schema_key = 'schema_version'"
                 ).fetchone()[0]
             self.assertEqual(version, str(BUNSHIN_SCHEMA_VERSION))
@@ -100,11 +100,11 @@ class BunshinCurrentCutoverTests(unittest.TestCase):
             source.mkdir(parents=True)
             with sqlite3.connect(str(source / BUNSHIN_DB_FILENAME)) as connection:
                 connection.execute(
-                    "CREATE TABLE bunshin_v2_schema_meta("
+                    "CREATE TABLE bunshin_schema_meta("
                     "schema_key TEXT PRIMARY KEY, schema_value TEXT NOT NULL)"
                 )
                 connection.execute(
-                    "INSERT INTO bunshin_v2_schema_meta VALUES "
+                    "INSERT INTO bunshin_schema_meta VALUES "
                     "('schema_version', '24')"
                 )
             invalid = source / "catalog" / "profile_overrides" / "invalid.json"
@@ -138,7 +138,7 @@ class BunshinCurrentCutoverTests(unittest.TestCase):
                 )
             with sqlite3.connect(str(source / BUNSHIN_DB_FILENAME)) as connection:
                 version = connection.execute(
-                    "SELECT schema_value FROM bunshin_v2_schema_meta "
+                    "SELECT schema_value FROM bunshin_schema_meta "
                     "WHERE schema_key = 'schema_version'"
                 ).fetchone()[0]
             self.assertEqual(version, str(BUNSHIN_SCHEMA_VERSION))

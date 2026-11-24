@@ -23,10 +23,7 @@ from pal.bunshin.ipc import (
     open_manager_connection,
     python_subprocess_env,
 )
-from pal.bunshin.harnesses import (
-    BunshinHarnessRegistry,
-    BunshinHarnessRegistryGeneration,
-)
+
 from pal.bunshin.source import BunshinControlEventHandler, BunshinEventSource
 from pal.bunshin.workflow_capabilities import BunshinPublicProvider
 from pal.bunshin.service import BunshinWorkflowService
@@ -53,7 +50,6 @@ class BunshinSnapshot:
 class BunshinManagerProvider:
     runtime_root: Path
     context: MainContext | None = None
-    harness_registry: BunshinHarnessRegistry | None = None
     runtime_db_path: Path | None = None
     process: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
     last_health: dict[str, Any] = field(default_factory=dict)
@@ -73,11 +69,6 @@ class BunshinManagerProvider:
     _lifecycle_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _attached: bool = field(default=False, init=False, repr=False)
     prompt_log_enabled: bool = field(default=False, init=False)
-    _unsubscribe_harness_registry: Callable[[], None] | None = field(
-        default=None,
-        init=False,
-        repr=False,
-    )
 
     def __post_init__(self) -> None:
         self.runtime_root = Path(self.runtime_root)
@@ -85,12 +76,6 @@ class BunshinManagerProvider:
             self.runtime_db_path = Path(self.runtime_db_path)
         self.client = BunshinManagerClient(self.runtime_root)
         self._lifecycle_client = BunshinManagerClient(self.runtime_root, request_timeout_seconds=5.0)
-        if self.harness_registry is not None:
-            self._unsubscribe_harness_registry = (
-                self.harness_registry.subscribe(
-                    self._on_harness_registry_generation
-                )
-            )
 
     def _process_status(self) -> tuple[int, int | None] | None:
         process = self.process
@@ -110,7 +95,6 @@ class BunshinManagerProvider:
                 self._attached = True
                 self.last_health = health
                 self.last_error = ""
-                self._sync_harness_registry()
                 log_policy = self.client.request_sync(
                     "set_prompt_log_enabled",
                     {"enabled": bool(self.prompt_log_enabled)},
@@ -121,7 +105,7 @@ class BunshinManagerProvider:
                 }
                 self.last_health = health
                 self._start_event_subscription()
-                self.client.request_sync("v2_wake")
+                self.client.request_sync("wake")
                 return health
             except Exception as exc:
                 self.last_error = f"{exc.__class__.__name__}: {exc}"
@@ -142,7 +126,7 @@ class BunshinManagerProvider:
 
     def wake_workflows(self) -> None:
         self._require_manager()
-        self.client.request_sync("v2_wake")
+        self.client.request_sync("wake")
 
     async def refresh_llm_endpoints(self) -> dict[str, Any]:
         await asyncio.to_thread(self._require_manager)
@@ -163,27 +147,6 @@ class BunshinManagerProvider:
             {"enabled": self.prompt_log_enabled},
         )
 
-    def _on_harness_registry_generation(
-        self,
-        generation: BunshinHarnessRegistryGeneration,
-    ) -> None:
-        if not self._attached:
-            return
-        try:
-            self.client.replace_harness_registry_sync(generation.to_dict())
-        except Exception as exc:
-            self.last_error = (
-                "harness registry sync failed: "
-                f"{exc.__class__.__name__}: {exc}"
-            )
-            raise
-
-    def _sync_harness_registry(self) -> None:
-        if self.harness_registry is None:
-            return
-        self.client.replace_harness_registry_sync(
-            self.harness_registry.snapshot().to_dict()
-        )
 
     def has_pending_events(self) -> bool:
         with self._buffer_lock:
@@ -235,7 +198,7 @@ class BunshinManagerProvider:
             if delivery_id:
                 with contextlib.suppress(Exception):
                     self.client.request_sync(
-                        "v2_defer_task_delivery",
+                        "defer_task_delivery",
                         {"delivery_id": delivery_id, "error": str(error or "delivery failed")},
                     )
             with self._buffer_lock:
@@ -255,7 +218,7 @@ class BunshinManagerProvider:
         try:
             if delivery_id:
                 result = self.client.request_sync(
-                    "v2_ack_task_delivery",
+                    "ack_task_delivery",
                     {"delivery_id": delivery_id},
                 )
                 # An already acknowledged row is still settled locally; the
@@ -288,7 +251,7 @@ class BunshinManagerProvider:
         return True
 
     def validate_memory_proposal_source(self, source: dict[str, Any]) -> bool:
-        result = self.client.request_sync("v2_validate_memory_proposal_source", {"source": source})
+        result = self.client.request_sync("validate_memory_proposal_source", {"source": source})
         return bool(result.get("valid"))
 
     def delivered_event_parts(self, event: dict[str, Any]) -> set[str]:
@@ -298,7 +261,7 @@ class BunshinManagerProvider:
         with self._buffer_lock:
             local = set(self._locally_delivered_parts.get(delivery_id, set()))
         result = self.client.request_sync(
-            "v2_list_task_delivery_parts",
+            "list_task_delivery_parts",
             {"delivery_id": delivery_id},
         )
         return local | {
@@ -320,7 +283,7 @@ class BunshinManagerProvider:
                 normalized_part_key
             )
         result = self.client.request_sync(
-            "v2_ack_task_delivery_part",
+            "ack_task_delivery_part",
             {"delivery_id": delivery_id, "part_key": normalized_part_key},
         )
         return bool(result.get("acknowledged"))
@@ -435,7 +398,7 @@ class BunshinManagerProvider:
         )
 
     async def handle_control_action_async(self, action: ControlAction) -> str:
-        if action.action_kind == "bunshin_v2_human_decision":
+        if action.action_kind in {"bunshin_human_decision", "bunshin_v2_human_decision"}:
             decision = str(action.args.get("decision") or "").strip().lower()
             if decision == "edit" and not str(
                 action.args.get("edit_instruction") or ""
@@ -607,7 +570,7 @@ class BunshinManagerProvider:
 
     @staticmethod
     def _validate_health(health: dict[str, Any]) -> dict[str, Any]:
-        if not bool(health.get("ok")) or str(health.get("health_source") or "") != "bunshin_v2_manager":
+        if not bool(health.get("ok")) or str(health.get("health_source") or "") not in {"bunshin_manager", "bunshin_v2_manager"}:
             raise RuntimeError("bunshin manager health check failed")
         if str(health.get("lifecycle_protocol") or "") != "plugin_raii.v1":
             raise RuntimeError("bunshin manager lifecycle protocol is incompatible")
@@ -650,7 +613,7 @@ class BunshinManagerProvider:
     def _manager_is_responding(self) -> bool:
         try:
             health = self._lifecycle_client.health_sync()
-            return bool(health.get("ok")) and str(health.get("health_source") or "") == "bunshin_v2_manager"
+            return bool(health.get("ok")) and str(health.get("health_source") or "") in {"bunshin_manager", "bunshin_v2_manager"}
         except Exception:
             return False
 
@@ -671,7 +634,7 @@ class BunshinManagerProvider:
         self._event_stop.clear()
         self._event_thread = threading.Thread(
             target=self._event_subscription_thread,
-            name="pal-bunshin-v2-events",
+            name="pal-bunshin-events",
             daemon=True,
         )
         self._event_thread.start()
@@ -728,7 +691,6 @@ def register_with_core(
     *,
     runtime_root: Path | None = None,
     runtime_db_path: Path | None = None,
-    harness_registry: BunshinHarnessRegistry | None = None,
 ) -> ModuleHandle:
     from pal.control.runtime_contracts import CORE_CONTROL
     from pal.core.control_action_registry import ControlActionSpec
@@ -738,7 +700,6 @@ def register_with_core(
     manager = BunshinManagerProvider(
         runtime_root=resolved_root,
         context=context,
-        harness_registry=harness_registry,
         runtime_db_path=runtime_db_path,
     )
     public = BunshinPublicProvider(
@@ -781,17 +742,15 @@ def register_with_core(
         control_action_handlers={
             "bunshin_approval_decision": ControlActionSpec(control_action),
             "bunshin_question_answer": ControlActionSpec(control_action),
-            "bunshin_v2_human_decision": ControlActionSpec(control_action),
+            "bunshin_human_decision": ControlActionSpec(control_action),
+            "bunshin_v2_human_decision": ControlActionSpec(control_action),  # delivered buttons
         },
         control_observers={"llm.endpoints.changed": refresh_endpoints,
                            "core.prompt_log.changed": update_logging},
-        ports={"bunshin": manager, "bunshin_v2": public},
+        ports={"bunshin": manager, "bunshin_workflows": public, "bunshin_v2": public},  # installed workflow consumers
         shutdown_sync=manager._stop_manager,
     )
-    if manager._unsubscribe_harness_registry is not None:
-        handle.cleanup_callbacks.append(
-            manager._unsubscribe_harness_registry
-        )
+
     context.register_module(handle)
     context.event_source_registry.attach("bunshin", source)
     for kind in event_kinds:

@@ -13,8 +13,8 @@ def receipt_freezes_authoring(connection: sqlite3.Connection, context: Any) -> b
     """A receipt freezes all sibling drafts, even before their projections catch up."""
     assignment = connection.execute(
         """SELECT a.state, a.submission_artifact_ref_json, a.submission_payload_hash
-           FROM bunshin_v2_role_attempts t
-           JOIN bunshin_v2_role_assignments a ON a.assignment_id = t.assignment_id
+           FROM bunshin_role_attempts t
+           JOIN bunshin_role_assignments a ON a.assignment_id = t.assignment_id
            WHERE t.attempt_id = ?""", (context.invocation_id,),
     ).fetchone()
     if assignment is not None and (
@@ -23,7 +23,7 @@ def receipt_freezes_authoring(connection: sqlite3.Connection, context: Any) -> b
     ):
         return True
     return connection.execute(
-        """SELECT 1 FROM bunshin_v2_submission_drafts
+        """SELECT 1 FROM bunshin_submission_drafts
            WHERE workflow_id = ? AND invocation_id = ? AND fencing_token = ?
              AND role = ? AND mode = ? AND input_fingerprint = ? AND status = 'submitted'
            LIMIT 1""",
@@ -36,8 +36,8 @@ def assert_authoring_open(connection: sqlite3.Connection, context: Any) -> None:
     if receipt_freezes_authoring(connection, context):
         raise ValueError("submission Draft is already frozen; role assignment receipt already froze authoring")
     attempt = connection.execute(
-        """SELECT a.state, t.status FROM bunshin_v2_role_attempts t
-           JOIN bunshin_v2_role_assignments a ON a.assignment_id = t.assignment_id
+        """SELECT a.state, t.status FROM bunshin_role_attempts t
+           JOIN bunshin_role_assignments a ON a.assignment_id = t.assignment_id
            WHERE t.attempt_id = ?""", (context.invocation_id,),
     ).fetchone()
     if attempt is not None and (attempt["state"] != "running" or attempt["status"] != "running"):
@@ -48,7 +48,7 @@ def assert_local_submission_authority(connection: sqlite3.Connection, context: A
                                       artifact_ref: Mapping[str, Any], payload_hash: str) -> None:
     receipt = connection.execute(
         """SELECT a.submission_artifact_ref_json, a.submission_payload_hash
-           FROM bunshin_v2_role_attempts t JOIN bunshin_v2_role_assignments a
+           FROM bunshin_role_attempts t JOIN bunshin_role_assignments a
            ON a.assignment_id = t.assignment_id WHERE t.attempt_id = ?""", (context.invocation_id,),
     ).fetchone()
     if receipt is not None and receipt["submission_payload_hash"]:
@@ -76,13 +76,13 @@ def reserved_finding_ids(connection: sqlite3.Connection, draft_key: str) -> set[
     while draft_key and draft_key not in seen:
         seen.add(draft_key)
         row = connection.execute(
-            "SELECT payload_json, source_draft_key FROM bunshin_v2_submission_drafts WHERE draft_key = ?", (draft_key,),
+            "SELECT payload_json, source_draft_key FROM bunshin_submission_drafts WHERE draft_key = ?", (draft_key,),
         ).fetchone()
         if row is None:
             break
         collect(json.loads(row["payload_json"]))
         for operation in connection.execute(
-            "SELECT result_json FROM bunshin_v2_submission_draft_ops WHERE draft_key = ?", (draft_key,),
+            "SELECT result_json FROM bunshin_submission_draft_ops WHERE draft_key = ?", (draft_key,),
         ):
             collect(json.loads(operation["result_json"]))
         draft_key = str(row["source_draft_key"] or "")
@@ -110,13 +110,13 @@ def recorded_execution_proofs(connection: sqlite3.Connection, draft_key: str) ->
     while draft_key and draft_key not in seen:
         seen.add(draft_key)
         row = connection.execute(
-            "SELECT payload_json, source_draft_key FROM bunshin_v2_submission_drafts WHERE draft_key = ?", (draft_key,),
+            "SELECT payload_json, source_draft_key FROM bunshin_submission_drafts WHERE draft_key = ?", (draft_key,),
         ).fetchone()
         if row is None:
             break
         collect(json.loads(row["payload_json"]))
         for row_op in connection.execute(
-            "SELECT result_json FROM bunshin_v2_submission_draft_ops WHERE draft_key = ?", (draft_key,),
+            "SELECT result_json FROM bunshin_submission_draft_ops WHERE draft_key = ?", (draft_key,),
         ):
             audit = json.loads(row_op["result_json"]).get("_draft_audit", {})
             collect(audit.get("changes", {}))
@@ -194,7 +194,7 @@ def public_operation_result(value: Mapping[str, Any]) -> dict[str, Any]:
 def assert_draft_versions(connection: sqlite3.Connection, versions: Mapping[str, int]) -> None:
     for key, expected in versions.items():
         row = connection.execute(
-            "SELECT version, status FROM bunshin_v2_submission_drafts WHERE draft_key = ?", (key,),
+            "SELECT version, status FROM bunshin_submission_drafts WHERE draft_key = ?", (key,),
         ).fetchone()
         if row is None or int(row["version"]) != int(expected) or row["status"] != "active":
             from pal.bunshin.submission_errors import SubmissionValidationError
@@ -217,8 +217,8 @@ def _stored_retry_inputs(assignment: Mapping[str, Any]) -> tuple[dict[str, dict[
 
 def source_is_owned_retry(connection: sqlite3.Connection, context: Any, source: Mapping[str, Any]) -> bool:
     attempts = connection.execute(
-        """SELECT t.attempt_id, a.* FROM bunshin_v2_role_attempts t
-           JOIN bunshin_v2_role_assignments a ON a.assignment_id = t.assignment_id
+        """SELECT t.attempt_id, a.* FROM bunshin_role_attempts t
+           JOIN bunshin_role_assignments a ON a.assignment_id = t.assignment_id
            WHERE t.attempt_id IN (?, ?)""",
         (context.invocation_id, source["invocation_id"]),
     ).fetchall()

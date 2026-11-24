@@ -40,7 +40,7 @@ class MetricsStore:
         now = utc_now()
         live_lease = connection.execute(
             """
-            SELECT 1 FROM bunshin_v2_leases
+            SELECT 1 FROM bunshin_leases
             WHERE owner_id != '' AND expires_at > ?
               AND json_extract(metadata_json, '$.workflow_id') = ?
             LIMIT 1
@@ -50,14 +50,14 @@ class MetricsStore:
         if live_lease is not None:
             return "live_lease"
         pending_effect = connection.execute(
-            "SELECT 1 FROM bunshin_v2_outbox WHERE workflow_id = ? AND status IN ('pending', 'inflight') LIMIT 1",
+            "SELECT 1 FROM bunshin_outbox WHERE workflow_id = ? AND status IN ('pending', 'inflight') LIMIT 1",
             (workflow.workflow_id,),
         ).fetchone()
         if pending_effect is not None:
             return "outbox"
         durable_assignment = connection.execute(
             """
-            SELECT 1 FROM bunshin_v2_role_assignments
+            SELECT 1 FROM bunshin_role_assignments
             WHERE workflow_id = ?
               AND state IN ('queued', 'claimed', 'running', 'retry_queued', 'result_recorded')
             LIMIT 1
@@ -79,7 +79,7 @@ class MetricsStore:
                 COALESCE(SUM(total_tool_latency_ms), 0) AS tool_time_ms,
                 COALESCE(SUM(total_wall_latency_ms), 0) AS worker_time_ms,
                 COUNT(*) AS role_invocations
-            FROM bunshin_v2_role_invocations
+            FROM bunshin_role_invocations
             WHERE workflow_id = ?
             """,
             (workflow_id,),
@@ -87,14 +87,14 @@ class MetricsStore:
         outbox = connection.execute(
             """
             SELECT COUNT(*) AS effect_count, COALESCE(SUM(attempt_count), 0) AS effect_attempts
-            FROM bunshin_v2_outbox WHERE workflow_id = ?
+            FROM bunshin_outbox WHERE workflow_id = ?
             """,
             (workflow_id,),
         ).fetchone()
         review = connection.execute(
             """
             SELECT COALESCE(SUM(total_latency_ms), 0) AS review_time_ms
-            FROM bunshin_v2_role_invocations
+            FROM bunshin_role_invocations
             WHERE workflow_id = ? AND role LIKE '%review%'
             """,
             (workflow_id,),
@@ -117,7 +117,7 @@ class MetricsStore:
         rows = connection.execute(
             """
             SELECT aggregate_type, aggregate_id, payload_json, created_at
-            FROM bunshin_v2_domain_events
+            FROM bunshin_domain_events
             WHERE workflow_id = ?
             ORDER BY created_at, event_id
             """,

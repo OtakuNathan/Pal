@@ -25,14 +25,14 @@ class ArtifactAliasesStore:
             raise ValueError("artifact alias requires actor, name, and artifact")
         with self.database.write_connection() as connection:
             row = connection.execute(
-                "SELECT durable FROM bunshin_v2_artifacts WHERE sha256 = ?",
+                "SELECT durable FROM bunshin_artifacts WHERE sha256 = ?",
                 (digest,),
             ).fetchone()
             if row is None or int(row["durable"]) != 1:
                 raise ValueError("artifact alias requires a durable artifact")
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_artifact_aliases(actor_id, alias, artifact_sha256, updated_at)
+                INSERT INTO bunshin_artifact_aliases(actor_id, alias, artifact_sha256, updated_at)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(actor_id, alias) DO UPDATE SET
                     artifact_sha256 = excluded.artifact_sha256,
@@ -46,8 +46,8 @@ class ArtifactAliasesStore:
         with self.database.read_connection() as connection:
             row = connection.execute(
                 """
-                SELECT a.* FROM bunshin_v2_artifacts AS a
-                JOIN bunshin_v2_artifact_aliases AS x ON x.artifact_sha256 = a.sha256
+                SELECT a.* FROM bunshin_artifacts AS a
+                JOIN bunshin_artifact_aliases AS x ON x.artifact_sha256 = a.sha256
                 WHERE x.actor_id = ? AND x.alias = ?
                 """,
                 (str(actor_id or "").strip(), str(alias or "").strip()),

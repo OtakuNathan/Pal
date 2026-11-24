@@ -2,8 +2,8 @@
 
 The store module is a parallel declaration whose bodies are deferred, so these
 tests construct ``WorkflowTelemetryRecords`` directly with plain dict rows
-shaped like the ``bunshin_v2_role_invocations``, ``bunshin_v2_role_turns``,
-and ``bunshin_v2_worker_events`` columns.
+shaped like the ``bunshin_role_invocations``, ``bunshin_role_turns``,
+and ``bunshin_worker_events`` columns.
 """
 
 from __future__ import annotations

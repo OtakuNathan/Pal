@@ -65,7 +65,7 @@ class CaptureCase:
         self.workspace = {
             "repo_path": str(fx.repo), "review_scratch_dir": str(self.scratch), "workspace_binding": "canonical",
             "write_path_scopes": [self.node.payload["path_policy"]["verification_corpus"]],
-            "bunshin_v2": {"workflow_id": fx.workflow_id, "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+            "bunshin": {"workflow_id": fx.workflow_id, "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                            "aggregate_id": self.node.aggregate_id, "role": "verifier", "mode": "module",
                            "authoring_input_fingerprint": "original-verifier-input", "invocation_id": self.attempt_id,
                            "lease_resource_key": self.attempt_lease.resource_key, "fencing_token": self.attempt_lease.fencing_token},
@@ -126,8 +126,8 @@ class CaptureCase:
     def rows(self):
         with self.repository.database.read_connection() as connection:
             return {name: [dict(row) for row in connection.execute(f"SELECT * FROM {name} ORDER BY 1")]
-                    for name in ("bunshin_v2_role_assignments", "bunshin_v2_role_attempts", "bunshin_v2_role_sessions",
-                                 "bunshin_v2_domain_events", "bunshin_v2_outbox", "bunshin_v2_leases")}
+                    for name in ("bunshin_role_assignments", "bunshin_role_attempts", "bunshin_role_sessions",
+                                 "bunshin_domain_events", "bunshin_outbox", "bunshin_leases")}
 
 
 def test_raw_receipt_preserves_all_findings_without_settling_or_rerunning(case):
@@ -367,7 +367,7 @@ def test_capture_provenance_links_every_preserved_reference(case):
     capture = case.artifacts.read_json(ref)
     with case.repository.database.read_connection() as connection:
         links = {(row["child_sha256"], row["relation"]) for row in connection.execute(
-            "SELECT child_sha256, relation FROM bunshin_v2_artifact_refs WHERE parent_sha256 = ?", (ref.sha256,),
+            "SELECT child_sha256, relation FROM bunshin_artifact_refs WHERE parent_sha256 = ?", (ref.sha256,),
         )}
     for name in ("source_pending_ref", "source_candidate_ref", "candidate_ref", "report_ref", "repair_packet_ref", "submission_ref", "prompt_ref", "validation_ref"):
         assert (capture[name]["sha256"], name) in links

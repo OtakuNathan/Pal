@@ -15,6 +15,7 @@ from pal.bunshin.storage.cycles import CyclesStore
 from pal.bunshin.storage.deliveries import DeliveriesStore
 from pal.bunshin.storage.delivery_bindings import DeliveryBindingsStore
 from pal.bunshin.storage.human_decisions import HumanDecisionsStore
+from pal.bunshin.storage.interaction_waits import InteractionWaits
 from pal.bunshin.storage.leases import LeasesStore
 from pal.bunshin.storage.outbox_claims import OutboxClaimsStore
 from pal.bunshin.storage.projections import ProjectionsStore
@@ -49,6 +50,7 @@ class BunshinRepository:
         self.deliveries = DeliveriesStore(database=self.database)
         self.delivery_bindings = DeliveryBindingsStore(database=self.database)
         self.human_decisions = HumanDecisionsStore(database=self.database)
+        self.interaction_waits = InteractionWaits(self.database)
         self.leases = LeasesStore(database=self.database)
         self.outbox_claims = OutboxClaimsStore(database=self.database)
         self.projections = ProjectionsStore(database=self.database, metrics=self.metrics, engine=transition_engine)
@@ -84,6 +86,11 @@ class BunshinRepository:
                     cycles=stores.cycles,
                     snapshots=stores.snapshots,
                     outbox_results=stores.outbox_results,
+                    role_access=stores.role_access,
+                    role_attempts=stores.role_attempts,
+                    interaction_waits=stores.interaction_waits,
+                    deliveries=stores.deliveries,
+                    queries=stores.queries,
                 )
             finally:
                 session.finish()

@@ -7,8 +7,8 @@ from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
 from pal.bunshin.role_protocol import RoleAssignmentState
 from pal.bunshin.semantic_orchestration.assignment_rules import _assignment_input_fingerprint
 from pal.bunshin.semantic_orchestration.role_environment import _refresh_ephemeral_role_reference_binds
-from pal.bunshin.semantic_orchestration.role_environment import _select_attempt_harness
-from pal.bunshin.harnesses import HARNESS_LAUNCH_PAL_SANDBOX, PAL_HARNESS_ID
+from pal.bunshin.harnesses import PAL_HARNESS_ID, pal_harness_spec
+from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.semantic_orchestration.attempt_models import AssignmentReuse, BoundRoleHarness, PreparedRoleSession, PreparedRoleWorkspace, RoleAttemptRequest
 
 
@@ -30,27 +30,17 @@ class HarnessBinding:
         role = stage_workspace_preparation.role
         role_session = stage_role_session.role_session
         input_fingerprint = _assignment_input_fingerprint(assignment)
-        harness_spec = _select_attempt_harness(
-            harness_generation,
-            role=role,
-            prior_attempts=(
-                self.repository.role_attempts.list_role_attempts(
-                    str(assignment["assignment_id"])
-                )
-                if assignment is not None
-                else ()
-            ),
-        )
-        # A role session is the logical coroutine; a process attempt is only
-        # its current shell.  Manager restart/reload can compile a new harness
-        # registry generation even when the selected Pal harness is unchanged.
-        # Keep the session's pinned generation for a same-harness continuation
-        # so an encrypted checkpoint remains restorable across process shells.
-        # A real harness switch still gets the current generation and therefore
-        # cannot consume a checkpoint authored by another harness.
+        harness_spec = harness_generation.select(role)
+        if harness_spec != pal_harness_spec():
+            raise ValueError("Bunshin role execution requires the built-in Pal harness")
+        # A historical Pal session keeps the generation used to encrypt its
+        # checkpoint even when the installed Python or worker module moved.
         session_harness_id = str(
             role_session.get("preferred_harness_id") or ""
         ).strip()
+        if (session_harness_id not in {"", PAL_HARNESS_ID}
+                and assignment["state"] not in {RoleAssignmentState.RESULT_RECORDED.value, RoleAssignmentState.SETTLED.value}):
+            raise SubmissionInvariantError("historical external harness session requires reconciliation before Pal can run")
         session_harness_generation = str(
             role_session.get("preferred_harness_generation") or ""
         ).strip()
@@ -72,9 +62,6 @@ class HarnessBinding:
             effective_harness_generation = session_harness_generation
         else:
             effective_harness_generation = harness_generation.generation_hash
-        pal_checkpoint_capable = (
-            harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX
-        )
         if assignment["state"] in {
             RoleAssignmentState.QUEUED.value,
             RoleAssignmentState.RETRY_QUEUED.value,
@@ -97,5 +84,5 @@ class HarnessBinding:
         return BoundRoleHarness(
             durable_prompt_reused=durable_prompt_reused, effective_harness_generation=effective_harness_generation,
             harness_spec=harness_spec, input_fingerprint=input_fingerprint, pack=pack,
-            pal_checkpoint_capable=pal_checkpoint_capable,
+            pal_checkpoint_capable=True,
         )

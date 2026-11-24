@@ -121,7 +121,7 @@ class ActiveWorkflowCase(ExistingRepositoryCase):
     def exhaust(self, effect):
         with self.repository.database.write_connection() as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET max_attempts = 1 WHERE effect_id = ?",
+                "UPDATE bunshin_outbox SET max_attempts = 1 WHERE effect_id = ?",
                 (effect["effect_id"],),
             )
         effect["max_attempts"] = 1

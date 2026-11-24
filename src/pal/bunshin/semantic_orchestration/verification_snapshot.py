@@ -142,7 +142,7 @@ class VerificationSnapshot:
                     workflow_id=current.workflow_id,
                     aggregate_type=AggregateType.DAG_NODE_RUN,
                     aggregate_id=current.aggregate_id,
-                    actor="bunshin-v2-manager",
+                    actor="bunshin-manager",
                     expected_version=current.version,
                     idempotency_key=f"effect:{effect['effect_key']}:quiesced",
                     payload={

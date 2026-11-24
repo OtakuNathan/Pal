@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from pal.shared.messages import normalize_bunshin_pack_fields
 import pal.bunshin.execution_values as _dependency_execution_values
 from pal.bunshin.semantic_orchestration.verification_workspace import _verification_workspace_changed_paths
 from pal.bunshin.semantic_orchestration.verification_workspace import _verification_scratch_paths
@@ -13,7 +15,7 @@ from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateTy
 from pal.bunshin.swe_verification import semantic_verification_submission_errors, verification_finding_route_errors
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.review_findings import structured_advisories, structured_findings
-from pal.bunshin.role_protocol import RoleAssignmentState, stable_hash
+from pal.bunshin.role_protocol import RoleAssignmentState, RoleSettlement, stable_hash
 from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity
 from pal.bunshin.semantic_orchestration.role_reports import RoleReports
 from pal.bunshin.semantic_orchestration.verification_policy import _verification_repair_scope
@@ -64,16 +66,16 @@ class VerificationCompletion:
             if scratch_only
             else _verification_corpus_files(review_workspace, corpus_scope)
         )
-        prompt_pack = self.artifacts.read_json(prompt_ref)
+        prompt_pack = normalize_bunshin_pack_fields(dict(self.artifacts.read_json(prompt_ref)))
         receipt_workspace = dict(prompt_pack.get("workspace") or {})
         receipt_workspace.update(repo_path=str(review_workspace), review_scratch_dir=str(review_scratch),
                                  verification_scratch_only=scratch_only)
-        receipt_workspace["bunshin_v2"] = {
-            **dict(dict(prompt_pack.get("metadata") or {}).get("bunshin_v2") or {}),
-            **dict(receipt_workspace.get("bunshin_v2") or {}),
+        receipt_workspace["bunshin"] = {
+            **dict(dict(prompt_pack.get("metadata") or {}).get("bunshin") or {}),
+            **dict(receipt_workspace.get("bunshin") or {}),
         }
-        receipt_workspace["bunshin_v2"]["swe_verification_tool_contract"] = {
-            **dict(receipt_workspace["bunshin_v2"].get("swe_verification_tool_contract") or {}),
+        receipt_workspace["bunshin"]["swe_verification_tool_contract"] = {
+            **dict(receipt_workspace["bunshin"].get("swe_verification_tool_contract") or {}),
             **_verification_repair_scope(self.repository, node),
         }
         accepted_legacy_receipt = self._bind_accepted_receipt(node, submission, terminal, receipt_workspace)
@@ -93,7 +95,7 @@ class VerificationCompletion:
         # evidence/corpus invariant failures remain manager errors.
         route_errors = set(verification_finding_route_errors(
             structured_findings(submission),
-            receipt_workspace["bunshin_v2"]["swe_verification_tool_contract"],
+            receipt_workspace["bunshin"]["swe_verification_tool_contract"],
         ))
         errors = tuple(error for error in errors if error not in route_errors)
         normalized_submission = dict(submission)
@@ -111,10 +113,7 @@ class VerificationCompletion:
             if isinstance(item, Mapping)
         ]
 
-        settlement = self.assignment_identity.role_submission_settlement(
-            effect,
-            assignment_id=self.assignment_identity.terminal_role_assignment_id(terminal),
-        )
+        settlement = self.assignment_identity.settlement_from_terminal(terminal)
         assignment = self.repository.role_assignments.read_role_assignment(
             settlement["role_assignment_id"]
         )
@@ -194,7 +193,7 @@ class VerificationCompletion:
     def publish_pending_verification(
         self, candidate_digest: str, candidate_ref: ArtifactRef, execution_adapter: str, fencing_token: int,
         invocation_id: str, lease_resource: str, normalized_submission: Any, prompt_ref: ArtifactRef,
-        review_scratch: Path, review_workspace: Path, settlement: Any, submission_ref: ArtifactRef,
+        review_scratch: Path, review_workspace: Path, settlement: RoleSettlement, submission_ref: Mapping[str, Any],
         terminal_ref: ArtifactRef,
     ) -> Any:
         pending_ref = self.artifacts.put_json(

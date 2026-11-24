@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pal.execution.contracts import CapabilityCall
 from pal.execution.generated_tool_models import (
-    BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput,
+    BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInput,
 )
 from pal.bunshin.capabilities import BunshinManagerProvider
 from pal.bunshin.catalog import BunshinCatalogService
@@ -91,7 +91,7 @@ class BunshinCatalogTests(unittest.TestCase):
         self.assertEqual(reset["status"], "reset")
         self.assertEqual(
             BunshinProfileRegistry(runtime_root=self.root).get("software_engineering.v2_coder").display_name,
-            "V2 Contract Coder",
+            "Contract Coder",
         )
         self.assertFalse(profile_override_path(self.root, "software_engineering", "v2_coder").exists())
 
@@ -148,7 +148,7 @@ class BunshinCatalogTests(unittest.TestCase):
 
     def test_family_override_tool_uses_only_the_executor_binding_contract(self) -> None:
         parsed = (
-            BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput.model_validate(
+            BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInput.model_validate(
                 {
                     "family": "lifestyle",
                     "changes": {
@@ -168,7 +168,7 @@ class BunshinCatalogTests(unittest.TestCase):
             "null",
         )
         strategy = (
-            BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput.model_validate(
+            BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInput.model_validate(
                 {
                     "family": "lifestyle",
                     "changes": {
@@ -182,7 +182,7 @@ class BunshinCatalogTests(unittest.TestCase):
             "artifact_bundle.v2",
         )
         with self.assertRaisesRegex(ValueError, "extra"):
-            BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput.model_validate(
+            BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInput.model_validate(
                 {
                     "family": "lifestyle",
                     "changes": {

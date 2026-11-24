@@ -52,6 +52,7 @@ class AggregateControl:
                 "aggregate worker still holds the architecture worktree",
             )
         self.repository.role_cancellation.cancel_role_assignments(
+            preserve_interactions=not cancel,
             workflow_id=snapshot.workflow_id,
             aggregate_type=snapshot.aggregate_type,
             aggregate_id=snapshot.aggregate_id,
@@ -67,7 +68,7 @@ class AggregateControl:
                         workflow_id=snapshot.workflow_id,
                         aggregate_type=snapshot.aggregate_type,
                         aggregate_id=snapshot.aggregate_id,
-                        actor="bunshin-v2-manager",
+                        actor="bunshin-manager",
                         expected_version=current.version,
                         idempotency_key=f"effect:{effect['effect_key']}:stopped",
                     ),
@@ -144,7 +145,7 @@ class AggregateControl:
                         workflow_id=snapshot.workflow_id,
                         aggregate_type=AggregateType.STANDALONE_REVIEW,
                         aggregate_id=snapshot.aggregate_id,
-                        actor="bunshin-v2-recovery",
+                        actor="bunshin-recovery",
                         expected_version=snapshot.version,
                         idempotency_key=f"effect:{effect['effect_key']}:queue-review",
                     )

@@ -9,6 +9,7 @@ from pal.control.presentation import interaction_button_rows
 
 SEPARATE_DETAILS_KINDS = frozenset({
     "approval_request", "bunshin_approval", "bunshin_clarification",
+    "bunshin_architecture_review",
     "bunshin_v2_architecture_review",
 })
 

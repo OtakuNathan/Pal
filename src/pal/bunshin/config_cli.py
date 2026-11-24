@@ -7,8 +7,8 @@ from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.ipc import BunshinManagerClient
 from pal.cli_config import add_config_options, configuration_target, emit_error, emit_result, read_object, require_runtime, request_owner
 from pal.execution.generated_tool_models import (
-    BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput,
+    BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInput,
+    BunshinCapabilitiesBunshinPublicProviderSetProfileOverrideInput,
 )
 
 
@@ -40,8 +40,8 @@ async def run_bunshin_config_cli_async(args: argparse.Namespace) -> int:
             method = f"catalog_{'set' if action == 'patch' else 'reset'}_{kind}_override"
             if action == "patch":
                 changes = read_object(path=args.patch_file)
-                model_type = (BunshinV2CapabilitiesBunshinV2PublicProviderSetProfileOverrideInput
-                              if kind == "profile" else BunshinV2CapabilitiesBunshinV2PublicProviderSetFamilyOverrideInput)
+                model_type = (BunshinCapabilitiesBunshinPublicProviderSetProfileOverrideInput
+                              if kind == "profile" else BunshinCapabilitiesBunshinPublicProviderSetFamilyOverrideInput)
                 model = model_type.model_validate({kind: args.name, "changes": changes})
                 params['changes'] = model.model_dump(exclude_unset=True)['changes']
                 if kind == "profile" and "preferred_endpoint_name" in params['changes']:

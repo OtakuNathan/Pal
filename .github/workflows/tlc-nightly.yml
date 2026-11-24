@@ -97,6 +97,8 @@ jobs:
             tests/test_lifecycle_gate_cancellation.py tests/test_plugin_publication_rollback.py \
             tests/test_registration_ownership.py tests/test_memory_swap.py tests/test_embedding_space.py \
             tests/test_memory_maintenance.py tests/test_workflow_memory_references.py \
+            tests/test_bunshin_capacity_conformance.py tests/test_bunshin_node_handoff.py \
+            tests/test_bunshin_process_lifecycle.py \
             tests/test_bunshin_web_lifetime.py tests/test_memory_resource_lifetime.py \
             tests/test_control_lifetime.py tests/test_database_lifetime.py \
             tests/test_plugin_entry_withdrawal.py tests/test_execution_extension_admission.py \

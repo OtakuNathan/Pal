@@ -4,11 +4,12 @@ from pal.bunshin.workspace_paths import path_scope_matches
 from pal.shared.tool_protocol import ToolCallIR
 
 from pal.execution.generated_tool_models import (
-    BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput,
-    BunshinV2CandidateBuilderOpBunshinCandidateRequestModuleSplitInput,
-    BunshinV2CandidateBuilderOpBunshinCandidateSubmitInput,
+    BunshinCandidateBuilderOpBunshinCandidateReportArchitectureDefectInput,
+    BunshinCandidateBuilderOpBunshinCandidateRequestModuleSplitInput,
+    BunshinCandidateBuilderOpBunshinCandidateSubmitInput,
 )
 
+import asyncio
 import json
 from dataclasses import dataclass
 import subprocess
@@ -21,6 +22,8 @@ from pal.execution.tool_facade import (
     rejection,
 )
 from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER
+from pal.bunshin.role_gateway_client import role_gateway_client_from_env
+from pal.bunshin.repair_precheck import check_manager_repair, repair_precheck_plan, repair_receipt_fields
 from pal.bunshin.skeleton import compiled_module_write_scopes
 from pal.bunshin.submission_drafts import (
     SubmissionDraftContext,
@@ -53,14 +56,15 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "search_objects": ('candidate', 'candidates'),
             "purpose": "Submit the current module Candidate for independent verification.",
             "use_when": (
-                "Use after every checklist item is completed, focused checks pass, and the "
+                "Use after focused checks pass. Complete the initial implementation checklist; during repair, "
+                "address the full RepairBill and submit for automated precheck when the "
                 "implementation is ready for independent verification. Takes no arguments; "
                 "the Manager derives Git delta and journal fields. A software module may "
                 "submit an unchanged baseline when it already satisfies the bound contract "
                 "and focused checks pass; do not manufacture changes for submission."
             ),
             "do_not_use_when": (
-                "Do not use with unfinished checklist work or when the correct terminal "
+                "Do not use when the correct terminal "
                 "outcome is an architecture defect or module split. An artifact-bundle unit "
                 "must have at least one contracted product file before submission. "
                 "Never add submit_candidate itself to the checklist."
@@ -70,7 +74,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "state, and do not repeat the same rejected submission unchanged."
             ),
         },
-        "InputModel": BunshinV2CandidateBuilderOpBunshinCandidateSubmitInput,
+        "InputModel": BunshinCandidateBuilderOpBunshinCandidateSubmitInput,
     },
     "op_bunshin_candidate_report_architecture_defect": {
         "alias": "report_candidate_architecture_defect",
@@ -94,7 +98,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "retry the same rejected report unchanged."
             ),
         },
-        "InputModel": BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput,
+        "InputModel": BunshinCandidateBuilderOpBunshinCandidateReportArchitectureDefectInput,
     },
     "op_bunshin_candidate_request_module_split": {
         "alias": "request_candidate_module_split",
@@ -114,7 +118,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "rejected request unchanged."
             ),
         },
-        "InputModel": BunshinV2CandidateBuilderOpBunshinCandidateRequestModuleSplitInput,
+        "InputModel": BunshinCandidateBuilderOpBunshinCandidateRequestModuleSplitInput,
     },
 }
 
@@ -127,7 +131,7 @@ CANDIDATE_BUILDER_TOOL_SPECS["op_bunshin_candidate_report_task_blocker"] = {
         "failure_next_steps": "Correct the blocker explanation and resubmit.",
         "search_objects": ("task", "blocker"),
     },
-    "InputModel": BunshinV2CandidateBuilderOpBunshinCandidateReportArchitectureDefectInput,
+    "InputModel": BunshinCandidateBuilderOpBunshinCandidateReportArchitectureDefectInput,
 }
 
 for _tool_name, _tool_spec in CANDIDATE_BUILDER_TOOL_SPECS.items():
@@ -162,7 +166,24 @@ async def candidate_builder_tool_result(
                 raise ValueError("task blocker is only available in direct mode")
             return _submit_candidate(call, workspace, produced_artifacts, progress=progress, status="task_blocked")
         if name == "op_bunshin_candidate_submit":
-            return _submit_candidate(call, workspace, produced_artifacts, progress=progress, status="candidate_ready")
+            precheck = None
+            if workspace.get("repair_precheck"):
+                if call.args:
+                    raise ValueError("submit_candidate takes no arguments")
+                client = role_gateway_client_from_env(Path(workspace["runtime_root"]))
+                if client:
+                    precheck = repair_receipt_fields(await client.request("repair_precheck_plan"))
+                    return await asyncio.to_thread(_submit_candidate, call, workspace, produced_artifacts,
+                                                   progress=progress, status="candidate_ready", precheck=precheck)
+                scope = _bound_candidate_work_view(workspace).get("verification_corpus") or {}
+                with submission_validation():
+                    plan = await asyncio.to_thread(repair_precheck_plan, Path(workspace["repo_path"]), scope)
+                    precheck = repair_receipt_fields(plan)
+                    await asyncio.to_thread(check_manager_repair, Path(workspace["runtime_root"]), {
+                        "invocation_id": call.call_id, "workspace": {**workspace, "repair_corpus_scope": scope},
+                    }, precheck)
+            return _submit_candidate(call, workspace, produced_artifacts, progress=progress,
+                                     status="candidate_ready", precheck=precheck)
         if name == "op_bunshin_candidate_report_architecture_defect":
             return _submit_candidate(call, workspace, produced_artifacts, progress=progress, status="architecture_defect")
         if name == "op_bunshin_candidate_request_module_split":
@@ -186,6 +207,7 @@ def _submit_candidate(
     *,
     status: str,
     progress: _SubmissionProgress,
+    precheck: Mapping[str, Any] | None = None,
 ) -> ToolExecutionResult:
     args = dict(call.args or {})
     context = SubmissionDraftContext.from_workspace(workspace, draft_kind="candidate")
@@ -194,7 +216,7 @@ def _submit_candidate(
     work_view = _bound_candidate_work_view(workspace)
     if status == "candidate_ready":
         try:
-            work_items = assert_work_items_complete(workspace)
+            work_items = read_work_items(workspace) if precheck is not None else assert_work_items_complete(workspace)
         except ValueError as exc:
             ledger = read_work_items(workspace)
             raise ToolRejectedError(
@@ -271,6 +293,8 @@ def _submit_candidate(
         "files_changed": files_changed,
         "status": status,
     }
+    if precheck is not None:
+        report["repair_precheck"] = dict(precheck)
     if status != "candidate_ready":
         module_name = _bound_unit_name(work_view)
         report.update(

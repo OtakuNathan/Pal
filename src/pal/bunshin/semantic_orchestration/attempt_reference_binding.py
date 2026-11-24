@@ -122,6 +122,8 @@ class ReferenceBinding:
                 invocation_acceptance = [
                     "Implement or repair only the bound module, write focused tests only in tests/<module_name>/developer, and keep tests/<module_name>/verifier read-only.",
                     "Treat private product code inherited from the Architect as a non-authoritative draft: inspect it as workspace evidence, then keep, modify, delete, or replace it as needed; you own and must validate the final implementation.",
+                    "Address the complete RepairBill. Submit to run the verifier suite and correct any failures."
+                    if activation.mode == RoleMode.REPAIR else
                     "Maintain the compact durable checklist with update_checklist; it is a micro-plan, not evidence. Complete it, run the minimum sufficient self-check with ordinary shell or LSP tools, then call submit_candidate with no arguments.",
                 ]
             else:

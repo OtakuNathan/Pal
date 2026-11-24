@@ -29,7 +29,7 @@ def read_role_attempt_business_lease_locked(
     database: DatabasePort, connection: sqlite3.Connection, attempt_id: str,
 ) -> dict[str, Any] | None:
     rows = connection.execute(
-        "SELECT * FROM bunshin_v2_artifacts WHERE artifact_type = ? "
+        "SELECT * FROM bunshin_artifacts WHERE artifact_type = ? "
         "AND json_extract(metadata_json, '$.attempt_id') = ?",
         (_ARTIFACT_TYPE, str(attempt_id)),
     ).fetchall()
@@ -57,8 +57,8 @@ def read_role_attempt_business_lease_locked(
     if not isinstance(binding['epoch_id'], str) or type(binding['graph_generation']) is not int or binding['graph_generation'] < 0:
         raise SubmissionInvariantError("invalid role attempt business generation")
     assignment = connection.execute(
-        "SELECT assignment.* FROM bunshin_v2_role_attempts AS attempt "
-        "JOIN bunshin_v2_role_assignments AS assignment ON assignment.assignment_id = attempt.assignment_id "
+        "SELECT assignment.* FROM bunshin_role_attempts AS attempt "
+        "JOIN bunshin_role_assignments AS assignment ON assignment.assignment_id = attempt.assignment_id "
         "WHERE attempt.attempt_id = ?", (str(attempt_id),),
     ).fetchone()
     spec = json.loads(str(assignment['execution_spec_json'])) if assignment is not None else {}

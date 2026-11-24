@@ -162,12 +162,12 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
     def _role_rows(self):
         with self.repository.database.read_connection() as connection:
             return {table: [dict(row) for row in connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()] for table in (
-                "bunshin_v2_role_assignments", "bunshin_v2_role_sessions", "bunshin_v2_role_attempts",
+                "bunshin_role_assignments", "bunshin_role_sessions", "bunshin_role_attempts",
             )}
 
     def _counts(self):
         with self.repository.database.read_connection() as connection:
-            return tuple(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in ("bunshin_v2_domain_events", "bunshin_v2_outbox"))
+            return tuple(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in ("bunshin_domain_events", "bunshin_outbox"))
 
     def test_public_resolve_restores_pending_checker_then_real_resume_effect_corrects(self):
         original = self._prepare_pending()
@@ -339,11 +339,11 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self._enter_triage()
         roles = self._role_rows()
         with self.repository.database.read_connection() as connection:
-            leases = [dict(row) for row in connection.execute("SELECT * FROM bunshin_v2_leases ORDER BY resource_key").fetchall()]
+            leases = [dict(row) for row in connection.execute("SELECT * FROM bunshin_leases ORDER BY resource_key").fetchall()]
         self.assertEqual(self._resolve()["state"], "REVIEW_SNAPSHOTTING")
         self.assertEqual(self._role_rows(), roles)
         with self.repository.database.read_connection() as connection:
-            self.assertEqual([dict(row) for row in connection.execute("SELECT * FROM bunshin_v2_leases ORDER BY resource_key").fetchall()], leases)
+            self.assertEqual([dict(row) for row in connection.execute("SELECT * FROM bunshin_leases ORDER BY resource_key").fetchall()], leases)
         # Intentionally exercise the persisted resume dispatch before asserting
         # graph state: pre-fix this reproduces the exact live CHECKER_RETRY
         # from CHECKER_READY exception rather than an earlier helper assertion.
@@ -354,7 +354,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self.assertFalse(self._graph_cycle().last_verdict.accepted)
         self.assertEqual(self._role_rows(), roles)
         with self.repository.database.read_connection() as connection:
-            self.assertTrue({row["resource_key"] for row in connection.execute("SELECT * FROM bunshin_v2_leases").fetchall()} <= {row["resource_key"] for row in leases})
+            self.assertTrue({row["resource_key"] for row in connection.execute("SELECT * FROM bunshin_leases").fetchall()} <= {row["resource_key"] for row in leases})
         self.assertEqual(self.repository.role_assignments.read_role_assignment(self.assignment["assignment_id"])["state"], "settled")
 
     def test_stale_verifier_evaluation_rolls_back_public_resolution(self):
@@ -379,8 +379,8 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self.assertEqual(self._graph_cycle().state, NodeCycleState.CHECKER_READY)
         self.assertEqual(self._role_rows(), roles)
         with self.repository.database.read_connection() as connection:
-            outbox = dict(connection.execute("SELECT * FROM bunshin_v2_outbox WHERE effect_id = ?", (effect["effect_id"],)).fetchone())
-            receipts = [dict(row) for row in connection.execute("SELECT * FROM bunshin_v2_effect_receipts WHERE effect_key = ?", (effect["effect_key"],)).fetchall()]
+            outbox = dict(connection.execute("SELECT * FROM bunshin_outbox WHERE effect_id = ?", (effect["effect_id"],)).fetchone())
+            receipts = [dict(row) for row in connection.execute("SELECT * FROM bunshin_effect_receipts WHERE effect_key = ?", (effect["effect_key"],)).fetchall()]
         self.assertEqual(outbox["status"], "completed")
         self.assertEqual(outbox["attempt_count"], 1)
         self.assertEqual(len(receipts), 1)
@@ -391,7 +391,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self.assertEqual(asyncio.run(processor._process_effect(effect)), "completed")
         self.assertEqual(self._node(), corrected)
         with self.repository.database.read_connection() as connection:
-            self.assertEqual(connection.execute("SELECT count(*) FROM bunshin_v2_effect_receipts WHERE effect_key = ?", (effect["effect_key"],)).fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) FROM bunshin_effect_receipts WHERE effect_key = ?", (effect["effect_key"],)).fetchone()[0], 1)
 
     def test_missing_settled_assignment_binding_rolls_back_public_resolution(self):
         self._assert_restore_rolls_back(pending_patch={"role_assignment_id": ""})
@@ -434,7 +434,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         roles = self._role_rows()
         counts = self._counts()
         with self.repository.database.read_connection() as connection:
-            leases = [dict(row) for row in connection.execute("SELECT * FROM bunshin_v2_leases ORDER BY resource_key").fetchall()]
+            leases = [dict(row) for row in connection.execute("SELECT * FROM bunshin_leases ORDER BY resource_key").fetchall()]
         with self.assertRaisesRegex(SubmissionInvariantError, "already has a committed verdict"):
             self._resolve()
         self.assertEqual(self._node(), terminal)
@@ -442,7 +442,7 @@ class PendingSettlementRecoveryTests(unittest.TestCase):
         self.assertEqual(self._role_rows(), roles)
         self.assertEqual(self._counts(), counts)
         with self.repository.database.read_connection() as connection:
-            self.assertEqual([dict(row) for row in connection.execute("SELECT * FROM bunshin_v2_leases ORDER BY resource_key").fetchall()], leases)
+            self.assertEqual([dict(row) for row in connection.execute("SELECT * FROM bunshin_leases ORDER BY resource_key").fetchall()], leases)
 
     def test_absent_pending_submission_rolls_back_public_resolution(self):
         self._assert_restore_rolls_back(

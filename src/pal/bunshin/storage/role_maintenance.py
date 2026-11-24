@@ -25,7 +25,7 @@ class RoleMaintenanceStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT session_id FROM bunshin_v2_role_sessions
+                SELECT session_id FROM bunshin_role_sessions
                 WHERE workflow_id = ? AND status IN (?, ?, ?)
                 ORDER BY created_at, session_id
                 """,
@@ -54,7 +54,7 @@ class RoleMaintenanceStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT session_id FROM bunshin_v2_role_sessions
+                SELECT session_id FROM bunshin_role_sessions
                 WHERE status IN (?, ?, ?)
                 """,
                 (
@@ -80,7 +80,7 @@ class RoleMaintenanceStore:
             workflows = connection.execute(
                 """
                 SELECT aggregate_id AS workflow_id, state AS workflow_state
-                FROM bunshin_v2_aggregate_snapshots
+                FROM bunshin_aggregate_snapshots
                 WHERE aggregate_type = ?
                   AND state IN ('COMPLETED', 'REJECTED', 'CANCELLED')
                 ORDER BY aggregate_id
@@ -102,7 +102,7 @@ class RoleMaintenanceStore:
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT session_id FROM bunshin_v2_role_sessions
+                SELECT session_id FROM bunshin_role_sessions
                 WHERE status IN (?, ?, ?)
                 """,
                 (

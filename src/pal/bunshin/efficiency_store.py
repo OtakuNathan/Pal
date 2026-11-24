@@ -1,4 +1,4 @@
-"""Read-only Bunshin v2 storage access for efficiency telemetry.
+"""Read-only Bunshin storage access for efficiency telemetry.
 
 This module is the single owner of the read-only query path into Bunshin
 storage. It must never create, migrate, or mutate the database: it opens the
@@ -48,7 +48,7 @@ def open_readonly(db_path: Path) -> Iterator[sqlite3.Connection]:
     """Open the Bunshin SQLite database strictly read-only.
 
     Args:
-        db_path: Path to the Bunshin v2 SQLite database file.
+        db_path: Path to the Bunshin SQLite database file.
 
     Returns:
         A context manager yielding one ``sqlite3.Connection`` opened with
@@ -89,13 +89,13 @@ def read_workflow_telemetry(db_path: Path, workflow_id: str) -> WorkflowTelemetr
     """Read all raw telemetry rows for one workflow in a single read-only pass.
 
     Args:
-        db_path: Path to the Bunshin v2 SQLite database file.
+        db_path: Path to the Bunshin SQLite database file.
         workflow_id: Workflow identifier supplied by the operator.
 
     Returns:
         ``WorkflowTelemetryRecords`` with rows from
-        ``bunshin_v2_role_invocations``, ``bunshin_v2_role_turns``, and
-        ``bunshin_v2_worker_events`` filtered to the workflow.
+        ``bunshin_role_invocations``, ``bunshin_role_turns``, and
+        ``bunshin_worker_events`` filtered to the workflow.
 
     Errors:
         ``StorageUnavailableError`` when storage cannot be opened read-only;
@@ -105,9 +105,13 @@ def read_workflow_telemetry(db_path: Path, workflow_id: str) -> WorkflowTelemetr
     """
     with open_readonly(db_path) as connection:
         try:
+            legacy = connection.execute(
+                "SELECT 1 FROM sqlite_schema WHERE name = 'bunshin_v2_role_invocations'"
+            ).fetchone()
+            prefix = "bunshin_v2" if legacy else "bunshin"
             role_invocations = _select_rows(
                 connection,
-                "SELECT * FROM bunshin_v2_role_invocations"
+                f"SELECT * FROM {prefix}_role_invocations"
                 " WHERE workflow_id = ? ORDER BY created_at, invocation_id",
                 (workflow_id,),
             )
@@ -117,8 +121,8 @@ def read_workflow_telemetry(db_path: Path, workflow_id: str) -> WorkflowTelemetr
                 )
             role_turns = _select_optional(
                 connection,
-                "SELECT t.* FROM bunshin_v2_role_turns AS t"
-                " JOIN bunshin_v2_role_invocations AS i"
+                f"SELECT t.* FROM {prefix}_role_turns AS t"
+                f" JOIN {prefix}_role_invocations AS i"
                 " ON t.invocation_id = i.invocation_id"
                 " WHERE i.workflow_id = ?"
                 " ORDER BY t.invocation_id, t.turn_index",
@@ -126,8 +130,8 @@ def read_workflow_telemetry(db_path: Path, workflow_id: str) -> WorkflowTelemetr
             )
             worker_events = _select_optional(
                 connection,
-                "SELECT e.* FROM bunshin_v2_worker_events AS e"
-                " JOIN bunshin_v2_role_invocations AS i"
+                f"SELECT e.* FROM {prefix}_worker_events AS e"
+                f" JOIN {prefix}_role_invocations AS i"
                 " ON e.invocation_id = i.invocation_id"
                 " WHERE i.workflow_id = ?"
                 " ORDER BY e.invocation_id, e.event_id",

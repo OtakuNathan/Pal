@@ -110,7 +110,7 @@ class _SelectiveTestFamilyProjector:
         )
 
 
-class BunshinV2ExecutionTests(unittest.TestCase):
+class BunshinExecutionTests(unittest.TestCase):
     def test_contract_enforcement_modes_distinguish_frozen_and_guarded_files(self) -> None:
         policy = {
             "contract_paths": ["src/router.py"],
@@ -176,7 +176,7 @@ class BunshinV2ExecutionTests(unittest.TestCase):
             )
 
     def setUp(self) -> None:
-        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_exec_"))
+        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_exec_"))
         self.repository = BunshinRepository(self.runtime_root)
         self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
         self.contracts = ContractArtifactAccess(self.store, self.repository)

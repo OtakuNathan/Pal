@@ -119,8 +119,9 @@ class AttemptExecution:
                 fencing_token,
             )
         )
+        submitted = False
         try:
-            return await self.run_profile_inner(
+            result = await self.run_profile_inner(
                 effect=effect,
                 snapshot=snapshot,
                 invocation_id=invocation_id,
@@ -133,11 +134,13 @@ class AttemptExecution:
                 workspace_override=workspace_override,
                 prepare_workspace=prepare_workspace,
             )
+            submitted = True
+            return result
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
-            await self.supervisor.release_process_slot()
+            await self.supervisor.release_process_slot(reserve_successor=submitted and self.supervisor.capacity_pool is not None)
 
     async def run_profile_inner(
         self,

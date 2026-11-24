@@ -25,14 +25,14 @@ from pal.bunshin.efficiency_store import (
 
 
 def resolve_db_path(runtime_root: Path) -> Path:
-    """Resolve the single authoritative Bunshin v2 storage location.
+    """Resolve the single authoritative Bunshin storage location.
 
-    The Bunshin v2 workflow database location is defined by
+    The Bunshin workflow database location is defined by
     ``pal.bunshin.config.bunshin_db_path(runtime_root)`` — the same source
     the Bunshin manager and ``BunshinWorkflowService`` use to write it.
     The ``PAL_BUNSHIN_RUNTIME_DB_PATH`` environment variable never applies
     here: it overrides the separate ``pal.sqlite3`` runtime database, not
-    the Bunshin v2 store.
+    the Bunshin store.
 
     Args:
         runtime_root: Pal runtime root supplied by the ``--runtime-root``
@@ -67,7 +67,7 @@ def register_bunshin_subparser(subparsers: argparse._SubParsersAction) -> argpar
     """
     bunshin_parser = subparsers.add_parser(
         "bunshin",
-        help="Inspect Bunshin v2 workflow data",
+        help="Inspect Bunshin workflow data",
     )
     bunshin_subparsers = bunshin_parser.add_subparsers(
         dest="bunshin_command",
@@ -106,7 +106,7 @@ def run_efficiency_command(
 ) -> int:
     """Execute ``pal bunshin efficiency`` end to end.
 
-    Resolves the Bunshin v2 storage path via ``resolve_db_path(args.runtime_root)``
+    Resolves the Bunshin storage path via ``resolve_db_path(args.runtime_root)``
     (delegating to ``pal.bunshin.config.bunshin_db_path``), opens it strictly
     read-only, reads telemetry, computes metrics, and writes the text or JSON
     report to ``stdout``.

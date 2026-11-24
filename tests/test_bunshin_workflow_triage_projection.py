@@ -124,7 +124,7 @@ def test_workflow_triage_and_cycle_intent_roll_back_together(case):
     assert coordinator.execution(workflow_id=workflow_id) == graph
     with service.repository.database.read_connection() as connection:
         assert connection.execute(
-            "SELECT COUNT(*) FROM bunshin_v2_outbox WHERE effect_type = 'freeze_workflow_children'",
+            "SELECT COUNT(*) FROM bunshin_outbox WHERE effect_type = 'freeze_workflow_children'",
         ).fetchone()[0] == 0
 
 

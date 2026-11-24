@@ -10,6 +10,16 @@ interrupted registrations at startup and during its existing outbox lifecycle;
 cleanup does not depend on Dreaming. Workflow creation runs in an owned worker
 whose completion is joined through cancellation.
 
+Workflow progress is reconstructed from the Task binding, workflow aggregates,
+persisted graph generation, nodes and role receipts. The effect dispatcher
+leases and acknowledges durable work. Node acceptance and recovery enter the
+same graph scheduler. Workflow finalization packages the published sink and
+queues delivery to Pal. Memory candidates follow the existing review path.
+
+Schema 30 adds durable interaction waits to schema 29 in place. Drain live
+workers (including old stdin-based questions) before replacing the host.
+The stopped-runtime cutover preserves the database and checkpoint files.
+
 The Manager web broker constructs only Execution, Web Search and Web Fetch.
 Its shared runtime has no workflow or memory dependency. Runtime constructors
 register resource cleanup before publishing modules and transfer ownership only
@@ -37,6 +47,22 @@ Package layout:
 
 All built-in roles, including Architect, run through the Pal worker and use
 Pal's configured LLM endpoints and tool surface.
+At the Manager boundary, `llm_admission` checks the role's pinned endpoint,
+output budget and endpoint fingerprint before constructing Pal's
+`EncodedTransportRequest`. The host-side `LLMProxy` streams it through
+`DirectEndpointTransport` and settles usage through `LLMUsageLedger`.
+Each request and its receipt belong to one run and attempt. Endpoint refresh
+allows new requests to use the replacement while admitted streams drain.
+
+`RunLedger` projects live progress for the frontend. A role session can reuse
+its run ID across retries. Registration binds the current assignment and attempt.
+A terminal event puts a live worker in `exiting` until its owner confirms
+cleanup. The durable SQLite records support recovery across Manager restarts.
+Recording a submission writes its artifact receipt and the attempt's submitted
+state together. Applying the business action settles that exact assignment and
+payload hash in the transaction that writes the aggregate, events and outbox.
+A replay checks the same receipt against the same aggregate.
+
 Sandboxed workers mount `llm/models`, `llm/providers`, and `llm/endpoints`
 read-only so the shared LLM runtime loads the same hook configuration as Pal.
 The worker uses the harness's resolved Python executable. Its executable,
@@ -64,13 +90,49 @@ failures fail the worker, and an unavailable stdout falls back to reporting the
 original required message on stderr. Manager recovers structured failure and
 retry metadata from these fallback records when stdout has no terminal event.
 
-Stored format and protocol identities are independent of Python package names.
-Existing `bunshin_v2_*` SQL names, `bunshin_v2` metadata and port keys, role
-profile IDs, capability-group IDs, RPC/control names, artifact formats, and
-session identity salts remain stable. Moving the package does not trigger a
-schema cutover or rewrite an existing checkpoint. A resumed Pal role retains
-its pinned harness generation when the current launcher changes; the same
-checkpoint identity and fail-closed restore checks continue to apply.
+New workflow tools, SQL tables and role pack bindings use the Bunshin name.
+Opening a current v29 database atomically renames the versioned tables and their
+indexes, including FTS. Active tasks, artifacts and checkpoint bytes keep their
+identities. Pinned packs normalize their legacy binding on read. Delivered review
+buttons and stored interaction IDs continue to resolve. Role profile IDs and
+versioned artifact protocols keep their published identities.
+
+Software Coders can trace callers, tests and integration wiring across the bound
+repository snapshot. Each parallel Coder works from its own module worktree.
+A file-frozen interface is read-only. When an interface and its implementation
+share a review-guarded file, the owning Coder may edit the body. The Verifier
+checks public behavior against the approved declarations. In planned mode the
+sandbox mounts the repository read-only and grants writes to assigned directories.
+The role policy lives in `permissions.py`. It translates the assigned worktree,
+protected paths, runtime resources and references into mounts for one invocation.
+The sandbox launcher and file tools use this policy. Directory mount enforcement
+is shared infrastructure in `pal.foundation.bwrap_permissions`.
+Host launch code can supply `ReadOnlyBind` declarations through the launcher's
+`runtime_mounts` argument. Destinations must be below the runtime's `data`
+directory and disjoint from existing mounts. Role packs have no mount authority
+through this interface. The role launcher uses it for the LSP Manager's runtime
+directory when present. The host starts the LSP Manager and resolves its
+language-server executables. The role connects to the mounted Unix socket.
+When a Coder owns an individual file in a shared directory, its file tools send
+the exact change to an attempt-local editor over an anonymous Unix socket.
+Only that editor mounts the shared parent writable under `/tmp/pal/bunshin`
+in its private namespace. It checks the pinned filename grant and replaces the
+file atomically. The Coder sees the change at the original worktree path. The
+process owner reaps the editor with the worker before releasing the worktree.
+Verifier tests and immutable inputs remain read-only. Candidate publication
+validates the complete delta against the assigned paths.
+
+A software repair receives the complete RepairBill. Its checklist is optional.
+On submission the Manager runs the whole local verifier suite in a fresh
+read-only sandbox with private build scratch. It binds the passing result to
+the candidate contents. An unsuccessful run
+returns its output to the same Coder. Use ordinary pytest discovery for Python
+corpora or a verifier-owned `run-tests.sh` in the bound corpus for native or
+mixed projects. The script runs from the repository root, reports all failures
+and returns the suite exit status. The precheck has a 240-second execution budget
+inside the five-minute submission RPC. A provider with only consumer-side tests or an older corpus
+without a runnable suite goes to independent review with an explicit pending
+precheck. Final acceptance always belongs to the Verifier.
 
 Owns:
 - durable workflow, aggregate, role-session, and worker-process orchestration
@@ -116,9 +178,11 @@ Interaction rule:
   only when the contract and incoming edges are also unchanged
 - logical role sessions are durable data, not resident processes. A
   `RoleProcessShell` materializes an OS process only after acquiring capacity;
-  capacity is released only after the process owner has terminated and reaped
-  its direct child, closed registration and heartbeats, and released worktree
-  occupancy. Sleeping or queued logical sessions consume no capacity
+  the process owner reaps its child and closes registration, heartbeats and
+  worktree occupancy before the next role can materialize. Manager grants node
+  capacity. The graph scheduler retains it for the same runnable node across
+  producer, verifier and repair attempts. A blocked dependency, pause, human
+  wait, backoff or terminal node returns capacity to the shared pool
 - Pal and Bunshin use the shared `core.AgentTurnRuntime`; Bunshin supplies only
   host ports, prompt fragments, tool observation hooks, and compaction policy
 - `pal.compaction.continuity.v1` shares the resident summary policy: current
@@ -134,17 +198,18 @@ Interaction rule:
 - the authored sink Coder still receives only its local module view. Manager
   projects whole-graph requirements, scenarios, and entrypoints into a separate
   `SystemDeliveryViewArtifact` visible only to the sink Verifier
-- Bunshin Git reads are a Manager-scoped review surface, not repository
-  archaeology: commands are limited to the bound Candidate range, owned module
-  paths, local tests, and dependency public contract paths
+- Bunshin Git reads use Manager-authenticated revisions. Coders may read all
+  repository paths. Module reviewers inspect owned paths, local tests and
+  dependency public contracts
 - role profile fragments are playbooks, Manager-derived views are inputs, and
   the WorkItem checklist is the execution driver; none is a second contract
 - every family uses the same Architect/Reviewer/Implementation/Verifier graph.
   Architect and Reviewer require profile participants; Implementation and
   Verifier are either both profile-backed or both explicit `null` participants
 - role profile and execution harness are separate contracts. Each attempt
-  captures one immutable harness generation; attached role-specialized
-  harnesses take priority and Pal remains the universal fallback
+  pins the built-in Pal harness. Each role profile chooses its model and
+  endpoint independently. Historical receipts keep their original harness
+  identity. Drain any active external-harness sessions before upgrading
 - the Bunshin compaction clock advances only for successful consumable LLM
   rounds. Provider errors, truncation, `compact_required`, tools, and
   compaction calls do not advance it
@@ -186,7 +251,11 @@ Interaction rule:
   tool-protocol safe point, including role-stage entry, structured terminal
   boundaries, and cooperative restart. A hard crash therefore resumes from
   the latest closed boundary plus durable worktree, checklist, findings, and
-  pending Manager input; no in-flight tool batch is checkpointed
+  pending Manager input. A role waiting for approval or clarification also
+  checkpoints its exact tool-call cursor and completed prefix before exiting.
+  Manager records the wait and its Task delivery together. A replacement
+  worker consumes the answer for the original call and continues the suffix.
+  Ambiguous execution after an answer has been claimed requires reconciliation
 - closed tool calls and results enter L1 incrementally. Compaction reads only
   that frozen L1; role contracts, checklists, task fallback, and memory recall
   remain independently projected authority

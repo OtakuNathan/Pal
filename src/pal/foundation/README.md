@@ -21,6 +21,13 @@ Exposes:
 - `RawSQLHookRegistry`
 - `RepositoryBase`
 - `FdLease`, `FdCapability`, and `FdCancellationControl`
+- `bwrap_permissions.DirectoryPermissions` mounts a tree with a chosen root
+  access mode, writable subdirectories and protected paths. Its `mount_into`
+  method returns exact file grants for a private editor. All paths in a grant
+  are relative to the mounted tree.
+- `bwrap_companion` launches a worker and its helper in separate bubblewrap
+  namespaces within the same owned process group. An anonymous socket connects
+  each pair. The helper alone receives the writable shadow mounts.
 - owner-side error presentation: `exception_reason` logs complete redacted
   evidence and returns a concise cause; `diagnostic_reason` handles external
   reports. These helpers never infer execution effects or recovery policy

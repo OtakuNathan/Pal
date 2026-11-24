@@ -85,7 +85,7 @@ class SubmissionDraftContext:
 
     @classmethod
     def from_workspace(cls, workspace: Mapping[str, Any], *, draft_kind: str) -> "SubmissionDraftContext":
-        binding = dict(workspace.get("bunshin_v2") or {})
+        binding = dict(workspace.get("bunshin") or {})
         context = cls(
             workflow_id=str(binding.get("workflow_id") or "").strip(),
             invocation_id=str(binding.get("invocation_id") or workspace.get("invocation_id") or "").strip(),
@@ -252,7 +252,7 @@ class SubmissionDraftStore:
             duplicate = connection.execute(
                 """
                 SELECT request_hash, result_json
-                FROM bunshin_v2_submission_draft_ops
+                FROM bunshin_submission_draft_ops
                 WHERE draft_key = ? AND operation_key = ?
                 """,
                 (context.draft_key, operation),
@@ -277,7 +277,7 @@ class SubmissionDraftStore:
             next_version = snapshot.version + 1
             updated = connection.execute(
                 """
-                UPDATE bunshin_v2_submission_drafts
+                UPDATE bunshin_submission_drafts
                 SET payload_json = ?, version = ?, updated_at = ?
                 WHERE draft_key = ? AND version = ? AND status = ?
                 """,
@@ -299,7 +299,7 @@ class SubmissionDraftStore:
             }
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_submission_draft_ops(
+                INSERT INTO bunshin_submission_draft_ops(
                     draft_key, operation_key, request_hash, result_json, created_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
@@ -350,7 +350,7 @@ class SubmissionDraftStore:
             self._assert_fence(connection, context)
             assert_authoring_open(connection, context)
             row = connection.execute(
-                "SELECT request_hash, result_json FROM bunshin_v2_submission_draft_ops WHERE draft_key = ? AND operation_key = ?",
+                "SELECT request_hash, result_json FROM bunshin_submission_draft_ops WHERE draft_key = ? AND operation_key = ?",
                 (context.draft_key, operation_key),
             ).fetchone()
             if row is None:
@@ -438,7 +438,7 @@ class SubmissionDraftStore:
         with self._transaction() as connection:
             self._assert_fence(connection, context)
             self._assert_submission_artifact_locked(connection, artifact_ref)
-            row = connection.execute("SELECT status FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+            row = connection.execute("SELECT status FROM bunshin_submission_drafts WHERE draft_key = ?",
                                      (context.draft_key,)).fetchone()
             if row is not None and row["status"] == ACTIVE_DRAFT_STATUS:
                 assert_local_submission_authority(connection, context, artifact_ref, payload_hash)
@@ -448,9 +448,9 @@ class SubmissionDraftStore:
                     replace(context, draft_kind="work_items").draft_key: expected_work_item_version,
                 })
             if context.role == "verifier" and submission_payload is not None and row is not None and row["status"] == ACTIVE_DRAFT_STATUS:
-                draft_row = connection.execute("SELECT payload_json FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+                draft_row = connection.execute("SELECT payload_json FROM bunshin_submission_drafts WHERE draft_key = ?",
                                                (context.draft_key,)).fetchone()
-                work_row = connection.execute("SELECT payload_json FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+                work_row = connection.execute("SELECT payload_json FROM bunshin_submission_drafts WHERE draft_key = ?",
                                               (replace(context, draft_kind="work_items").draft_key,)).fetchone()
                 assert_verifier_projection(submission_payload, json.loads(draft_row["payload_json"]),
                                           json.loads(work_row["payload_json"]) if work_row else {})
@@ -463,7 +463,7 @@ class SubmissionDraftStore:
                         raise SubmissionValidationError("verification corpus changed before receipt acceptance")
             updated = connection.execute(
                 """
-                UPDATE bunshin_v2_submission_drafts
+                UPDATE bunshin_submission_drafts
                 SET status = ?, submitted_artifact_ref_json = ?,
                     submission_payload_hash = ?, submitted_at = ?, updated_at = ?
                 WHERE draft_key = ? AND version = ? AND status = ?
@@ -484,7 +484,7 @@ class SubmissionDraftStore:
                     """
                     SELECT version, status, submitted_artifact_ref_json,
                            submission_payload_hash
-                    FROM bunshin_v2_submission_drafts WHERE draft_key = ?
+                    FROM bunshin_submission_drafts WHERE draft_key = ?
                     """,
                     (context.draft_key,),
                 ).fetchone()
@@ -532,7 +532,7 @@ class SubmissionDraftStore:
         with self._transaction() as connection:
             self._assert_submission_artifact_locked(connection, artifact_ref)
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+                "SELECT * FROM bunshin_submission_drafts WHERE draft_key = ?",
                 (context.draft_key,),
             ).fetchone()
             if row is None:
@@ -554,7 +554,7 @@ class SubmissionDraftStore:
             submitted_at = utc_now()
             updated = connection.execute(
                 """
-                UPDATE bunshin_v2_submission_drafts
+                UPDATE bunshin_submission_drafts
                 SET status = ?, submitted_artifact_ref_json = ?,
                     submission_payload_hash = ?, submitted_at = ?, updated_at = ?
                 WHERE draft_key = ? AND status = ?
@@ -585,7 +585,7 @@ class SubmissionDraftStore:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout=30000")
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+                "SELECT * FROM bunshin_submission_drafts WHERE draft_key = ?",
                 (str(draft_key),),
             ).fetchone()
         if row is None:
@@ -615,7 +615,7 @@ class SubmissionDraftStore:
             connection.execute("PRAGMA busy_timeout=30000")
             row = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_submission_drafts
+                SELECT * FROM bunshin_submission_drafts
                 WHERE workflow_id = ? AND invocation_id = ? AND role = ? AND mode = ?
                   AND draft_kind = ? AND input_fingerprint = ?
                   AND authoring_contract_version = ? AND status = ?
@@ -648,7 +648,7 @@ class SubmissionDraftStore:
         if not digest:
             raise ValueError("submission receipt artifact ref requires sha256")
         row = connection.execute(
-            "SELECT durable, storage_path FROM bunshin_v2_artifacts WHERE sha256 = ?",
+            "SELECT durable, storage_path FROM bunshin_artifacts WHERE sha256 = ?",
             (digest,),
         ).fetchone()
         if row is None or int(row["durable"] or 0) != 1:
@@ -664,7 +664,7 @@ class SubmissionDraftStore:
         seed: Mapping[str, Any] | None,
     ) -> SubmissionDraftSnapshot:
         row = connection.execute(
-            "SELECT * FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+            "SELECT * FROM bunshin_submission_drafts WHERE draft_key = ?",
             (context.draft_key,),
         ).fetchone()
         if row is None:
@@ -673,7 +673,7 @@ class SubmissionDraftStore:
             now = utc_now()
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_submission_drafts(
+                INSERT INTO bunshin_submission_drafts(
                     draft_key, workflow_id, invocation_id, lease_resource_key,
                     fencing_token, role, mode, draft_kind, input_fingerprint,
                     authoring_contract_version, version, status, payload_json,
@@ -699,7 +699,7 @@ class SubmissionDraftStore:
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+                "SELECT * FROM bunshin_submission_drafts WHERE draft_key = ?",
                 (context.draft_key,),
             ).fetchone()
         return _snapshot_from_row(row)
@@ -712,7 +712,7 @@ class SubmissionDraftStore:
         rows = connection.execute(
             """
             SELECT *
-            FROM bunshin_v2_submission_drafts
+            FROM bunshin_submission_drafts
             WHERE workflow_id = ? AND role = ? AND mode = ? AND draft_kind = ?
               AND input_fingerprint = ? AND authoring_contract_version = ?
               AND draft_key != ?
@@ -756,7 +756,7 @@ class SubmissionDraftStore:
         lease = connection.execute(
             """
             SELECT owner_id, fencing_token, expires_at
-            FROM bunshin_v2_leases
+            FROM bunshin_leases
             WHERE resource_key = ?
             """,
             (str(draft_row["lease_resource_key"]),),
@@ -781,7 +781,7 @@ class SubmissionDraftStore:
 
     def _assert_fence(self, connection: sqlite3.Connection, context: SubmissionDraftContext) -> None:
         row = connection.execute(
-            "SELECT owner_id, fencing_token, expires_at FROM bunshin_v2_leases WHERE resource_key = ?",
+            "SELECT owner_id, fencing_token, expires_at FROM bunshin_leases WHERE resource_key = ?",
             (context.lease_resource_key,),
         ).fetchone()
         if row is None:
@@ -790,7 +790,7 @@ class SubmissionDraftStore:
             raise ValueError("submission Draft write rejected by stale fencing token")
         assignment = connection.execute(
             """SELECT a.*, t.lease_resource_key AS attempt_resource, t.fencing_token AS attempt_fence
-               FROM bunshin_v2_role_attempts t JOIN bunshin_v2_role_assignments a
+               FROM bunshin_role_attempts t JOIN bunshin_role_assignments a
                ON a.assignment_id = t.assignment_id WHERE t.attempt_id = ?""",
             (context.invocation_id,),
         ).fetchone()

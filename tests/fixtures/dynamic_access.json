@@ -87,27 +87,7 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/bunshin/manager.py:BunshinManager._serve_llm_stream_request:getattr(exc, 'kind', 'role_gateway' if worker else 'manager')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/manager.py:BunshinManager._serve_llm_stream_request:getattr(exc, 'provider_started', False)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/manager.py:BunshinManager._serve_llm_stream_request:getattr(stream, 'aclose', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/bunshin/manager.py:BunshinManager.close_all:getattr(self._host_tool_bundle, 'close', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/manager.py:_consume_transport_iterator:getattr(iterator, 'close', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/manager.py:_validate_transport_payload_authority:getattr(endpoint, 'max_output_tokens', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
@@ -136,10 +116,6 @@
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/bunshin/runner_components/agent_session.py:AgentSession.run_agent_loop:getattr(settled, 'state', '')": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/bunshin/runner_components/agent_session.py:AgentSession.run_agent_loop:getattr(state.execution_runtime, 'begin_tool_result_turn', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

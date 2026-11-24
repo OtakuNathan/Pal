@@ -215,7 +215,7 @@ class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "architecture_revision_id": "revision-1",
                 "manifest_sha": "sha-1",
                 "decision_token": "token-1",
-                "bunshin_v2": True,
+                "bunshin": True,
                 "markdown": "Review",
                 "attachments": [
                     {"path": "first.md"},

@@ -34,7 +34,7 @@ class CyclesStore:
         transaction = self.database.write_connection() if _connection is None else nullcontext(_connection)
         with transaction as connection:
             existing = connection.execute(
-                "SELECT graph_ir_json, workflow_id FROM bunshin_v2_graph_generations "
+                "SELECT graph_ir_json, workflow_id FROM bunshin_graph_generations "
                 "WHERE graph_id = ? AND generation = ?",
                 (graph.graph_id, graph.generation),
             ).fetchone()
@@ -51,7 +51,7 @@ class CyclesStore:
                 )
             latest = connection.execute(
                 "SELECT MAX(generation) AS generation "
-                "FROM bunshin_v2_graph_generations WHERE graph_id = ?",
+                "FROM bunshin_graph_generations WHERE graph_id = ?",
                 (graph.graph_id,),
             ).fetchone()
             latest_generation = int((latest or {})["generation"] or 0)
@@ -61,7 +61,7 @@ class CyclesStore:
                 )
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_graph_generations(
+                INSERT INTO bunshin_graph_generations(
                     graph_id, generation, workflow_id, generation_hash,
                     graph_ir_json, source_ref, status, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -92,13 +92,13 @@ class CyclesStore:
         with connection_scope as connection:
             if generation is None:
                 row = connection.execute(
-                    "SELECT graph_ir_json FROM bunshin_v2_graph_generations "
+                    "SELECT graph_ir_json FROM bunshin_graph_generations "
                     "WHERE graph_id = ? ORDER BY generation DESC LIMIT 1",
                     (graph_id,),
                 ).fetchone()
             else:
                 row = connection.execute(
-                    "SELECT graph_ir_json FROM bunshin_v2_graph_generations "
+                    "SELECT graph_ir_json FROM bunshin_graph_generations "
                     "WHERE graph_id = ? AND generation = ?",
                     (graph_id, int(generation)),
                 ).fetchone()
@@ -121,7 +121,7 @@ class CyclesStore:
         with transaction as connection:
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_plan_cycles(
+                INSERT INTO bunshin_plan_cycles(
                     cycle_id, workflow_id, generation, state, payload_json,
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -153,7 +153,7 @@ class CyclesStore:
         connection_scope = self.database.read_connection() if _connection is None else nullcontext(_connection)
         with connection_scope as connection:
             row = connection.execute(
-                "SELECT payload_json FROM bunshin_v2_plan_cycles "
+                "SELECT payload_json FROM bunshin_plan_cycles "
                 "WHERE workflow_id = ?",
                 (workflow_id,),
             ).fetchone()
@@ -177,12 +177,12 @@ class CyclesStore:
             if graph_generation is None:
                 graph = connection.execute(
                     "SELECT MAX(graph_generation) AS generation "
-                    "FROM bunshin_v2_node_cycles WHERE workflow_id = ?",
+                    "FROM bunshin_node_cycles WHERE workflow_id = ?",
                     (workflow_id,),
                 ).fetchone()
                 graph_generation = int((graph or {})["generation"] or 0)
             rows = connection.execute(
-                "SELECT payload_json FROM bunshin_v2_node_cycles "
+                "SELECT payload_json FROM bunshin_node_cycles "
                 "WHERE workflow_id = ? AND graph_generation = ? "
                 "ORDER BY node_name",
                 (workflow_id, int(graph_generation)),
@@ -209,7 +209,7 @@ class CyclesStore:
         with transaction as connection:
             graph_row = connection.execute(
                 "SELECT workflow_id, generation_hash, execution_json "
-                "FROM bunshin_v2_graph_generations "
+                "FROM bunshin_graph_generations "
                 "WHERE graph_id = ? AND generation = ?",
                 (execution.graph.graph_id, execution.graph.generation),
             ).fetchone()
@@ -233,7 +233,7 @@ class CyclesStore:
                 payload = _cycle_payload(cycle)
                 connection.execute(
                     """
-                    INSERT INTO bunshin_v2_node_cycles(
+                    INSERT INTO bunshin_node_cycles(
                         cycle_id, workflow_id, graph_id, graph_generation,
                         node_name, state, payload_json, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -256,7 +256,7 @@ class CyclesStore:
                     ),
                 )
             connection.execute(
-                "UPDATE bunshin_v2_graph_generations "
+                "UPDATE bunshin_graph_generations "
                 "SET status = ?, execution_json = ? "
                 "WHERE graph_id = ? AND generation = ?",
                 (
@@ -298,14 +298,14 @@ class CyclesStore:
                 if generation is None:
                     row = connection.execute(
                         "SELECT graph_ir_json, status, execution_json "
-                        "FROM bunshin_v2_graph_generations "
+                        "FROM bunshin_graph_generations "
                         "WHERE workflow_id = ? ORDER BY generation DESC LIMIT 1",
                         (workflow_id,),
                     ).fetchone()
                 else:
                     row = connection.execute(
                         "SELECT graph_ir_json, status, execution_json "
-                        "FROM bunshin_v2_graph_generations "
+                        "FROM bunshin_graph_generations "
                         "WHERE workflow_id = ? AND generation = ?",
                         (workflow_id, int(generation)),
                     ).fetchone()

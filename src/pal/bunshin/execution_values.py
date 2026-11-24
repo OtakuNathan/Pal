@@ -2,6 +2,7 @@ from __future__ import annotations
 from pal.bunshin.workspace_git import _git_bytes as _git_bytes
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
@@ -34,13 +35,17 @@ def _action(
     )
 
 
-def workspace_content_fingerprint(worktree: Path) -> str:
+def workspace_content_fingerprint(worktree: Path, *, include_symlinks: bool = False) -> str:
     paths = _git_bytes(worktree, "ls-files", "-co", "--exclude-standard", "-z").split(b"\0")
     digest = hashlib.sha256()
     for raw_path in sorted(item for item in paths if item):
         relative = raw_path.decode("utf-8", errors="surrogateescape")
         path = worktree / relative
-        if not path.is_file() or path.is_symlink():
+        if path.is_symlink():
+            if include_symlinks:
+                digest.update(b"symlink\0" + raw_path + b"\0" + os.fsencode(os.readlink(path)) + b"\0")
+            continue
+        if not path.is_file():
             continue
         digest.update(raw_path)
         digest.update(b"\0")

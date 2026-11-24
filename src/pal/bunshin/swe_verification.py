@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.repair_precheck import suite_command
 from pal.bunshin.workspace_paths import path_scope_matches
 
 from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
@@ -6,11 +7,11 @@ from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
 from pal.shared.tool_protocol import ToolCallIR
 
 from pal.execution.generated_tool_models import (
-    BunshinV2SweVerificationOpBunshinVerificationRequestArchitectureRevisionInput,
-    BunshinV2SweVerificationOpBunshinVerificationRequestContractRevisionInput,
-    BunshinV2SweVerificationOpBunshinVerificationRequestModuleRepairInput,
-    BunshinV2SweVerificationOpBunshinVerificationRequestRequirementsRevisionInput,
-    BunshinV2SweVerificationOpBunshinVerificationUnknownInput,
+    BunshinSweVerificationOpBunshinVerificationRequestArchitectureRevisionInput,
+    BunshinSweVerificationOpBunshinVerificationRequestContractRevisionInput,
+    BunshinSweVerificationOpBunshinVerificationRequestModuleRepairInput,
+    BunshinSweVerificationOpBunshinVerificationRequestRequirementsRevisionInput,
+    BunshinSweVerificationOpBunshinVerificationUnknownInput,
 )
 
 import hashlib
@@ -118,7 +119,7 @@ def semantic_verification_submission_errors(
         findings = []
         errors.append(str(exc))
     if workspace is not None:
-        contract = dict(dict(workspace.get("bunshin_v2") or {}).get("swe_verification_tool_contract") or {})
+        contract = dict(dict(workspace.get("bunshin") or {}).get("swe_verification_tool_contract") or {})
         errors.extend(verification_finding_route_errors(findings, contract))
     reason = str(submission.get("reason") or "").strip()
     if outcome not in {"pass", "unknown"} and not findings:
@@ -201,6 +202,9 @@ def semantic_verification_submission_errors(
     non_report_case_paths = [
         path for path in current_case_paths if path != (workspace or {}).get("verification_report_relpath")
     ]
+    if (outcome == "module_repair" and (workspace or {}).get("repair_suite_required")
+            and non_report_case_paths and not suite_command(corpus_scope, non_report_case_paths)):
+        errors.append("Provide run-tests.sh in the verifier corpus to run all of its cases from the repository root.")
     if outcome != "unknown" and not non_report_case_paths:
         errors.append(
             "verification requires at least one durable verifier-authored case; "
@@ -300,7 +304,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "Correct missing or misclassified findings and complete the checklist before retrying."
             ),
         },
-        "InputModel": BunshinV2SweVerificationOpBunshinVerificationRequestModuleRepairInput,
+        "InputModel": BunshinSweVerificationOpBunshinVerificationRequestModuleRepairInput,
     },
     "op_bunshin_verification_request_contract_revision": {
         "alias": "request_verification_contract_revision",
@@ -314,7 +318,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "do_not_use_when": "Do not use when the current module can be repaired without changing its accepted contract.",
             "failure_next_steps": "Correct the finding classification or complete the checklist before retrying.",
         },
-        "InputModel": BunshinV2SweVerificationOpBunshinVerificationRequestContractRevisionInput,
+        "InputModel": BunshinSweVerificationOpBunshinVerificationRequestContractRevisionInput,
     },
     "op_bunshin_verification_request_architecture_revision": {
         "alias": "request_verification_architecture_revision",
@@ -328,7 +332,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "do_not_use_when": "Do not use for an implementation defect or a frozen-contract defect with unchanged topology.",
             "failure_next_steps": "Correct the finding classification or complete the checklist before retrying.",
         },
-        "InputModel": BunshinV2SweVerificationOpBunshinVerificationRequestArchitectureRevisionInput,
+        "InputModel": BunshinSweVerificationOpBunshinVerificationRequestArchitectureRevisionInput,
     },
     "op_bunshin_verification_request_requirements_revision": {
         "alias": "request_verification_requirements_revision",
@@ -342,7 +346,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             ),
             "failure_next_steps": "Correct the requirements finding or complete the checklist before retrying.",
         },
-        "InputModel": BunshinV2SweVerificationOpBunshinVerificationRequestRequirementsRevisionInput,
+        "InputModel": BunshinSweVerificationOpBunshinVerificationRequestRequirementsRevisionInput,
     },
     "op_bunshin_verification_unknown": {
         "alias": "submit_verification_unknown",
@@ -359,7 +363,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             ),
             "failure_next_steps": "Correct the reason or collect the available evidence before retrying.",
         },
-        "InputModel": BunshinV2SweVerificationOpBunshinVerificationUnknownInput,
+        "InputModel": BunshinSweVerificationOpBunshinVerificationUnknownInput,
     },
 }
 
@@ -598,12 +602,12 @@ def verification_outcome_readiness(
         errors.append(str(exc))
     targets: list[str] = []
     if outcome == "module_repair":
-        contract = dict(dict(workspace.get("bunshin_v2") or {}).get("swe_verification_tool_contract") or {})
+        contract = dict(dict(workspace.get("bunshin") or {}).get("swe_verification_tool_contract") or {})
         try:
             targets = infer_repair_target_modules(findings, contract.get("repair_path_owners") or {})
         except ValueError as exc:
             errors.append(str(exc))
-    contract = dict(dict(workspace.get("bunshin_v2") or {}).get("swe_verification_tool_contract") or {})
+    contract = dict(dict(workspace.get("bunshin") or {}).get("swe_verification_tool_contract") or {})
     errors.extend(verification_finding_route_errors(findings, contract))
     if cases:
         errors.extend(verification_case_errors(cases, outcome=outcome, workspace=workspace))

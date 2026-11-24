@@ -36,7 +36,7 @@ def verifier(tmp_path):
         "repo_path": str(repo),
         "write_path_scopes": [{"kind": "directory", "path": "tests/verifier"}],
         "output_policy": {"primary_artifact": "verification_submission.json"},
-        "bunshin_v2": {
+        "bunshin": {
             "workflow_id": "workflow-test", "invocation_id": "progress-test",
             "lease_resource_key": lease.resource_key, "fencing_token": lease.fencing_token,
             "role": "verifier", "mode": "module",
@@ -198,7 +198,7 @@ def test_explicit_file_scope_does_not_observe_sibling_files(verifier):
 
 def test_changed_bound_candidate_identity_counts(verifier):
     before = verifier.completion_gate_progress_marker()
-    verifier.pack.workspace["bunshin_v2"]["authoring_input_fingerprint"] = "new-candidate"
+    verifier.pack.workspace["bunshin"]["authoring_input_fingerprint"] = "new-candidate"
     assert verifier.completion_gate_progress_marker() != before
 
 
@@ -255,7 +255,7 @@ def test_scratch_only_verifier_observes_bound_scratch_without_repo_files(verifie
 
 
 def test_other_roles_do_not_read_verification_drafts_or_corpus(verifier, monkeypatch):
-    verifier.pack.workspace["bunshin_v2"].update(role="architect", mode="author")
+    verifier.pack.workspace["bunshin"].update(role="architect", mode="author")
     read = SubmissionDraftStore.read
 
     def forbid_verification_read(self, context, **kwargs):

@@ -8,6 +8,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -20,6 +21,8 @@ import msgpack
 from pal.core.module_registry import ModuleRegistry
 from pal.core.runtime_state import RuntimeSnapshotCoordinator
 from pal.execution.git_tool import classify_git_command
+from pal.foundation.bwrap_permissions import ReadOnlyBind
+from pal.bunshin.permissions import mount_role_runtime_dependencies
 from pal.lsp.ipc import LspManagerClient
 from pal.shared import ToolExecutionResult
 from pal.memory import MemoryService
@@ -67,6 +70,24 @@ def _prepare_role_endpoint(runtime_root: Path) -> Path:
 
 
 class BunshinSandboxTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("bwrap"), "requires bubblewrap")
+    def test_role_without_workspace_starts_in_tmp_without_mounting_host_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _prepare_role_endpoint(root)
+            pack = BunshinInvocationPack(
+                invocation_id="no-workspace",
+                metadata={"sandbox": {
+                    "enabled": True, "backend": "bwrap", "scratch_dir": str(root / "runs" / "no-workspace"),
+                }},
+            )
+            argv, _ = build_sandboxed_runner_invocation(
+                runtime_root=root, pack=pack, argv=["/bin/pwd"], env={"PATH": os.defpath},
+            )
+            self.assertEqual(argv[argv.index("--chdir") + 1], "/tmp")
+            bind_sources = [Path(argv[i + 1]).resolve() for i, arg in enumerate(argv) if arg == "--bind"]
+            self.assertNotIn(Path.cwd().resolve(), bind_sources)
+
     def test_role_runtime_cannot_select_host_llm_authority(self) -> None:
         with (
             tempfile.TemporaryDirectory(prefix="pal_bunshin_llm_authority_") as tmp,
@@ -221,6 +242,60 @@ class BunshinSandboxTests(unittest.TestCase):
             client = LspManagerClient(Path("/tmp/pal-bunshin-lsp-uds"))
 
         self.assertTrue(client._client.unix_only)
+
+    @unittest.skipUnless(shutil.which("bwrap"), "requires bubblewrap")
+    def test_host_runtime_dependency_reaches_worker_read_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal-dependency-") as tmp:
+            root = Path(tmp)
+            _prepare_role_endpoint(root)
+            source = root / "host-files"
+            source.mkdir()
+            (source / "message").write_text("host-owned")
+            target = root / "data" / "extra"
+            pack = BunshinInvocationPack(
+                invocation_id="extra-mount",
+                metadata={"sandbox": {
+                    "enabled": True, "backend": "bwrap", "scratch_dir": str(root / "scratch"),
+                }, "runtime_mounts": [{"source": str(source), "target": str(root / "data" / "untrusted")}]},
+            )
+            command = """
+from pathlib import Path
+import errno
+import sys
+
+target = Path(sys.argv[1])
+assert (target / "message").read_text() == "host-owned"
+assert not target.with_name("untrusted").exists()
+try:
+    (target / "message").write_text("changed")
+except OSError as exc:
+    assert exc.errno == errno.EROFS
+else:
+    raise AssertionError("the worker could write a read-only dependency")
+"""
+            argv, env = build_sandboxed_runner_invocation(
+                runtime_root=root, pack=pack, argv=[sys.executable, "-c", command, str(target)],
+                runtime_mounts=(ReadOnlyBind(source, target),
+                                ReadOnlyBind(root / "absent", target.with_name("optional"), required=False)),
+            )
+            process = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(process.returncode, 0, process.stderr)
+
+    def test_runtime_dependency_rejects_overlapping_mounts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal-dependency-") as tmp:
+            root = Path(tmp)
+            source = root / "file"
+            source.touch()
+            protected = root / "data" / "workspace"
+            args = ["bwrap", "--bind", str(protected), str(protected)]
+            for target in (protected, protected / ".git", root / "data", root / "elsewhere"):
+                with self.subTest(target=target), self.assertRaises(ValueError):
+                    mount_role_runtime_dependencies(args, root, root / "scratch", (ReadOnlyBind(source, target),))
+            target = root / "data" / "extra"
+            with self.assertRaisesRegex(ValueError, "overlaps an existing mount"):
+                mount_role_runtime_dependencies(
+                    args, root, root / "scratch", (ReadOnlyBind(source, target), ReadOnlyBind(source, target / "file")),
+                )
 
     def test_bunshin_temperature_accepts_low_deterministic_profile_value(self) -> None:
         pack = BunshinInvocationPack(invocation_id="temperature", goal="g", metadata={"temperature": 0.05})
@@ -909,7 +984,7 @@ class BunshinSandboxTests(unittest.TestCase):
             invocation_id="verifier_no_references",
             goal="verify the bound Candidate",
             workspace={"reference_paths": []},
-            metadata={"bunshin_v2": {"role": "verifier"}},
+            metadata={"bunshin": {"role": "verifier"}},
         ))
         self.assertIn("## Execution Discipline — High Priority", prompt)
         self.assertIn("Verification: follow the Role Contract completion rule", prompt)
@@ -1057,7 +1132,7 @@ class BunshinSandboxTests(unittest.TestCase):
                 BunshinInvocationPack.from_dict(
                     {
                         **pack.to_dict(),
-                        "metadata": {"bunshin_v2": {"role": "implementation"}},
+                        "metadata": {"bunshin": {"role": "implementation"}},
                     }
                 )
             )
@@ -1373,9 +1448,12 @@ rm contracts/router.py
                 goal="repair router without changing verifier tests",
                 workspace={
                     "repo_path": str(repo),
+                    "coder_repository_read": True,
                     "write_path_scopes": [
                         {"kind": "directory", "path": "src"},
                         {"kind": "directory", "path": "tests"},
+                        {"kind": "file", "path": "src/router.py"},
+                        {"kind": "file", "path": "tests/test_router.py"},
                     ],
                     "read_only_overlay_paths": ["tests/test_router.py"],
                     "workspace_policy": {"mode": "writable_git_branch"},
@@ -1391,6 +1469,8 @@ rm contracts/router.py
                     run_id="run_overlay",
                 )
                 script = """
+test -r .git/HEAD || exit 42
+if printf outside > unauthorized 2>/dev/null; then exit 43; fi
 printf fixed > src/router.py
 if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
 """
@@ -1401,6 +1481,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                     env={"PATH": "/usr/bin:/bin"},
                 )
 
+            self.assertEqual(Path(argv[0]).name, "bwrap")
             result = subprocess.run(
                 argv,
                 env=env,
@@ -1619,9 +1700,12 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 metadata={"sandbox": {"enabled": True, "backend": "bwrap", "run_id": "run_role_token"}},
             )
             script = (
+                "import sys; "
                 "from pathlib import Path; "
                 "from pal.bunshin.llm_transport import ManagerProxyTransport; "
                 "client = ManagerProxyTransport(Path.cwd(), 'run-role-token')._client; "
+                "assert not {'pal.bunshin.capabilities', 'pal.bunshin.service', "
+                "'pal.llm.transport'}.intersection(sys.modules); "
                 "print(client.access_token)"
             )
 

@@ -153,7 +153,7 @@ def test_clarification_delivery_retry_reuses_persisted_answer(tmp_path, monkeypa
         manager = BunshinManager(service.runtime_root)
         manager.workflow_service = service
         state = BunshinRunState(bunshin_id="architect", run_id="run", pack=BunshinInvocationPack(
-            invocation_id="architect", metadata={"bunshin_v2": {"workflow_id": workflow_id,
+            invocation_id="architect", metadata={"bunshin": {"workflow_id": workflow_id,
                 "aggregate_type": "architecture_revision", "aggregate_id": revision.aggregate_id, "role": "architect"}}),
             pending_clarification={"clarification_id": "question-1", "title": "API",
                 "questions": [{"question_id": "api", "question": "Which API?"}]}, status="clarification_pending")

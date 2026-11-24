@@ -136,7 +136,7 @@ class HumanReview:
                         workflow_id=revision.workflow_id,
                         aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                         aggregate_id=revision.aggregate_id,
-                        actor="bunshin-v2-manager",
+                        actor="bunshin-manager",
                         expected_version=current.version,
                         idempotency_key=(
                             f"human-review-published:v{HUMAN_REVIEW_RENDER_VERSION}:"

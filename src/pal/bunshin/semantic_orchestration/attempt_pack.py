@@ -58,13 +58,13 @@ class AttemptPack:
         # session id here makes draft_read present a context that the Role
         # Gateway (correctly) rejects as belonging to another assignment.
         workspace_value = dict(pack_value.get("workspace") or {})
-        workspace_binding = dict(workspace_value.get("bunshin_v2") or {})
+        workspace_binding = dict(workspace_value.get("bunshin") or {})
         workspace_binding.update(
             {
                 # SubmissionDraftContext is reconstructed from the workspace
                 # pack inside the worker.  Keep the complete immutable
                 # authoring binding there, not only the per-attempt lease
-                # fields; metadata.bunshin_v2 is not visible to that parser.
+                # fields; metadata.bunshin is not visible to that parser.
                 "workflow_id": snapshot.workflow_id,
                 "aggregate_type": snapshot.aggregate_type.value,
                 "aggregate_id": snapshot.aggregate_id,
@@ -81,7 +81,7 @@ class AttemptPack:
                 "harness_config": dict(harness_spec.config),
             }
         )
-        workspace_value["bunshin_v2"] = workspace_binding
+        workspace_value["bunshin"] = workspace_binding
         workspace_value.update(
             {
                 "artifact_dir": str(attempt_dir / "artifacts"),
@@ -99,8 +99,8 @@ class AttemptPack:
         ):
             Path(str(workspace_value[key])).mkdir(parents=True, exist_ok=True)
         metadata = dict(pack_value.get("metadata") or {})
-        bunshin_v2 = dict(metadata.get("bunshin_v2") or {})
-        bunshin_v2.update(
+        bunshin = dict(metadata.get("bunshin") or {})
+        bunshin.update(
             {
                 "invocation_id": str(attempt["attempt_id"]),
                 "lease_resource": assignment_lease_resource,
@@ -115,7 +115,7 @@ class AttemptPack:
                 "harness_config": dict(harness_spec.config),
             }
         )
-        metadata["bunshin_v2"] = bunshin_v2
+        metadata["bunshin"] = bunshin
         metadata["agent_session"] = {
             "session_id": invocation_id,
             # A retry reuses the same durable assignment while a new
@@ -133,6 +133,7 @@ class AttemptPack:
             ),
             "harness_id": harness_spec.harness_id,
             "harness_generation": effective_harness_generation,
+            "durable_tool_interactions": True,
             "checkpoint_initialization_required": stage_harness_binding.pal_checkpoint_capable,
             "continuation_input_path": str(continuation_input_path or ""),
             "continuation_output_path": str(continuation_output_path),

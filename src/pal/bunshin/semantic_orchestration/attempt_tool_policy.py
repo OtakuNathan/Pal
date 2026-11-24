@@ -50,13 +50,13 @@ class ToolPolicy:
                 )
                 pack_value = pack.to_dict()
                 metadata = dict(pack_value.get("metadata") or {})
-                bunshin_v2 = dict(metadata.get("bunshin_v2") or {})
-                bunshin_v2["swe_verification_tool_contract"] = tool_contract
-                metadata["bunshin_v2"] = bunshin_v2
+                bunshin = dict(metadata.get("bunshin") or {})
+                bunshin["swe_verification_tool_contract"] = tool_contract
+                metadata["bunshin"] = bunshin
                 workspace_value = dict(pack_value.get("workspace") or {})
-                workspace_bunshin_v2 = dict(workspace_value.get("bunshin_v2") or {})
-                workspace_bunshin_v2["swe_verification_tool_contract"] = tool_contract
-                workspace_value["bunshin_v2"] = workspace_bunshin_v2
+                workspace_bunshin = dict(workspace_value.get("bunshin") or {})
+                workspace_bunshin["swe_verification_tool_contract"] = tool_contract
+                workspace_value["bunshin"] = workspace_bunshin
                 resolved_profile = dict(pack_value.get("resolved_profile") or {})
                 guidance_overrides = merge_tool_guidance_overrides(
                     resolved_profile.get("capability_guidance_overrides"),
@@ -74,7 +74,7 @@ class ToolPolicy:
         if (
             prepare_workspace
             and not uses_bound_durable_workspace
-            and not bool(pack.workspace.get("v2_role_workspace"))
+            and not bool(pack.workspace.get("role_workspace_prepared"))
         ):
             pack = prepare_role_workspace(
                 self.runtime_root,
@@ -82,7 +82,7 @@ class ToolPolicy:
                 run_id=run_id,
                 attempt_key=f"fence-{fencing_token}",
             )
-        elif not bool(pack.workspace.get("v2_role_workspace")):
+        elif not bool(pack.workspace.get("role_workspace_prepared")):
             invocation_dir = invocation_root(self.runtime_root) / invocation_id
             attempt_dir = invocation_dir / "attempts" / f"fence-{fencing_token}"
             bound_workspace = dict(pack.workspace)

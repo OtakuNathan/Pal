@@ -432,10 +432,10 @@ class DependencyRepairPersistenceTests(unittest.TestCase):
 
     def test_legacy_execution_defaults_and_unknown_version_fail_closed(self) -> None:
         with self.repository.database.write_connection() as connection:
-            connection.execute("UPDATE bunshin_v2_graph_generations SET execution_json = ?", (json.dumps({"state": "RUNNING"}),))
+            connection.execute("UPDATE bunshin_graph_generations SET execution_json = ?", (json.dumps({"state": "RUNNING"}),))
         self.assertEqual(self.repository.cycles.read_graph_execution(workflow_id=self.workflow).dependency_repairs, DependencyRepairLedger())
         with self.repository.database.write_connection() as connection:
-            connection.execute("UPDATE bunshin_v2_graph_generations SET execution_json = ?", (json.dumps({"dependency_repairs": {"version": 99, "pending": None, "history": []}}),))
+            connection.execute("UPDATE bunshin_graph_generations SET execution_json = ?", (json.dumps({"dependency_repairs": {"version": 99, "pending": None, "history": []}}),))
         with self.assertRaisesRegex(ValueError, "unsupported"):
             self.repository.cycles.read_graph_execution(workflow_id=self.workflow)
 
@@ -460,12 +460,12 @@ class DependencyRepairPersistenceTests(unittest.TestCase):
     def test_old_accepted_projection_cannot_publish_while_repair_pending(self) -> None:
         # A stored admission fence has precedence over legacy state inference.
         with self.repository.database.write_connection() as connection:
-            rows = connection.execute("SELECT cycle_id, payload_json FROM bunshin_v2_node_cycles").fetchall()
+            rows = connection.execute("SELECT cycle_id, payload_json FROM bunshin_node_cycles").fetchall()
             for row in rows:
                 payload = json.loads(row["payload_json"])
                 payload["state"] = "ACCEPTED"
                 payload["active_assignment"] = None
-                connection.execute("UPDATE bunshin_v2_node_cycles SET payload_json=? WHERE cycle_id=?", (json.dumps(payload), row["cycle_id"]))
+                connection.execute("UPDATE bunshin_node_cycles SET payload_json=? WHERE cycle_id=?", (json.dumps(payload), row["cycle_id"]))
         loaded = self.repository.cycles.read_graph_execution(workflow_id=self.workflow)
         self.assertEqual(loaded.state, GraphExecutionState.RUNNING)
         self.assertEqual(loaded.published_sink_ref, "")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.messages import normalize_bunshin_pack_fields
+
 import base64
 import json
 from dataclasses import dataclass, field, replace
@@ -10,33 +12,13 @@ from pal.execution.git_tool import GitTool, classify_git_command
 from pal.execution.tool_facade import ToolExecutionError, ToolRejectedError
 from pal.shared import RuntimeStatus
 from pal.bunshin.git_gateway_diagnostics import GitGatewayDiagnostics
-from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.role_gateway_client import role_gateway_client_from_env, RoleGatewayArtifactStore
-from pal.bunshin.architecture_compilation import (
-    compiled_architecture_definition_from_mapping,
-)
 from pal.bunshin.artifacts import ArtifactRef
-from pal.bunshin.contracts import AggregateType
-from pal.bunshin.contract_protocol import (
-    ARCHITECT_FILENAME,
-    software_contract_projection,
-    validate_contract_payload,
-)
-from pal.bunshin.graph_compiler import (
-    GraphCompileBindings,
-    GraphCompiler,
-    build_yaml_source_map,
-)
-from pal.bunshin.graph_satellites import FamilyGraphSatelliteProjector
-from pal.bunshin.graph_protocol import GraphSourceMap, RoleBinding
 from pal.bunshin.git_scope import scoped_role_git_read_plan
-from pal.bunshin.role_contracts import (
-    family_execution_adapter,
-    validate_family_binding_payload,
-)
+from pal.bunshin.interaction_gateway import interaction_command
+from pal.bunshin.architect_submission import compile_architect_submission
+from pal.bunshin.verifier_submission import validate_verification_submission
 from pal.bunshin.service import BunshinWorkflowService
-from pal.bunshin.skeleton import preflight_architecture_workspace_submission
-from pal.bunshin.task_ledger import validate_task_ledger
 from pal.bunshin.submission_drafts import (
     decode_remote_draft_snapshot,
     SubmissionDraftContext,
@@ -44,16 +26,7 @@ from pal.bunshin.submission_drafts import (
     SubmissionDraftStore,
 )
 from pal.bunshin.role_protocol import RoleAssignmentState, stable_hash
-from pal.bunshin.swe_verification import (
-    semantic_verification_submission_errors,
-    verification_corpus_files,
-    verification_scratch_paths,
-    verification_workspace_changed_paths,
-)
-from pal.bunshin.work_items import (
-    assert_work_items_complete,
-    submission_work_items, work_item_seed, prepare_work_item_mutation,
-)
+from pal.bunshin.work_items import work_item_seed, prepare_work_item_mutation
 
 from pal.bunshin.submission_errors import SubmissionValidationError, submission_validation
 
@@ -70,29 +43,6 @@ ROLE_SUBMISSION_ARTIFACT_TYPES = {
 
 def role_submission_artifact_type(submission_kind: str) -> str:
     return str(ROLE_SUBMISSION_ARTIFACT_TYPES.get(str(submission_kind or "")) or "")
-
-
-def _graph_role_binding(value: Mapping[str, Any]) -> RoleBinding:
-    binding = dict(value or {})
-    participant = str(binding.get("participant") or "")
-    profile = dict(binding.get("role_profile") or {})
-    return RoleBinding(
-        participant=participant,
-        profile_id=(
-            str(
-                profile.get("canonical_profile_id")
-                or profile.get("bunshin_profile")
-                or ""
-            ).strip()
-            if participant == "profile"
-            else ""
-        ),
-        reason=(
-            str(binding.get("reason") or "").strip()
-            if participant == "null"
-            else ""
-        ),
-    )
 
 
 @dataclass
@@ -113,7 +63,10 @@ class RoleAssignmentGateway:
 
     def call(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(params or {})
-        authenticated = self.authorize(str(payload.pop("access_token", "")))
+        access_token = str(payload.pop("access_token", ""))
+        authenticated = self.authorize(access_token)
+        if method in {"interaction_park", "interaction_resume", "interaction_consumed"}:
+            return interaction_command(self.service, method, authenticated, payload, access_token=access_token)
         if method == "checkpoint_initialize":
             assignment = dict(authenticated["assignment"])
             checkpoint = self.repository.role_attempts.publish_initial_role_checkpoint(
@@ -164,6 +117,15 @@ class RoleAssignmentGateway:
                 request=dict(payload.get("request") or {}),
             )
             return {"found": result is not None, "result": result}
+        if method == "repair_precheck_plan":
+            from pal.bunshin.repair_precheck import repair_precheck_plan
+            assignment = authenticated["assignment"]
+            if (assignment["role"], assignment["mode"]) != ("implementation", "repair"):
+                raise ValueError("repair precheck requires an implementation repair assignment")
+            workspace = self._authenticated_prompt_pack(authenticated)["workspace"]
+            if not workspace.get("repair_precheck"):
+                raise ValueError("assignment has no repair precheck")
+            return repair_precheck_plan(Path(workspace["repo_path"]), workspace["repair_corpus_scope"])
         if method == "draft_submit":
             return self._draft_submit(authenticated, payload)
         if method == "bound_input_json":
@@ -357,9 +319,9 @@ class RoleAssignmentGateway:
         pack = self._authenticated_prompt_pack(authenticated)
         workspace = dict(pack.get("workspace") or {})
         workspace["runtime_root"] = str(self.service.runtime_root)
-        workspace["bunshin_v2"] = {
-            **dict(dict(pack.get("metadata") or {}).get("bunshin_v2") or {}),
-            **dict(workspace.get("bunshin_v2") or {}),
+        workspace["bunshin"] = {
+            **dict(dict(pack.get("metadata") or {}).get("bunshin") or {}),
+            **dict(workspace.get("bunshin") or {}),
             **context.to_dict(), "authoring_input_fingerprint": context.input_fingerprint,
         }
         return workspace
@@ -375,7 +337,7 @@ class RoleAssignmentGateway:
         if not isinstance(submission, Mapping):
             raise SubmissionValidationError("role submission must be a JSON object")
         payload = dict(submission)
-        if context.role == "verifier" and assignment.get("submission_payload_hash"):
+        if (context.role == "verifier" or context.draft_kind == "candidate") and assignment.get("submission_payload_hash"):
             if stable_hash(payload) != assignment["submission_payload_hash"]:
                 raise SubmissionValidationError("role assignment already has a different submission receipt")
             return {"submitted": True, "submission_artifact_ref": dict(assignment["submission_artifact_ref"]),
@@ -408,6 +370,13 @@ class RoleAssignmentGateway:
             self._validate_draft_submission_before_receipt(
                 authenticated, context, payload, case_revision=int(snapshot.payload.get("case_revision") or 0),
             )
+        if (context.draft_kind == "candidate" and assignment["mode"] == "repair"
+                and str(payload.get("status") or "candidate_ready").strip().lower() == "candidate_ready"):
+            pack = self._authenticated_prompt_pack(authenticated)
+            if pack["workspace"].get("repair_precheck"):
+                from pal.bunshin.repair_precheck import check_manager_repair
+                with submission_validation():
+                    check_manager_repair(self.service.runtime_root, pack, payload.get("repair_precheck") or {})
         artifact_ref = self.service.artifacts.put_json(
             payload,
             artifact_type=artifact_type,
@@ -516,291 +485,14 @@ class RoleAssignmentGateway:
         submission: Mapping[str, Any],
         *, case_revision: int = 0,
     ) -> None:
-        """Reject correctable verifier output before freezing its Draft."""
-
-        if str(assignment.get("aggregate_type") or "") != AggregateType.DAG_NODE_RUN.value:
-            return
-        node = self.repository.snapshots.read_snapshot(
-            AggregateType.DAG_NODE_RUN,
-            str(assignment.get("aggregate_id") or ""),
-        )
-        if node is None:
-            return
-        view_value = node.payload.get("unit_work_view_ref")
-        if not isinstance(view_value, Mapping) or not view_value.get("sha256"):
-            return
-        try:
-            work_view = self.service.artifacts.read_json(dict(view_value))
-        except Exception:
-            # Manager-owned identity/corpus corruption is not correctable by
-            # the live role.  Preserve the durable post-submit invariant path
-            # instead of feeding the model an impossible retry instruction.
-            return
-        if not isinstance(work_view, Mapping):
-            return
-
-        prompt_pack = self._authenticated_prompt_pack(authenticated)
-        workspace = dict(prompt_pack.get("workspace") or {})
-        workspace["bunshin_v2"] = {
-            **dict(dict(prompt_pack.get("metadata") or {}).get("bunshin_v2") or {}),
-            **dict(workspace.get("bunshin_v2") or {}),
-        }
-        from pal.bunshin.semantic_orchestration.verification_policy import _verification_repair_scope
-
-        workspace["bunshin_v2"]["swe_verification_tool_contract"] = {
-            **dict(workspace["bunshin_v2"].get("swe_verification_tool_contract") or {}),
-            **_verification_repair_scope(self.repository, node),
-        }
-        workspace["verification_case_revision"] = case_revision
-        review_workspace = Path(str(workspace.get("repo_path") or ""))
-        review_scratch = Path(str(workspace.get("review_scratch_dir") or ""))
-        scratch_only = bool(workspace.get("verification_scratch_only"))
-        corpus_scope = dict(
-            dict(node.payload.get("path_policy") or {}).get(
-                "verification_corpus"
-            )
-            or {}
-        )
-        if scratch_only:
-            changed_paths = verification_scratch_paths(review_scratch)
-            current_case_paths = list(changed_paths)
-        else:
-            candidate_digest = str(node.payload.get("candidate_digest") or "").strip()
-            if not candidate_digest:
-                return
-            if not review_workspace.is_dir():
-                return
-            try:
-                changed_paths = verification_workspace_changed_paths(
-                    review_workspace,
-                    candidate_digest,
-                )
-            except Exception:
-                return
-            current_case_paths = verification_corpus_files(
-                review_workspace,
-                corpus_scope,
-            )
-        errors = semantic_verification_submission_errors(
-            submission,
-            work_view=dict(work_view),
-            changed_paths=changed_paths,
-            current_case_paths=current_case_paths,
-            corpus_scope=corpus_scope,
-            scratch_only=scratch_only,
-            workspace=workspace,
-        )
-        if errors:
-            raise ValueError(
-                "verification submission rejected before durable receipt:\n- "
-                + "\n- ".join(errors)
-            )
+        return validate_verification_submission(self.service, self._authenticated_prompt_pack, authenticated, assignment, submission, case_revision=case_revision)
 
     def _compile_architect_submission(
         self,
         authenticated: Mapping[str, Any],
         submission: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Validate one authored projection against its pinned Family binding.
-
-        The sandbox sends only the parsed ``architect.yaml`` instance. Raw JSON
-        Schema and compiler state stay behind this Manager gateway.
-        """
-
-        payload = dict(submission)
-        if set(payload) != {"source", "architecture"}:
-            raise SubmissionValidationError(
-                "architect submission requires only source and architecture"
-            )
-        if str(payload.get("source") or "") != ARCHITECT_FILENAME:
-            raise SubmissionValidationError(
-                f"architect submission source must be {ARCHITECT_FILENAME}"
-            )
-        architecture = payload.get("architecture")
-        if not isinstance(architecture, Mapping):
-            raise SubmissionValidationError("architect submission architecture must be an object")
-
-        assignment = dict(authenticated["assignment"])
-        binding_sha = str(assignment.get("family_binding_sha") or "").strip()
-        binding_record = self.repository.artifacts.read_artifact_record(binding_sha)
-        if binding_record is None:
-            raise ValueError("pinned FamilyBindingArtifact is unavailable")
-        if str(binding_record.get("artifact_type") or "") != "FamilyBindingArtifact":
-            raise ValueError("pinned family binding has the wrong artifact type")
-        binding = dict(self.service.artifacts.read_json(binding_record))
-        validate_family_binding_payload(binding)
-        architecture_binding = dict(
-            binding.get("architecture_definition") or {}
-        )
-        schema_payload = self.service.artifacts.read_json(
-            dict(architecture_binding.get("schema_ref") or {})
-        )
-        template_payload = self.service.artifacts.read_json(
-            dict(architecture_binding.get("template_ref") or {})
-        )
-        satellite_template_payload = self.service.artifacts.read_json(
-            dict(architecture_binding.get("satellite_template_ref") or {})
-        )
-        if not isinstance(schema_payload, Mapping):
-            raise ValueError("pinned architecture schema artifact is malformed")
-        if not isinstance(template_payload, Mapping):
-            raise ValueError("pinned architect template artifact is malformed")
-        if not isinstance(satellite_template_payload, Mapping):
-            raise ValueError("pinned graph satellite template artifact is malformed")
-        if (
-            str(satellite_template_payload.get("specialization_id") or "")
-            != str(architecture_binding.get("specialization_id") or "")
-            or str(satellite_template_payload.get("generation_hash") or "")
-            != str(architecture_binding.get("generation_hash") or "")
-        ):
-            raise ValueError(
-                "pinned graph satellite template does not match its Family binding"
-            )
-        definition = compiled_architecture_definition_from_mapping(
-            {
-                "specialization_id": architecture_binding["specialization_id"],
-                "family_id": architecture_binding["family_id"],
-                "generation_hash": architecture_binding["generation_hash"],
-                "schema": dict(schema_payload),
-                "template": str(template_payload.get("template") or ""),
-                "graph_satellite_template": str(
-                    satellite_template_payload.get("template") or ""
-                ),
-                "example": {},
-            }
-        )
-        with submission_validation():
-            document = validate_contract_payload(
-                dict(architecture),
-                definition=definition,
-            )
-
-        if (
-            family_execution_adapter(binding.get("execution_adapter"))
-            == SOFTWARE_GIT_ADAPTER
-        ):
-            revision = self.repository.snapshots.read_snapshot(
-                AggregateType.ARCHITECTURE_REVISION,
-                str(assignment["aggregate_id"]),
-            )
-            if revision is None:
-                raise ValueError("architecture revision is unavailable")
-            workspace_root = Path(
-                str(revision.payload.get("architecture_workspace_path") or "")
-            )
-            base_sha = str(
-                revision.payload.get("architecture_base_sha") or ""
-            ).strip()
-            requirements_ref = dict(revision.payload.get("requirements_ref") or {})
-            workspace_snapshot_ref = dict(
-                revision.payload.get("workspace_snapshot_ref") or {}
-            )
-            if (
-                not workspace_root.is_dir()
-                or not base_sha
-                or not requirements_ref.get("sha256")
-                or not workspace_snapshot_ref.get("sha256")
-            ):
-                raise ValueError(
-                    "architecture workspace preflight state is incomplete"
-                )
-            requirements = validate_task_ledger(
-                self.service.artifacts.read_json(requirements_ref)
-            )
-            workspace_snapshot = self.service.artifacts.read_json(
-                workspace_snapshot_ref
-            )
-            validation, _ = (
-                preflight_architecture_workspace_submission(
-                    software_contract_projection(
-                        document.model_dump(mode="python")
-                    ),
-                    requirements_payload=requirements,
-                    workspace_root=workspace_root,
-                    base_sha=base_sha,
-                    original_head=str(
-                        dict(workspace_snapshot).get("original_head") or ""
-                    ),
-                )
-            )
-            with submission_validation():
-                validation.raise_for_errors()
-
-        prompt_pack = self._authenticated_prompt_pack(authenticated)
-        workspace = {
-            **dict(prompt_pack.get("workspace") or {}),
-            "runtime_root": str(self.service.runtime_root),
-            "bunshin_v2": dict(
-                dict(prompt_pack.get("metadata") or {}).get("bunshin_v2") or {}
-            ),
-        }
-        # Architecture revisions and installed GraphIR generations are
-        # independent sequences.  A human edit may supersede any number of
-        # authored revisions before one is accepted, and those discarded
-        # revisions must not consume GraphIR generations.  Compile the
-        # candidate against the next append-only GraphIR slot; installation
-        # still performs the transactional gap/identity check.
-        previous_graph = self.repository.cycles.read_graph_generation(
-            graph_id=str(assignment["workflow_id"]),
-        )
-        graph_generation = (
-            int(previous_graph.generation) + 1
-            if previous_graph is not None
-            else 1
-        )
-        source_map = (
-            build_yaml_source_map(
-                Path(str(workspace["architect_path"]))
-            )
-            if str(workspace.get("architect_path") or "").strip()
-            else GraphSourceMap(
-                source_ref=ARCHITECT_FILENAME,
-                locations={},
-            )
-        )
-        source_map_ref = self.service.artifacts.put_json(
-            source_map.to_dict(),
-            artifact_type="GraphSourceMapArtifact",
-            provenance={
-                "workflow_id": str(assignment["workflow_id"]),
-                "architecture_assignment_id": str(
-                    assignment["assignment_id"]
-                ),
-            },
-        )
-        with submission_validation():
-            graph_ir = GraphCompiler().compile(
-                document,
-                graph_id=str(assignment["workflow_id"]),
-                generation=graph_generation,
-                bindings=GraphCompileBindings(
-                    producer=_graph_role_binding(
-                        dict(binding["role_bindings"])["implementation"]
-                    ),
-                    checker=_graph_role_binding(
-                        dict(binding["role_bindings"])["verifier"]
-                    ),
-                    execution_adapter=str(binding["execution_adapter"]),
-                ),
-                satellite_projector=FamilyGraphSatelliteProjector(
-                    specialization_id=definition.specialization_id,
-                    template=definition.graph_satellite_template,
-                ),
-                source_ref=ARCHITECT_FILENAME,
-                workspace_authority_rules=definition.workspace_authority_rules,
-                source_map=source_map,
-                source_map_ref=source_map_ref.sha256,
-            )
-        work_items = assert_work_items_complete(workspace)
-        return {
-            "schema_version": "2",
-            "contract_schema": definition.specialization_id,
-            "contract": document.model_dump(mode="python"),
-            "graph_ir": graph_ir.to_dict(),
-            "graph_source_map_ref": source_map_ref.to_dict(),
-            "source": ARCHITECT_FILENAME,
-            "work_items": submission_work_items(work_items.get("items")),
-        }
+        return compile_architect_submission(self.service, self._authenticated_prompt_pack, authenticated, submission)
 
     def _authenticated_prompt_pack(
         self,
@@ -815,7 +507,7 @@ class RoleAssignmentGateway:
         prompt_pack = self.service.artifacts.read_json(prompt_ref)
         if not isinstance(prompt_pack, Mapping):
             raise ValueError("role prompt pack is malformed")
-        return dict(prompt_pack)
+        return normalize_bunshin_pack_fields(dict(prompt_pack))
 
     def _draft_evidence_read(self, authenticated: Mapping[str, Any],
                             params: Mapping[str, Any]) -> dict[str, Any]:

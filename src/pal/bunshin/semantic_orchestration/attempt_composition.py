@@ -2,7 +2,6 @@ from __future__ import annotations
 from pal.bunshin.semantic_orchestration.runtime_settings import RoleRuntimeSettings
 from pal.bunshin.semantic_orchestration.workflow_requests import WorkflowRequests
 from pathlib import Path
-from pal.bunshin.harnesses import BunshinHarnessRegistry
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_orchestration.attempt_inputs import AttemptInputs
@@ -37,6 +36,8 @@ from pal.bunshin.semantic_orchestration.attempt_process_result import ProcessRes
 from pal.bunshin.semantic_orchestration.attempt_terminal_validation import TerminalValidation
 from pal.bunshin.semantic_orchestration.attempt_completion import AttemptCompletion
 from pal.bunshin.semantic_orchestration.attempt_execution import AttemptExecution
+from pal.foundation.bwrap_permissions import ReadOnlyBind
+from pal.lsp.ipc import lsp_runtime_dir
 
 
 def build_attempt_execution(
@@ -48,7 +49,6 @@ def build_attempt_execution(
     workflow_facts: WorkflowFacts,
     artifacts: ContentAddressedArtifactStore,
     background: BackgroundAssignments,
-    harness_registry: BunshinHarnessRegistry,
     processes: WorkerProcesses,
     settings: RoleRuntimeSettings,
     publish_worker_event: WorkerEventPublisher | None,
@@ -62,9 +62,10 @@ def build_attempt_execution(
     unregister_broker_run: BrokerRunUnregistrar | None,
     workspace_locks: WorkspaceLockRegistry,
 ) -> AttemptExecution:
+    lsp_directory = lsp_runtime_dir(runtime_root.expanduser().absolute())
     return AttemptExecution(
         workspace_preparation=WorkspacePreparation(
-            artifacts=artifacts, attempt_inputs=attempt_inputs, harness_registry=harness_registry,
+            artifacts=artifacts, attempt_inputs=attempt_inputs,
             repository=repository, requests=requests, runtime_root=runtime_root,
         ),
         verifier_context=VerifierContext(artifacts=artifacts),
@@ -81,7 +82,10 @@ def build_attempt_execution(
         assignment_replay=AssignmentReplay(artifacts=artifacts, background=background, role_checkpoints=role_checkpoints),
         attempt_admission=AttemptAdmission(repository=repository, supervisor=supervisor),
         attempt_pack=AttemptPack(settings=settings, role_checkpoints=role_checkpoints, runtime_root=runtime_root),
-        attempt_publication=AttemptPublication(artifacts=artifacts, repository=repository, runtime_db_path=runtime_db_path, runtime_root=runtime_root),
+        attempt_publication=AttemptPublication(
+            artifacts=artifacts, repository=repository, runtime_db_path=runtime_db_path, runtime_root=runtime_root,
+            runtime_mounts=(ReadOnlyBind(lsp_directory, lsp_directory, required=False),),
+        ),
         worker_execution=WorkerExecution(
             processes=processes, publish_worker_event=publish_worker_event, register_broker_run=register_broker_run,
             repository=repository, role_leases=role_leases, supervisor=supervisor,

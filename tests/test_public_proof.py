@@ -34,30 +34,30 @@ class PublicProofTests(unittest.TestCase):
         connection = sqlite3.connect(self.database)
         connection.executescript(
             """
-            CREATE TABLE bunshin_v2_schema_meta (schema_version INTEGER);
-            CREATE TABLE bunshin_v2_aggregate_snapshots (
+            CREATE TABLE bunshin_schema_meta (schema_version INTEGER);
+            CREATE TABLE bunshin_aggregate_snapshots (
                 aggregate_type TEXT, aggregate_id TEXT, workflow_id TEXT,
                 state TEXT, version INTEGER, payload_json TEXT,
                 created_at TEXT, updated_at TEXT
             );
-            CREATE TABLE bunshin_v2_task_projection (
+            CREATE TABLE bunshin_task_projection (
                 task_id TEXT, state TEXT, title TEXT, objective TEXT,
                 profile_id TEXT, family_id TEXT, task_revision_sha TEXT,
                 owner TEXT, updated_at TEXT
             );
-            CREATE TABLE bunshin_v2_workflow_projection (
+            CREATE TABLE bunshin_workflow_projection (
                 workflow_id TEXT, current_phase TEXT, workflow_state TEXT,
                 active_aggregate_type TEXT, active_aggregate_id TEXT,
                 active_worker_id TEXT, waiting_for_user INTEGER,
                 liveness TEXT, updated_at TEXT
             );
-            CREATE TABLE bunshin_v2_domain_events (
+            CREATE TABLE bunshin_domain_events (
                 event_id TEXT, workflow_id TEXT, aggregate_type TEXT,
                 aggregate_id TEXT, aggregate_version INTEGER, event_type TEXT,
                 action_id TEXT, correlation_id TEXT, causation_id TEXT,
                 created_at TEXT
             );
-            CREATE TABLE bunshin_v2_role_invocations (
+            CREATE TABLE bunshin_role_invocations (
                 invocation_id TEXT, workflow_id TEXT, aggregate_type TEXT,
                 aggregate_id TEXT, role TEXT, mode TEXT, role_profile_id TEXT,
                 harness_id TEXT, harness_generation TEXT, status TEXT,
@@ -66,25 +66,25 @@ class PublicProofTests(unittest.TestCase):
                 total_tool_latency_ms INTEGER, total_wall_latency_ms INTEGER,
                 created_at TEXT, updated_at TEXT
             );
-            CREATE TABLE bunshin_v2_role_assignments (
+            CREATE TABLE bunshin_role_assignments (
                 assignment_id TEXT, session_id TEXT, workflow_id TEXT,
                 aggregate_type TEXT, aggregate_id TEXT, role TEXT, mode TEXT,
                 role_profile_id TEXT, state TEXT, active_attempt_id TEXT,
                 submission_kind TEXT, submission_artifact_ref_json TEXT,
                 created_at TEXT, updated_at TEXT
             );
-            CREATE TABLE bunshin_v2_role_attempts (
+            CREATE TABLE bunshin_role_attempts (
                 attempt_id TEXT, assignment_id TEXT, attempt_index INTEGER,
                 fencing_token INTEGER, harness_id TEXT,
                 harness_generation TEXT, status TEXT, error_kind TEXT,
                 started_at TEXT, finished_at TEXT, updated_at TEXT
             );
-            CREATE TABLE bunshin_v2_delivery_outbox (
+            CREATE TABLE bunshin_delivery_outbox (
                 delivery_id TEXT, workflow_id TEXT, event_kind TEXT,
                 status TEXT, attempt_count INTEGER, created_at TEXT,
                 updated_at TEXT
             );
-            CREATE TABLE bunshin_v2_artifacts (
+            CREATE TABLE bunshin_artifacts (
                 sha256 TEXT, artifact_type TEXT, schema_version TEXT,
                 media_type TEXT, byte_size INTEGER, storage_path TEXT,
                 durable INTEGER, created_at TEXT
@@ -105,39 +105,39 @@ class PublicProofTests(unittest.TestCase):
             ("workflow", "wf_demo", "wf_demo", "ACTIVE", 1, workflow_payload, now, now),
         ]
         connection.executemany(
-            "INSERT INTO bunshin_v2_aggregate_snapshots VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_aggregate_snapshots VALUES (?,?,?,?,?,?,?,?)",
             values,
         )
-        connection.execute("INSERT INTO bunshin_v2_schema_meta VALUES (29)")
+        connection.execute("INSERT INTO bunshin_schema_meta VALUES (29)")
         connection.execute(
-            "INSERT INTO bunshin_v2_task_projection VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_task_projection VALUES (?,?,?,?,?,?,?,?,?)",
             ("task_demo", "ACTIVE", "Demo", "Prove recovery", "generic", "general", self.artifact_sha, "pal", now),
         )
         connection.execute(
-            "INSERT INTO bunshin_v2_workflow_projection VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_workflow_projection VALUES (?,?,?,?,?,?,?,?,?)",
             ("wf_demo", "implementation", "ACTIVE", "dag_node_run", "node_demo", "inv_demo", 0, "live_lease", now),
         )
         connection.execute(
-            "INSERT INTO bunshin_v2_domain_events VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_domain_events VALUES (?,?,?,?,?,?,?,?,?,?)",
             ("evt_1", "wf_demo", "workflow", "wf_demo", 1, "workflow.create_workflow", "action_1", "", "", now),
         )
         connection.execute(
-            "INSERT INTO bunshin_v2_role_invocations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_role_invocations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ("inv_demo", "wf_demo", "workflow", "wf_demo", "writer", "author", "generic", "pal", "gen", "running", 1, 10, 5, 20, 2, 22, now, now),
         )
         connection.execute(
-            "INSERT INTO bunshin_v2_role_assignments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_role_assignments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ("asg_demo", "inv_demo", "wf_demo", "workflow", "wf_demo", "writer", "author", "generic", "running", "att_2", "artifact", "{}", now, now),
         )
         connection.executemany(
-            "INSERT INTO bunshin_v2_role_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_role_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [
                 ("att_1", "asg_demo", 1, 1, "pal", "gen", "lost", "worker_process_failed", now, now, now),
                 ("att_2", "asg_demo", 2, 2, "pal", "gen", "running", "", now, "", now),
             ],
         )
         connection.execute(
-            "INSERT INTO bunshin_v2_artifacts VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_artifacts VALUES (?,?,?,?,?,?,?,?)",
             (self.artifact_sha, "DemoArtifact", "1", "application/json", self.artifact.stat().st_size, str(self.artifact), 1, now),
         )
         connection.commit()
@@ -158,6 +158,17 @@ class PublicProofTests(unittest.TestCase):
         self.assertNotIn("objective", proof["task"])
         self.assertNotIn("workflow_name", proof["workflow"]["payload"])
         self.assertNotIn("workspace_path", proof["workflow"]["payload"])
+
+    def test_proof_and_telemetry_can_read_an_archived_versioned_database(self) -> None:
+        from pal.bunshin.efficiency_store import read_workflow_telemetry
+
+        with sqlite3.connect(self.database) as connection:
+            for (table,) in connection.execute("SELECT name FROM sqlite_schema WHERE type='table'").fetchall():
+                connection.execute(f'ALTER TABLE "{table}" RENAME TO "{table.replace("bunshin_", "bunshin_v2_", 1)}"')
+        original = self.database.read_bytes()
+        self.assertTrue(MODULE.collect_proof(runtime_root=self.root, workflow_id="wf_demo")["checks"]["recovery_observed"])
+        self.assertTrue(read_workflow_telemetry(self.database, "wf_demo").role_invocations)
+        self.assertEqual(self.database.read_bytes(), original)
 
     def test_task_text_requires_explicit_public_opt_in(self) -> None:
         proof = MODULE.collect_proof(
@@ -184,7 +195,7 @@ class PublicProofTests(unittest.TestCase):
         connection = sqlite3.connect(self.database)
         now = "2026-08-14T07:01:00+00:00"
         connection.execute(
-            "INSERT INTO bunshin_v2_domain_events VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO bunshin_domain_events VALUES (?,?,?,?,?,?,?,?,?,?)",
             ("evt_3", "wf_demo", "workflow", "wf_demo", 3, "workflow.gap", "action_3", "", "", now),
         )
         connection.commit()

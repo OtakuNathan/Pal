@@ -62,7 +62,7 @@ class E04TransportLaneTests(unittest.TestCase):
             _register_run(manager, "run-compaction", endpoint)
             _register_run(manager, "run-main", endpoint)
             capture = _CapturingTransport()
-            manager._llm_json_transport = capture  # type: ignore[assignment]
+            manager.llm_proxy.transport = capture  # type: ignore[assignment]
 
             server, _ = await start_manager_server(root, manager._handle_client)
             try:
@@ -108,7 +108,7 @@ class E04TransportLaneTests(unittest.TestCase):
 
                 # Per-request records stay isolated; nothing leaks across
                 # the compaction/main lanes.
-                records = manager._llm_transport_requests
+                records = manager.llm_proxy.requests
                 self.assertIn("req-compaction", records)
                 self.assertIn("req-main", records)
                 self.assertEqual(records["req-compaction"].run_id, "run-compaction")

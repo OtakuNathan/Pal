@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping, Callable
 from pal.foundation import utc_now
-from pal.bunshin.role_protocol import RoleAssignmentAction, RoleAssignmentState, RoleAttemptState, RoleSessionAction, RoleSubmissionReceipt, role_assignment_target
+from pal.bunshin.role_protocol import RoleAssignmentAction, RoleAssignmentState, RoleAttemptState, RoleSessionAction, RoleSubmissionReceipt, RoleSettlement, role_assignment_target
 from pal.bunshin.storage.artifacts import ArtifactsStore
 from pal.bunshin.storage.connection_contracts import DatabasePort
 from pal.bunshin.storage.leases import LeasesStore
@@ -88,7 +88,7 @@ class RoleSubmissionsStore:
             now = utc_now()
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_assignments
+                UPDATE bunshin_role_assignments
                 SET state = ?, submission_artifact_ref_json = ?,
                     submission_payload_hash = ?, settlement_action_json = ?,
                     updated_at = ?
@@ -105,7 +105,7 @@ class RoleSubmissionsStore:
             )
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_attempts
+                UPDATE bunshin_role_attempts
                 SET status = ?, response_artifact_ref_json = ?, updated_at = ?
                 WHERE attempt_id = ?
                 """,
@@ -133,11 +133,13 @@ class RoleSubmissionsStore:
         with self.database.write_connection() as connection:
             self.settle_role_assignment_locked(
                 connection,
-                assignment_id=str(assignment_id),
-                submission_payload_hash=str(submission_payload_hash),
+                settlement={
+                    "role_assignment_id": str(assignment_id),
+                    "role_submission_payload_hash": str(submission_payload_hash),
+                },
             )
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_assignments WHERE assignment_id = ?",
+                "SELECT * FROM bunshin_role_assignments WHERE assignment_id = ?",
                 (str(assignment_id),),
             ).fetchone()
             return _decode_role_assignment(row)
@@ -146,14 +148,15 @@ class RoleSubmissionsStore:
         self,
         connection: sqlite3.Connection,
         *,
-        assignment_id: str,
-        submission_payload_hash: str,
+        settlement: RoleSettlement,
         workflow_id: str = "",
         aggregate_type: str = "",
         aggregate_id: str = "",
     ) -> None:
+        assignment_id = settlement["role_assignment_id"]
+        submission_payload_hash = settlement["role_submission_payload_hash"]
         assignment = connection.execute(
-            "SELECT * FROM bunshin_v2_role_assignments WHERE assignment_id = ?",
+            "SELECT * FROM bunshin_role_assignments WHERE assignment_id = ?",
             (str(assignment_id),),
         ).fetchone()
         if assignment is None:
@@ -180,14 +183,14 @@ class RoleSubmissionsStore:
         now = utc_now()
         connection.execute(
             """
-            UPDATE bunshin_v2_role_assignments
+            UPDATE bunshin_role_assignments
             SET state = ?, updated_at = ? WHERE assignment_id = ?
             """,
             (target_state.value, now, str(assignment_id)),
         )
         connection.execute(
             """
-            UPDATE bunshin_v2_role_attempts
+            UPDATE bunshin_role_attempts
             SET status = CASE WHEN status = ? THEN ? ELSE status END,
                 access_token_hash = '', finished_at = ?, updated_at = ?
             WHERE attempt_id = ?
@@ -201,7 +204,7 @@ class RoleSubmissionsStore:
             ),
         )
         attempt = connection.execute(
-            "SELECT * FROM bunshin_v2_role_attempts WHERE attempt_id = ?",
+            "SELECT * FROM bunshin_role_attempts WHERE attempt_id = ?",
             (str(assignment["active_attempt_id"]),),
         ).fetchone()
         if attempt is not None:
@@ -210,7 +213,7 @@ class RoleSubmissionsStore:
             if lease_resource and fencing_token:
                 connection.execute(
                     """
-                    DELETE FROM bunshin_v2_leases
+                    DELETE FROM bunshin_leases
                     WHERE resource_key = ? AND owner_id = ? AND fencing_token = ?
                     """,
                     (

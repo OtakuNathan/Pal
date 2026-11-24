@@ -32,7 +32,7 @@ class SnapshotsStore:
         aggregate_id: str,
     ) -> AggregateSnapshot | None:
         row = connection.execute(
-            "SELECT * FROM bunshin_v2_aggregate_snapshots WHERE aggregate_type = ? AND aggregate_id = ?",
+            "SELECT * FROM bunshin_aggregate_snapshots WHERE aggregate_type = ? AND aggregate_id = ?",
             (aggregate_type.value, aggregate_id),
         ).fetchone()
         return _snapshot_from_row(row) if row is not None else None
@@ -47,7 +47,7 @@ class SnapshotsStore:
             try:
                 connection.execute(
                     """
-                    INSERT INTO bunshin_v2_aggregate_snapshots(
+                    INSERT INTO bunshin_aggregate_snapshots(
                         aggregate_type, aggregate_id, workflow_id, state, version,
                         payload_json, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -68,7 +68,7 @@ class SnapshotsStore:
             return
         cursor = connection.execute(
             """
-            UPDATE bunshin_v2_aggregate_snapshots
+            UPDATE bunshin_aggregate_snapshots
             SET state = ?, version = ?, payload_json = ?, updated_at = ?
             WHERE aggregate_type = ? AND aggregate_id = ? AND version = ?
             """,

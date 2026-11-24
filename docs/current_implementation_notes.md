@@ -208,7 +208,7 @@ Current defaults:
 - MCP server request timeout: 300 seconds
 - Pal-to-manager IPC timeout: 300 seconds
 
-## Bunshin V2
+## Bunshin
 
 Bunshin is a detachable first-party plugin backed by a manager sidecar. PalCore
 sees only the sidecar port, an event source, and control handlers; the manager

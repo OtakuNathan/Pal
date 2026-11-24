@@ -1,9 +1,8 @@
 from __future__ import annotations
 from pal.foundation.diagnostics import exception_report
+from pal.bunshin.effect_dispatcher import WorkflowEffectDispatcher
 from pal.bunshin.unit_of_work import BunshinUnitOfWork
 
-import asyncio
-import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,10 +13,9 @@ from pal.bunshin.contracts import (
     ActionEnvelope,
     AggregateSnapshot,
     AggregateType,
-    DeferredEffectError,
     PermanentEffectError,
 )
-from pal.bunshin.delivery import DeliveryReceipt, DirectDeliveryReceipt
+from pal.bunshin.workflow_publication import WorkflowPublication
 from pal.bunshin.dag_scheduling import DagScheduler
 from pal.bunshin.epoch_compilation import ExecutionCompiler
 from pal.bunshin.machine_dsl import ControlDisposition, ControlIntent
@@ -31,13 +29,18 @@ from pal.bunshin.paths import (
     cleanup_workflow_worktrees,
     resolve_project_git_layout,
 )
-from pal.bunshin.replan import collect_architecture_finding_batch
-from pal.bunshin.service import BunshinWorkflowService, workflow_request_from_snapshot
+from pal.bunshin.graph_replanning import GraphReplanning
+from pal.bunshin.workflow_effect_context import WorkflowEffectContext, _derived_id
+from pal.bunshin.service import workflow_request_from_snapshot
 from pal.bunshin.sessions import (
     architecture_reviewer_session_id,
     architect_session_id_for_revision,
 )
 from pal.bunshin.verification import DefectPropagationService
+from pal.bunshin.workflow_control import (
+    _active_control_children, _reconcile_cycle_control_projection,
+    _workflow_pauses_cycles, reconcile_control_requests,
+)
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
 
@@ -49,7 +52,7 @@ class SemanticEffectPort(Protocol):
 @dataclass
 class RejectingSemanticEffectPort:
     async def execute_semantic_effect(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        raise RuntimeError(f"no V2 semantic worker is configured for effect {effect.get('effect_type')}")
+        raise RuntimeError(f"no Bunshin semantic worker is configured for effect {effect.get('effect_type')}")
 
 
 LEGACY_MECHANICAL_EFFECT_TYPES = frozenset({"cleanup_terminal_worktrees"})
@@ -118,179 +121,107 @@ TRIAGE_FREEZE_EFFECT_TYPES = frozenset(
 
 
 @dataclass
-class BunshinOutboxProcessor:
-    service: BunshinWorkflowService
+class WorkflowEffects(WorkflowEffectContext):
     semantic_effects: SemanticEffectPort = field(default_factory=RejectingSemanticEffectPort)
     publish_workflow_event: Callable[[Mapping[str, Any]], None] | None = None
-    worker_id: str = "bunshin-v2-outbox"
-    effect_lease_seconds: int = 120
-    _background_tasks: set[asyncio.Task[str]] = field(default_factory=set, init=False, repr=False)
 
-    @property
-    def repository(self):
-        return self.service.repository
+    replanning: GraphReplanning = field(init=False)
+    publication: WorkflowPublication = field(init=False)
 
-    @property
-    def active_background_count(self) -> int:
-        return sum(not task.done() for task in self._background_tasks)
+    def __post_init__(self) -> None:
+        self.replanning = GraphReplanning(self.service)
+        self.publication = WorkflowPublication(self.service, self.publish_workflow_event)
 
-    async def process_once(self, *, limit: int = 10) -> dict[str, Any]:
-        claimed = self.repository.outbox_claims.claim_outbox(
-            self.worker_id,
-            limit=max(1, int(limit)),
-            lease_seconds=self.effect_lease_seconds,
-        )
-        if not claimed:
-            return {"status": "idle", "claimed": 0, "completed": 0, "failed": 0}
-        results = await asyncio.gather(*(self._process_effect(effect) for effect in claimed))
-        return {
-            "status": "processed",
-            "claimed": len(claimed),
-            "completed": sum(item == "completed" for item in results),
-            "failed": sum(item != "completed" for item in results),
-        }
+    def reconcile_after_effect(self, effect: Mapping[str, Any]) -> None:
+        workflow_id = str(effect.get("workflow_id") or "")
+        if not workflow_id:
+            return
+        effect_type = str(effect.get("effect_type") or "")
+        if (effect_type.startswith(("resume_", "reconcile_"))
+                or self.repository.queries.control_reconciliation_needed(workflow_id)):
+            self._reconcile_control_requests(workflow_id)
+        self.replanning.reconcile_replan_collections(workflow_id)
+        self.publication.publish_terminal(workflow_id)
 
-    def start_available(self, *, max_concurrency: int) -> int:
-        self._background_tasks = {task for task in self._background_tasks if not task.done()}
-        available = max(0, int(max_concurrency) - len(self._background_tasks))
-        if available == 0:
-            return 0
-        claimed = self.repository.outbox_claims.claim_outbox(
-            self.worker_id,
-            limit=available,
-            lease_seconds=self.effect_lease_seconds,
-        )
-        for effect in claimed:
-            task = asyncio.create_task(
-                self._process_effect(effect),
-                name=f"bunshin-v2-effect-{str(effect['effect_id'])[-12:]}",
-            )
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-        return len(claimed)
+    async def execute_effect(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
+        if str(effect.get("effect_type") or "") in MECHANICAL_EFFECT_TYPES:
+            result = await self._execute_mechanical(effect)
+        else:
+            result = await self.semantic_effects.execute_semantic_effect(effect)
+        self.reconcile_after_effect(effect)
+        return result
 
-    async def stop_background(self) -> None:
-        tasks = tuple(self._background_tasks)
-        self._background_tasks.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _process_effect(self, effect: Mapping[str, Any]) -> str:
+    def settle_failed_effect(self, effect: Mapping[str, Any], exc: Exception, worker_id: str) -> str:
         effect_id = str(effect["effect_id"])
-        heartbeat = asyncio.create_task(self._heartbeat(effect_id))
-        try:
-            if str(effect.get("effect_type") or "") in MECHANICAL_EFFECT_TYPES:
-                result = await self._execute_mechanical(effect)
-            else:
-                result = await self.semantic_effects.execute_semantic_effect(effect)
-            self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
-            self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
-            self._publish_terminal_workflow_if_any(
-                str(effect.get("workflow_id") or "")
+        snapshot = self._effect_snapshot(effect)
+        effect_type = str(effect.get("effect_type") or "")
+        superseded = effect_type != "reconcile_dependency_repairs" and (
+            # A cohort effect remains authoritative after its source has
+            # closed to STALE; only its exact receipt/generation handler
+            # may decide supersession. Errors must remain retryable/triaged.
+            snapshot.state in {"PAUSED", "CANCELLED", "STALE"}
+            or (
+                snapshot.state == "PAUSE_REQUESTED"
+                and effect_type not in PAUSE_EFFECT_TYPES
             )
-            result_ref = dict(result.get("result_artifact_ref") or {}) if isinstance(result, Mapping) else {}
-            provider_request_id = str(result.get("provider_request_id") or "") if isinstance(result, Mapping) else ""
+            or (
+                snapshot.state == "CANCEL_REQUESTED"
+                and effect_type not in CANCELLATION_EFFECT_TYPES
+            )
+            or (
+                snapshot.state == "TRIAGE_REQUIRED"
+                and effect_type not in TRIAGE_FREEZE_EFFECT_TYPES
+            )
+        )
+        if superseded:
+            failure_ref = self.service.artifacts.put_json(
+                {
+                    "effect_id": effect_id,
+                    "effect_type": effect_type,
+                    "status": "superseded_after_failure",
+                    "aggregate_state": snapshot.state,
+                    "error": exception_report(exc),
+                    "summary": "Effect failed and was retired because its aggregate changed state; execution success is not confirmed.",
+                },
+                artifact_type="EffectFailureArtifact",
+            )
             self.repository.outbox_results.complete_outbox_effect(
-                effect_id,
-                worker_id=self.worker_id,
-                provider_request_id=provider_request_id,
-                result_artifact_ref=result_ref,
+                effect_id, worker_id=worker_id, result_artifact_ref=failure_ref.to_dict(),
             )
+            self.reconcile_after_effect(effect)
             return "completed"
-        except DeferredEffectError as exc:
-            self.repository.outbox_results.defer_outbox_effect(
-                effect_id,
-                worker_id=self.worker_id,
-                reason=str(exc) or "effect deferred at a durable restart safe point",
-                attempt_was_incremented=bool(effect.get("claim_incremented_attempt", True)),
-            )
-            return "deferred"
-        except Exception as exc:
-            snapshot = self._effect_snapshot(effect)
-            effect_type = str(effect.get("effect_type") or "")
-            superseded = effect_type != "reconcile_dependency_repairs" and (
-                # A cohort effect remains authoritative after its source has
-                # closed to STALE; only its exact receipt/generation handler
-                # may decide supersession. Errors must remain retryable/triaged.
-                snapshot.state in {"PAUSED", "CANCELLED", "STALE"}
-                or (
-                    snapshot.state == "PAUSE_REQUESTED"
-                    and effect_type not in PAUSE_EFFECT_TYPES
+        error = exception_report(exc)
+        if isinstance(exc, PermanentEffectError):
+            triage_action = self._failed_effect_triage_action(effect, exc)
+            with self.repository.transaction() as connection:
+                (connection or self.repository).outbox_results.fail_outbox_effect(
+                    effect_id,
+                    worker_id=worker_id,
+                    error=error,
+                    triage_action=triage_action,
                 )
-                or (
-                    snapshot.state == "CANCEL_REQUESTED"
-                    and effect_type not in CANCELLATION_EFFECT_TYPES
+                self._sync_cycle_triage(
+                    triage_action,
+                    unit_of_work=connection,
                 )
-                or (
-                    snapshot.state == "TRIAGE_REQUIRED"
-                    and effect_type not in TRIAGE_FREEZE_EFFECT_TYPES
-                )
-            )
-            if superseded:
-                failure_ref = self.service.artifacts.put_json(
-                    {
-                        "effect_id": effect_id,
-                        "effect_type": effect_type,
-                        "status": "superseded_after_failure",
-                        "aggregate_state": snapshot.state,
-                        "error": exception_report(exc),
-                        "summary": "Effect failed and was retired because its aggregate changed state; execution success is not confirmed.",
-                    },
-                    artifact_type="EffectFailureArtifact",
-                )
-                self.repository.outbox_results.complete_outbox_effect(
-                    effect_id, worker_id=self.worker_id, result_artifact_ref=failure_ref.to_dict(),
-                )
-                self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
-                self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
-                self._publish_terminal_workflow_if_any(
-                    str(effect.get("workflow_id") or "")
-                )
-                return "completed"
-            error = exception_report(exc)
-            if isinstance(exc, PermanentEffectError):
+        else:
+            triage_action = None
+            if int(effect.get("attempt_count") or 0) >= int(effect.get("max_attempts") or 1):
                 triage_action = self._failed_effect_triage_action(effect, exc)
-                with self.repository.transaction() as connection:
-                    (connection or self.repository).outbox_results.fail_outbox_effect(
-                        effect_id,
-                        worker_id=self.worker_id,
-                        error=error,
-                        triage_action=triage_action,
-                    )
-                    self._sync_cycle_triage(
-                        triage_action,
-                        unit_of_work=connection,
-                    )
-            else:
-                triage_action = None
-                if int(effect.get("attempt_count") or 0) >= int(effect.get("max_attempts") or 1):
-                    triage_action = self._failed_effect_triage_action(effect, exc)
-                with self.repository.transaction() as connection:
-                    (connection or self.repository).outbox_results.retry_outbox_effect(
-                        effect_id,
-                        worker_id=self.worker_id,
-                        error=error,
-                        retry_after_seconds=5,
-                        triage_action=triage_action,
-                    )
-                    self._sync_cycle_triage(
-                        triage_action,
-                        unit_of_work=connection,
-                    )
-            self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
-            self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
-            self._publish_terminal_workflow_if_any(
-                str(effect.get("workflow_id") or "")
-            )
-            return "failed"
-        finally:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
+            with self.repository.transaction() as connection:
+                (connection or self.repository).outbox_results.retry_outbox_effect(
+                    effect_id,
+                    worker_id=worker_id,
+                    error=error,
+                    retry_after_seconds=5,
+                    triage_action=triage_action,
+                )
+                self._sync_cycle_triage(
+                    triage_action,
+                    unit_of_work=connection,
+                )
+        self.reconcile_after_effect(effect)
+        return "failed"
 
     def _sync_cycle_triage(
         self,
@@ -335,16 +266,6 @@ class BunshinOutboxProcessor:
             unit_of_work=unit_of_work,
         )
 
-    async def _heartbeat(self, effect_id: str) -> None:
-        interval = max(1.0, self.effect_lease_seconds / 3)
-        while True:
-            await asyncio.sleep(interval)
-            self.repository.outbox_claims.renew_outbox_claim(
-                effect_id,
-                worker_id=self.worker_id,
-                lease_seconds=self.effect_lease_seconds,
-            )
-
     async def _execute_mechanical(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         effect_type = str(effect.get("effect_type") or "")
         payload = dict(effect.get("payload") or {})
@@ -365,7 +286,7 @@ class BunshinOutboxProcessor:
         if effect_type == "notify_node_accepted":
             return self._node_accepted(effect)
         if effect_type == "publish_accepted_memory_candidate":
-            return self._publish_accepted_memory_candidate(effect)
+            return self.publication.publish_memory_candidate(effect)
         if effect_type == "propagate_resume":
             # Resuming also restores routing when pause consumed the initial
             # start effect before any child aggregate existed.
@@ -415,11 +336,11 @@ class BunshinOutboxProcessor:
             )
             return {}
         if effect_type == "request_epoch_replan":
-            return self._request_epoch_replan(effect)
+            return self.replanning.request_epoch_replan(effect)
         if effect_type == "freeze_epoch_for_replan":
-            return self._freeze_epoch_for_replan(effect)
+            return self.replanning.freeze_epoch_for_replan(effect)
         if effect_type == "create_replan_revision":
-            return self._create_replan_revision(effect)
+            return self.replanning.create_replan_revision(effect)
         if effect_type == "submit_workflow_completion":
             epoch = self._effect_snapshot(effect)
             workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
@@ -429,7 +350,7 @@ class BunshinOutboxProcessor:
                     workflow_id=epoch.workflow_id,
                     aggregate_type=AggregateType.WORKFLOW,
                     aggregate_id=epoch.workflow_id,
-                    actor="bunshin-v2-manager",
+                    actor="bunshin-manager",
                     expected_version=workflow.version,
                     idempotency_key=f"effect:{effect['effect_key']}:workflow-complete",
                     payload={"result_artifact_ref": epoch.payload.get("published_deliverable_ref")},
@@ -489,7 +410,7 @@ class BunshinOutboxProcessor:
                     workflow_id=review.workflow_id,
                     aggregate_type=AggregateType.WORKFLOW,
                     aggregate_id=review.workflow_id,
-                    actor="bunshin-v2-manager",
+                    actor="bunshin-manager",
                     expected_version=workflow.version,
                     idempotency_key=f"effect:{effect['effect_key']}:workflow-complete",
                     payload={"result_artifact_ref": review.payload.get("verification_artifact_ref")},
@@ -518,7 +439,7 @@ class BunshinOutboxProcessor:
                         workflow_id=workflow.workflow_id,
                         aggregate_type=AggregateType.WORKFLOW,
                         aggregate_id=workflow.aggregate_id,
-                        actor="bunshin-v2-manager",
+                        actor="bunshin-manager",
                         expected_version=workflow.version,
                         idempotency_key=f"effect:{effect['effect_key']}:reject-workflow",
                     )
@@ -531,7 +452,7 @@ class BunshinOutboxProcessor:
             result = self._reconcile_workflow(effect)
             await self._resume_pending_dependency_repair(effect)
             return result
-        raise ValueError(f"unsupported mechanical V2 effect: {effect_type}")
+        raise ValueError(f"unsupported mechanical Bunshin effect: {effect_type}")
 
     def _terminal_repository_layout(
         self,
@@ -575,7 +496,7 @@ class BunshinOutboxProcessor:
                     workflow_id=epoch.workflow_id,
                     aggregate_type=AggregateType.EXECUTION_EPOCH,
                     aggregate_id=epoch.aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=epoch.version,
                     idempotency_key=f"effect:{effect['effect_key']}:start-execution",
                 )
@@ -586,40 +507,18 @@ class BunshinOutboxProcessor:
         if epoch.state == "CANCEL_REQUESTED":
             return self._control_epoch_nodes("cancel_epoch_nodes", effect)
         if epoch.state == "REPLAN_COLLECTING":
-            self._reconcile_replan_collection(epoch)
+            self.replanning.reconcile_replan_collection(epoch)
             return {}
         if epoch.state == "REPLAN_REQUIRED":
             if not str(epoch.payload.get("active_replan_revision_id") or ""):
-                return self._create_replan_revision(effect)
+                return self.replanning.create_replan_revision(effect)
             return {}
         if epoch.state == "RUNNING":
             self._control_epoch_nodes("resume_epoch_nodes", effect)
-            DagScheduler(self.repository).schedule_ready_nodes(
-                workflow_id=epoch.workflow_id,
-                epoch_id=epoch.aggregate_id,
+            DagScheduler(self.repository).advance(
+                workflow_id=epoch.workflow_id, epoch_id=epoch.aggregate_id,
+                generation=int(epoch.payload.get("graph_generation") or 0),
             )
-            nodes = self._epoch_nodes(epoch)
-            graph_execution = WorkflowCoordinator(self.repository).execution(
-                workflow_id=epoch.workflow_id,
-                generation=int(epoch.payload.get("graph_generation") or 0) or None,
-            )
-            if nodes and graph_execution.state.value == "COMPLETED":
-                accepted = next(
-                    (
-                        item
-                        for item in nodes
-                        if bool(item.payload.get("graph_sink"))
-                    ),
-                    sorted(nodes, key=lambda item: item.aggregate_id)[-1],
-                )
-                return self._node_accepted(
-                    {
-                        **dict(effect),
-                        "aggregate_type": AggregateType.DAG_NODE_RUN.value,
-                        "aggregate_id": accepted.aggregate_id,
-                        "effect_key": f"{effect['effect_key']}:accepted-node-reconcile",
-                    }
-                )
             return {}
         if epoch.state == "FINALIZING":
             return await self.semantic_effects.execute_semantic_effect(
@@ -645,7 +544,7 @@ class BunshinOutboxProcessor:
                     workflow_id=epoch.workflow_id,
                     aggregate_type=AggregateType.EXECUTION_EPOCH,
                     aggregate_id=epoch.aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=epoch.version,
                     idempotency_key=f"effect:{effect['effect_key']}:nodes-compiled",
                     payload=payload,
@@ -686,7 +585,7 @@ class BunshinOutboxProcessor:
                     workflow_id=workflow.workflow_id,
                     aggregate_type=AggregateType.WORKFLOW,
                     aggregate_id=workflow.aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=workflow.version,
                     idempotency_key=f"effect:{effect['effect_key']}:start-workflow",
                 )
@@ -835,7 +734,7 @@ class BunshinOutboxProcessor:
                             workflow_id=revision.workflow_id,
                             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                             aggregate_id=revision.aggregate_id,
-                            actor="bunshin-v2-recovery",
+                            actor="bunshin-recovery",
                             expected_version=revision.version,
                             idempotency_key=(
                                 f"effect:{effect['effect_key']}:refresh-human-review:"
@@ -880,7 +779,7 @@ class BunshinOutboxProcessor:
                     workflow_id=workflow.workflow_id,
                     aggregate_type=AggregateType.WORKFLOW,
                     aggregate_id=workflow.aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=workflow.version,
                     idempotency_key=f"effect:{effect['effect_key']}:reject-workflow",
                 )
@@ -892,7 +791,7 @@ class BunshinOutboxProcessor:
                     workflow_id=workflow.workflow_id,
                     aggregate_type=AggregateType.WORKFLOW,
                     aggregate_id=workflow.aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=workflow.version,
                     idempotency_key=f"effect:{effect['effect_key']}:cancel-workflow",
                 )
@@ -960,150 +859,13 @@ class BunshinOutboxProcessor:
                 workflow_id=workflow.workflow_id,
                 aggregate_type=AggregateType.WORKFLOW,
                 aggregate_id=workflow.aggregate_id,
-                actor="bunshin-v2-recovery",
+                actor="bunshin-recovery",
                 expected_version=workflow.version,
                 idempotency_key=f"effect:{effect_key}:complete-workflow",
                 payload={"result_artifact_ref": dict(result_ref)},
             )
         )
         self.repository.role_maintenance.complete_workflow_role_sessions(workflow.workflow_id)
-
-    def _publish_terminal_workflow_if_any(self, workflow_id: str) -> None:
-        normalized_workflow_id = str(workflow_id or "").strip()
-        if self.publish_workflow_event is None or not normalized_workflow_id:
-            return
-        workflow = self.repository.snapshots.read_snapshot(
-            AggregateType.WORKFLOW,
-            normalized_workflow_id,
-        )
-        if workflow is None or workflow.state not in {
-            "COMPLETED",
-            "REJECTED",
-            "CANCELLED",
-        }:
-            return
-        normalized_status = workflow.state.lower()
-        result_artifact_ref = dict(
-            workflow.payload.get("result_artifact_ref") or {}
-        )
-        summary = f"Bunshin workflow {normalized_status}."
-        attachments: list[dict[str, str]] = []
-        result_sha = str(result_artifact_ref.get("sha256") or "")
-        if normalized_status == "completed" and result_sha:
-            record = self.repository.artifacts.read_artifact_record(result_sha)
-            if record and str(record.get("artifact_type") or "") == "DeliveryReceiptArtifact":
-                payload = self.service.artifacts.read_json(result_artifact_ref)
-                verification_ref_value: Mapping[str, Any] = {}
-                if payload.get("schema_version") == "4":
-                    direct_receipt = DirectDeliveryReceipt.model_validate(payload)
-                    verification_ref_value = direct_receipt.verification_ref
-                    for item in direct_receipt.files:
-                        content = self.service.artifacts.read_bytes(item.artifact_ref)
-                        if hashlib.sha256(content).hexdigest() != item.content_sha256:
-                            raise IOError("delivery file content hash does not match its receipt")
-                        file_record = self.repository.artifacts.read_artifact_record(item.artifact_ref["sha256"])
-                        if not file_record or file_record["artifact_type"] != "VerifiedReportArtifact":
-                            raise ValueError("verified report artifact metadata is unavailable")
-                        attachments.append({"path": str(file_record["storage_path"]),
-                            "file_name": Path(item.repository_path).name, "mime_type": item.mime_type,
-                            "caption": f"Verified report: {item.repository_path}"})
-                    delivery_receipt = direct_receipt.patch_receipt
-                    summary = "Bunshin workflow completed. Verified reports attached."
-                else:
-                    delivery_receipt = DeliveryReceipt.model_validate(payload)
-                    verification_ref_value = delivery_receipt.verification_ref
-                if delivery_receipt is not None:
-                    patch_bytes = self.service.artifacts.read_bytes(delivery_receipt.patch_ref)
-                    if (
-                        hashlib.sha256(patch_bytes).hexdigest()
-                        != delivery_receipt.patch_content_sha256
-                    ):
-                        raise IOError("delivery patch content hash does not match its receipt")
-                    patch_record = self.repository.artifacts.read_artifact_record(
-                        str(delivery_receipt.patch_ref.get("sha256") or "")
-                    )
-                    if (
-                        patch_record is None
-                        or str(patch_record.get("artifact_type") or "")
-                        != "GitFormatPatchArtifact"
-                    ):
-                        raise ValueError("delivery patch artifact metadata is unavailable")
-                    patch_path = Path(str(patch_record.get("storage_path") or ""))
-                    if not patch_path.is_file():
-                        raise FileNotFoundError("delivery patch artifact file is unavailable")
-                    friendly_name = Path(delivery_receipt.patch_path).name
-                    summary = "Bunshin workflow completed. Verified reports and Git patch attached." if attachments else "Bunshin workflow completed. Verified Git patch attached."
-                    attachments.append(
-                        {
-                            "path": str(patch_path),
-                            "file_name": friendly_name,
-                            "mime_type": "text/x-patch",
-                            "caption": (
-                                "Bunshin verified patch for commit "
-                                f"{delivery_receipt.commit_sha[:12]}"
-                            ),
-                        }
-                    )
-                report_attachment = self._verification_report_attachment(verification_ref_value)
-                if report_attachment is not None:
-                    attachments.append(report_attachment)
-        revision_id = str(workflow.payload.get("architecture_revision_id") or "").strip()
-        resolved_interactions = (
-            [
-                {
-                    "interaction_id": f"bunshin_v2_architecture_{revision_id}",
-                    "interaction_kind": "bunshin_v2_architecture_review",
-                }
-            ]
-            if revision_id
-            else []
-        )
-        event = {
-            "workflow_id": normalized_workflow_id,
-            "status": normalized_status,
-            "summary": summary,
-            "terminal_at": workflow.updated_at,
-            "resolved_interactions": resolved_interactions,
-            "result_artifact_ref": result_artifact_ref,
-        }
-        if attachments:
-            event["attachments"] = attachments
-        self.publish_workflow_event(event)
-
-    def _verification_report_attachment(
-        self,
-        verification_ref: Mapping[str, Any],
-    ) -> dict[str, str] | None:
-        verification_sha = str(dict(verification_ref or {}).get("sha256") or "").strip()
-        if not verification_sha:
-            return None
-        verification_record = self.repository.artifacts.read_artifact_record(verification_sha)
-        if not verification_record or str(verification_record.get("artifact_type") or "") != "VerificationArtifact":
-            return None
-        verification = self.service.artifacts.read_json(verification_ref)
-        report_ref = dict(verification.get("verification_report_ref") or {})
-        report_sha = str(report_ref.get("sha256") or "").strip()
-        if not report_sha:
-            return None
-        report_record = self.repository.artifacts.read_artifact_record(report_sha)
-        if not report_record or str(report_record.get("artifact_type") or "") != "VerificationReportArtifact":
-            return None
-        report_bytes = self.service.artifacts.read_bytes(report_ref)
-        expected_sha = str(verification.get("verification_report_sha256") or "").strip()
-        if expected_sha and hashlib.sha256(report_bytes).hexdigest() != expected_sha:
-            raise IOError("verification report content hash does not match its artifact")
-        storage_path = Path(str(report_record.get("storage_path") or ""))
-        if not storage_path.is_file():
-            raise FileNotFoundError("verification report artifact file is unavailable")
-        module_name = str(verification.get("module_name") or "").strip()
-        relpath = str(verification.get("verification_report_path") or "verification_report.yaml").strip()
-        file_name = f"{module_name}_verification_report.yaml" if module_name else "verification_report.yaml"
-        return {
-            "path": str(storage_path),
-            "file_name": file_name,
-            "mime_type": "text/yaml",
-            "caption": f"Verification report ({module_name or 'module'}): {relpath}",
-        }
 
     def _submit_effect_action(self, effect: Mapping[str, Any], payload: Mapping[str, Any]) -> Mapping[str, Any]:
         action_type = str(payload.get("action_type") or "")
@@ -1125,7 +887,7 @@ class BunshinOutboxProcessor:
                 workflow_id=snapshot.workflow_id,
                 aggregate_type=snapshot.aggregate_type,
                 aggregate_id=snapshot.aggregate_id,
-                actor="bunshin-v2-outbox",
+                actor="bunshin-outbox",
                 # Effects are replayed from the same causative domain event.
                 # Pin the request to that event's resulting version so a crash
                 # retry hashes as the same business action after the first
@@ -1205,7 +967,7 @@ class BunshinOutboxProcessor:
                         workflow_id=workflow.workflow_id,
                         aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                         aggregate_id=revision_id,
-                        actor="bunshin-v2-router",
+                        actor="bunshin-router",
                         expected_version=0,
                         idempotency_key=f"effect:{effect['effect_key']}:revision",
                         payload={
@@ -1237,7 +999,7 @@ class BunshinOutboxProcessor:
                         workflow_id=workflow.workflow_id,
                         aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                         aggregate_id=revision_id,
-                        actor="bunshin-v2-router",
+                        actor="bunshin-router",
                         expected_version=0,
                         idempotency_key=f"effect:{effect['effect_key']}:import",
                         payload={
@@ -1269,7 +1031,7 @@ class BunshinOutboxProcessor:
                     workflow_id=workflow.workflow_id,
                     aggregate_type=AggregateType.STANDALONE_REVIEW,
                     aggregate_id=review_id,
-                    actor="bunshin-v2-router",
+                    actor="bunshin-router",
                     expected_version=0,
                     idempotency_key=f"effect:{effect['effect_key']}:review",
                     payload={"review_request_ref": artifact_ref, "review_mode": operation},
@@ -1285,7 +1047,7 @@ class BunshinOutboxProcessor:
                     workflow_id=workflow.workflow_id,
                     aggregate_type=AggregateType.STANDALONE_REVIEW,
                     aggregate_id=review_id,
-                    actor="bunshin-v2-router",
+                    actor="bunshin-router",
                     expected_version=review.version,
                     idempotency_key=f"effect:{effect['effect_key']}:queue-review",
                 ),
@@ -1314,7 +1076,7 @@ class BunshinOutboxProcessor:
                     workflow_id=previous.workflow_id,
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                     aggregate_id=revision_id,
-                    actor="bunshin-v2-router",
+                    actor="bunshin-router",
                     expected_version=0,
                     idempotency_key=f"effect:{effect['effect_key']}:revision",
                     payload={
@@ -1356,7 +1118,7 @@ class BunshinOutboxProcessor:
                             workflow_id=previous.workflow_id,
                             aggregate_type=AggregateType.EXECUTION_EPOCH,
                             aggregate_id=source_epoch_id,
-                            actor="bunshin-v2-router",
+                            actor="bunshin-router",
                             expected_version=epoch.version,
                             idempotency_key=(
                                 f"effect:{effect['effect_key']}:replan-revision-linked"
@@ -1372,247 +1134,6 @@ class BunshinOutboxProcessor:
                 unit_of_work=connection,
             )
         return {}
-
-    def _request_epoch_replan(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        source = self._effect_snapshot(effect)
-        if source.aggregate_type != AggregateType.DAG_NODE_RUN:
-            raise ValueError("request_epoch_replan must originate from a DAG node")
-        epoch_id = str(source.payload.get("epoch_id") or "")
-        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
-        if epoch is None or epoch.state in {"SUPERSEDED", "COMPLETED", "CANCELLED"}:
-            return {}
-        finding_ref = dict(
-            source.payload.get("repair_bill_ref") or source.payload.get("finding_artifact_ref") or {}
-        )
-        if not finding_ref:
-            raise ValueError("architecture replan requires a persisted finding")
-        finding_payload = dict(self.service.artifacts.read_json(finding_ref))
-        fingerprint = str(finding_payload.get("finding_fingerprint") or finding_ref.get("sha256") or "")
-        if epoch.state == "REPLAN_REQUIRED":
-            known = set(str(item) for item in list(epoch.payload.get("replan_finding_fingerprints") or []))
-            if fingerprint in known:
-                return {}
-            failure_ref = self.service.artifacts.put_json(
-                {
-                    "reason": "a new architecture finding arrived after the replan batch was frozen",
-                    "finding_artifact_ref": finding_ref,
-                    "finding_fingerprint": fingerprint,
-                    "source_node": str(source.payload.get("module_name") or source.payload.get("unit_id") or ""),
-                },
-                artifact_type="LateReplanFindingArtifact",
-                child_refs=((str(finding_ref["sha256"]), "late_finding"),),
-            )
-            self.repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type="ENTER_TRIAGE",
-                    workflow_id=epoch.workflow_id,
-                    aggregate_type=AggregateType.EXECUTION_EPOCH,
-                    aggregate_id=epoch.aggregate_id,
-                    actor="bunshin-v2-manager",
-                    expected_version=epoch.version,
-                    idempotency_key=f"late-replan-finding:{epoch.aggregate_id}:{fingerprint}",
-                    payload={
-                        "failure_artifact_ref": failure_ref.to_dict(),
-                        "blocker": {
-                            "kind": "late_replan_finding",
-                            "finding_artifact_ref": finding_ref,
-                        },
-                    },
-                )
-            )
-            return {"result_artifact_ref": failure_ref.to_dict()}
-        if epoch.state not in {"RUNNING", "FINALIZING", "REPLAN_COLLECTING"}:
-            return {}
-        self.repository.transitions.dispatch(
-            ActionEnvelope(
-                action_type="REGISTER_REPLAN_FINDING",
-                workflow_id=source.workflow_id,
-                aggregate_type=AggregateType.EXECUTION_EPOCH,
-                aggregate_id=epoch_id,
-                actor="bunshin-v2-manager",
-                expected_version=epoch.version,
-                idempotency_key=f"effect:{effect['effect_key']}:register-replan-finding",
-                payload={
-                    "finding_artifact_ref": finding_ref,
-                    "finding_fingerprint": fingerprint,
-                    "source_node": str(source.payload.get("module_name") or source.payload.get("unit_id") or ""),
-                },
-            )
-        )
-        return {}
-
-    def _freeze_epoch_for_replan(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        epoch = self._effect_snapshot(effect)
-        if epoch.aggregate_type != AggregateType.EXECUTION_EPOCH:
-            raise ValueError("freeze_epoch_for_replan requires an execution epoch")
-        self._stale_non_drain_nodes(epoch)
-        self._reconcile_replan_collection(epoch)
-        return {}
-
-    def _stale_non_drain_nodes(self, epoch: AggregateSnapshot) -> None:
-        pending = [dict(item or {}) for item in list(epoch.payload.get("pending_replan_findings") or [])]
-        finding_ref = dict(pending[0].get("finding_artifact_ref") or {}) if pending else {}
-        if not finding_ref:
-            return
-        for node in self._epoch_nodes(epoch):
-            if node.state in {
-                "ACCEPTED",
-                "STALE",
-                "CANCELLED",
-                "TRIAGE_REQUIRED",
-                "REVIEWING",
-                "REVIEW_QUIESCING",
-                "REVIEW_SNAPSHOTTING",
-            }:
-                continue
-            legal = self.repository.transitions.legal_actions(AggregateType.DAG_NODE_RUN, node.state)
-            action_type = (
-                "MARK_STALE"
-                if "MARK_STALE" in legal
-                else "REQUEST_STALE"
-                if "REQUEST_STALE" in legal
-                else ""
-            )
-            if not action_type:
-                continue
-            self.repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id=epoch.workflow_id,
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node.aggregate_id,
-                    actor="bunshin-v2-replan",
-                    expected_version=node.version,
-                    idempotency_key=f"replan-freeze:{epoch.aggregate_id}:{node.aggregate_id}:{node.version}",
-                    payload={"stale_reason_ref": finding_ref},
-                )
-            )
-
-    def _reconcile_replan_collections(self, workflow_id: str) -> None:
-        if not workflow_id:
-            return
-        for epoch in self.repository.queries.list_workflow_snapshots(workflow_id):
-            if epoch.aggregate_type == AggregateType.EXECUTION_EPOCH and epoch.state == "REPLAN_COLLECTING":
-                self._reconcile_replan_collection(epoch)
-
-    def _reconcile_replan_collection(self, epoch: AggregateSnapshot) -> None:
-        current = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
-        if current is None or current.state != "REPLAN_COLLECTING":
-            return
-        self._stale_non_drain_nodes(current)
-        current = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
-        nodes = self._epoch_nodes(current)
-        unsettled = {
-            "PRODUCING",
-            "REPAIRING",
-            "QUIESCING",
-            "SNAPSHOTTING",
-            "REVIEWING",
-            "REVIEW_QUIESCING",
-            "REVIEW_SNAPSHOTTING",
-            "PAUSE_REQUESTED",
-            "CANCEL_REQUESTED",
-        }
-        if any(node.state in unsettled for node in nodes):
-            return
-        batch = collect_architecture_finding_batch(
-            self.service.artifacts,
-            epoch=current,
-            nodes=nodes,
-        )
-        manifest_ref = dict(current.payload.get("architecture_manifest_ref") or {})
-        manifest = dict(self.service.artifacts.read_json(manifest_ref)) if manifest_ref else {}
-        requirements_ref = dict(manifest.get("requirements_ref") or {})
-        latest = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, current.aggregate_id)
-        if latest is None or latest.state != "REPLAN_COLLECTING":
-            return
-        self.repository.transitions.dispatch(
-            ActionEnvelope(
-                action_type="REPLAN_BATCH_READY",
-                workflow_id=latest.workflow_id,
-                aggregate_type=AggregateType.EXECUTION_EPOCH,
-                aggregate_id=latest.aggregate_id,
-                actor="bunshin-v2-manager",
-                expected_version=latest.version,
-                idempotency_key=f"replan-batch-ready:{latest.aggregate_id}:{batch.artifact_ref.sha256}",
-                payload={
-                    "replan_finding_batch_ref": batch.artifact_ref.to_dict(),
-                    "replan_finding_fingerprints": list(batch.finding_fingerprints),
-                    "requirements_ref": requirements_ref,
-                },
-            )
-        )
-
-    def _create_replan_revision(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        epoch = self._effect_snapshot(effect)
-        if epoch.aggregate_type != AggregateType.EXECUTION_EPOCH or epoch.state != "REPLAN_REQUIRED":
-            return {}
-        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
-        if workflow is None:
-            raise ValueError("replan epoch has no workflow")
-        generation = int(epoch.payload.get("replan_generation") or 0)
-        revision_id = _derived_id("arch", f"replan:{epoch.aggregate_id}:{generation}")
-        batch_ref = dict(epoch.payload.get("replan_finding_batch_ref") or {})
-        with self.repository.transaction() as connection:
-            plan_cycle = WorkflowCoordinator(self.repository).begin_plan_revision(
-                workflow_id=epoch.workflow_id,
-                unit_of_work=connection,
-            )
-            (connection or self.repository).transitions.dispatch(
-                ActionEnvelope(
-                    action_type="CREATE_ARCHITECTURE_REVISION",
-                    workflow_id=epoch.workflow_id,
-                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                    aggregate_id=revision_id,
-                    actor="bunshin-v2-manager",
-                    expected_version=0,
-                    idempotency_key=f"replan-revision:{epoch.aggregate_id}:{generation}",
-                    payload={
-                        "request_ref": workflow.payload.get("request_ref"),
-                        "requirements_ref": dict(epoch.payload.get("requirements_ref") or {}),
-                        "base_architecture_manifest_ref": dict(epoch.payload.get("architecture_manifest_ref") or {}),
-                        "replan_finding_batch_ref": batch_ref,
-                        "architecture_cycle_id": revision_id,
-                        "source_execution_epoch_id": epoch.aggregate_id,
-                        "replan_generation": generation,
-                        "research_mode": "local_only",
-                        "revision_number": plan_cycle.generation,
-                    },
-                ),
-            )
-            latest = (connection or self.repository).snapshots.read_snapshot(
-                AggregateType.EXECUTION_EPOCH,
-                epoch.aggregate_id,
-            )
-            if latest is not None and latest.state == "REPLAN_REQUIRED":
-                (connection or self.repository).transitions.dispatch(
-                    ActionEnvelope(
-                        action_type="REPLAN_REVISION_LINKED",
-                        workflow_id=epoch.workflow_id,
-                        aggregate_type=AggregateType.EXECUTION_EPOCH,
-                        aggregate_id=epoch.aggregate_id,
-                        actor="bunshin-v2-manager",
-                        expected_version=latest.version,
-                        idempotency_key=f"replan-revision-linked:{epoch.aggregate_id}:{generation}",
-                        payload={"active_replan_revision_id": revision_id},
-                    ),
-                )
-            self._link_workflow(
-                epoch.workflow_id,
-                "LINK_ARCHITECTURE_REVISION",
-                {"architecture_revision_id": revision_id},
-                f"replan:{epoch.aggregate_id}:{generation}",
-                unit_of_work=connection,
-            )
-        return {"architecture_revision_id": revision_id, "result_artifact_ref": batch_ref}
-
-    def _epoch_nodes(self, epoch: AggregateSnapshot) -> list[AggregateSnapshot]:
-        return [
-            item
-            for item in self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
-            if item.aggregate_type == AggregateType.DAG_NODE_RUN
-            and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
-        ]
 
     def _compile_execution(
         self,
@@ -1662,7 +1183,7 @@ class BunshinOutboxProcessor:
                         workflow_id=workflow_id,
                         aggregate_type=AggregateType.EXECUTION_EPOCH,
                         aggregate_id=source_epoch_id,
-                        actor="bunshin-v2-manager",
+                        actor="bunshin-manager",
                         expected_version=previous.version,
                         idempotency_key=f"successor-epoch:{source_epoch_id}:{epoch_id}",
                         payload={"successor_execution_epoch_id": epoch_id},
@@ -1711,7 +1232,7 @@ class BunshinOutboxProcessor:
                     workflow_id=source.workflow_id,
                     aggregate_type=AggregateType.WORKFLOW,
                     aggregate_id=source.aggregate_id,
-                    actor="bunshin-v2-manager",
+                    actor="bunshin-manager",
                     expected_version=source.version,
                     idempotency_key=f"effect:{effect['effect_key']}:replacement-aborted",
                 )
@@ -1730,7 +1251,7 @@ class BunshinOutboxProcessor:
                     "goal": str(request.get("goal") or ""),
                     "research_mode": str(request.get("research_mode") or "none"),
                     "actor": str(request.get("actor") or "pal"),
-                    "source_channel": "bunshin-v2-manager",
+                    "source_channel": "bunshin-manager",
                 }
             )
             replacement = self.repository.snapshots.read_snapshot(
@@ -1751,8 +1272,8 @@ class BunshinOutboxProcessor:
                     self.service.control_workflow(
                         workflow_id=replacement.aggregate_id,
                         command="cancel",
-                        actor="bunshin-v2-manager",
-                        source_channel="bunshin-v2-manager",
+                        actor="bunshin-manager",
+                        source_channel="bunshin-manager",
                         reason="execution restart was cancelled before replacement activation",
                     )
             self.repository.transitions.dispatch(
@@ -1761,7 +1282,7 @@ class BunshinOutboxProcessor:
                     workflow_id=latest.workflow_id,
                     aggregate_type=AggregateType.WORKFLOW,
                     aggregate_id=latest.aggregate_id,
-                    actor="bunshin-v2-manager",
+                    actor="bunshin-manager",
                     expected_version=latest.version,
                     idempotency_key=f"effect:{effect['effect_key']}:replacement-started",
                     payload={"replacement_workflow_id": replacement_id},
@@ -1778,121 +1299,11 @@ class BunshinOutboxProcessor:
 
     def _node_accepted(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
-        epoch_id = str(node.payload.get("epoch_id") or "")
-        DagScheduler(self.repository).schedule_ready_nodes(
-            workflow_id=node.workflow_id,
-            epoch_id=epoch_id,
+        DagScheduler(self.repository).advance(
+            workflow_id=node.workflow_id, epoch_id=str(node.payload.get("epoch_id") or ""),
+            generation=int(node.payload.get("graph_generation") or 0),
         )
-        nodes = [
-            item
-            for item in self.repository.queries.list_workflow_snapshots(node.workflow_id)
-            if item.aggregate_type == AggregateType.DAG_NODE_RUN
-            and str(item.payload.get("epoch_id") or "") == epoch_id
-        ]
-        sinks = [item for item in nodes if bool(item.payload.get("graph_sink"))]
-        if nodes and len(sinks) == 1:
-            graph_execution = WorkflowCoordinator(self.repository).execution(
-                workflow_id=node.workflow_id,
-                generation=int(node.payload.get("graph_generation") or 0) or None,
-            )
-        else:
-            graph_execution = None
-        if graph_execution is not None and graph_execution.state.value == "COMPLETED":
-            sink = sinks[0]
-            if (
-                node.aggregate_id == sink.aggregate_id
-                and str(dict(sink.payload.get("candidate_ref") or {}).get("sha256") or "")
-                == graph_execution.published_sink_ref
-            ):
-                epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
-                if epoch is not None and epoch.state == "RUNNING":
-                    self.repository.transitions.dispatch(
-                        ActionEnvelope(
-                            action_type="ALL_REQUIRED_NODES_ACCEPTED",
-                            workflow_id=node.workflow_id,
-                            aggregate_type=AggregateType.EXECUTION_EPOCH,
-                            aggregate_id=epoch_id,
-                            actor="bunshin-v2-outbox",
-                            expected_version=epoch.version,
-                            idempotency_key=f"effect:{effect['effect_key']}:all-required-accepted",
-                            payload={
-                                "accepted_candidate_refs": [dict(item.payload["candidate_ref"]) for item in nodes],
-                                "verification_artifact_refs": [
-                                    dict(item.payload["verification_artifact_ref"])
-                                    for item in nodes
-                                    if item.payload.get("verification_artifact_ref")
-                                ],
-                                "sink_candidate_ref": dict(
-                                    sink.payload.get("candidate_ref") or {}
-                                ),
-                            },
-                        )
-                    )
         return {}
-
-    def _publish_accepted_memory_candidate(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        node = self._effect_snapshot(effect)
-        if node.state != "ACCEPTED" or str(node.payload.get("node_kind") or "unit") != "unit":
-            return {}
-        if node.payload.get("memory_candidate_ref"):
-            return {"result_artifact_ref": dict(node.payload["memory_candidate_ref"])}
-        epoch_id = str(node.payload.get("epoch_id") or "")
-        memory_candidate_ref = self.service.artifacts.put_json(
-            {
-                "schema_version": "1",
-                "candidate_kind": "accepted_unit_learning",
-                "review_status": "pending_human_review",
-                "workflow_id": node.workflow_id,
-                "epoch_id": epoch_id,
-                "node_run_id": node.aggregate_id,
-                "unit_id": str(node.payload.get("unit_id") or ""),
-                "unit_contract_ref": dict(node.payload.get("unit_contract_ref") or {}),
-                "candidate_ref": dict(node.payload.get("candidate_ref") or {}),
-                "verification_artifact_ref": dict(node.payload.get("verification_artifact_ref") or {}),
-                "historical_repair_bill_refs": [
-                    dict(item)
-                    for item in list(node.payload.get("historical_repair_bill_refs") or [])
-                    if isinstance(item, Mapping)
-                ],
-                "architecture_manifest_ref": dict(node.payload.get("architecture_manifest_ref") or {}),
-                "publication_rule": "Pal or the user must review this candidate before long-term memory publication.",
-                "validity_rule": "Publish only while this node remains ACCEPTED in the active execution epoch; STALE or superseded nodes invalidate the candidate.",
-            },
-            artifact_type="AcceptedModuleMemoryCandidateArtifact",
-            child_refs=tuple(
-                [
-                    (str(ref.get("sha256")), relation)
-                    for relation, ref in (
-                        ("unit_contract", dict(node.payload.get("unit_contract_ref") or {})),
-                        ("candidate", dict(node.payload.get("candidate_ref") or {})),
-                        ("verification", dict(node.payload.get("verification_artifact_ref") or {})),
-                        ("architecture_manifest", dict(node.payload.get("architecture_manifest_ref") or {})),
-                    )
-                    if ref.get("sha256")
-                ]
-                + [
-                    (str(ref.get("sha256")), "repair_bill")
-                    for ref in list(node.payload.get("historical_repair_bill_refs") or [])
-                    if isinstance(ref, Mapping) and ref.get("sha256")
-                ]
-            ),
-            provenance={"workflow_id": node.workflow_id, "node_run_id": node.aggregate_id},
-        )
-        current = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
-        if current is not None and not current.payload.get("memory_candidate_ref"):
-            self.repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type="MEMORY_CANDIDATE_PUBLISHED",
-                    workflow_id=node.workflow_id,
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node.aggregate_id,
-                    actor="bunshin-v2-outbox",
-                    expected_version=current.version,
-                    idempotency_key=f"effect:{effect['effect_key']}:memory-candidate",
-                    payload={"memory_candidate_ref": memory_candidate_ref.to_dict()},
-                )
-            )
-        return {"result_artifact_ref": memory_candidate_ref.to_dict()}
 
     def _propagate_workflow_control(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)
@@ -1911,7 +1322,7 @@ class BunshinOutboxProcessor:
                         workflow_id=workflow.workflow_id,
                         aggregate_type=child.aggregate_type,
                         aggregate_id=child.aggregate_id,
-                        actor="bunshin-v2-control",
+                        actor="bunshin-control",
                         expected_version=child.version,
                         idempotency_key=f"effect:{effect['effect_key']}:{child.aggregate_id}",
                     )
@@ -1934,7 +1345,7 @@ class BunshinOutboxProcessor:
                     workflow_id=workflow.workflow_id,
                     aggregate_type=child.aggregate_type,
                     aggregate_id=child.aggregate_id,
-                    actor="bunshin-v2-control",
+                    actor="bunshin-control",
                     expected_version=child.version,
                     idempotency_key=f"effect:{effect['effect_key']}:{child.aggregate_id}",
                 )
@@ -1975,7 +1386,7 @@ class BunshinOutboxProcessor:
                         workflow_id=workflow.workflow_id,
                         aggregate_type=AggregateType.WORKFLOW,
                         aggregate_id=workflow.workflow_id,
-                        actor="bunshin-v2-control",
+                        actor="bunshin-control",
                         expected_version=latest.version,
                         idempotency_key=f"effect:{effect['effect_key']}:confirm",
                     )
@@ -1983,82 +1394,10 @@ class BunshinOutboxProcessor:
         return {}
 
     def _control_epoch_nodes(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        epoch = self._effect_snapshot(effect)
-        snapshots = self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
-        nodes = [
-            item
-            for item in snapshots
-            if item.aggregate_type == AggregateType.DAG_NODE_RUN
-            and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
-        ]
-        node_machine = machine_spec_for(AggregateType.DAG_NODE_RUN)
-        intent = (
-            ControlIntent.CANCEL
-            if effect_type == "cancel_epoch_nodes"
-            else ControlIntent.PAUSE
-        )
-        for node in nodes:
-            if effect_type == "resume_epoch_nodes":
-                action_type = "RESUME"
-                if action_type not in self.repository.transitions.legal_actions(
-                    AggregateType.DAG_NODE_RUN,
-                    node.state,
-                ):
-                    continue
-            else:
-                if (
-                    node_machine.control_disposition(intent, node.state)
-                    != ControlDisposition.REQUEST
-                ):
-                    continue
-                action_type = node_machine.control_policies[intent].request_action
-            self.repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id=epoch.workflow_id,
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node.aggregate_id,
-                    actor="bunshin-v2-control",
-                    expected_version=node.version,
-                    idempotency_key=f"effect:{effect['effect_key']}:{node.aggregate_id}",
-                )
-            )
+        intent = {"cancel_epoch_nodes": ControlIntent.CANCEL, "pause_epoch_nodes": ControlIntent.PAUSE,
+                  "freeze_epoch_nodes": ControlIntent.PAUSE, "resume_epoch_nodes": None}[effect_type]
+        DagScheduler(self.repository).control_nodes(intent, self._effect_snapshot(effect), str(effect["effect_key"]))
         return {}
-
-    def _link_workflow(
-        self,
-        workflow_id: str,
-        action_type: str,
-        payload: Mapping[str, Any],
-        causation_key: str,
-        *,
-        unit_of_work: BunshinUnitOfWork | None = None,
-    ) -> None:
-        workflow = (unit_of_work or self.repository).snapshots.read_snapshot(
-            AggregateType.WORKFLOW,
-            workflow_id,
-        )
-        if workflow is None:
-            raise ValueError("workflow does not exist")
-        (unit_of_work or self.repository).transitions.dispatch(
-            ActionEnvelope(
-                action_type=action_type,
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor="bunshin-v2-router",
-                expected_version=workflow.version,
-                idempotency_key=f"link:{causation_key}:{action_type}",
-                payload=dict(payload),
-            ),
-        )
-
-    def _effect_snapshot(self, effect: Mapping[str, Any]) -> AggregateSnapshot:
-        aggregate_type = AggregateType(str(effect["aggregate_type"]))
-        snapshot = self.repository.snapshots.read_snapshot(aggregate_type, str(effect["aggregate_id"]))
-        if snapshot is None:
-            raise ValueError("effect aggregate no longer exists")
-        return snapshot
 
     def _failed_effect_triage_action(
         self,
@@ -2098,7 +1437,7 @@ class BunshinOutboxProcessor:
             workflow_id=target.workflow_id,
             aggregate_type=target.aggregate_type,
             aggregate_id=target.aggregate_id,
-            actor="bunshin-v2-outbox",
+            actor="bunshin-outbox",
             idempotency_key=(
                 f"effect-failed:{effect['effect_key']}:"
                 f"{target.aggregate_type.value}:{target.aggregate_id}"
@@ -2120,346 +1459,32 @@ class BunshinOutboxProcessor:
         reconcile_control_requests(self.repository, workflow_id)
 
 
-def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
-    if not workflow_id:
-        return
-    snapshots = list(repository.queries.list_workflow_snapshots(workflow_id))
-    workflow = next(
-        (item for item in snapshots if item.aggregate_type == AggregateType.WORKFLOW),
-        None,
-    )
-    if workflow is None:
-        return
-    _reconcile_cycle_control_projection(repository, workflow, snapshots)
-    requested_intent = {
-        "PAUSE_REQUESTED": ControlIntent.PAUSE,
-        "CANCEL_REQUESTED": ControlIntent.CANCEL,
-    }.get(workflow.state)
-    if requested_intent is not None:
-        for child in _active_control_children(snapshots, workflow):
-            machine = machine_spec_for(child.aggregate_type)
-            if (
-                machine.control_disposition(requested_intent, child.state)
-                != ControlDisposition.REQUEST
-            ):
-                continue
-            action_type = machine.control_policies[requested_intent].request_action
-            repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id=workflow_id,
-                    aggregate_type=child.aggregate_type,
-                    aggregate_id=child.aggregate_id,
-                    actor="bunshin-v2-control",
-                    expected_version=child.version,
-                    idempotency_key=(
-                        f"reconcile:{workflow_id}:{action_type.lower()}:"
-                        f"{child.aggregate_id}:{child.version}"
-                    ),
-                )
-            )
-    elif workflow.state == "ACTIVE":
-        for child in _active_control_children(snapshots, workflow):
-            if child.state != "PAUSED" or "RESUME" not in repository.transitions.legal_actions(
-                child.aggregate_type,
-                child.state,
-            ):
-                continue
-            repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type="RESUME",
-                    workflow_id=workflow_id,
-                    aggregate_type=child.aggregate_type,
-                    aggregate_id=child.aggregate_id,
-                    actor="bunshin-v2-control",
-                    expected_version=child.version,
-                    idempotency_key=(
-                        f"reconcile:{workflow_id}:resume:"
-                        f"{child.aggregate_id}:{child.version}"
-                    ),
-                )
-            )
+@dataclass
+class BunshinOutboxProcessor(WorkflowEffects):
+    """Compatibility entry point for callers that constructed the combined processor."""
+    worker_id: str = "bunshin-outbox"
+    effect_lease_seconds: int = 120
+    dispatcher: WorkflowEffectDispatcher = field(init=False)
 
-    snapshots = list(repository.queries.list_workflow_snapshots(workflow_id))
-    for epoch in [
-        item
-        for item in snapshots
-        if item.aggregate_type == AggregateType.EXECUTION_EPOCH
-    ]:
-        nodes = [
-            item
-            for item in snapshots
-            if item.aggregate_type == AggregateType.DAG_NODE_RUN
-            and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
-        ]
-        node_machine = machine_spec_for(AggregateType.DAG_NODE_RUN)
-        epoch_intent = {
-            "PAUSE_REQUESTED": ControlIntent.PAUSE,
-            "CANCEL_REQUESTED": ControlIntent.CANCEL,
-        }.get(epoch.state)
-        if epoch_intent is not None:
-            for node in nodes:
-                if (
-                    node_machine.control_disposition(epoch_intent, node.state)
-                    != ControlDisposition.REQUEST
-                ):
-                    continue
-                action_type = node_machine.control_policies[epoch_intent].request_action
-                repository.transitions.dispatch(
-                    ActionEnvelope(
-                        action_type=action_type,
-                        workflow_id=workflow_id,
-                        aggregate_type=AggregateType.DAG_NODE_RUN,
-                        aggregate_id=node.aggregate_id,
-                        actor="bunshin-v2-control",
-                        expected_version=node.version,
-                        idempotency_key=(
-                            f"reconcile:{epoch.aggregate_id}:{action_type.lower()}:"
-                            f"{node.aggregate_id}:{node.version}"
-                        ),
-                    )
-                )
-            snapshots = list(repository.queries.list_workflow_snapshots(workflow_id))
-            nodes = [
-                item
-                for item in snapshots
-                if item.aggregate_type == AggregateType.DAG_NODE_RUN
-                and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
-            ]
-            epoch = next(
-                item
-                for item in snapshots
-                if item.aggregate_type == AggregateType.EXECUTION_EPOCH
-                and item.aggregate_id == epoch.aggregate_id
-            )
-        if epoch.state == "PAUSE_REQUESTED" and all(
-            node_machine.control_disposition(ControlIntent.PAUSE, item.state)
-            == ControlDisposition.SETTLED
-            for item in nodes
-        ):
-            repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type="NODES_PAUSED",
-                    workflow_id=workflow_id,
-                    aggregate_type=AggregateType.EXECUTION_EPOCH,
-                    aggregate_id=epoch.aggregate_id,
-                    actor="bunshin-v2-control",
-                    expected_version=epoch.version,
-                    idempotency_key=f"reconcile:{epoch.aggregate_id}:{epoch.version}:paused",
-                )
-            )
-        elif epoch.state == "CANCEL_REQUESTED" and all(
-            node_machine.control_disposition(ControlIntent.CANCEL, item.state)
-            == ControlDisposition.SETTLED
-            for item in nodes
-        ):
-            repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type="NODES_CANCELLED",
-                    workflow_id=workflow_id,
-                    aggregate_type=AggregateType.EXECUTION_EPOCH,
-                    aggregate_id=epoch.aggregate_id,
-                    actor="bunshin-v2-control",
-                    expected_version=epoch.version,
-                    idempotency_key=f"reconcile:{epoch.aggregate_id}:{epoch.version}:cancelled",
-                )
-            )
-        elif epoch.state in {"STARTING", "RUNNING", "FINALIZING"}:
-            for node in nodes:
-                if node.state != "PAUSED" or "RESUME" not in repository.transitions.legal_actions(
-                    AggregateType.DAG_NODE_RUN,
-                    node.state,
-                ):
-                    continue
-                repository.transitions.dispatch(
-                    ActionEnvelope(
-                        action_type="RESUME",
-                        workflow_id=workflow_id,
-                        aggregate_type=AggregateType.DAG_NODE_RUN,
-                        aggregate_id=node.aggregate_id,
-                        actor="bunshin-v2-control",
-                        expected_version=node.version,
-                        idempotency_key=(
-                            f"reconcile:{epoch.aggregate_id}:resume:"
-                            f"{node.aggregate_id}:{node.version}"
-                        ),
-                    )
-                )
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.dispatcher = WorkflowEffectDispatcher(self, self.worker_id, self.effect_lease_seconds)
 
-    snapshots = list(repository.queries.list_workflow_snapshots(workflow_id))
-    workflow = next(
-        (item for item in snapshots if item.aggregate_type == AggregateType.WORKFLOW),
-        None,
-    )
-    if workflow is None:
-        return
-    children = _active_control_children(snapshots, workflow)
-    if workflow.state == "PAUSE_REQUESTED" and all(
-        machine_spec_for(item.aggregate_type).control_disposition(
-            ControlIntent.PAUSE,
-            item.state,
-        )
-        == ControlDisposition.SETTLED
-        for item in children
-    ):
-        repository.transitions.dispatch(
-            ActionEnvelope(
-                action_type="CHILDREN_PAUSED",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor="bunshin-v2-control",
-                expected_version=workflow.version,
-                idempotency_key=f"reconcile:{workflow_id}:{workflow.version}:paused",
-            )
-        )
-    elif workflow.state == "CANCEL_REQUESTED" and all(
-        machine_spec_for(item.aggregate_type).control_disposition(
-            ControlIntent.CANCEL,
-            item.state,
-        )
-        == ControlDisposition.SETTLED
-        for item in children
-    ):
-        repository.transitions.dispatch(
-            ActionEnvelope(
-                action_type="CHILDREN_CANCELLED",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor="bunshin-v2-control",
-                expected_version=workflow.version,
-                idempotency_key=f"reconcile:{workflow_id}:{workflow.version}:cancelled",
-            )
-        )
+    async def _process_effect(self, effect: Mapping[str, Any]) -> str:
+        return await self.dispatcher._process_effect(effect)
 
-    refreshed = list(repository.queries.list_workflow_snapshots(workflow_id))
-    refreshed_workflow = next(
-        (
-            item
-            for item in refreshed
-            if item.aggregate_type == AggregateType.WORKFLOW
-        ),
-        None,
-    )
-    if refreshed_workflow is not None:
-        _reconcile_cycle_control_projection(
-            repository,
-            refreshed_workflow,
-            refreshed,
-        )
+    async def process_once(self, *, limit: int = 10) -> dict[str, Any]:
+        return await self.dispatcher.process_once(limit=limit)
 
+    def start_available(self, *, max_concurrency: int) -> int:
+        return self.dispatcher.start_available(max_concurrency=max_concurrency)
 
-def _workflow_pauses_cycles(workflow: AggregateSnapshot) -> bool:
-    # An ACTIVE workflow's triage freezes its children through the ordinary
-    # pause protocol. The semantic cursors must receive that same intent
-    # before process retirement can confirm PAUSED and clear the old slot.
-    # Triage during cancellation/restart must not replace its cancel intent.
-    return workflow.state in {"PAUSE_REQUESTED", "PAUSED"} or (
-        workflow.state == "TRIAGE_REQUIRED"
-        and str(workflow.payload.get("triage_resume_state") or "")
-        in {"ACTIVE", "PAUSE_REQUESTED"}
-    )
+    async def stop_background(self) -> None:
+        await self.dispatcher.stop_background()
 
-
-def _reconcile_cycle_control_projection(
-    repository: Any,
-    workflow: AggregateSnapshot,
-    snapshots: list[AggregateSnapshot],
-) -> None:
-    """Repair the crash window between aggregate control and cycle state.
-
-    Aggregate machines project process/effect progress. PlanCycle and
-    GraphExecution remain the semantic owners, so this reconciliation is
-    one-way and idempotent: committed aggregate intent may repair a missing
-    cycle write, never the reverse.
-    """
-
-    coordinator = WorkflowCoordinator(repository)
-    if _workflow_pauses_cycles(workflow):
-        coordinator.request_workflow_pause(workflow_id=workflow.workflow_id)
-    elif workflow.state in {"CANCEL_REQUESTED", "CANCELLED"}:
-        coordinator.request_workflow_cancel(workflow_id=workflow.workflow_id)
-    elif workflow.state == "ACTIVE":
-        coordinator.resume_workflow(workflow_id=workflow.workflow_id)
-
-    active_revision_id = str(
-        workflow.payload.get("architecture_revision_id") or ""
-    )
-    for item in snapshots:
-        if (
-            item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
-            and item.aggregate_id == active_revision_id
-            and item.state in {"PAUSED", "CANCELLED"}
-        ):
-            coordinator.confirm_plan_control(
-                workflow_id=workflow.workflow_id,
-                cancel=item.state == "CANCELLED",
-            )
-        if (
-            item.aggregate_type == AggregateType.DAG_NODE_RUN
-            and item.state in {"PAUSED", "CANCELLED"}
-        ):
-            coordinator.confirm_node_control(
-                workflow_id=workflow.workflow_id,
-                node_name=str(
-                    item.payload.get("module_name")
-                    or item.payload.get("unit_id")
-                    or ""
-                ),
-                cancel=item.state == "CANCELLED",
-            )
-
-
-def _active_control_children(
-    snapshots: list[AggregateSnapshot],
-    workflow: AggregateSnapshot,
-) -> list[AggregateSnapshot]:
-    active_ids = {
-        str(workflow.payload.get(field) or "")
-        for field in (
-            "architecture_revision_id",
-            "execution_epoch_id",
-            "standalone_review_id",
-        )
-        if str(workflow.payload.get(field) or "")
-    }
-    children = [
-        item
-        for item in snapshots
-        if item.aggregate_type
-        in {
-            AggregateType.ARCHITECTURE_REVISION,
-            AggregateType.EXECUTION_EPOCH,
-            AggregateType.STANDALONE_REVIEW,
-        }
-        and item.aggregate_id in active_ids
-    ]
-    if active_ids:
-        return children
-    return [
-        item
-        for item in snapshots
-        if item.aggregate_type
-        in {
-            AggregateType.ARCHITECTURE_REVISION,
-            AggregateType.EXECUTION_EPOCH,
-            AggregateType.STANDALONE_REVIEW,
-        }
-        and item.state
-        not in {
-            "ACCEPTED",
-            "REJECTED",
-            "COMPLETED",
-            "CANCELLED",
-            "STALE",
-            "SUPERSEDED",
-        }
-    ]
-
-
-def _derived_id(prefix: str, effect_key: str) -> str:
-    return f"{prefix}_{hashlib.sha256(effect_key.encode('utf-8')).hexdigest()[:24]}"
+    @property
+    def active_background_count(self) -> int:
+        return self.dispatcher.active_background_count
 
 
 def _execution_epoch_id(

@@ -26,7 +26,7 @@ from pal.bunshin.role_protocol import (
 )
 
 
-class BunshinV2RoleProtocolTests(unittest.TestCase):
+class BunshinRoleProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-role-protocol-"))
         self.repository = BunshinRepository(self.runtime_root)

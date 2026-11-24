@@ -44,12 +44,12 @@ def test_restored_native_loop_consumes_new_contract_without_rewriting_profile(tm
         value.resolved_profile["output_contract_fragment"] = (
             "Manager validates and records the bound files after the harness finishes."
         )
-        value.metadata["bunshin_v2"].update({
+        value.metadata["bunshin"].update({
             "workflow_id": "architect-workflow", "invocation_id": "native-attempt",
             "lease_resource_key": lease.resource_key, "fencing_token": lease.fencing_token,
             "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
         })
-        value.workspace["bunshin_v2"] = copy.deepcopy(value.metadata["bunshin_v2"])
+        value.workspace["bunshin"] = copy.deepcopy(value.metadata["bunshin"])
         restore_path = tmp_path / "before-fix-checkpoint.json"
         value.metadata["agent_session"] = {
             "session_id": value.invocation_id, "workflow_id": "architect-workflow",

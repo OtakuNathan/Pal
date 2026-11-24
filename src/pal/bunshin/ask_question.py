@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pal.execution.generated_tool_models import (
-    BunshinV2AskQuestionInput,
+    BunshinAskQuestionInput,
 )
 from pal.shared import RuntimeStatus, ToolExecutionResult
 
@@ -33,7 +33,7 @@ ASK_QUESTION_TOOL_SPEC: dict[str, Any] = {
             "task; report the blocked requirement through the harness."
         ),
     },
-    "InputModel": BunshinV2AskQuestionInput,
+    "InputModel": BunshinAskQuestionInput,
 }
 
 

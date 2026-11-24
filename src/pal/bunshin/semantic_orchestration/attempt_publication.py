@@ -1,5 +1,4 @@
 from __future__ import annotations
-import pal.bunshin.turns as _dependency_turns
 from dataclasses import dataclass
 from pal.bunshin.storage.role_assignments import semantic_business_lease
 from pathlib import Path
@@ -7,12 +6,12 @@ from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.paths import invocation_root
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.bunshin.harnesses import HARNESS_LAUNCH_PAL_SANDBOX
 from pal.bunshin.semantic_orchestration.role_environment import _bind_role_attempt_sandbox
 import json
 from pal.bunshin.ipc import BUNSHIN_RUNTIME_DB_PATH_ENV, python_subprocess_env
 from pal.bunshin.sandbox import build_sandboxed_runner_invocation
 from pal.bunshin.ipc import ROLE_GATEWAY_TOKEN_ENV
+from pal.foundation.bwrap_permissions import ReadOnlyBind
 from pal.bunshin.semantic_orchestration.attempt_models import (
     BoundRoleHarness, ClaimedRoleAttempt, MaterializedRolePack, PreparedRoleSession, PreparedRoleWorkspace,
     PublishedRoleAttempt, RoleAttemptRequest,
@@ -25,6 +24,7 @@ class AttemptPublication:
     repository: BunshinRepository
     runtime_db_path: Path | None
     runtime_root: Path
+    runtime_mounts: tuple[ReadOnlyBind, ...] = ()
 
     async def execute(
         self, command: RoleAttemptRequest, stage_attempt_admission: ClaimedRoleAttempt,
@@ -49,15 +49,12 @@ class AttemptPublication:
         role = stage_workspace_preparation.role
         run_id = stage_workspace_preparation.run_id
         snapshot = command.snapshot
-        if harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX:
-            pack = _bind_role_attempt_sandbox(
-                self.runtime_root,
-                pack,
-                run_id=run_id,
-                durable_prompt_reused=durable_prompt_reused,
-            )
-        else:
-            pack = _dependency_turns.sanitize_runner_session_pack(pack)
+        pack = _bind_role_attempt_sandbox(
+            self.runtime_root,
+            pack,
+            run_id=run_id,
+            durable_prompt_reused=durable_prompt_reused,
+        )
         prompt_ref = self.artifacts.put_json(
             pack.to_dict(),
             artifact_type="RolePromptPackArtifact",
@@ -126,13 +123,11 @@ class AttemptPublication:
         runner_env[ROLE_GATEWAY_TOKEN_ENV] = assignment_access_token
         if self.runtime_db_path is not None:
             runner_env[BUNSHIN_RUNTIME_DB_PATH_ENV] = str(self.runtime_db_path)
-        if harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX:
-            argv, env = build_sandboxed_runner_invocation(
-                runtime_root=self.runtime_root,
-                pack=pack,
-                argv=argv,
-                env=runner_env,
-            )
-        else:
-            env = runner_env
+        argv, env = build_sandboxed_runner_invocation(
+            runtime_root=self.runtime_root,
+            pack=pack,
+            argv=argv,
+            env=runner_env,
+            runtime_mounts=self.runtime_mounts,
+        )
         return PublishedRoleAttempt(argv=argv, env=env, pack=pack, prompt_ref=prompt_ref)

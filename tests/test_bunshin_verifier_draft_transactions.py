@@ -20,7 +20,7 @@ from tests import test_bunshin_role_gateway as gateway_tests
 
 @pytest.fixture
 def gateway():
-    fixture = gateway_tests.BunshinV2RoleGatewayTests()
+    fixture = gateway_tests.BunshinRoleGatewayTests()
     fixture.setUp()
     repo = fixture.service.repository
     repo.role_sessions.ensure_role_session(session_id="draft-verifier-session", workflow_id="workflow-router",
@@ -37,7 +37,7 @@ def gateway():
     external = {"kind": "finding", "summary": "External review history", "origin": "verifier:module",
                 "finding": {"finding_kind": "module_defect", "priority": "p1", "summary": "External review history"}}
     prompt = fixture.service.artifacts.put_json({"workspace": {"repo_path": str(fixture.workspace),
-        "bunshin_v2": {"work_item_seed": [external]}}}, artifact_type="RolePromptPackArtifact")
+        "bunshin": {"work_item_seed": [external]}}}, artifact_type="RolePromptPackArtifact")
     repo.role_attempts.start_role_attempt(assignment_id=assignment["assignment_id"], attempt_id_value=attempt["attempt_id"],
         lease_resource_key=resource, fencing_token=fence, prompt_pack_ref=prompt.to_dict())
     token = repo.role_access.issue_role_attempt_access_token(assignment_id=assignment["assignment_id"],
@@ -197,9 +197,9 @@ def replacement_attempt(gateway, *, generation=4, pending_receipt=False):
     repo.leases.release_lease(context.lease_resource_key, context.invocation_id, context.fencing_token)
     # Fixture recovery boundary: old worker quiesced; durable source/receipt is retained.
     with repo.database.write_connection() as connection:
-        connection.execute("UPDATE bunshin_v2_role_assignments SET state = 'cancelled' WHERE assignment_id = ?",
+        connection.execute("UPDATE bunshin_role_assignments SET state = 'cancelled' WHERE assignment_id = ?",
                            (assignment["assignment_id"],))
-        connection.execute("UPDATE bunshin_v2_role_sessions SET status = 'suspended' WHERE session_id = ?",
+        connection.execute("UPDATE bunshin_role_sessions SET status = 'suspended' WHERE session_id = ?",
                            (assignment["session_id"],))
     next_assignment = repo.role_assignments.create_role_assignment(RoleAssignmentRequest(
         assignment_key="continued-same-evaluation", session_id=assignment["session_id"], workflow_id=assignment["workflow_id"],
@@ -228,7 +228,7 @@ def test_trusted_logical_evaluation_owns_retry_but_receipt_or_new_generation_is_
     assert (finding["finding_id"] in ids) is editable
     if editable:
         from pal.bunshin.work_items import prepare_work_item_mutation
-        workspace = {"runtime_root": str(store.runtime_root), "bunshin_v2": {
+        workspace = {"runtime_root": str(store.runtime_root), "bunshin": {
             **next_context.to_dict(), "authoring_input_fingerprint": next_context.input_fingerprint}}
         args = {"finding_id": finding["finding_id"], "expected_revision": 1, "reason": "Same evaluation correction"}
         store.mutate(replace(next_context, draft_kind="work_items"), operation_key="continued-remove", request=args,
@@ -237,7 +237,7 @@ def test_trusted_logical_evaluation_owns_retry_but_receipt_or_new_generation_is_
         assert finding["finding_id"] in json.dumps(inherited.payload["history"])
     # No edit to the copied draft can erase the source row.
     with store._transaction() as connection:
-        source = connection.execute("SELECT payload_json FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+        source = connection.execute("SELECT payload_json FROM bunshin_submission_drafts WHERE draft_key = ?",
                                     (replace(context, draft_kind="work_items").draft_key,)).fetchone()
         assert finding["finding_id"] in source[0]
 
@@ -315,7 +315,7 @@ def test_upsert_deleted_identity_remains_reserved_after_same_evaluation_retry(ga
     mutate(gateway, "work_items", "delete", finding_id=created["finding_id"], expected_revision=1, reason="Mistaken")
     retry = replacement_attempt(gateway)
     from pal.bunshin.work_items import prepare_work_item_mutation
-    workspace = {"runtime_root": str(store.runtime_root), "bunshin_v2": {
+    workspace = {"runtime_root": str(store.runtime_root), "bunshin": {
         **retry.to_dict(), "authoring_input_fingerprint": retry.input_fingerprint}}
     args = {"finding_id": created["finding_id"], "expected_revision": 0,
             "finding_kind": "module_defect", "priority": "p1", "summary": "Same key reuse"}

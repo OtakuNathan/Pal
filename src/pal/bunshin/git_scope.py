@@ -228,6 +228,8 @@ def _authenticated_git_scope(
     workspace = dict(prompt_pack.get("workspace") or {})
     allowed_paths: set[_PathScope] = set()
     workspace_policy = dict(workspace.get("workspace_policy") or {})
+    if assignment.get("role") == "implementation" and workspace.get("coder_repository_read"):
+        allowed_paths.add(_PathScope(".", literal=True))
     if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo":
         # Submission-scope reviewers are physically bound to a read-only
         # repository by the sandbox.  Their authenticated surface is the

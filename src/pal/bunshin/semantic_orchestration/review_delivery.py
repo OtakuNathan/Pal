@@ -69,7 +69,7 @@ class ReviewDelivery:
                 workflow_id=review.workflow_id,
                 aggregate_type=AggregateType.STANDALONE_REVIEW,
                 aggregate_id=review.aggregate_id,
-                actor="bunshin-v2-manager",
+                actor="bunshin-manager",
                 expected_version=current.version,
                 idempotency_key=f"effect:{effect['effect_key']}:ack",
                 payload=payload,

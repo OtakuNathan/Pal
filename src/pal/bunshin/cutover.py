@@ -18,6 +18,7 @@ from pal.bunshin.ipc import BunshinManagerClient, bunshin_runtime_dir
 from pal.bunshin.schema import (
     BUNSHIN_SCHEMA_VERSION,
     ensure_bunshin_schema,
+    schema_meta_table,
 )
 
 
@@ -36,6 +37,14 @@ def cutover_bunshin_runtime(runtime_root: Path) -> BunshinRuntimeCutoverResult:
     root = Path(runtime_root)
     source = bunshin_runtime_dir(root)
     previous_version = _bunshin_schema_version(source / BUNSHIN_DB_FILENAME)
+    if previous_version == 29:
+        require_bunshin_runtime_stopped(root)
+        from pal.bunshin.schema import ensure_bunshin_schema
+        with sqlite3.connect(source / BUNSHIN_DB_FILENAME) as connection:
+            ensure_bunshin_schema(connection)
+        return BunshinRuntimeCutoverResult(status="migrated_in_place", previous_version=29)
+    if previous_version > BUNSHIN_SCHEMA_VERSION:
+        raise RuntimeError("Bunshin runtime was written by a newer version")
     if previous_version in {0, BUNSHIN_SCHEMA_VERSION}:
         return BunshinRuntimeCutoverResult(
             status=(
@@ -123,9 +132,9 @@ def _bunshin_schema_version(db_path: Path) -> int:
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT schema_value
-                FROM bunshin_v2_schema_meta
+                FROM {schema_meta_table(connection)}
                 WHERE schema_key = 'schema_version'
                 """
             ).fetchone()

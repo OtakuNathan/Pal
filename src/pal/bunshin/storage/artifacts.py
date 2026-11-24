@@ -34,13 +34,13 @@ class ArtifactsStore:
         with self.database.write_connection() as connection:
             for child_sha, _relation in child_refs:
                 child = connection.execute(
-                    "SELECT durable FROM bunshin_v2_artifacts WHERE sha256 = ?",
+                    "SELECT durable FROM bunshin_artifacts WHERE sha256 = ?",
                     (str(child_sha),),
                 ).fetchone()
                 if child is None or int(child["durable"]) != 1:
                     raise ValueError(f"child artifact is not durable: {child_sha}")
             existing = connection.execute(
-                "SELECT artifact_type, schema_version, media_type, byte_size, storage_path FROM bunshin_v2_artifacts WHERE sha256 = ?",
+                "SELECT artifact_type, schema_version, media_type, byte_size, storage_path FROM bunshin_artifacts WHERE sha256 = ?",
                 (ref.sha256,),
             ).fetchone()
             if existing is not None:
@@ -56,7 +56,7 @@ class ArtifactsStore:
                     raise ValueError("typed artifact metadata is immutable")
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_artifacts(
+                INSERT INTO bunshin_artifacts(
                     sha256, artifact_type, schema_version, media_type, byte_size,
                     storage_path, durable, provenance_json, metadata_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
@@ -77,7 +77,7 @@ class ArtifactsStore:
             for child_sha, relation in child_refs:
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO bunshin_v2_artifact_refs(parent_sha256, child_sha256, relation, created_at)
+                    INSERT OR IGNORE INTO bunshin_artifact_refs(parent_sha256, child_sha256, relation, created_at)
                     VALUES (?, ?, ?, ?)
                     """,
                     (ref.sha256, str(child_sha), str(relation), now),
@@ -87,7 +87,7 @@ class ArtifactsStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT durable, storage_path FROM bunshin_v2_artifacts WHERE sha256 = ?",
+                "SELECT durable, storage_path FROM bunshin_artifacts WHERE sha256 = ?",
                 (str(sha256).removeprefix("sha256:"),),
             ).fetchone()
             return bool(row is not None and int(row["durable"]) == 1 and Path(str(row["storage_path"])).is_file())
@@ -97,7 +97,7 @@ class ArtifactsStore:
         digest = str(sha256).removeprefix("sha256:")
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_artifacts WHERE sha256 = ?",
+                "SELECT * FROM bunshin_artifacts WHERE sha256 = ?",
                 (digest,),
             ).fetchone()
             if row is None:
@@ -121,7 +121,7 @@ class ArtifactsStore:
             row = connection.execute(
                 """
                 SELECT result_artifact_ref_json
-                FROM bunshin_v2_outbox
+                FROM bunshin_outbox
                 WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
                   AND effect_type = ? AND status = 'completed'
                   AND result_artifact_ref_json != '{}'
@@ -138,7 +138,7 @@ class ArtifactsStore:
     def assert_artifact_refs_durable(self, connection: sqlite3.Connection, value: Any) -> None:
         for digest in _artifact_digests(value):
             row = connection.execute(
-                "SELECT durable, storage_path FROM bunshin_v2_artifacts WHERE sha256 = ?",
+                "SELECT durable, storage_path FROM bunshin_artifacts WHERE sha256 = ?",
                 (digest,),
             ).fetchone()
             if row is None or int(row["durable"]) != 1:

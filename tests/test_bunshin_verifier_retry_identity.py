@@ -85,7 +85,7 @@ class PauseResumeVerifier:
         node = self.fx._node()
         with self.repo.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT o.* FROM bunshin_v2_outbox o JOIN bunshin_v2_domain_events e ON e.event_id = o.event_id "
+                "SELECT o.* FROM bunshin_outbox o JOIN bunshin_domain_events e ON e.event_id = o.event_id "
                 "WHERE o.aggregate_id = ? AND o.effect_type IN ('admit_verifier_role', 'resume_semantic_state') "
                 "ORDER BY e.aggregate_version DESC LIMIT 1", (node.aggregate_id,),
             ).fetchone()
@@ -115,8 +115,8 @@ class PauseResumeVerifier:
         context = SubmissionDraftContext(workflow_id=self.workflow, invocation_id=attempt["attempt_id"],
             lease_resource_key=resource, fencing_token=lease.fencing_token, role="verifier", mode="module",
             draft_kind="verification", input_fingerprint=prompt.input_fingerprint)
-        workspace = {**prepared.workspace, "runtime_root": str(self.fx.root), "bunshin_v2": {
-            **prompt.pack.metadata["bunshin_v2"], **context.to_dict(), "authoring_input_fingerprint": context.input_fingerprint}}
+        workspace = {**prepared.workspace, "runtime_root": str(self.fx.root), "bunshin": {
+            **prompt.pack.metadata["bunshin"], **context.to_dict(), "authoring_input_fingerprint": context.input_fingerprint}}
         prompt_ref = self.artifacts.put_json({**prompt.pack.to_dict(), "workspace": workspace}, artifact_type="RolePromptPackArtifact")
         self.repo.role_attempts.start_role_attempt(assignment_id=assignment["assignment_id"], attempt_id_value=attempt["attempt_id"],
             lease_resource_key=resource, fencing_token=lease.fencing_token, prompt_pack_ref=prompt_ref.to_dict())
@@ -188,9 +188,9 @@ def test_real_pause_resume_preparation_change_preserves_current_editable_drafts(
         assert removed.ok and removed.structured["removed"]
         # Source rows remain intact; only the owned recovery copy changes.
         with store._transaction() as connection:
-            saved = connection.execute("SELECT payload_json FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+            saved = connection.execute("SELECT payload_json FROM bunshin_submission_drafts WHERE draft_key = ?",
                                        (first.draft_key,)).fetchone()
-            saved_work = connection.execute("SELECT payload_json FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+            saved_work = connection.execute("SELECT payload_json FROM bunshin_submission_drafts WHERE draft_key = ?",
                                             (replace(first, draft_kind="work_items").draft_key,)).fetchone()
         assert json.loads(saved[0]) == dict(source.payload)
         assert json.loads(saved_work[0]) == dict(source_work.payload)
@@ -219,7 +219,7 @@ def set_prior_field(lifecycle, assignment, field, value):
                "input_fingerprint", "submission_kind", "input_refs_json", "execution_spec_json"}
     assert field in allowed
     with lifecycle.repo.database.write_connection() as connection:
-        connection.execute(f"UPDATE bunshin_v2_role_assignments SET {field} = ? WHERE assignment_id = ?",
+        connection.execute(f"UPDATE bunshin_role_assignments SET {field} = ? WHERE assignment_id = ?",
                            (value, assignment["assignment_id"]))
 
 
@@ -287,8 +287,8 @@ def test_malformed_stored_identity_blocks_and_rolls_back_inheritance(lifecycle, 
     with pytest.raises(SubmissionInvariantError, match="source identity is malformed"):
         SubmissionDraftStore(lifecycle.fx.root).read(target)
     with lifecycle.repo.database.read_connection() as connection:
-        assert connection.execute("SELECT 1 FROM bunshin_v2_submission_drafts WHERE draft_key = ?", (target.draft_key,)).fetchone() is None
-        source = connection.execute("SELECT payload_json FROM bunshin_v2_submission_drafts WHERE draft_key = ?",
+        assert connection.execute("SELECT 1 FROM bunshin_submission_drafts WHERE draft_key = ?", (target.draft_key,)).fetchone() is None
+        source = connection.execute("SELECT payload_json FROM bunshin_submission_drafts WHERE draft_key = ?",
                                     (replace(first, draft_kind="work_items").draft_key,)).fetchone()
     assert "current-defect" in source[0]
 

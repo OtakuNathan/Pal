@@ -20,9 +20,9 @@ from pal.bunshin.service import BunshinWorkflowService
 from pal.bunshin.task_ledger import TaskLedgerService
 
 
-class BunshinV2ReplanTests(unittest.TestCase):
+class BunshinReplanTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_replan_"))
+        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_replan_"))
         self.service = BunshinWorkflowService(self.runtime_root)
         self.repository = self.service.repository
         self.artifacts = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
@@ -103,8 +103,8 @@ class BunshinV2ReplanTests(unittest.TestCase):
             "CONTRACT_DEFECT",
             {"repair_bill_ref": finding_a.to_dict()},
         )
-        self.processor._request_epoch_replan(self._node_effect("node_a", "finding-a"))
-        self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze"))
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_a", "finding-a"))
+        self.processor.replanning.freeze_epoch_for_replan(self._epoch_effect("freeze"))
 
         epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_COLLECTING")
@@ -127,8 +127,8 @@ class BunshinV2ReplanTests(unittest.TestCase):
             "CONTRACT_DEFECT",
             {"repair_bill_ref": finding_b.to_dict()},
         )
-        self.processor._request_epoch_replan(self._node_effect("node_b", "finding-b"))
-        self.processor._reconcile_replan_collections(self.workflow_id)
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_b", "finding-b"))
+        self.processor.replanning.reconcile_replan_collections(self.workflow_id)
 
         epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_REQUIRED")
@@ -142,7 +142,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
         self.assertNotIn("repair_bill_refs", serialized_view)
         self.assertNotIn(self.epoch_id, serialized_view)
 
-        self.processor._create_replan_revision(self._epoch_effect("create-revision"))
+        self.processor.replanning.create_replan_revision(self._epoch_effect("create-revision"))
         revisions = self._architecture_revisions()
         self.assertEqual(len(revisions), 1)
         self.assertEqual(
@@ -150,8 +150,8 @@ class BunshinV2ReplanTests(unittest.TestCase):
             epoch.payload["replan_finding_batch_ref"],
         )
 
-        self.processor._request_epoch_replan(self._node_effect("node_a", "finding-a-replay"))
-        self.processor._request_epoch_replan(self._node_effect("node_b", "finding-b-replay"))
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_a", "finding-a-replay"))
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_b", "finding-b-replay"))
         self.assertEqual(len(self._architecture_revisions()), 1)
         projection = self.repository.queries.read_workflow_projection(self.workflow_id)
         self.assertEqual(projection["active_aggregate_type"], "architecture_revision")
@@ -177,9 +177,9 @@ class BunshinV2ReplanTests(unittest.TestCase):
             "CONTRACT_DEFECT",
             {"repair_bill_ref": finding.to_dict()},
         )
-        self.processor._request_epoch_replan(self._node_effect("node_a", "finding-a"))
-        self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze"))
-        self.processor._reconcile_replan_collections(self.workflow_id)
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_a", "finding-a"))
+        self.processor.replanning.freeze_epoch_for_replan(self._epoch_effect("freeze"))
+        self.processor.replanning.reconcile_replan_collections(self.workflow_id)
         self.assertEqual(
             self.repository.snapshots.read_snapshot(
                 AggregateType.EXECUTION_EPOCH,
@@ -345,9 +345,9 @@ class BunshinV2ReplanTests(unittest.TestCase):
                 "CONTRACT_DEFECT",
                 {"repair_bill_ref": finding.to_dict()},
             )
-        self.processor._request_epoch_replan(self._node_effect("node_a", "first"))
-        self.processor._request_epoch_replan(self._node_effect("node_b", "second"))
-        self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-same"))
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_a", "first"))
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_b", "second"))
+        self.processor.replanning.freeze_epoch_for_replan(self._epoch_effect("freeze-same"))
 
         epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         batch = self.artifacts.read_json(epoch.payload["replan_finding_batch_ref"])
@@ -365,8 +365,8 @@ class BunshinV2ReplanTests(unittest.TestCase):
             "CONTRACT_DEFECT",
             {"repair_bill_ref": first.to_dict()},
         )
-        self.processor._request_epoch_replan(self._node_effect("node_a", "first"))
-        self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-recovery"))
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_a", "first"))
+        self.processor.replanning.freeze_epoch_for_replan(self._epoch_effect("freeze-recovery"))
         epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_REQUIRED")
 
@@ -408,11 +408,11 @@ class BunshinV2ReplanTests(unittest.TestCase):
                 "CONTRACT_DEFECT",
                 {"repair_bill_ref": finding.to_dict()},
             )
-            self.processor._request_epoch_replan(
+            self.processor.replanning.request_epoch_replan(
                 self._node_effect(node_id, f"requirement-{fingerprint}")
             )
 
-        self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-requirements"))
+        self.processor.replanning.freeze_epoch_for_replan(self._epoch_effect("freeze-requirements"))
         epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "REPLAN_REQUIRED")
         self.assertEqual(epoch.payload["requirements_ref"], self.requirements_ref.to_dict())
@@ -428,8 +428,8 @@ class BunshinV2ReplanTests(unittest.TestCase):
             "CONTRACT_DEFECT",
             {"repair_bill_ref": first.to_dict()},
         )
-        self.processor._request_epoch_replan(self._node_effect("node_a", "first"))
-        self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-first"))
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_a", "first"))
+        self.processor.replanning.freeze_epoch_for_replan(self._epoch_effect("freeze-first"))
         self.assertEqual(
             self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id).state,
             "REPLAN_REQUIRED",
@@ -443,7 +443,7 @@ class BunshinV2ReplanTests(unittest.TestCase):
             "CONTRACT_DEFECT",
             {"repair_bill_ref": late.to_dict()},
         )
-        self.processor._request_epoch_replan(self._node_effect("node_late", "late"))
+        self.processor.replanning.request_epoch_replan(self._node_effect("node_late", "late"))
 
         epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
         self.assertEqual(epoch.state, "TRIAGE_REQUIRED")

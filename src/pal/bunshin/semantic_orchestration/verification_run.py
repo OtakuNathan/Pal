@@ -96,6 +96,7 @@ class VerificationRun:
             reference_refs=verifier_references,
             workspace_override={
                 "kind": "existing_repo",
+                "repair_suite_required": adapter == SOFTWARE_GIT_ADAPTER,
                 "repo_path": str(review_workspace),
                 "workspace_binding": (
                     "canonical"

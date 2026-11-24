@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.interaction_suspend import InteractionParked
 from pal.bunshin.failure_diagnostics import exception_diagnostic
 from pal.foundation.diagnostics import diagnostic_text, exception_report
 from pal.bunshin.runner_components.models import BunshinRuntimeBundle as BunshinRuntimeBundle
@@ -55,8 +56,8 @@ class BunshinRunner:
                 llm_authority="manager_proxy",
                 max_output_tokens_override=_optional_positive_int(self.pack.metadata.get("max_output_tokens")),
                 snapshot_root=Path(self.pack.workspace["run_dir"]) if self.pack.workspace.get("run_dir") else None,
-                memory_workflow_id=str((self.pack.workspace.get("bunshin_v2") or {}).get("workflow_id")
-                    or (self.pack.metadata.get("bunshin_v2") or {}).get("workflow_id") or ""),
+                memory_workflow_id=str((self.pack.workspace.get("bunshin") or {}).get("workflow_id")
+                    or (self.pack.metadata.get("bunshin") or {}).get("workflow_id") or ""),
             )
             self.components.memory_results.bind_generation(bundle.memory_generation_id, bundle.memory_service)
             accepted_payload = {
@@ -71,6 +72,12 @@ class BunshinRunner:
                 accepted_payload,
             )
             return await self.components.invocation.run_invocation(bundle, prompt_observation_tag=prompt_observation_tag)
+        except InteractionParked as parked:
+            await self._report_terminal_after_cleanup(bundle, {
+                "status": "suspended", "interaction_id": parked.wait_id,
+                "summary": "Role is waiting for a user response",
+            })
+            return 0
         except _BunshinCooperativeCancel as cancel:
             await self._report_terminal_after_cleanup(bundle, self.components.results.cancel_terminal_payload(cancel.payload))
             return 0

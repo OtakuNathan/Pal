@@ -68,6 +68,8 @@ class AssignmentRecovery:
                 # expires; otherwise two supervisors can race at submission.
                 continue
             disposition = self.assignment_identity.role_assignment_disposition(effect, assignment)
+            if disposition == "suspended" and self.repository.interaction_waits.is_parked(assignment["assignment_id"]):
+                continue
             if disposition:
                 self.repository.role_cancellation.cancel_role_assignments(
                     workflow_id=str(assignment["workflow_id"]),
@@ -76,9 +78,11 @@ class AssignmentRecovery:
                     reason=f"assignment recovery suppressed: {disposition}",
                 )
                 continue
+            if self.repository.interaction_waits.pending(assignment_id=str(assignment["assignment_id"])):
+                continue
             task = asyncio.create_task(
                 self.assignment_execution.background_worker_loop(effect, runner),
-                name=f"bunshin-v2-recovered-{str(assignment['assignment_id'])[-12:]}",
+                name=f"bunshin-recovered-{str(assignment['assignment_id'])[-12:]}",
             )
             self.background.recover(effect_key, str(assignment["assignment_id"]), task)
             started += 1

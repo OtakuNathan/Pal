@@ -98,7 +98,7 @@ def test_current_repair_packet_preserves_every_regression_through_submit(tmp_pat
             {"name": "module_work_view", "path": str(view_path)},
             {"name": "verification_policy", "path": str(policy_path)},
         ],
-        "bunshin_v2": {
+        "bunshin": {
             "workflow_id": "workflow-test", "invocation_id": "attempt-current",
             "lease_resource_key": lease.resource_key, "fencing_token": lease.fencing_token,
             "role": "verifier", "mode": "module", "authoring_input_fingerprint": "candidate-current",
@@ -167,7 +167,7 @@ def test_modern_identity_is_only_a_legacy_compatible_fallback(finding, bill_case
 def scoped_for(view, *, guidance=None, contract=None):
     if contract is None:
         contract = compile_verification_invocation_tool_contract(work_view=view, verification_policy={})
-    workspace = {"bunshin_v2": {
+    workspace = {"bunshin": {
         "workflow_id": "projection-workflow", "invocation_id": "projection-test",
         "lease_resource_key": "projection-lease", "fencing_token": 1,
         "role": "verifier", "mode": "module", "authoring_input_fingerprint": "projection-input",

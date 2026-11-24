@@ -50,12 +50,12 @@ def test_real_wrapper_and_heartbeat_preserve_original_failure_without_public_cha
     async def scenario():
         runtime = ExecutionRuntime(runtime_root=tmp_path)
         scoped = BunshinScopedExecutionRuntime(runtime, [NAME], workspace={
-            "run_id": "run", "runtime_root": str(tmp_path), "bunshin_v2": binding(stale)})
+            "run_id": "run", "runtime_root": str(tmp_path), "bunshin": binding(stale)})
         events = []
         async def write(event):
             events.append(event)
         pack = BunshinInvocationPack(invocation_id="session", metadata={
-            "bunshin_v2": {"role": "verifier"}, "heartbeat_interval_seconds": 0.01})
+            "bunshin": {"role": "verifier"}, "heartbeat_interval_seconds": 0.01})
         reporter = Reporter("session", pack, "run", write)
         async def execute(_runtime, call, **kwargs):
             return await scoped.execute_tool_async(call)
@@ -179,7 +179,7 @@ def test_observation_does_not_attach_previous_failure_to_next_success():
                     return _error_result(call, exc)
             return ToolExecutionResult(name=ALIAS, ok=True, llm_text="done")
         pack = BunshinInvocationPack(invocation_id="session", metadata={
-            "bunshin_v2": {"role": "verifier"}, "heartbeat_interval_seconds": 0.01})
+            "bunshin": {"role": "verifier"}, "heartbeat_interval_seconds": 0.01})
         reporter = Reporter("session", pack, "run", write)
         observation = ToolObservation(Heartbeat(reporter, pack), reporter,
             SimpleNamespace(execute_allowed_tool=execute), ToolSession())

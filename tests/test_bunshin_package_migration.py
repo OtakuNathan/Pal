@@ -15,7 +15,7 @@ import pytest
 
 import pal.bunshin
 from pal.bunshin.checkpoint import AgentSessionCheckpointError
-from pal.bunshin.harnesses import BunshinHarnessRegistry, pal_harness_spec
+from pal.bunshin.harnesses import builtin_harness_generation, single_harness_generation, pal_harness_spec
 from pal.bunshin.runner import BunshinRunner
 from pal.bunshin.semantic_orchestration.attempt_harness_binding import HarnessBinding
 from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
@@ -61,7 +61,7 @@ def test_relocated_verifier_validation_retains_real_failure_provenance():
 
 @pytest.fixture
 def role():
-    fixture = protocol_fixture.BunshinV2RoleProtocolTests()
+    fixture = protocol_fixture.BunshinRoleProtocolTests()
     fixture.setUp()
     try:
         yield fixture
@@ -73,9 +73,7 @@ def legacy_pal_generation():
     current = pal_harness_spec()
     # Reconstruct the old launcher identity, without an old module or shim.
     old = replace(current, worker_argv=(*current.worker_argv[:-1], "pal.bunshin.v2.worker_main"), provider_generation="")
-    registry = BunshinHarnessRegistry()
-    registry.register(old)
-    return registry.snapshot()
+    return single_harness_generation(old)
 
 
 def runner_for(root, pack):
@@ -87,7 +85,7 @@ def runner_for(root, pack):
 def test_same_pal_harness_pins_old_generation_and_restores_checkpoint(role, completed):
     async def scenario():
         old = legacy_pal_generation()
-        current = BunshinHarnessRegistry(include_pal=True).snapshot()
+        current = builtin_harness_generation()
         assert current.select("implementation").worker_argv[-1] == "pal.bunshin.worker_main"
         assert old.generation_hash != current.generation_hash
         assignment = role.repository.role_assignments.create_role_assignment(role.request())

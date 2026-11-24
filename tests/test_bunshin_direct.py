@@ -111,7 +111,7 @@ def test_identical_blocker_after_clarification_is_a_new_round(tmp_path, monkeypa
         assigned = replace(node, payload={**node.payload, "active_worker_id": "coder",
             "lease_resource_key": "blocker-worker", "fencing_token": lease.fencing_token})
         runner = ImplementationRun(
-            assignment_identity=Mock(role_submission_settlement=Mock(return_value={})),
+            assignment_identity=Mock(settlement_from_terminal=Mock(return_value={})),
             attempt_execution=Mock(run_profile=AsyncMock(return_value=({}, None, None))),
             effect_reads=Mock(effect_snapshot=Mock(return_value=assigned)),
             role_leases=Mock(ensure_node_effect_lease=AsyncMock(return_value=assigned)),
@@ -185,7 +185,7 @@ def test_direct_delivery_reads_verified_commit_and_retains_code_patch(tmp_path):
         idempotency_key="completed", payload={"result_artifact_ref": ref.to_dict()}))
     processor = BunshinOutboxProcessor(service, publish_workflow_event=events.append)
     (repo / "report.md").unlink()
-    processor._publish_terminal_workflow_if_any(workflow_id)
+    processor.publication.publish_terminal(workflow_id)
     assert len(events[0]["attachments"]) == 1
     attachment = events[0]["attachments"][0]
     assert attachment["file_name"] == "report.md"

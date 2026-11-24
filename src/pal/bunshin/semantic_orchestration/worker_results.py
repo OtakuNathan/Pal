@@ -188,7 +188,8 @@ def _worker_event_timing(events: list[Mapping[str, Any]]) -> dict[str, int | flo
 
 
 def _recorded_role_metrics(terminal: Mapping[str, Any]) -> dict[str, int | float]:
-    timing = dict(dict(terminal.get("payload") or {}).get("v2_timing") or {})
+    payload = dict(terminal.get("payload") or {})
+    timing = dict(payload.get("worker_timing", payload.get("v2_timing")) or {})
     return {
         "input_tokens": max(0, int(timing.get("input_tokens") or 0)),
         "output_tokens": max(0, int(timing.get("output_tokens") or 0)),

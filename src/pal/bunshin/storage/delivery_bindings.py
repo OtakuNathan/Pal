@@ -30,13 +30,13 @@ class DeliveryBindingsStore:
         now = utc_now()
         with self.database.write_connection() as connection:
             row = connection.execute(
-                "SELECT 1 FROM bunshin_v2_task_projection WHERE task_id = ?",
+                "SELECT 1 FROM bunshin_task_projection WHERE task_id = ?",
                 (normalized_task_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("task delivery binding requires an existing Task")
             existing = connection.execute(
-                "SELECT * FROM bunshin_v2_task_delivery_bindings WHERE task_id = ?",
+                "SELECT * FROM bunshin_task_delivery_bindings WHERE task_id = ?",
                 (normalized_task_id,),
             ).fetchone()
             if existing is not None:
@@ -48,7 +48,7 @@ class DeliveryBindingsStore:
                 return _delivery_binding_row(existing)
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_task_delivery_bindings(
+                INSERT INTO bunshin_task_delivery_bindings(
                     task_id, origin_binding_json, current_binding_json,
                     binding_version, created_at, updated_at
                 ) VALUES (?, ?, ?, 1, ?, ?)
@@ -61,7 +61,7 @@ class DeliveryBindingsStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_task_delivery_bindings WHERE task_id = ?",
+                "SELECT * FROM bunshin_task_delivery_bindings WHERE task_id = ?",
                 (str(task_id or "").strip(),),
             ).fetchone()
         return _delivery_binding_row(row) if row is not None else None
@@ -79,7 +79,7 @@ class DeliveryBindingsStore:
         normalized = _normalize_delivery_binding(binding)
         with self.database.write_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_task_delivery_bindings WHERE task_id = ?",
+                "SELECT * FROM bunshin_task_delivery_bindings WHERE task_id = ?",
                 (normalized_task_id,),
             ).fetchone()
             if row is None:
@@ -91,14 +91,14 @@ class DeliveryBindingsStore:
             now = utc_now()
             connection.execute(
                 """
-                UPDATE bunshin_v2_task_delivery_bindings
+                UPDATE bunshin_task_delivery_bindings
                 SET current_binding_json = ?, binding_version = ?, updated_at = ?
                 WHERE task_id = ?
                 """,
                 (_json(normalized), version, now, normalized_task_id),
             )
             updated = connection.execute(
-                "SELECT * FROM bunshin_v2_task_delivery_bindings WHERE task_id = ?",
+                "SELECT * FROM bunshin_task_delivery_bindings WHERE task_id = ?",
                 (normalized_task_id,),
             ).fetchone()
         return {**_delivery_binding_row(updated), "changed": True}
@@ -109,8 +109,8 @@ class DeliveryBindingsStore:
             rows = connection.execute(
                 """
                 SELECT DISTINCT h.workflow_id
-                FROM bunshin_v2_human_decisions AS h
-                JOIN bunshin_v2_aggregate_snapshots AS w
+                FROM bunshin_human_decisions AS h
+                JOIN bunshin_aggregate_snapshots AS w
                   ON w.aggregate_type = ? AND w.aggregate_id = h.workflow_id
                 WHERE h.status = 'issued'
                   AND json_extract(w.payload_json, '$.task_id') = ?

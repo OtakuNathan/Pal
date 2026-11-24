@@ -142,7 +142,7 @@ class RuntimeCase:
         outcome = await self.processor._process_effect(effect)
         if outcome != "completed":
             with self.repository.database.read_connection() as connection:
-                failure = dict(connection.execute("SELECT * FROM bunshin_v2_outbox WHERE effect_id=?", (effect["effect_id"],)).fetchone())
+                failure = dict(connection.execute("SELECT * FROM bunshin_outbox WHERE effect_id=?", (effect["effect_id"],)).fetchone())
             pytest.fail(f"{effect_type}: {outcome}: {failure}")
         return effect
 
@@ -189,7 +189,7 @@ class RuntimeCase:
         attempt_lease = self.repository.leases.claim_lease("attempt:" + attempt["attempt_id"], attempt["attempt_id"], ttl_seconds=120)
         workspace = {"repo_path": str(self.workspaces[name]), "review_scratch_dir": str(self.fx.root / ("scratch-" + name)),
                      "write_path_scopes": [node.payload["path_policy"]["verification_corpus"]], "workspace_binding": "canonical",
-                     "bunshin_v2": {"workflow_id": self.workflow_id, "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                     "bunshin": {"workflow_id": self.workflow_id, "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                        "aggregate_id": node.aggregate_id, "role": "verifier", "mode": "module", "invocation_id": attempt["attempt_id"],
                        "authoring_input_fingerprint": assignment["input_fingerprint"], "lease_resource_key": attempt_lease.resource_key,
                        "fencing_token": attempt_lease.fencing_token}}
@@ -245,8 +245,8 @@ class RuntimeCase:
 
     def assert_receipt(self, effect):
         with self.repository.database.read_connection() as connection:
-            row = dict(connection.execute("SELECT * FROM bunshin_v2_outbox WHERE effect_id=?", (effect["effect_id"],)).fetchone())
-            count = connection.execute("SELECT count(*) FROM bunshin_v2_effect_receipts WHERE effect_key=?", (effect["effect_key"],)).fetchone()[0]
+            row = dict(connection.execute("SELECT * FROM bunshin_outbox WHERE effect_id=?", (effect["effect_id"],)).fetchone())
+            count = connection.execute("SELECT count(*) FROM bunshin_effect_receipts WHERE effect_key=?", (effect["effect_key"],)).fetchone()[0]
         assert row["status"] == "completed"
         assert count == 1
 
@@ -764,7 +764,7 @@ def test_nonfrontier_pending_scope_admission_defers_without_charging_retry(case)
         assert case.node("backup_cli").state == "QUEUED"
         assert not case.repository.leases.read_lease("node:node-backup_cli:writer")
         with case.repository.database.read_connection() as connection:
-            row = dict(connection.execute("SELECT * FROM bunshin_v2_outbox WHERE effect_id=?", (effect["effect_id"],)).fetchone())
+            row = dict(connection.execute("SELECT * FROM bunshin_outbox WHERE effect_id=?", (effect["effect_id"],)).fetchone())
         assert row["attempt_count"] == 0
         assert row["status"] == "pending"
         await case.process("archive_verify", "reconcile_dependency_repairs")

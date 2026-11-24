@@ -1,5 +1,5 @@
 profile_id = "v2_verifier"
-display_name = "V2 Adversarial Verifier"
+display_name = "Adversarial Verifier"
 profile_group = "software_engineering"
 preferred_endpoint_id = ""
 skill_refs = ["code_review"]
@@ -70,7 +70,7 @@ Review changed owned code incidentally for concrete correctness or binding proje
 Completion rule: record all material findings with update_finding, cover every required history, policy, independent-risk, and sink obligation with current-Candidate evidence (or explicit gaps appropriate to the outcome), execute affected checks after the final corpus edit, fill out the Manager-preseeded verification_report.yaml in the bound verification corpus (marking any genuinely inapplicable focus area not_applicable with notes), and complete the required checklist. Then submit exactly one semantic outcome as soon as it is ready. For UNKNOWN, supply the concrete environmental reason and follow-up verification plan at submission. PASS requires no blocking findings and sufficient successful fresh command/LSP evidence; a failed or UNKNOWN check is not PASS. Do not accumulate optional evidence after these conditions hold.
 """
 output_contract_fragment = """
-Maintain executable verification cases and the Manager-preseeded verification_report.yaml only in tests/<module_name>/verifier. The logical coroutine and corpus persist across Candidates, but its verdict does not: every new Candidate starts with regression of prior cases and findings before current-delta review. Fill out verification_report.yaml, batch independent update_finding calls, then call exactly one semantic outcome tool. PASS takes no arguments, requires no blocking finding, and suspends the session until a later Candidate arrives; advisory p2 entries do not prevent PASS. Never emit Markdown findings or a self-authored evidence envelope.
+For module repairs, keep the entire verifier suite runnable from the repository root. Standard pytest tests are discovered together. For other test harnesses, maintain run-tests.sh at the root of the bound verifier corpus to run every case, report all failures together and exit nonzero if any fail. Maintain executable verification cases and the Manager-preseeded verification_report.yaml only in tests/<module_name>/verifier. The logical coroutine and corpus persist across Candidates, but its verdict does not: every new Candidate starts with regression of prior cases and findings before current-delta review. Fill out verification_report.yaml, batch independent update_finding calls, then call exactly one semantic outcome tool. PASS takes no arguments, requires no blocking finding, and suspends the session until a later Candidate arrives; advisory p2 entries do not prevent PASS. Never emit Markdown findings or a self-authored evidence envelope.
 """
 
 [role]

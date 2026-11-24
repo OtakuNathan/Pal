@@ -73,7 +73,7 @@ def _verification_workspace_from_prompt_pack(
     prompt_pack = artifacts.read_json(prompt_ref)
     workspace = dict(prompt_pack.get("workspace") or {})
     binding = str(workspace.get("workspace_binding") or "").strip().lower()
-    if binding != "canonical" and not bool(workspace.get("v2_role_workspace")):
+    if binding != "canonical" and not bool(workspace.get("role_workspace_prepared")):
         raise SubmissionInvariantError(
             "verifier prompt pack is not bound to a canonical or isolated role workspace"
         )

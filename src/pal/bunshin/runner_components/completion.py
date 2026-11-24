@@ -24,12 +24,12 @@ class Completion:
         from pal.bunshin.work_items import read_work_items
 
         workspace = dict(self.pack.workspace or {})
-        binding = dict((self.pack.metadata or {}).get("bunshin_v2") or {})
-        binding.update(dict(workspace.get("bunshin_v2") or {}))
+        binding = dict((self.pack.metadata or {}).get("bunshin") or {})
+        binding.update(dict(workspace.get("bunshin") or {}))
         workspace.update(
             runtime_root=str(self.runtime_root),
             invocation_id=self.pack.invocation_id,
-            bunshin_v2=binding,
+            bunshin=binding,
         )
         items = []
         if binding.get("role"):
@@ -112,8 +112,8 @@ class Completion:
 
     def manager_submission_receipt_required(self) -> bool:
         metadata = dict(self.pack.metadata or {})
-        bunshin_v2 = dict(metadata.get("bunshin_v2") or {})
-        return bool(bunshin_v2.get("submission_receipt_required"))
+        bunshin = dict(metadata.get("bunshin") or {})
+        return bool(bunshin.get("submission_receipt_required"))
 
     def manager_submission_receipt_present(self) -> bool:
         if self.manager_submission_receipt_observed:

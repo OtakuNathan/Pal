@@ -38,6 +38,20 @@ class TerminalValidation:
             f"Worker terminal status={terminal_payload.get('status')}.\n"
             + _terminal_failure_details(terminal_payload)
         )
+        wait_id = str(terminal_payload.get("interaction_id") or "")
+        if terminal_payload.get("status") == "suspended" and wait_id:
+            wait = self.repository.interaction_waits.get(wait_id)
+            if wait is None or wait["assignment_id"] != assignment["assignment_id"] or wait["attempt_id"] != attempt["attempt_id"]:
+                raise SubmissionInvariantError("worker suspended without its durable interaction")
+            self.repository.role_retries.queue_role_attempt_retry(
+                assignment_id=assignment["assignment_id"], attempt_id_value=attempt["attempt_id"],
+                error_kind="waiting_for_user", error_text=wait_id,
+            )
+            release_attempt_lease(self.repository, assignment_lease_resource, attempt["attempt_id"],
+                                  assignment_lease.fencing_token, result_details=result_details)
+            self.repository.role_invocations.suspend_role_invocation(invocation_id=invocation_id,
+                                                                     fencing_token=fencing_token)
+            raise DeferredEffectError("role suspended for user interaction")
         if (
             str(terminal_payload.get("status") or "") == "suspended"
             and bool(terminal_payload.get("manager_restart"))
@@ -73,7 +87,7 @@ class TerminalValidation:
                 _terminal_failure_details(terminal_payload) or "worker deferred for manager restart"
             )
         if str(terminal_payload.get("status") or "") != "completed":
-            summary = _terminal_failure_details(terminal_payload) or "V2 semantic worker failed"
+            summary = _terminal_failure_details(terminal_payload) or "Bunshin semantic worker failed"
             permanent_blocker = _terminal_nonretryable_blocker(terminal_payload)
             error_kind, _, retry_directive = _worker_terminal_failure([
                 {"event_kind": "terminal", "payload": terminal_payload},

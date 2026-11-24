@@ -2,7 +2,7 @@
 
 Unlike the developer corpus (which substitutes adapters), these cases drive
 the real public entrypoint — ``python -m pal.main bunshin efficiency`` —
-against real SQLite storage written with the production Bunshin v2 schema,
+against real SQLite storage written with the production Bunshin schema,
 covering the system delivery scenarios:
 
 - cli_text_report: real text report, exit 0, database byte-identical.
@@ -36,7 +36,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SRC_ROOT = _REPO_ROOT / "src"
 
 _INVOCATION_SQL = (
-    "INSERT INTO bunshin_v2_role_invocations"
+    "INSERT INTO bunshin_role_invocations"
     " (invocation_id, workflow_id, aggregate_type, aggregate_id,"
     "  lease_resource_key, fencing_token, role, prompt_pack_ref_json,"
     "  status, last_completed_turn, created_at, updated_at)"
@@ -45,7 +45,7 @@ _INVOCATION_SQL = (
 )
 
 _TURN_SQL = (
-    "INSERT INTO bunshin_v2_role_turns"
+    "INSERT INTO bunshin_role_turns"
     " (invocation_id, turn_index, llm_request_ref_json, llm_response_ref_json,"
     "  input_tokens, output_tokens, latency_ms, tool_latency_ms,"
     "  wall_latency_ms, completed_at)"
@@ -53,7 +53,7 @@ _TURN_SQL = (
 )
 
 _EVENT_SQL = (
-    "INSERT INTO bunshin_v2_worker_events"
+    "INSERT INTO bunshin_worker_events"
     " (invocation_id, event_kind, phase, round_index, tool_call_count,"
     "  payload_json, created_at)"
     " VALUES (?, 'progress', 'llm_round_completed', ?, ?, '{}',"
@@ -248,7 +248,7 @@ def test_quiet_manager_round_flows_to_efficiency_cli(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as connection:
         payload = json.loads(
             connection.execute(
-                "SELECT payload_json FROM bunshin_v2_worker_events"
+                "SELECT payload_json FROM bunshin_worker_events"
                 " WHERE invocation_id = 'inv-quiet'"
             ).fetchone()[0]
         )
@@ -277,8 +277,8 @@ def test_cli_legacy_storage_missing_tables_stay_honest(tmp_path: Path) -> None:
     db_path = bunshin_db_path(runtime_root)
     connection = sqlite3.connect(db_path)
     try:
-        connection.execute("DROP TABLE bunshin_v2_role_turns")
-        connection.execute("DROP TABLE bunshin_v2_worker_events")
+        connection.execute("DROP TABLE bunshin_role_turns")
+        connection.execute("DROP TABLE bunshin_worker_events")
         connection.commit()
     finally:
         connection.close()
@@ -311,7 +311,7 @@ def test_cli_malformed_row_aborts_with_diagnostic(tmp_path: Path) -> None:
     connection = sqlite3.connect(db_path)
     try:
         connection.execute(
-            "UPDATE bunshin_v2_role_turns SET input_tokens = 'not-an-int'"
+            "UPDATE bunshin_role_turns SET input_tokens = 'not-an-int'"
             " WHERE invocation_id = 'inv-a' AND turn_index = 0"
         )
         connection.commit()

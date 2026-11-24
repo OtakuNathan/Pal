@@ -33,7 +33,7 @@ class RoleEventsStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             invocation = connection.execute(
-                "SELECT status FROM bunshin_v2_role_invocations WHERE invocation_id = ?",
+                "SELECT status FROM bunshin_role_invocations WHERE invocation_id = ?",
                 (invocation_id,),
             ).fetchone()
             if invocation is None:
@@ -44,7 +44,7 @@ class RoleEventsStore:
             }.get(event_kind)
             if diagnostic_limit is not None:
                 count = connection.execute(
-                    "SELECT COUNT(*) FROM bunshin_v2_worker_events "
+                    "SELECT COUNT(*) FROM bunshin_worker_events "
                     "WHERE invocation_id = ? AND event_kind = ?",
                     (invocation_id, event_kind),
                 ).fetchone()[0]
@@ -52,7 +52,7 @@ class RoleEventsStore:
                     return
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_worker_events(
+                INSERT INTO bunshin_worker_events(
                     invocation_id, event_kind, phase, round_index, tool_call_count, payload_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -61,7 +61,7 @@ class RoleEventsStore:
             if event_kind == "progress" and phase == "llm_round_completed":
                 connection.execute(
                     """
-                    UPDATE bunshin_v2_role_invocations
+                    UPDATE bunshin_role_invocations
                     SET last_completed_turn = MAX(last_completed_turn, ?), updated_at = ?
                     WHERE invocation_id = ?
                     """,
@@ -87,7 +87,7 @@ class RoleEventsStore:
         self.database.ensure_schema()
         with self.database.write_connection() as connection:
             invocation = connection.execute(
-                "SELECT * FROM bunshin_v2_role_invocations WHERE invocation_id = ?",
+                "SELECT * FROM bunshin_role_invocations WHERE invocation_id = ?",
                 (invocation_id,),
             ).fetchone()
             if invocation is None:
@@ -107,7 +107,7 @@ class RoleEventsStore:
             now = utc_now()
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_role_turns(
+                INSERT INTO bunshin_role_turns(
                     invocation_id, turn_index, llm_request_ref_json, llm_response_ref_json,
                     tool_summary_ref_json, input_tokens, output_tokens, cost, latency_ms,
                     tool_latency_ms, wall_latency_ms, completed_at
@@ -132,7 +132,7 @@ class RoleEventsStore:
             if connection.execute("SELECT changes()").fetchone()[0] == 1:
                 connection.execute(
                     """
-                    UPDATE bunshin_v2_role_invocations
+                    UPDATE bunshin_role_invocations
                     SET last_completed_turn = MAX(last_completed_turn, ?),
                         total_input_tokens = total_input_tokens + ?,
                         total_output_tokens = total_output_tokens + ?,
@@ -175,7 +175,7 @@ class RoleEventsStore:
         with self.database.write_connection() as connection:
             self.leases.assert_lease_locked(connection, lease_resource_key, owner_id, fencing_token)
             row = connection.execute(
-                "SELECT generation FROM bunshin_v2_node_journals WHERE node_run_id = ?",
+                "SELECT generation FROM bunshin_node_journals WHERE node_run_id = ?",
                 (node_run_id,),
             ).fetchone()
             current_generation = int(row["generation"]) if row is not None else 0
@@ -186,7 +186,7 @@ class RoleEventsStore:
             next_generation = current_generation + 1
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_node_journals(
+                INSERT INTO bunshin_node_journals(
                     node_run_id, workflow_id, lease_resource_key, fencing_token,
                     generation, journal_json, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -213,7 +213,7 @@ class RoleEventsStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_node_journals WHERE node_run_id = ?",
+                "SELECT * FROM bunshin_node_journals WHERE node_run_id = ?",
                 (str(node_run_id),),
             ).fetchone()
             if row is None:

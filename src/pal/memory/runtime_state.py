@@ -1,4 +1,6 @@
 from __future__ import annotations
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from pal.llm.compaction import is_native_window
 
@@ -403,6 +405,20 @@ def _prepared_history_root(
     )
 
 
+# Only the caller restoring an authenticated parked cursor may authorize
+# open calls. Ordinary crash snapshots retain their conservative normalization.
+_expected_pending: ContextVar[tuple[str, frozenset[str]] | None] = ContextVar("restoring_tool_calls", default=None)
+
+
+@contextmanager
+def restore_pending_tool_calls(turn_id: str, call_ids: tuple[str, ...]):
+    token = _expected_pending.set((turn_id, frozenset(call_ids)))
+    try:
+        yield
+    finally:
+        _expected_pending.reset(token)
+
+
 def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:
     allowed_fields = {"turn_id", "state", "revision", "metadata", "messages"}
     if extras := sorted(set(value) - allowed_fields):
@@ -414,6 +430,14 @@ def _turn_from_payload(value: Mapping[str, Any]) -> L1TurnIR:
         raise ValueError("runtime L1 turn contains an invalid message")
     messages = tuple(message_from_payload(item) for item in raw_messages)
     requested_state = L1TurnState(str(value.get("state") or "active"))
+    expected = _expected_pending.get()
+    if expected and expected[0] == value["turn_id"]:
+        turn = L1TurnIR(str(value["turn_id"]), messages, requested_state,
+                        int(value["revision"]), dict(value.get("metadata") or {}))
+        if (turn.state != L1TurnState.ACTIVE or turn.pending_call_ids != expected[1]
+                or any(m.state == MessageState.IN_PROGRESS for m in messages)):
+            raise ValueError("parked tool cursor disagrees with active L1 turn")
+        return turn
     drafts = tuple(message for message in messages if message.role == MessageRole.ASSISTANT and (
         message.state == MessageState.IN_PROGRESS
         or (requested_state in {L1TurnState.INTERRUPTED, L1TurnState.ABORTED}

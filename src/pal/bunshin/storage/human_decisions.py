@@ -37,14 +37,14 @@ class HumanDecisionsStore:
         now = _utc_datetime()
         with self.database.write_connection() as connection:
             artifact = connection.execute(
-                "SELECT durable FROM bunshin_v2_artifacts WHERE sha256 = ?",
+                "SELECT durable FROM bunshin_artifacts WHERE sha256 = ?",
                 (str(manifest_sha).removeprefix("sha256:"),),
             ).fetchone()
             if artifact is None or int(artifact["durable"]) != 1:
                 raise ValueError("human decision token requires a durable architecture manifest")
             connection.execute(
                 """
-                UPDATE bunshin_v2_human_decisions
+                UPDATE bunshin_human_decisions
                 SET status = 'expired'
                 WHERE workflow_id = ? AND architecture_revision_id = ? AND status = 'issued'
                 """,
@@ -52,7 +52,7 @@ class HumanDecisionsStore:
             )
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_human_decisions(
+                INSERT INTO bunshin_human_decisions(
                     token_hash, workflow_id, architecture_revision_id, manifest_sha,
                     actor_id, expires_at, issued_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -74,7 +74,7 @@ class HumanDecisionsStore:
         token_hash = hashlib.sha256(str(token).encode("utf-8")).hexdigest()
         with self.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_human_decisions WHERE token_hash = ?",
+                "SELECT * FROM bunshin_human_decisions WHERE token_hash = ?",
                 (token_hash,),
             ).fetchone()
             if row is None:
@@ -93,7 +93,7 @@ class HumanDecisionsStore:
         with self.database.write_connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE bunshin_v2_human_decisions
+                UPDATE bunshin_human_decisions
                 SET status = 'expired'
                 WHERE workflow_id = ? AND architecture_revision_id = ? AND status = 'issued'
                 """,
@@ -123,7 +123,7 @@ class HumanDecisionsStore:
         with self.database.write_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_human_decisions
+                SELECT * FROM bunshin_human_decisions
                 WHERE workflow_id = ? AND actor_id = ? AND status = 'issued'
                 ORDER BY issued_at DESC
                 """,
@@ -142,14 +142,14 @@ class HumanDecisionsStore:
                 raise ValueError("current workflow has multiple pending human decisions")
             architecture_revision_id, manifest_sha = next(iter(bindings))
             artifact = connection.execute(
-                "SELECT durable FROM bunshin_v2_artifacts WHERE sha256 = ?",
+                "SELECT durable FROM bunshin_artifacts WHERE sha256 = ?",
                 (manifest_sha,),
             ).fetchone()
             if artifact is None or int(artifact["durable"]) != 1:
                 raise ValueError("pending human decision references a non-durable artifact")
             connection.execute(
                 """
-                UPDATE bunshin_v2_human_decisions
+                UPDATE bunshin_human_decisions
                 SET status = 'expired'
                 WHERE workflow_id = ? AND architecture_revision_id = ? AND manifest_sha = ?
                   AND actor_id = ? AND status = 'issued'
@@ -163,7 +163,7 @@ class HumanDecisionsStore:
             )
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_human_decisions(
+                INSERT INTO bunshin_human_decisions(
                     token_hash, workflow_id, architecture_revision_id, manifest_sha,
                     actor_id, expires_at, issued_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -188,7 +188,7 @@ class HumanDecisionsStore:
             raise ValueError("human decision action requires decision_token")
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         row = connection.execute(
-            "SELECT * FROM bunshin_v2_human_decisions WHERE token_hash = ?",
+            "SELECT * FROM bunshin_human_decisions WHERE token_hash = ?",
             (token_hash,),
         ).fetchone()
         if row is None:
@@ -209,7 +209,7 @@ class HumanDecisionsStore:
             raise ValueError(f"stale human decision binding: {', '.join(mismatches)}")
         cursor = connection.execute(
             """
-            UPDATE bunshin_v2_human_decisions
+            UPDATE bunshin_human_decisions
             SET status = 'consumed', decision = ?, action_id = ?, consumed_at = ?
             WHERE token_hash = ? AND status = 'issued'
             """,

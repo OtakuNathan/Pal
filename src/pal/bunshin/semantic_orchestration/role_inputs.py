@@ -192,7 +192,7 @@ def _role_workspace_input_binding_roots(
     artifact_style = (
         str(snapshot.payload.get("execution_adapter") or "") == ARTIFACT_BUNDLE_ADAPTER
         or not resolved_root
-        or (bool(workspace.get("v2_role_workspace")) and not workspace_source_root)
+        or (bool(workspace.get("role_workspace_prepared")) and not workspace_source_root)
     )
     if not artifact_style:
         return Path(resolved_root), None

@@ -17,7 +17,7 @@ _ROLE_RUNNER_METADATA_KEYS = frozenset(
         "temperature",
         "max_tool_rounds",
         "bunshin_debug_log_enabled",
-        "bunshin_v2",
+        "bunshin",
         "preferred_endpoint_id",
         "preferred_endpoint_source",
         "prompt_log_enabled",
@@ -35,14 +35,14 @@ def sanitize_runner_session_pack(pack: BunshinInvocationPack) -> BunshinInvocati
         for key, value in dict(pack.metadata or {}).items()
         if key in _ROLE_RUNNER_METADATA_KEYS
     }
-    bunshin_v2 = metadata.get("bunshin_v2")
-    if isinstance(bunshin_v2, dict):
+    bunshin = metadata.get("bunshin")
+    if isinstance(bunshin, dict):
         # Architecture compilation is a Manager concern. The role receives the
         # rendered authoring file, never the pinned Draft 2020-12 schema or its
         # compiler inputs.
-        metadata["bunshin_v2"] = {
+        metadata["bunshin"] = {
             key: value
-            for key, value in bunshin_v2.items()
+            for key, value in bunshin.items()
             if key not in {
                 "architecture_definition",
                 "architecture_schema",

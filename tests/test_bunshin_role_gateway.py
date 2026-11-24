@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -30,7 +32,7 @@ from pal.bunshin.submission_errors import SubmissionValidationError
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 
 
-class BunshinV2RoleGatewayTests(unittest.TestCase):
+class BunshinRoleGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-worker-gateway-")).resolve()
         self.service = BunshinWorkflowService(self.runtime_root)
@@ -69,6 +71,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         )
         self.prompt_ref = self.service.artifacts.put_json(
             {
+                "invocation_id": "gateway-router",
                 "instruction": "implement router",
                 "workspace": {"repo_path": str(self.workspace)},
                 "metadata": {
@@ -415,7 +418,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             "repo_path": str(self.workspace), "review_scratch_dir": str(review_scratch),
             "verification_scratch_only": False,
             "write_path_scopes": [{"kind": "directory", "path": "tests/router/verifier"}],
-            "bunshin_v2": {"authoring_input_fingerprint": "router-verification-input"},
+            "bunshin": {"authoring_input_fingerprint": "router-verification-input"},
             "review_tool_evidence_refs": [],
         }
         prompt_ref = self.service.artifacts.put_json(
@@ -514,7 +517,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         })
         from pal.bunshin.semantic_evidence import run_shell_evidence, recorded_cases
         receipt_workspace["runtime_root"] = str(self.runtime_root)
-        receipt_workspace["bunshin_v2"].update(context)
+        receipt_workspace["bunshin"].update(context)
         receipt_workspace.pop("verification_case_revision", None)
         result = asyncio.run(run_shell_evidence(new_tool_call(
             name="op_bunshin_verification_run_diff_risk", call_id="fresh-semantic-case",
@@ -885,7 +888,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
         )
         with self.service.repository.database.write_connection() as connection:
             connection.execute(
-                "UPDATE bunshin_v2_role_attempts SET prompt_pack_ref_json = ? WHERE attempt_id = ?",
+                "UPDATE bunshin_role_attempts SET prompt_pack_ref_json = ? WHERE attempt_id = ?",
                 (json.dumps(self.prompt_ref.to_dict()), self.attempt_id),
             )
 
@@ -1048,6 +1051,50 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside the assigned repository"):
                 self.call("git_read", cmd="ls-files", cwd=str(self.runtime_root))
             run.assert_not_called()
+
+    def test_coder_repository_read_includes_other_modules(self) -> None:
+        self._seed_git_files(["other/caller.py"])
+        self._bind_git_scope_workspace(
+            coder_repository_read=True,
+            write_path_scopes=[{"kind": "file", "path": "README.md"}],
+        )
+        result = self.call("git_read", cmd="ls-files -- other/caller.py")
+        self.assertIn("other/caller.py", result["stdout"])
+
+    @unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap"), "requires bubblewrap")
+    def test_manager_prechecks_every_repair_before_recording_a_receipt(self) -> None:
+        self._seed_git_files([])
+        corpus = self.workspace / "verifier"
+        corpus.mkdir()
+        (corpus / "test_old.py").write_text("def test_previous_regression(): assert 1 + 1 == 2")
+        (corpus / "test_new.py").write_text(
+            "from pathlib import Path\n"
+            "def test_current_regression(): assert Path('README.md').read_text() == 'fixed'"
+        )
+        self._bind_git_scope_workspace(repair_precheck=True, repair_corpus_scope={"kind": "directory", "path": "verifier"})
+        with self.service.repository.database.write_connection() as db:
+            db.execute("UPDATE bunshin_role_assignments SET mode = 'repair' WHERE assignment_id = ?", (self.assignment_id,))
+        context = {**self.context, "mode": "repair"}
+        self.call("draft_read", context=context)
+        def submit(report):
+            return self.call("draft_submit", context=context, expected_version=0, submission=report)
+        ready = {"status": "candidate_ready"}
+        with self.assertRaisesRegex(SubmissionValidationError, "does not match"):
+            submit(ready)
+        plan = self.call("repair_precheck_plan")
+        self.assertNotIn("status", plan)
+        plan["status"] = "passed"
+        with self.assertRaisesRegex(SubmissionValidationError, "test_current_regression") as error:
+            submit({**ready, "repair_precheck": plan})
+        self.assertIn("1 failed, 1 passed", str(error.exception))
+        self.assertFalse(self.call("submission_status")["recorded"])
+        (self.workspace / "README.md").write_text("fixed")
+        with self.assertRaisesRegex(SubmissionValidationError, "does not match"):
+            submit({**ready, "repair_precheck": plan})
+        report = {**ready, "repair_precheck": {**self.call("repair_precheck_plan"), "status": "passed"}}
+        accepted = submit(report)
+        self.assertTrue(accepted["submitted"])
+        self.assertEqual(submit(report), accepted)
 
     def test_git_read_complete_repo_scope_works_from_root_and_descendant(self) -> None:
         self._bind_git_scope_workspace(workspace_policy={"mode": "read_only_repo"})
@@ -1481,7 +1528,7 @@ class BunshinV2RoleGatewayTests(unittest.TestCase):
             {
                 "workspace": {"repo_path": str(self.workspace)},
                 "metadata": {
-                    "bunshin_v2": {
+                    "bunshin": {
                         "workflow_id": "workflow-router",
                         "invocation_id": attempt_id,
                         "lease_resource_key": resource,

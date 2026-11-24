@@ -45,7 +45,7 @@ class AttemptCompletion:
             assignment_lease.fencing_token,
             continuation_output_path,
         )
-        terminal_payload["v2_timing"] = _worker_event_timing(events)
+        terminal_payload["worker_timing"] = _worker_event_timing(events)
         if checkpoint is not None:
             terminal_payload["session_turn_index"] = int(
                 dict(checkpoint.get("metrics") or {}).get(

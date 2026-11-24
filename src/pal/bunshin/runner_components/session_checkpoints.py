@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 from uuid import uuid4
 from pal.core.runtime_state import RuntimeSnapshotIdentity, runtime_spec_hash
 from pal.core.turns import TurnContinuation
@@ -37,6 +37,8 @@ class SessionCheckpoints:
     pack: BunshinInvocationPack
     runtime_root: Path
     agent_session_checkpoint: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+
+    on_closed_checkpoint: Callable[[int], Awaitable[None]] | None = field(default=None, init=False, repr=False)
 
     def continuation_is_restart_safe(
         self,
@@ -108,7 +110,7 @@ class SessionCheckpoints:
         bundle: BunshinRuntimeBundle,
     ) -> dict[str, str]:
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
-        binding = dict((self.pack.metadata or {}).get("bunshin_v2") or {})
+        binding = dict((self.pack.metadata or {}).get("bunshin") or {})
         workflow_id = str(
             session_metadata.get("workflow_id")
             or binding.get("workflow_id")
@@ -209,6 +211,7 @@ class SessionCheckpoints:
         *,
         initial_instruction: str,
         response_keys: list[str],
+        parked_batch: dict[str, Any] | None = None,
     ) -> None:
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
         session_id = str(session_metadata.get("session_id") or "").strip()
@@ -219,7 +222,7 @@ class SessionCheckpoints:
                 raise AgentSessionCheckpointError("initial checkpoint has no Manager binding")
             return
         checkpoint_path = Path(checkpoint_text)
-        if not self.continuation_is_restart_safe(continuation, state.memory_service):
+        if parked_batch is None and not self.continuation_is_restart_safe(continuation, state.memory_service):
             return
         static_identity = self.agent_session_static_identity(bundle)
         sequence = max(
@@ -243,6 +246,8 @@ class SessionCheckpoints:
             ),
             "runtime_snapshot": runtime_snapshot,
         }
+        if parked_batch is not None:
+            private_payload["coroutine_state"]["parked_batch"] = parked_batch
         payload = seal_agent_session_checkpoint(self.runtime_root, private_payload)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         target = checkpoint_path
@@ -264,6 +269,9 @@ class SessionCheckpoints:
             acknowledgement = await client.request("checkpoint_initialize")
             if acknowledgement.get("sequence") != sequence:
                 raise AgentSessionCheckpointError("initial checkpoint acknowledgement has the wrong sequence")
+        if parked_batch is None and self.on_closed_checkpoint is not None:
+            await self.on_closed_checkpoint(sequence)
+            self.on_closed_checkpoint = None
         self.agent_session_checkpoint = private_payload
 
     def restore_invocation_checkpoint_state(

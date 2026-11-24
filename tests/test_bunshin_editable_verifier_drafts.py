@@ -47,7 +47,7 @@ def test_current_finding_create_update_delete_and_fresh_pass(verifier, kind):
     assert not call("remove_verification_case", name="current delta", reason="too late").ok
     with fixture.repository.database.read_connection() as connection:
         audits = [json.loads(row[0])["_draft_audit"] for row in connection.execute(
-            "SELECT result_json FROM bunshin_v2_submission_draft_ops WHERE draft_key = ?",
+            "SELECT result_json FROM bunshin_submission_draft_ops WHERE draft_key = ?",
             (SubmissionDraftContext.from_workspace(workspace, draft_kind="work_items").draft_key,),
         )]
     assert any("mistaken" in json.dumps(audit) for audit in audits)

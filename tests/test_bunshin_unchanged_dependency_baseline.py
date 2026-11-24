@@ -148,7 +148,7 @@ class ExistingRepositoryCase:
     def stored(self, identity, effect_type):
         with self.repository.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_outbox WHERE aggregate_id = ? AND effect_type = ? "
+                "SELECT * FROM bunshin_outbox WHERE aggregate_id = ? AND effect_type = ? "
                 "ORDER BY rowid DESC LIMIT 1", (identity, effect_type),
             ).fetchone()
         assert row is not None, (identity, effect_type)
@@ -236,6 +236,7 @@ class ExistingRepositoryCase:
         )
         self.coordinator.checker_verdict(
             workflow_id=self.workflow_id, node_name=name, accepted=True,
+            accepted_product_ref=node.payload["candidate_ref"]["sha256"],
         )
         self.repository.leases.release_lease(
             node.payload["lease_resource_key"], node.payload["active_worker_id"],
@@ -319,7 +320,7 @@ def test_public_workflow_triage_resolution_resumes_same_checkpoint_and_epoch(cas
         # Retry exhaustion is deterministic and preserves the failed receipt.
         with case.repository.database.write_connection() as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET max_attempts = 1 WHERE effect_id = ?",
+                "UPDATE bunshin_outbox SET max_attempts = 1 WHERE effect_id = ?",
                 (stored["effect_id"],),
             )
         effect = case.claim(provider.aggregate_id, "notify_node_accepted")
@@ -520,4 +521,32 @@ def test_unchanged_intermediate_keeps_provider_bindings_through_next_consumer(ca
             assert case.git(workspace, "rev-parse", "HEAD") == case.base
             assert case.git(workspace, "rev-list", "--count", "HEAD") == "1"
             assert case.git(workspace, "status", "--porcelain") == ""
+    asyncio.run(run())
+
+
+def test_recovery_and_delayed_sink_notification_finalize_the_same_graph_once(case):
+    from pal.bunshin.orchestration import WorkflowEffects
+    from pal.bunshin.service import BunshinWorkflowService
+
+    async def run():
+        await case.submit_producers()
+        for name in ("manifest_model", "archive_verify", "inventory"):
+            accepted = await case.accept_provider(name)
+            await case.process(accepted.aggregate_id, "notify_node_accepted")
+        sink = await case.accept_provider("backup_cli")
+        assert case.coordinator.published_sink_ref(workflow_id=case.workflow_id) == sink.payload["candidate_ref"]["sha256"]
+        case.scheduler.advance(workflow_id=case.workflow_id, epoch_id=case.epoch_id, generation=case.graph.generation + 1)
+        assert case.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, case.epoch_id).state == "RUNNING"
+        recovered = WorkflowEffects(BunshinWorkflowService(case.repository.runtime_root))
+        await recovered._reconcile_execution_epoch({
+            "aggregate_type": "execution_epoch", "aggregate_id": case.epoch_id, "effect_key": "recovery",
+        })
+        epoch = case.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, case.epoch_id)
+        assert epoch.state == "FINALIZING"
+        assert epoch.payload["sink_candidate_ref"] == sink.payload["candidate_ref"]
+        await case.process(sink.aggregate_id, "notify_node_accepted")
+        assert case.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, case.epoch_id) == epoch
+        with case.repository.database.read_connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM bunshin_outbox WHERE aggregate_id = ? "
+                              "AND effect_type = 'publish_final_deliverable'", (case.epoch_id,)).fetchone()[0] == 1
     asyncio.run(run())

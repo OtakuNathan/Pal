@@ -7,6 +7,25 @@ from uuid import uuid4
 from pal.foundation.persistence import utc_now
 
 
+def normalize_bunshin_pack_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Read pinned pre-rename packs without rewriting their artifact bytes."""
+    result = dict(payload)
+    for section in ("metadata", "workspace"):
+        fields = payload.get(section)
+        if isinstance(fields, dict) and "bunshin_v2" in fields:
+            fields = dict(fields)
+            binding = fields.pop("bunshin_v2")
+            fields.setdefault("bunshin", binding)
+            result[section] = fields
+    workspace = result.get("workspace")
+    if isinstance(workspace, dict) and "v2_role_workspace" in workspace:
+        workspace = dict(workspace)
+        prepared = workspace.pop("v2_role_workspace")
+        workspace.setdefault("role_workspace_prepared", prepared)
+        result["workspace"] = workspace
+    return result
+
+
 @dataclass(frozen=True)
 class BunshinInvocationPack:
     invocation_id: str
@@ -62,6 +81,7 @@ class BunshinInvocationPack:
     def from_dict(cls, payload: dict[str, Any]) -> "BunshinInvocationPack":
         if not isinstance(payload, dict):
             raise ValueError("BunshinInvocationPack payload must be an object")
+        payload = normalize_bunshin_pack_fields(payload)
         invocation_id = str(payload.get("invocation_id") or "").strip()
         if not invocation_id:
             raise ValueError("BunshinInvocationPack.invocation_id is required")

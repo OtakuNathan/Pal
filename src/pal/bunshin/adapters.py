@@ -186,7 +186,7 @@ def prepare_role_workspace(
         {
             "kind": "existing_repo",
             "repo_path": str(target),
-            "v2_role_workspace": True,
+            "role_workspace_prepared": True,
             "workspace_capability_injection": False,
             **{key: str(path) for key, path in writable_dirs.items()},
         }

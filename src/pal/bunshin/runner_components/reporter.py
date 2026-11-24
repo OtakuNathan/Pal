@@ -39,7 +39,7 @@ class Reporter:
         self.append_prompt_debug_log(render_reply_debug_log(text, context=self.prompt_debug_context()))
 
     async def emit(self, event_kind: str, payload: dict[str, Any]) -> None:
-        binding = dict(dict(self.pack.metadata or {}).get("bunshin_v2") or {})
+        binding = dict(dict(self.pack.metadata or {}).get("bunshin") or {})
         event_payload = dict(payload)
         event = {
             "type": "event",

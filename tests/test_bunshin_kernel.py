@@ -70,7 +70,7 @@ from pal.bunshin.checkpoint import (
 )
 
 
-class BunshinV2TransitionKernelTests(unittest.TestCase):
+class BunshinTransitionKernelTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = build_default_transition_engine()
 
@@ -332,7 +332,7 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
 
         with repository.database.read_connection() as connection:
             row = connection.execute(
-                "SELECT status FROM bunshin_v2_role_invocations WHERE invocation_id = 'inv-status'"
+                "SELECT status FROM bunshin_role_invocations WHERE invocation_id = 'inv-status'"
             ).fetchone()
         self.assertEqual(row["status"], "completed")
 
@@ -2051,9 +2051,9 @@ class BunshinV2TransitionKernelTests(unittest.TestCase):
         )
 
 
-class BunshinV2PersistenceTests(unittest.TestCase):
+class BunshinPersistenceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_"))
+        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_"))
         self.repository = BunshinRepository(self.runtime_root)
         self.artifacts = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
 
@@ -2197,7 +2197,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_1",),
             )
         self.repository.projections.rebuild_workflow_projections()
@@ -2252,7 +2252,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_1",),
             )
         self.repository.projections.rebuild_workflow_projections()
@@ -2306,7 +2306,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.row_factory = sqlite3.Row
             effect = connection.execute(
-                "SELECT status, locked_by, last_error FROM bunshin_v2_outbox WHERE effect_id = ?",
+                "SELECT status, locked_by, last_error FROM bunshin_outbox WHERE effect_id = ?",
                 (effect_id,),
             ).fetchone()
         self.assertEqual(dict(effect), {"status": "inflight", "locked_by": "outbox_worker", "last_error": ""})
@@ -2334,7 +2334,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         self.repository.outbox_claims.claim_outbox("crashed_manager", limit=1)
         with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET locked_until = '2000-01-01T00:00:00+00:00' WHERE effect_id = ?",
+                "UPDATE bunshin_outbox SET locked_until = '2000-01-01T00:00:00+00:00' WHERE effect_id = ?",
                 (effect_id,),
             )
         reclaimed = self.repository.outbox_claims.claim_outbox("draining_manager", limit=1)
@@ -2359,7 +2359,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
                 """
-                UPDATE bunshin_v2_outbox
+                UPDATE bunshin_outbox
                 SET max_attempts = 1, locked_until = '2000-01-01T00:00:00+00:00'
                 WHERE effect_id = ?
                 """,
@@ -2392,7 +2392,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         self.repository.outbox_claims.claim_outbox("retry_worker", limit=1)
         with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET max_attempts = 1 WHERE effect_id = ?",
+                "UPDATE bunshin_outbox SET max_attempts = 1 WHERE effect_id = ?",
                 (effect_id,),
             )
         invalid_triage = self.action(
@@ -2413,7 +2413,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         with sqlite3.connect(str(self.repository.database.db_path)) as connection:
             connection.row_factory = sqlite3.Row
             effect = connection.execute(
-                "SELECT status, locked_by, last_error FROM bunshin_v2_outbox WHERE effect_id = ?",
+                "SELECT status, locked_by, last_error FROM bunshin_outbox WHERE effect_id = ?",
                 (effect_id,),
             ).fetchone()
         self.assertEqual(dict(effect), {"status": "inflight", "locked_by": "retry_worker", "last_error": ""})
@@ -2513,10 +2513,10 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         )
         with self.repository.database.read_connection() as connection:
             invocation = connection.execute(
-                "SELECT last_completed_turn FROM bunshin_v2_role_invocations WHERE invocation_id = 'inv_events'"
+                "SELECT last_completed_turn FROM bunshin_role_invocations WHERE invocation_id = 'inv_events'"
             ).fetchone()
             event = connection.execute(
-                "SELECT phase, round_index, tool_call_count FROM bunshin_v2_worker_events WHERE invocation_id = 'inv_events'"
+                "SELECT phase, round_index, tool_call_count FROM bunshin_worker_events WHERE invocation_id = 'inv_events'"
             ).fetchone()
         self.assertEqual(invocation["last_completed_turn"], 7)
         self.assertEqual((event["phase"], event["round_index"], event["tool_call_count"]), ("llm_round_completed", 7, 19))
@@ -2543,7 +2543,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
         with self.repository.database.write_connection() as connection:
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_role_sessions(
+                INSERT INTO bunshin_role_sessions(
                     session_id, workflow_id, aggregate_type, aggregate_id,
                     role, mode, status, created_at, updated_at
                 ) VALUES ('inv-checklist', 'wf_1', 'architecture_revision',
@@ -2553,7 +2553,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             )
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_role_assignments(
+                INSERT INTO bunshin_role_assignments(
                     assignment_id, assignment_key, request_hash, session_id,
                     workflow_id, aggregate_type, aggregate_id, role, mode,
                     role_profile_id, family_binding_sha, input_fingerprint,
@@ -2568,7 +2568,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             )
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_role_attempts(
+                INSERT INTO bunshin_role_attempts(
                     attempt_id, assignment_id, attempt_index,
                     lease_resource_key, fencing_token, status,
                     started_at, updated_at
@@ -2579,7 +2579,7 @@ class BunshinV2PersistenceTests(unittest.TestCase):
             )
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_submission_drafts(
+                INSERT INTO bunshin_submission_drafts(
                     draft_key, workflow_id, invocation_id, lease_resource_key,
                     fencing_token, role, mode, draft_kind, input_fingerprint,
                     authoring_contract_version, version, status, payload_json,

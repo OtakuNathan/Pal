@@ -108,5 +108,5 @@ def test_rebind_is_indirect_and_still_only_changes_delivery(env, monkeypatch):
     request.assert_not_called()
     rebound = invoke(runtime, 'rebind_bunshin_task_delivery', args)
     assert rebound.ok, rebound.llm_text
-    request.assert_called_once_with('v2_rebind_task_delivery', {'task_id': 'task-id', 'binding': {'channel_id': 'telegram_main'}})
+    request.assert_called_once_with('rebind_task_delivery', {'task_id': 'task-id', 'binding': {'channel_id': 'telegram_main'}})
     assert rebound.structured['channel_name'] == 'telegram_main'

@@ -22,6 +22,20 @@ def _snapshot_from_row(row: sqlite3.Row) -> AggregateSnapshot:
     )
 
 
+_LEGACY_ACTION_ACTORS = frozenset({
+    "bunshin-architect",
+    "bunshin-architecture-reviewer",
+    "bunshin-control",
+    "bunshin-manager",
+    "bunshin-outbox",
+    "bunshin-recovery",
+    "bunshin-replan",
+    "bunshin-router",
+    "bunshin-scheduler",
+    "bunshin-worker-supervisor",
+})
+
+
 def _action_request_payload(action: ActionEnvelope) -> dict[str, Any]:
     return {
         "action_type": action.action_type,

@@ -32,7 +32,7 @@ from pal.execution.contracts import CapabilityCall
 from pal.shared import RuntimeStatus
 
 
-class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
+class BunshinRestartImportLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="pal-restart-import-")
         self.addCleanup(self.temporary.cleanup)
@@ -126,7 +126,7 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
         self.processed_effects: list[dict] = []
         self.import_rollback_checked = False
         self.legacy_import = False
-        original_process = self.processor._process_effect
+        original_process = self.processor.dispatcher._process_effect
         async def capture_effect(effect):
             self.processed_effects.append(dict(effect))
             if (effect["effect_type"] == "route_workflow"
@@ -153,7 +153,7 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
                 ))
                 self.import_rollback_checked = True
             return await original_process(effect)
-        patcher = patch.object(self.processor, "_process_effect", capture_effect)
+        patcher = patch.object(self.processor.dispatcher, "_process_effect", capture_effect)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -172,7 +172,7 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
             result = asyncio.run(self.processor.process_once(limit=1))
             with sqlite3.connect(self.repository.database.db_path) as connection:
                 errors = connection.execute(
-                    "SELECT effect_type, last_error FROM bunshin_v2_outbox WHERE last_error != ''"
+                    "SELECT effect_type, last_error FROM bunshin_outbox WHERE last_error != ''"
                 ).fetchall()
             self.assertEqual(result["failed"], 0, f"{label}: {errors}")
             self.assertGreater(result["claimed"], 0, f"{label}: outbox became idle")
@@ -275,7 +275,7 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
         }
         prompt_ref = self.service.artifacts.put_json({
             "workspace": {**workspace, "architect_path": str(architect_path(workspace))},
-            "metadata": {"bunshin_v2": {
+            "metadata": {"bunshin": {
                 **{key: value for key, value in context.items() if key != "draft_kind"},
                 "authoring_input_fingerprint": context["input_fingerprint"],
                 "work_item_seed": [{"kind": "phase", "summary": "design", "status": "pending", "required": True}],
@@ -458,7 +458,7 @@ class BunshinV2RestartImportLifecycleTests(unittest.TestCase):
             self.assertEqual(failures, 8)
             with sqlite3.connect(self.repository.database.db_path) as connection:
                 failed = connection.execute(
-                    "SELECT attempt_count, last_error FROM bunshin_v2_outbox "
+                    "SELECT attempt_count, last_error FROM bunshin_outbox "
                     "WHERE workflow_id = ? AND effect_type = 'run_reviewer_role' AND status = 'failed'",
                     (replacement_id,),
                 ).fetchone()

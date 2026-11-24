@@ -28,6 +28,9 @@ Exposes:
 - `CapabilityCall`
 - `CapabilityResult`
 - `ExecutionRuntime`
+- `mounted_file_editor.with_mounted_file_editor` attaches an editor for exact
+  file grants to a sandbox invocation. File tools use its private channel for
+  atomic updates while the worker's view of the parent directory stays read-only.
 
 Infrastructure provider references use `<owner_module_id>:<local_name>`. Claims
 validate the namespace and reject occupied names under the registry lock;

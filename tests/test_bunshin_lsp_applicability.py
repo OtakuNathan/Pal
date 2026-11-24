@@ -77,7 +77,7 @@ def bind_policy(verifier, source, state):
     )
     path = next(item["path"] for item in workspace["reference_paths"] if item["name"] == "verification_policy")
     Path(path).write_text(json.dumps(contract["verification_policy"]))
-    workspace["bunshin_v2"]["verification_tool_contract"] = contract
+    workspace["bunshin"]["verification_tool_contract"] = contract
     return contract
 
 
@@ -150,7 +150,7 @@ def test_required_unavailable_is_unknown_not_pass(verifier):
     assert payload(call("submit_verification_unknown", reason="Required LSP unavailable; rerun after recovery."))["submitted"]
 
 
-def test_available_successful_lsp_closes_exact_required_obligation(verifier):
+def test_available_successful_lsp_cannot_replace_final_command(verifier):
     fixture, _, _, call, _, _ = verifier
     bind_policy(verifier, {"lsp_policy": "when_available"}, "ok")
     delta = payload(run_delta(verifier))["case"]
@@ -158,9 +158,8 @@ def test_available_successful_lsp_closes_exact_required_obligation(verifier):
                                      "result": {"status": "ok", "diagnostics_state": "fresh", "diagnostics": []}}
     lsp = payload(call("run_verification_lsp_check", name="prepared diagnostics", file="router.py"))["case"]
     assert lsp["status"] == "PASS"
-    assert status(verifier)["ready_by_outcome"]["pass"]
-    assert not manager_errors(verifier, [delta, lsp])
-    assert payload(call("submit_verification_pass"))["submitted"]
+    assert not status(verifier)["ready_by_outcome"]["pass"]
+    assert any("successful final command receipt" in error for error in manager_errors(verifier, [delta, lsp]))
 
 
 @pytest.mark.parametrize("case_status", ["UNKNOWN", "FAIL"])
@@ -169,7 +168,7 @@ def test_optional_policy_never_reinterprets_existing_unresolved_evidence(verifie
     bind_policy(verifier, {"lsp_policy": "when_available"}, "unavailable")
     delta = payload(run_delta(verifier))["case"]
     previous = {"name": "existing LSP observation", "case_kind": "lsp", "status": case_status,
-                "obligation_tags": ["lsp"], "input_fingerprint": workspace["bunshin_v2"]["authoring_input_fingerprint"]}
+                "obligation_tags": ["lsp"], "input_fingerprint": workspace["bunshin"]["authoring_input_fingerprint"]}
     cases = [delta, previous]
     draft = {"evidence": {"cases": {item["name"]: item for item in cases}}}
     local = verification_outcome_readiness(workspace, draft, outcome="pass")

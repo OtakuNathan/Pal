@@ -1,7 +1,8 @@
 """Contract-driven Bunshin orchestration public surface."""
 
+from typing import TYPE_CHECKING, Any
+
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
-from pal.bunshin.capabilities import BunshinSnapshot, inspect_bunshin, register_with_core
 from pal.bunshin.contracts import (
     ActionEnvelope,
     AggregateSnapshot,
@@ -28,7 +29,10 @@ from pal.bunshin.profiles import (
     BunshinProfileRegistry,
 )
 from pal.bunshin.repository import BunshinRepository
-from pal.bunshin.service import BunshinWorkflowService
+
+if TYPE_CHECKING:
+    from pal.bunshin.capabilities import BunshinSnapshot, inspect_bunshin, register_with_core
+    from pal.bunshin.service import BunshinWorkflowService
 
 __all__ = [
     "ActionEnvelope",
@@ -59,3 +63,20 @@ __all__ = [
     "inspect_bunshin",
     "register_with_core",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Load host composition only when requested through the public package."""
+    if name == "BunshinWorkflowService":
+        from pal.bunshin.service import BunshinWorkflowService
+
+        return BunshinWorkflowService
+    if name in {"BunshinSnapshot", "inspect_bunshin", "register_with_core"}:
+        from pal.bunshin.capabilities import BunshinSnapshot, inspect_bunshin, register_with_core
+
+        return {
+            "BunshinSnapshot": BunshinSnapshot,
+            "inspect_bunshin": inspect_bunshin,
+            "register_with_core": register_with_core,
+        }[name]
+    raise AttributeError(name)

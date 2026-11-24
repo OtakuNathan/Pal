@@ -98,7 +98,7 @@ def managed_verifier(verifier):
     attempt = repo.role_assignments.claim_role_assignment(assignment["assignment_id"])
     resource = "assignment:" + assignment["assignment_id"]
     fence = repo.leases.claim_lease(resource, attempt["attempt_id"], ttl_seconds=120).fencing_token
-    workspace["bunshin_v2"].update(workflow_id=workflow, invocation_id=attempt["attempt_id"],
+    workspace["bunshin"].update(workflow_id=workflow, invocation_id=attempt["attempt_id"],
         lease_resource_key=resource, fencing_token=fence, authoring_input_fingerprint="freshness-input")
     workspace["invocation_id"] = attempt["attempt_id"]
     prompt = service.artifacts.put_json({"workspace": workspace}, artifact_type="RolePromptPackArtifact")

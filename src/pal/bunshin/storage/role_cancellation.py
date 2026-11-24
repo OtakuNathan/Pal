@@ -24,6 +24,7 @@ class RoleCancellationStore:
         aggregate_id: str,
         reason: str,
         exclude_assignment_id: str = "",
+        preserve_interactions: bool = False,
         assignment_ids: tuple[str, ...] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         """Terminate nonterminal invocations bound to one aggregate.
@@ -50,7 +51,7 @@ class RoleCancellationStore:
         with self.database.write_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM bunshin_v2_role_assignments
+                SELECT * FROM bunshin_role_assignments
                 WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
                   AND assignment_id != ?
                   AND state IN (?, ?, ?, ?, ?)
@@ -64,6 +65,11 @@ class RoleCancellationStore:
                     *cancellable_states,
                 ),
             ).fetchall()
+            if preserve_interactions:
+                parked = {row[0] for row in connection.execute(
+                    "SELECT assignment_id FROM bunshin_interaction_waits WHERE state IN ('open','answered')"
+                )}
+                rows = [row for row in rows if row["assignment_id"] not in parked]
             if assignment_ids is not None:
                 exact_ids = frozenset(str(item) for item in assignment_ids)
                 rows = [row for row in rows if str(row["assignment_id"]) in exact_ids]
@@ -72,19 +78,23 @@ class RoleCancellationStore:
                 if str(assignment["state"]) == RoleAssignmentState.RESULT_RECORDED.value:
                     self.role_submissions.settle_role_assignment_locked(
                         connection,
-                        assignment_id=str(assignment["assignment_id"]),
-                        submission_payload_hash=str(
-                            assignment["submission_payload_hash"]
-                        ),
+                        settlement={
+                            "role_assignment_id": str(assignment["assignment_id"]),
+                            "role_submission_payload_hash": str(assignment["submission_payload_hash"]),
+                        },
                     )
                     connection.execute(
                         """
-                        UPDATE bunshin_v2_role_assignments
+                        UPDATE bunshin_role_assignments
                         SET last_error = ?, updated_at = ? WHERE assignment_id = ?
                         """,
                         (str(reason), now, str(assignment["assignment_id"])),
                     )
                     continue
+                connection.execute(
+                    "UPDATE bunshin_interaction_waits SET state='cancelled' WHERE assignment_id=? "
+                    "AND state IN ('open','answered','resuming')", (assignment["assignment_id"],),
+                )
                 target_state = role_assignment_target(
                     str(assignment["state"]),
                     RoleAssignmentAction.CANCEL,
@@ -92,13 +102,13 @@ class RoleCancellationStore:
                 attempt_id_value = str(assignment["active_attempt_id"] or "")
                 if attempt_id_value:
                     attempt = connection.execute(
-                        "SELECT * FROM bunshin_v2_role_attempts WHERE attempt_id = ?",
+                        "SELECT * FROM bunshin_role_attempts WHERE attempt_id = ?",
                         (attempt_id_value,),
                     ).fetchone()
                     if attempt is not None:
                         connection.execute(
                             """
-                            UPDATE bunshin_v2_role_attempts
+                            UPDATE bunshin_role_attempts
                             SET status = ?, access_token_hash = '', error_kind = ?,
                                 error_text = ?, finished_at = ?, updated_at = ?
                             WHERE attempt_id = ?
@@ -117,14 +127,14 @@ class RoleCancellationStore:
                         if lease_resource and fencing_token:
                             connection.execute(
                                 """
-                                DELETE FROM bunshin_v2_leases
+                                DELETE FROM bunshin_leases
                                 WHERE resource_key = ? AND owner_id = ? AND fencing_token = ?
                                 """,
                                 (lease_resource, attempt_id_value, fencing_token),
                             )
                 connection.execute(
                     """
-                    UPDATE bunshin_v2_role_assignments
+                    UPDATE bunshin_role_assignments
                     SET state = ?, last_error = ?, updated_at = ?
                     WHERE assignment_id = ?
                     """,
@@ -146,7 +156,7 @@ class RoleCancellationStore:
             identifiers = tuple(str(row["assignment_id"]) for row in rows)
             placeholders = ",".join("?" for _ in identifiers)
             updated = connection.execute(
-                "SELECT * FROM bunshin_v2_role_assignments "
+                "SELECT * FROM bunshin_role_assignments "
                 f"WHERE assignment_id IN ({placeholders}) ORDER BY created_at, assignment_id",
                 identifiers,
             ).fetchall()

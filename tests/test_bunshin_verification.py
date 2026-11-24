@@ -131,9 +131,9 @@ class _FakeExecutionAdapter(ExecutionRuntime):
         raise AssertionError(f"unexpected delegated tool: {call.name}")
 
 
-class BunshinV2VerificationTests(unittest.TestCase):
+class BunshinVerificationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_verify_"))
+        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_verify_"))
         self.repository = BunshinRepository(self.runtime_root)
         self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
         self.verification = VerificationService(self.repository, self.store)
@@ -761,7 +761,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         with (
             patch.object(
                 worker.components.assignment_identity,
-                'role_submission_settlement',
+                'settlement_from_terminal',
                 return_value=settlement,
             ),
             patch.object(
@@ -923,7 +923,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
                 "workspace": {
                     "repo_path": str(role_workspace),
                     "review_scratch_dir": str(review_scratch),
-                    "v2_role_workspace": True,
+                    "role_workspace_prepared": True,
                 }
             },
             artifact_type="RolePromptPackArtifact",
@@ -1337,7 +1337,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             {
                 "runtime_root": str(self.runtime_root),
                 "review_scratch_dir": str(self.runtime_root / f"scratch-{self.lease_index}"),
-                "bunshin_v2": {
+                "bunshin": {
                     "workflow_id": "wf_verify",
                     "invocation_id": invocation,
                     "lease_resource_key": resource,
@@ -1411,7 +1411,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         )
 
     def _advance_worker_fence(self, workspace: dict[str, object]) -> dict[str, object]:
-        binding = dict(workspace["bunshin_v2"])
+        binding = dict(workspace["bunshin"])
         resource = str(binding["lease_resource_key"])
         invocation = str(binding["invocation_id"])
         self.repository.leases.release_lease(
@@ -1422,7 +1422,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         lease = self.repository.leases.claim_lease(resource, invocation, ttl_seconds=60)
         return {
             **workspace,
-            "bunshin_v2": {
+            "bunshin": {
                 **binding,
                 "fencing_token": lease.fencing_token,
             },
@@ -2206,6 +2206,38 @@ class BunshinV2VerificationTests(unittest.TestCase):
                 tree = _git(repo, "write-tree").strip()
                 self.assertEqual(_git(repo, "show", f"{tree}:report.md"), "Verified evidence\n")
 
+    @unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap"), "requires bubblewrap")
+    def test_repair_submit_runs_whole_verifier_suite_without_a_checklist(self):
+        repo = self.runtime_root / "repair-module"
+        corpus = repo / "tests/example/verifier"
+        corpus.mkdir(parents=True)
+        (repo / "value").write_text("first")
+        (corpus / "run-tests.sh").write_text(
+            "test -f value && grep -qx second value || { echo 'regression B still red'; exit 1; }"
+        )
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Pal", "-c", "user.email=test@example.org",
+                        "commit", "-qm", "verifier corpus"], check=True)
+        view = self.runtime_root / "repair-view.json"
+        view.write_text(json.dumps({"module_name": "example", "contract_mode": "review_guarded",
+                                    "implementation_scopes": [{"kind": "file", "path": "value"}],
+                                    "verification_corpus": {"kind": "directory", "path": "tests/example/verifier"}}))
+        workspace = self._bind_workspace({
+            "repo_path": str(repo), "repair_precheck": True,
+            "artifact_dir": str(self.runtime_root / "out"), "artifact_stage_dir": str(self.runtime_root / "stage"),
+            "reference_paths": [{"name": "module_work_view", "path": str(view)}],
+        }, role="implementation", mode="repair")
+        def submit():
+            return asyncio.run(candidate_builder_tool_result(
+                new_tool_call(name="op_bunshin_candidate_submit", args={}), workspace, [],
+            ))
+        rejected = submit()
+        self.assertFalse(rejected.ok)
+        self.assertIn("regression B still red", rejected.llm_text)
+        (repo / "value").write_text("second")
+        self.assertTrue(submit().ok)
+
     def test_candidate_submit_accepts_review_guarded_contract_as_live_git_delta(self) -> None:
         repo = self.runtime_root / "candidate-repo"
         (repo / "src/font").mkdir(parents=True)
@@ -2372,7 +2404,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
             },
             role="implementation",
         )
-        binding = dict(workspace["bunshin_v2"])
+        binding = dict(workspace["bunshin"])
         binding["work_item_seed"] = [
             {
                 "kind": "task",
@@ -2385,7 +2417,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
                 "required": True,
             },
         ]
-        workspace["bunshin_v2"] = binding
+        workspace["bunshin"] = binding
 
         planned = self._candidate_call(
             workspace,
@@ -2890,9 +2922,9 @@ class BunshinV2VerificationTests(unittest.TestCase):
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)}, role="verifier"
         )
-        binding = dict(workspace["bunshin_v2"])
+        binding = dict(workspace["bunshin"])
         binding["verification_tool_contract"] = contract
-        workspace["bunshin_v2"] = binding
+        workspace["bunshin"] = binding
 
         result = self._verification_call(
             workspace,
@@ -3028,9 +3060,9 @@ class BunshinV2VerificationTests(unittest.TestCase):
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)}, role="verifier"
         )
-        binding = dict(workspace["bunshin_v2"])
+        binding = dict(workspace["bunshin"])
         binding["verification_tool_contract"] = contract
-        workspace["bunshin_v2"] = binding
+        workspace["bunshin"] = binding
 
         result = self._verification_call(
             workspace,
@@ -3904,21 +3936,21 @@ class BunshinV2VerificationTests(unittest.TestCase):
         )
 
         processor = BunshinOutboxProcessor(service)
-        processor._request_epoch_replan(
+        processor.replanning.request_epoch_replan(
             {
                 "effect_key": "task-ledger-replan",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": node_id,
             }
         )
-        processor._freeze_epoch_for_replan(
+        processor.replanning.freeze_epoch_for_replan(
             {
                 "effect_key": "task-ledger-freeze",
                 "aggregate_type": AggregateType.EXECUTION_EPOCH.value,
                 "aggregate_id": epoch_id,
             }
         )
-        processor._create_replan_revision(
+        processor.replanning.create_replan_revision(
             {
                 "effect_key": "task-ledger-create-revision",
                 "aggregate_type": AggregateType.EXECUTION_EPOCH.value,
@@ -3949,7 +3981,7 @@ class BunshinV2VerificationTests(unittest.TestCase):
         service = BunshinWorkflowService(self.runtime_root)
         processor = BunshinOutboxProcessor(service)
 
-        result = processor._publish_accepted_memory_candidate(
+        result = processor.publication.publish_memory_candidate(
             {
                 "effect_key": "accepted-memory",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
@@ -4065,9 +4097,9 @@ class BunshinV2VerificationTests(unittest.TestCase):
             )
         return self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
 
-class BunshinV2DeliveryTests(unittest.TestCase):
+class BunshinDeliveryTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_delivery_"))
+        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_delivery_"))
         self.repository = BunshinRepository(self.runtime_root)
         self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository.artifacts)
         self.repo = self.runtime_root / "repo"

@@ -41,7 +41,7 @@ def prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
 class BunshinPromptFragmentProvider(PromptFragmentProvider):
     scaffold_factory: Callable[[], dict[str, Any]]
     role_context_factory: Callable[[], str]
-    provider_id: str = "bunshin.v2.worker.prompt"
+    provider_id: str = "bunshin.worker.prompt"
     module_id: str = "bunshin"
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
@@ -206,8 +206,8 @@ def bunshin_primary_input(envelope: ChannelEnvelope) -> str:
 
 
 def bunshin_role(pack: BunshinInvocationPack) -> str:
-    binding = {**dict((pack.metadata or {}).get("bunshin_v2") or {}),
-               **dict((pack.workspace or {}).get("bunshin_v2") or {})}
+    binding = {**dict((pack.metadata or {}).get("bunshin") or {}),
+               **dict((pack.workspace or {}).get("bunshin") or {})}
     return str(binding.get("role") or dict((pack.resolved_profile or {}).get("role") or {}).get("kind") or "")
 
 
@@ -378,7 +378,10 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
         "- Prefer the smallest contract-complete action. Do not add optional abstraction, evidence, or polish after this role's completion conditions are satisfied.",
     ]
     role = bunshin_role(pack)
-    if role == "implementation":
+    if role == "implementation" and pack.workspace.get("repair_precheck"):
+        lines[1] = "- Use the full routed findings as your repair scope. Keep a durable note when useful."
+        lines.append("- Submit the repaired Candidate for automatic precheck; address returned failures in this assignment.")
+    elif role == "implementation":
         lines.append(
             "- Implementation: once the owned contract, edit path, and one sufficient validation path are clear, implement directly. When the checklist is complete and focused checks pass, call submit_candidate immediately."
         )

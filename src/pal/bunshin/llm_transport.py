@@ -13,7 +13,7 @@ from pal.llm.endpoint_spec import endpoint_spec_fingerprint
 from pal.llm.ir import LLMUsageIR
 from pal.llm.models import LLMEndpointModel
 from pal.llm.shapes.base import _JSONFrame
-from pal.llm.transport import (
+from pal.llm.transport_contracts import (
     EncodedTransportRequest,
     LLMEndpointSpecStaleError,
     LLMProviderStartedError,

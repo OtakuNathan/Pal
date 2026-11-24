@@ -33,8 +33,8 @@ from pal.bunshin.ipc import bunshin_port_path, bunshin_socket_path
 from pal.bunshin.sandbox import build_sandboxed_runner_invocation
 from pal.bunshin.adapters import prepare_workspace_environment
 from pal.bunshin.workflow_capabilities import (
-    BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput,
-    BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput,
+    BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput,
+    BunshinCapabilitiesBunshinPublicProviderSubmitHumanDecisionInput,
     BunshinPublicProvider,
 )
 from pal.bunshin.ask_question import ASK_QUESTION_CAPABILITY
@@ -130,7 +130,7 @@ class _NoopSemanticEffects:
         return {}
 
 
-class BunshinV2WorkerIdentityTests(unittest.TestCase):
+class BunshinWorkerIdentityTests(unittest.TestCase):
     def test_general_profile_shorthand_expands_without_requiring_a_dot(self) -> None:
         self.assertEqual(
             canonical_role_profile_parts("architect"),
@@ -285,6 +285,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
 
         self.assertFalse(terminal["payload"]["durable_receipt_replay"])
         self.assertEqual(terminal["payload"]["session_turn_index"], 3)
+        self.assertEqual(terminal["payload"]["worker_timing"], {"input_tokens": 7})
         replay = worker.components.role_checkpoints.terminal_from_assignment_receipt(
             {
                 "assignment_id": "assignment-fresh-receipt",
@@ -319,7 +320,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
             ]
         )
 
-        metrics = _recorded_role_metrics({"payload": {"v2_timing": timing}})
+        metrics = _recorded_role_metrics({"payload": {"worker_timing": timing}})
 
         self.assertEqual(metrics["input_tokens"], 101)
         self.assertEqual(metrics["output_tokens"], 29)
@@ -364,7 +365,7 @@ class BunshinV2WorkerIdentityTests(unittest.TestCase):
         )
 
         self.assertFalse(uses_bound)
-        self.assertTrue(workspace["v2_role_workspace"])
+        self.assertTrue(workspace["role_workspace_prepared"])
         self.assertNotEqual(Path(workspace["repo_path"]), source)
         self.assertEqual(
             Path(workspace["repo_path"]),
@@ -657,9 +658,9 @@ class _StalledCompletionGateRunner(BunshinRunner):
         self.components.agent_session.run_agent_loop = self.run_agent_loop
 
 
-class BunshinV2PublicSurfaceTests(unittest.TestCase):
+class BunshinPublicSurfaceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_v2_public_"))
+        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bunshin_public_"))
 
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
@@ -1202,7 +1203,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             {
                 "workspace": {
                     "repo_path": "/tmp/original-verifier-workspace",
-                    "v2_role_workspace": True,
+                    "role_workspace_prepared": True,
                 }
             },
             artifact_type="RolePromptPackArtifact",
@@ -2695,7 +2696,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         processor.repository.snapshots.read_snapshot = lambda *_args, **_kwargs: completed
 
-        processor._publish_terminal_workflow_if_any(workflow.workflow_id)
+        processor.publication.publish_terminal(workflow.workflow_id)
 
         self.assertEqual(actions, [])
         self.assertEqual(
@@ -2709,7 +2710,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                     "resolved_interactions": [
                         {
                             "interaction_id": "bunshin_v2_architecture_arch-terminal-delivery",
-                            "interaction_kind": "bunshin_v2_architecture_review",
+                            "interaction_kind": "bunshin_architecture_review",
                         }
                     ],
                     "result_artifact_ref": {"sha256": "deliverable-sha"},
@@ -2766,7 +2767,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         processor.repository.snapshots.read_snapshot = lambda *_args, **_kwargs: workflow
 
-        processor._publish_terminal_workflow_if_any(workflow.workflow_id)
+        processor.publication.publish_terminal(workflow.workflow_id)
 
         self.assertEqual(
             published[0]["summary"],
@@ -2827,7 +2828,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         processor.repository.snapshots.read_snapshot = lambda *_args, **_kwargs: workflow
 
         with self.assertRaisesRegex(IOError, "does not match its receipt"):
-            processor._publish_terminal_workflow_if_any(workflow.workflow_id)
+            processor.publication.publish_terminal(workflow.workflow_id)
 
     def test_runner_checkpoint_uses_manager_selected_paths_and_ignores_stale_files(self) -> None:
         async def scenario() -> None:
@@ -2858,7 +2859,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 instruction="initial assignment",
                 workspace={"run_dir": str(run_dir)},
                 metadata={
-                    "bunshin_v2": {"role": "implementation", "mode": "produce"},
+                    "bunshin": {"role": "implementation", "mode": "produce"},
                     "agent_session": {
                         **base_session,
                         "response_key": "effect-1",
@@ -2936,7 +2937,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 metadata={
                     # Repair is another playbook turn of the same durable
                     # implementation coroutine, not a new checkpoint stage.
-                    "bunshin_v2": {"role": "implementation", "mode": "repair"},
+                    "bunshin": {"role": "implementation", "mode": "repair"},
                     "agent_session": {
                         **base_session,
                         "response_key": "effect-2",
@@ -3007,7 +3008,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             invocation_id="inv-checklist-context",
             workspace={"repo_path": str(self.runtime_root)},
             metadata={
-                "bunshin_v2": {
+                "bunshin": {
                     "role": "implementation",
                     "invocation_id": "inv-checklist-context",
                 }
@@ -3036,7 +3037,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             invocation_id="inv-architect-checklist-context",
             workspace={"repo_path": str(self.runtime_root)},
             metadata={
-                "bunshin_v2": {
+                "bunshin": {
                     "role": "architect",
                     "invocation_id": "inv-architect-checklist-context",
                 }
@@ -3265,14 +3266,14 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         def manager_request(method, params=None):
             request = dict(params or {})
-            if method == "v2_start_workflow":
+            if method == "start_workflow":
                 return provider.service.start_workflow(request)
-            if method == "v2_rebind_task_delivery":
+            if method == "rebind_task_delivery":
                 return provider.service.repository.delivery_bindings.rebind_task_delivery(
                     task_id=str(request.get("task_id") or ""),
                     binding=dict(request.get("binding") or {}),
                 )
-            if method == "v2_task_status":
+            if method == "task_status":
                 return provider.service.task_status(
                     str(request.get("task_id") or ""),
                     workflow_id=str(request.get("workflow_id") or ""),
@@ -3372,7 +3373,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         pack = BunshinInvocationPack(
             invocation_id="inv-receipt-gate",
             workspace={"output_policy": {"primary_artifact": "coder_report.json"}},
-            metadata={"bunshin_v2": {"submission_receipt_required": True}},
+            metadata={"bunshin": {"submission_receipt_required": True}},
         )
         runner = BunshinRunner(
             runtime_root=self.runtime_root,
@@ -4555,9 +4556,9 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         acquire_process_slot = worker.supervisor.acquire_process_slot
         claim_role_assignment = worker.repository.role_assignments.claim_role_assignment
 
-        async def capture_process_slot(run_id: str):
+        async def capture_process_slot(run_id: str, **kwargs):
             admission_events.append("process_permit")
-            return await acquire_process_slot(run_id)
+            return await acquire_process_slot(run_id, **kwargs)
 
         def capture_attempt(*args, **kwargs):
             admission_events.append("attempt")
@@ -4583,7 +4584,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         def capture_sandbox_pack(_runtime_root, pack, **_kwargs):
             captured["control_route"] = dict(
-                dict(pack.metadata.get("bunshin_v2") or {}).get("control_route") or {}
+                dict(pack.metadata.get("bunshin") or {}).get("control_route") or {}
             )
             captured["response_key"] = str(
                 dict(pack.metadata.get("agent_session") or {}).get("response_key")
@@ -4742,7 +4743,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         provider = BunshinManagerProvider(self.runtime_root)
         existing_health = {
             "ok": True,
-            "health_source": "bunshin_v2_manager",
+            "health_source": "bunshin_manager",
             "lifecycle_protocol": "plugin_raii.v1",
             "manager_pid": 111,
         }
@@ -4764,7 +4765,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         provider = BunshinManagerProvider(self.runtime_root)
         health = {
             "ok": True,
-            "health_source": "bunshin_v2_manager",
+            "health_source": "bunshin_manager",
             "lifecycle_protocol": "plugin_raii.v1",
             "manager_pid": 333,
             "shutdown_requested": False,
@@ -4784,16 +4785,16 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_manager_rejects_pre_raii_sidecar_health(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "protocol is incompatible"):
             BunshinManagerProvider._validate_health(
-                {"ok": True, "health_source": "bunshin_v2_manager", "manager_pid": 42}
+                {"ok": True, "health_source": "bunshin_manager", "manager_pid": 42}
             )
 
     def test_bunshin_plugin_exposes_only_semantic_v2_business_capabilities(self) -> None:
         self.assertEqual(
-            BunshinV2CapabilitiesBunshinV2PublicProviderStartWorkflowInput.__module__,
+            BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput.__module__,
             "pal.bunshin.workflow_capabilities",
         )
         self.assertEqual(
-            BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput.__module__,
+            BunshinCapabilitiesBunshinPublicProviderSubmitHumanDecisionInput.__module__,
             "pal.bunshin.workflow_capabilities",
         )
         core = build_core()
@@ -4881,7 +4882,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             goal_description = start_schema["properties"]["goal"]["description"]
             self.assertIn("routing objective only", goal_description)
             self.assertIn("cannot substitute", goal_description)
-            workspace_schema = start_schema["$defs"]["BunshinV2StartWorkflowWorkspace"]
+            workspace_schema = start_schema["$defs"]["BunshinStartWorkflowWorkspace"]
             self.assertIn("kind", workspace_schema["required"])
             self.assertEqual(
                 workspace_schema["properties"]["kind"]["enum"],
@@ -5211,7 +5212,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             ):
                 connection.execute(
                     """
-                    INSERT INTO bunshin_v2_node_projection(
+                    INSERT INTO bunshin_node_projection(
                         node_run_id, workflow_id, epoch_id, unit_id, node_kind,
                         state, dependency_node_ids_json, active_worker_id,
                         candidate_digest, blocker_json, updated_at
@@ -5234,7 +5235,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             ):
                 connection.execute(
                     """
-                    INSERT INTO bunshin_v2_role_invocations(
+                    INSERT INTO bunshin_role_invocations(
                         invocation_id, workflow_id, aggregate_type, aggregate_id,
                         lease_resource_key, fencing_token, role, mode,
                         role_profile_id, family_binding_sha,
@@ -5665,9 +5666,9 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         service = BunshinWorkflowService(self.runtime_root)
         self._create_task(service, "existing-ledger-entry")
         with sqlite3.connect(service.repository.database.db_path) as connection:
-            connection.execute("DELETE FROM bunshin_v2_tasks_fts")
+            connection.execute("DELETE FROM bunshin_tasks_fts")
             connection.execute(
-                "DELETE FROM bunshin_v2_schema_meta WHERE schema_key = 'task_fts_index_version'"
+                "DELETE FROM bunshin_schema_meta WHERE schema_key = 'task_fts_index_version'"
             )
 
         service.repository.database.ensure_schema()
@@ -5678,7 +5679,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
     def test_public_human_decision_resolves_pending_card_without_token_argument(self) -> None:
         wakes: list[str] = []
         submitted: list[dict[str, object]] = []
-        validated = BunshinV2CapabilitiesBunshinV2PublicProviderSubmitHumanDecisionInput.model_validate(
+        validated = BunshinCapabilitiesBunshinPublicProviderSubmitHumanDecisionInput.model_validate(
             {"task": "OHOS platform layer", "decision": "accept"}
         )
         self.assertIsNone(validated.edit_instruction)
@@ -5921,7 +5922,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_restart_source",),
             )
 
@@ -6016,7 +6017,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         ).snapshot
         with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 (active.workflow_id,),
             )
         repository.transitions.dispatch(
@@ -6068,7 +6069,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         with sqlite3.connect(str(repository.database.db_path)) as connection:
             workflow_count = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM bunshin_v2_aggregate_snapshots WHERE aggregate_type = ?",
+                    "SELECT COUNT(*) FROM bunshin_aggregate_snapshots WHERE aggregate_type = ?",
                     (AggregateType.WORKFLOW.value,),
                 ).fetchone()[0]
             )
@@ -6223,7 +6224,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
 
         with patch.object(service, "_workflow_uses_git_strategy", return_value=True):
-            view = service._human_review_view(revision)
+            view = service.status_reader._human_review_view(revision)
 
         self.assertIn("## Family Context", view["markdown"])
         self.assertIn("## Task Revision History", view["markdown"])
@@ -6427,7 +6428,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             requested,
             [
                 (
-                    "v2_task_status",
+                    "task_status",
                     {
                         "task_id": "task-live-question",
                         "workflow_id": "wf-live-question",
@@ -6859,7 +6860,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(service.repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_orphaned_node",),
             )
 
@@ -7131,7 +7132,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             row = connection.execute(
                 """
                 SELECT status, attempt_count, last_error
-                FROM bunshin_v2_outbox
+                FROM bunshin_outbox
                 WHERE workflow_id = ? AND status = 'failed'
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -7169,7 +7170,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             row = connection.execute(
                 """
                 SELECT status, attempt_count, last_error
-                FROM bunshin_v2_outbox
+                FROM bunshin_outbox
                 WHERE workflow_id = ? AND last_error LIKE 'deferred%manager restart%'
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -7327,7 +7328,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 (workflow_id,),
             )
         service.control_workflow(
@@ -7428,7 +7429,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(service.repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_cancel_recovery",),
             )
         revision = service.repository.snapshots.read_snapshot(
@@ -7605,7 +7606,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_triage_hierarchy",),
             )
         workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, "wf_triage_hierarchy")
@@ -7639,7 +7640,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             pending_effect_types = {
                 str(row[0])
                 for row in connection.execute(
-                    "SELECT effect_type FROM bunshin_v2_outbox WHERE workflow_id = ? AND status = 'pending'",
+                    "SELECT effect_type FROM bunshin_outbox WHERE workflow_id = ? AND status = 'pending'",
                     ("wf_triage_hierarchy",),
                 )
             }
@@ -7730,7 +7731,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 (workflow_id,),
             )
         decision_token = repository.human_decisions.issue_human_decision_token(
@@ -7758,7 +7759,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
                 """
-                UPDATE bunshin_v2_outbox
+                UPDATE bunshin_outbox
                 SET status = 'completed'
                 WHERE workflow_id = ? AND effect_type != 'materialize_plan_revision'
                 """,
@@ -7822,7 +7823,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
         )
         with sqlite3.connect(str(repository.database.db_path)) as connection:
             connection.execute(
-                "UPDATE bunshin_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                "UPDATE bunshin_outbox SET status = 'completed' WHERE workflow_id = ?",
                 ("wf_relink_child",),
             )
 
@@ -7847,9 +7848,10 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
     def test_manager_has_no_v1_spawn_rpc(self) -> None:
         manager = BunshinManager(self.runtime_root)
-        with self.assertRaisesRegex(ValueError, "unknown Bunshin V2 manager method: spawn"):
+        with self.assertRaisesRegex(ValueError, "unknown Bunshin manager method: spawn"):
             asyncio.run(manager._call_method("spawn", {"task_context_pack": {}}))
-        self.assertEqual(asyncio.run(manager._call_method("v2_wake", {}))["status"], "woken")
+        for method in ("wake", "v2_wake"):
+            self.assertEqual(asyncio.run(manager._call_method(method, {}))["status"], "woken")
 
     def test_worker_token_cannot_borrow_another_broker_run(self) -> None:
         manager = BunshinManager(self.runtime_root)
@@ -7881,7 +7883,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             pack=BunshinInvocationPack(
                 invocation_id="inv-architect-question",
                 metadata={
-                    "bunshin_v2": {
+                    "bunshin": {
                         "workflow_id": "wf-architect-question",
                         "aggregate_type": "architecture_revision",
                         "aggregate_id": "arch-architect-question",
@@ -8002,7 +8004,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
             run_id="run-architect-question",
             pack=BunshinInvocationPack(
                 invocation_id="inv-architect-question",
-                metadata={"bunshin_v2": {"workflow_id": "wf-architect-question"}},
+                metadata={"bunshin": {"workflow_id": "wf-architect-question"}},
             ),
             pending_clarification={
                 "clarification_id": "clarification-1",
@@ -8029,7 +8031,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
 
         status = asyncio.run(
             manager._call_method(
-                "v2_task_status",
+                "task_status",
                 {
                     "task_id": "task-architect-question",
                     "workflow_id": "wf-architect-question",
@@ -8076,7 +8078,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 invocation_id="inv-routed-question",
                 metadata={
                     "prompt_log_enabled": True,
-                    "bunshin_v2": {
+                    "bunshin": {
                         "workflow_id": "wf-routed-question",
                     }
                 },
@@ -8330,7 +8332,7 @@ class BunshinV2PublicSurfaceTests(unittest.TestCase):
                 pack=BunshinInvocationPack(
                     invocation_id="v2_invocation",
                     goal="one contract invocation",
-                    metadata={"bunshin_v2": {"workflow_id": "wf"}},
+                    metadata={"bunshin": {"workflow_id": "wf"}},
                 ),
                 bunshin_id="inv_test",
                 run_id="run_test",

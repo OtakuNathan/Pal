@@ -71,7 +71,7 @@ class BunshinControlEventHandler(EventHandler):
             revision_id = str(payload.get("architecture_revision_id") or "").strip()
             delivery = (terminal_delivery_for_interaction(
                 route, interaction_id=f"bunshin_v2_architecture_{revision_id}",
-                interaction_kind="bunshin_v2_architecture_review",
+                interaction_kind="bunshin_architecture_review",
                 text=str(payload.get("summary") or "Bunshin architecture decision recorded.")) if revision_id else None)
         else:
             text = str(payload.get("summary") or payload.get("status") or "Bunshin workflow completed.")

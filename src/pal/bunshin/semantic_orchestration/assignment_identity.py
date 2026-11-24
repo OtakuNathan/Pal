@@ -8,7 +8,7 @@ from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.machines import machine_spec_for
 from pal.bunshin.role_contracts import RoleActivation, RoleMode
 from pal.bunshin.role_gateway import role_submission_artifact_type
-from pal.bunshin.role_protocol import RoleAssignmentState
+from pal.bunshin.role_protocol import RoleAssignmentState, RoleSettlement
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.routes import SEMANTIC_EFFECT_ROUTES
 
@@ -166,33 +166,47 @@ class AssignmentIdentity:
         assignment_id: str = "",
         required: bool = True,
     ) -> dict[str, str]:
-        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
         resolved_assignment_id = str(assignment_id).strip()
         if not resolved_assignment_id:
+            effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
             resolved_assignment_id = self.background.assignment_id(effect_key, "")
         if not resolved_assignment_id:
             return {}
-        assignment = self.repository.role_assignments.read_role_assignment(resolved_assignment_id)
+        settlement = self._recorded_settlement(resolved_assignment_id)
+        if settlement is None:
+            if required:
+                raise SubmissionInvariantError("role business action requires a durable submission receipt")
+            return {}
+        return {
+            "role_assignment_id": settlement["role_assignment_id"],
+            "role_submission_payload_hash": settlement["role_submission_payload_hash"],
+        }
+
+    def _recorded_settlement(self, assignment_id: str) -> RoleSettlement | None:
+        assignment = self.repository.role_assignments.read_role_assignment(assignment_id)
         if assignment is None:
             raise SubmissionInvariantError("role assignment disappeared before settlement")
         if assignment["state"] not in {
             RoleAssignmentState.RESULT_RECORDED.value,
             RoleAssignmentState.SETTLED.value,
         }:
-            if not required:
-                return {}
-            raise SubmissionInvariantError(
-                "role business action requires a durable submission receipt"
-            )
+            return None
         payload_hash = str(assignment.get("submission_payload_hash") or "")
         if not payload_hash:
             raise SubmissionInvariantError(
                 "role assignment submission receipt has no payload hash"
             )
         return {
-            "role_assignment_id": resolved_assignment_id,
+            "role_assignment_id": assignment_id,
             "role_submission_payload_hash": payload_hash,
         }
+
+    def settlement_from_terminal(self, terminal: Mapping[str, Any]) -> RoleSettlement:
+        assignment_id = self.terminal_role_assignment_id(terminal)
+        settlement = self._recorded_settlement(assignment_id)
+        if settlement is None:
+            raise SubmissionInvariantError("role business action requires a durable submission receipt")
+        return settlement
 
     @staticmethod
     def terminal_role_assignment_id(terminal: Mapping[str, Any]) -> str:

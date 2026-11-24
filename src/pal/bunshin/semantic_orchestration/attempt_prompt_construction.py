@@ -73,7 +73,7 @@ class PromptConstruction:
             profile_name=profile_name,
             bunshin_profile=profile,
             metadata={
-                "bunshin_v2": {
+                "bunshin": {
                     "workflow_id": snapshot.workflow_id,
                     "aggregate_type": snapshot.aggregate_type.value,
                     "aggregate_id": snapshot.aggregate_id,

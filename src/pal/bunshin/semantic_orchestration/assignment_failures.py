@@ -73,7 +73,7 @@ class AssignmentFailures:
                             workflow_id=snapshot.workflow_id,
                             aggregate_type=snapshot.aggregate_type,
                             aggregate_id=snapshot.aggregate_id,
-                            actor="bunshin-v2-worker-supervisor",
+                            actor="bunshin-worker-supervisor",
                             expected_version=snapshot.version,
                             idempotency_key=(
                                 f"worker-startup-failed:"
@@ -199,7 +199,7 @@ class AssignmentFailures:
                             workflow_id=snapshot.workflow_id,
                             aggregate_type=snapshot.aggregate_type,
                             aggregate_id=snapshot.aggregate_id,
-                            actor="bunshin-v2-worker-supervisor",
+                            actor="bunshin-worker-supervisor",
                             expected_version=snapshot.version,
                             # One durable receipt may be replayed after an operator
                             # resolves triage.  Deduplicate retries inside the

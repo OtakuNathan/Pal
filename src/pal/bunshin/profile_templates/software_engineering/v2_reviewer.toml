@@ -1,5 +1,5 @@
 profile_id = "v2_reviewer"
-display_name = "V2 Software Reviewer"
+display_name = "Software Reviewer"
 profile_group = "software_engineering"
 preferred_endpoint_id = ""
 skill_refs = ["code_review"]

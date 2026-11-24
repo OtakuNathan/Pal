@@ -96,15 +96,6 @@ class BunshinManagerClient:
     async def refresh_llm_endpoints(self) -> dict[str, Any]:
         return await self.request("refresh_llm_endpoints")
 
-    def replace_harness_registry_sync(
-        self,
-        generation: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self.request_sync(
-            "replace_harness_registry",
-            {"generation": dict(generation)},
-        )
-
     def shutdown_sync(self, *, graceful: bool = True, timeout_seconds: float | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {"graceful": graceful}
         if timeout_seconds is not None:

@@ -32,8 +32,8 @@ from tests.test_bunshin_historical_contract import modern_bill
 
 @pytest.fixture
 def verifier(request):
-    from tests.test_bunshin_verification import BunshinV2VerificationTests
-    fixture = BunshinV2VerificationTests()
+    from tests.test_bunshin_verification import BunshinVerificationTests
+    fixture = BunshinVerificationTests()
     fixture.setUp()
     root = fixture.runtime_root
     repo, _ = fixture._git_repo()
@@ -53,8 +53,8 @@ def verifier(request):
         'write_path_scopes': [view['verification_corpus']], 'reference_paths': refs,
         'review_tool_evidence_refs': [],
     }, role='verifier')
-    workspace['bunshin_v2']['verification_tool_contract'] = contract
-    workspace['invocation_id'] = workspace['bunshin_v2']['invocation_id']
+    workspace['bunshin']['verification_tool_contract'] = contract
+    workspace['invocation_id'] = workspace['bunshin']['invocation_id']
     pack = apply_role_capability_policy(BunshinInvocationPack(
         invocation_id=workspace['invocation_id'], workspace=workspace,
     ), activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE))
@@ -273,7 +273,7 @@ def test_manager_and_local_case_status_and_input_gates_agree(verifier, case_chan
     _, workspace, _, _, _, view = verifier
     payload(run_delta(verifier))
     case = {'name': 'case', 'case_kind': 'diff_risk', 'obligation_tags': ['candidate_delta_review'],
-            'status': 'PASS', 'input_fingerprint': workspace['bunshin_v2']['authoring_input_fingerprint'], **case_change}
+            'status': 'PASS', 'input_fingerprint': workspace['bunshin']['authoring_input_fingerprint'], **case_change}
     draft = {'evidence': {'cases': {'case': case}}}
     local = verification_outcome_readiness(workspace, draft, outcome='pass')
     manager = semantic_verification_submission_errors(

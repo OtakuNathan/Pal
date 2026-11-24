@@ -4830,7 +4830,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message(self) -> None:
         spec = InteractionMessageSpec(
             interaction_id="review_long",
-            interaction_kind="bunshin_v2_architecture_review",
+            interaction_kind="bunshin_architecture_review",
             text=("architecture contract\n" * 600).strip(),
             buttons=(
                 (
@@ -4871,7 +4871,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_telegram_endpoint_restores_durable_interaction_after_endpoint_restart(self) -> None:
         spec = InteractionMessageSpec(
             interaction_id="review_restart",
-            interaction_kind="bunshin_v2_architecture_review",
+            interaction_kind="bunshin_architecture_review",
             text="Review ready",
             buttons=(
                 (
@@ -4879,7 +4879,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
                         label="Accept",
                         action_key="control.action.dispatch",
                         action_args={
-                            "action_kind": "bunshin_v2_human_decision",
+                            "action_kind": "bunshin_human_decision",
                             "args": {"decision": "accept"},
                         },
                     ),

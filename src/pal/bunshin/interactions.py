@@ -102,7 +102,7 @@ def bunshin_architecture_review_delivery(payload: dict[str, Any], route: Control
     revision_id = str(payload.get("architecture_revision_id") or "")
     manifest_sha = str(payload.get("manifest_sha") or "")
     token = str(payload.get("decision_token") or "")
-    if not bool(payload.get("bunshin_v2")) or not all((workflow_id, revision_id, manifest_sha, token)):
+    if not bool(payload.get("bunshin", payload.get("bunshin_v2"))) or not all((workflow_id, revision_id, manifest_sha, token)):
         return None
     common = {
         "workflow_id": workflow_id,
@@ -113,14 +113,14 @@ def bunshin_architecture_review_delivery(payload: dict[str, Any], route: Control
     }
     buttons = (
         (
-            _button("Accept", "bunshin_v2_human_decision", workflow_id, {**common, "decision": "accept"}),
-            _button("Edit", "bunshin_v2_human_decision", workflow_id, {**common, "decision": "edit"}),
-            _button("Reject", "bunshin_v2_human_decision", workflow_id, {**common, "decision": "reject"}),
+            _button("Accept", "bunshin_human_decision", workflow_id, {**common, "decision": "accept"}),
+            _button("Edit", "bunshin_human_decision", workflow_id, {**common, "decision": "edit"}),
+            _button("Reject", "bunshin_human_decision", workflow_id, {**common, "decision": "reject"}),
         ),
     )
     interaction = InteractionMessageSpec(
         interaction_id=f"bunshin_v2_architecture_{revision_id}",
-        interaction_kind="bunshin_v2_architecture_review",
+        interaction_kind="bunshin_architecture_review",
         route=route,
         text=str(payload.get("markdown") or "Architecture review is ready."),
         buttons=buttons,

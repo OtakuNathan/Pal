@@ -85,7 +85,7 @@ class FinalDelivery:
                 workflow_id=epoch.workflow_id,
                 aggregate_type=AggregateType.EXECUTION_EPOCH,
                 aggregate_id=epoch.aggregate_id,
-                actor="bunshin-v2-manager",
+                actor="bunshin-manager",
                 expected_version=current.version,
                 idempotency_key=f"publish:{deliverable_ref.sha256}",
                 payload={"published_deliverable_ref": deliverable_ref.to_dict()},

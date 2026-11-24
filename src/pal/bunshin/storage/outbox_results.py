@@ -33,13 +33,13 @@ class OutboxResultsStore:
         with self.database.write_connection() as connection:
             self.artifacts.assert_artifact_refs_durable(connection, result_ref)
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_outbox WHERE effect_id = ?",
+                "SELECT * FROM bunshin_outbox WHERE effect_id = ?",
                 (str(effect_id),),
             ).fetchone()
             if row is None:
                 raise KeyError(f"unknown outbox effect: {effect_id}")
             receipt = connection.execute(
-                "SELECT request_hash FROM bunshin_v2_effect_receipts WHERE effect_key = ?",
+                "SELECT request_hash FROM bunshin_effect_receipts WHERE effect_key = ?",
                 (str(row["effect_key"]),),
             ).fetchone()
             if receipt is not None:
@@ -50,7 +50,7 @@ class OutboxResultsStore:
                 raise LeaseConflict("outbox effect is not claimed by this worker")
             connection.execute(
                 """
-                INSERT INTO bunshin_v2_effect_receipts(
+                INSERT INTO bunshin_effect_receipts(
                     effect_key, effect_id, request_hash, provider_request_id,
                     result_artifact_ref_json, completed_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
@@ -66,7 +66,7 @@ class OutboxResultsStore:
             )
             connection.execute(
                 """
-                UPDATE bunshin_v2_outbox
+                UPDATE bunshin_outbox
                 SET status = 'completed', provider_request_id = ?, result_artifact_ref_json = ?,
                     locked_by = '', locked_until = '', last_error = '', updated_at = ?
                 WHERE effect_id = ?
@@ -100,7 +100,7 @@ class OutboxResultsStore:
         transaction = self.database.write_connection() if _connection is None else nullcontext(_connection)
         with transaction as connection:
             row = connection.execute(
-                "SELECT status, locked_by, attempt_count, max_attempts FROM bunshin_v2_outbox WHERE effect_id = ?",
+                "SELECT status, locked_by, attempt_count, max_attempts FROM bunshin_outbox WHERE effect_id = ?",
                 (str(effect_id),),
             ).fetchone()
             if row is None:
@@ -112,7 +112,7 @@ class OutboxResultsStore:
             next_retry_at = (now + timedelta(seconds=max(0, retry_after_seconds))).isoformat()
             connection.execute(
                 """
-                UPDATE bunshin_v2_outbox
+                UPDATE bunshin_outbox
                 SET status = ?, next_retry_at = ?, locked_by = '', locked_until = '',
                     last_error = ?, updated_at = ?
                 WHERE effect_id = ?
@@ -146,7 +146,7 @@ class OutboxResultsStore:
         now = utc_now()
         with self.database.write_connection() as connection:
             row = connection.execute(
-                "SELECT status, locked_by, attempt_count FROM bunshin_v2_outbox WHERE effect_id = ?",
+                "SELECT status, locked_by, attempt_count FROM bunshin_outbox WHERE effect_id = ?",
                 (str(effect_id),),
             ).fetchone()
             if row is None:
@@ -155,7 +155,7 @@ class OutboxResultsStore:
                 raise LeaseConflict("outbox effect is not claimed by this worker")
             connection.execute(
                 """
-                UPDATE bunshin_v2_outbox
+                UPDATE bunshin_outbox
                 SET status = 'pending', attempt_count = ?, next_retry_at = ?,
                     locked_by = '', locked_until = '', last_error = ?, updated_at = ?
                 WHERE effect_id = ?
@@ -196,7 +196,7 @@ class OutboxResultsStore:
         transaction = self.database.write_connection() if _connection is None else nullcontext(_connection)
         with transaction as connection:
             row = connection.execute(
-                "SELECT status, locked_by FROM bunshin_v2_outbox WHERE effect_id = ?",
+                "SELECT status, locked_by FROM bunshin_outbox WHERE effect_id = ?",
                 (str(effect_id),),
             ).fetchone()
             if row is None:
@@ -205,7 +205,7 @@ class OutboxResultsStore:
                 raise LeaseConflict("outbox effect is not claimed by this worker")
             connection.execute(
                 """
-                UPDATE bunshin_v2_outbox
+                UPDATE bunshin_outbox
                 SET status = 'failed', next_retry_at = ?, locked_by = '', locked_until = '',
                     last_error = ?, updated_at = ?
                 WHERE effect_id = ?
@@ -240,7 +240,7 @@ class OutboxResultsStore:
     ) -> None:
         row = connection.execute(
             """
-            SELECT attempt_index FROM bunshin_v2_effect_attempts
+            SELECT attempt_index FROM bunshin_effect_attempts
             WHERE effect_id = ? AND worker_id = ? AND status = 'running'
             ORDER BY attempt_index DESC
             LIMIT 1
@@ -251,7 +251,7 @@ class OutboxResultsStore:
             raise LeaseConflict("outbox effect has no active attempt for this worker")
         connection.execute(
             """
-            UPDATE bunshin_v2_effect_attempts
+            UPDATE bunshin_effect_attempts
             SET status = ?, error_kind = ?, error_text = ?,
                 provider_request_id = ?, result_artifact_ref_json = ?, finished_at = ?
             WHERE effect_id = ? AND attempt_index = ? AND status = 'running'

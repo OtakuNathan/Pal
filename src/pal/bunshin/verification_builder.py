@@ -11,14 +11,14 @@ from pal.shared.tool_protocol import ToolCallIR
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 from pal.execution.generated_tool_models import (
-    BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput,
-    BunshinV2VerificationBuilderOpBunshinVerificationDraftStatusInput,
-    BunshinV2VerificationBuilderOpBunshinVerificationRemoveCaseInput,
-    BunshinV2VerificationBuilderOpBunshinVerificationRunLspCheckInput,
-    BunshinV2VerificationBuilderOpBunshinVerificationScratchWriteInput,
-    BunshinV2VerificationBuilderOpBunshinVerificationSetSummaryInput,
-    BunshinV2VerificationBuilderOpBunshinVerificationSubmitInput,
-    BunshinV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput,
+    BunshinVerificationBuilderOpBunshinVerificationCheckUnavailableInput,
+    BunshinVerificationBuilderOpBunshinVerificationDraftStatusInput,
+    BunshinVerificationBuilderOpBunshinVerificationRemoveCaseInput,
+    BunshinVerificationBuilderOpBunshinVerificationRunLspCheckInput,
+    BunshinVerificationBuilderOpBunshinVerificationScratchWriteInput,
+    BunshinVerificationBuilderOpBunshinVerificationSetSummaryInput,
+    BunshinVerificationBuilderOpBunshinVerificationSubmitInput,
+    BunshinVerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput,
 )
 
 import hashlib
@@ -243,7 +243,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "preserve an already-written probe and report storage or binding failures to Manager."
             ),
         },
-        "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationScratchWriteInput,
+        "InputModel": BunshinVerificationBuilderOpBunshinVerificationScratchWriteInput,
     },
     **{
         name: {
@@ -269,7 +269,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                     "environment, and rerun the same semantic case name only when justified."
                 ),
             },
-            "InputModel": BunshinV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput,
+            "InputModel": BunshinVerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput,
         }
         for name, (kind, tag) in _RUN_TO_KIND_TAG.items()
     },
@@ -291,7 +291,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "UNKNOWN once with record_unavailable_verification."
             ),
         },
-        "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationRunLspCheckInput,
+        "InputModel": BunshinVerificationBuilderOpBunshinVerificationRunLspCheckInput,
     },
     "op_bunshin_verification_check_unavailable": {
         "alias": "record_unavailable_verification",
@@ -305,7 +305,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             ),
             "failure_next_steps": "Correct the obligation kind or concrete environmental reason before retrying.",
         },
-        "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationCheckUnavailableInput,
+        "InputModel": BunshinVerificationBuilderOpBunshinVerificationCheckUnavailableInput,
     },
     "op_bunshin_verification_set_summary": {
         "alias": "set_verification_summary",
@@ -316,7 +316,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "do_not_use_when": "Do not use the summary as evidence or a substitute for structured findings.",
             "failure_next_steps": "Correct the summary shape from the returned validation error.",
         },
-        "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationSetSummaryInput,
+        "InputModel": BunshinVerificationBuilderOpBunshinVerificationSetSummaryInput,
     },
     "op_bunshin_verification_draft_status": {
         "alias": "read_verification_draft_status",
@@ -327,7 +327,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "do_not_use_when": "Do not poll it repeatedly when no case, finding, or assignment state has changed.",
             "failure_next_steps": "Follow the returned retry directive or report the storage failure to Manager. Unavailable status is not evidence of submission readiness.",
         },
-        "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationDraftStatusInput,
+        "InputModel": BunshinVerificationBuilderOpBunshinVerificationDraftStatusInput,
     },
     "op_bunshin_verification_remove_case": {
         "alias": "remove_verification_case",
@@ -338,7 +338,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "do_not_use_when": "Do not hide a legitimate failure; rerun that case after a real fix instead.",
             "failure_next_steps": "Correct the case name or audit reason only for a validation rejection; reconcile uncertain changes before retrying.",
         },
-        "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationRemoveCaseInput,
+        "InputModel": BunshinVerificationBuilderOpBunshinVerificationRemoveCaseInput,
     },
     "op_bunshin_verification_submit": {
         "alias": "submit_verification",
@@ -349,7 +349,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "do_not_use_when": "Do not use with missing evidence, incomplete findings, or unfinished checklist work.",
             "failure_next_steps": "Correct rejected draft content; reconcile unknown acceptance with Manager, and never repeat a submission already accepted.",
         },
-        "InputModel": BunshinV2VerificationBuilderOpBunshinVerificationSubmitInput,
+        "InputModel": BunshinVerificationBuilderOpBunshinVerificationSubmitInput,
     },
 }
 
@@ -942,7 +942,7 @@ def _submit(
         output["severity"] = finding_severity(first)
     output["policy_exceptions"] = _policy_exceptions(cases)
     filename = "verification_plan.json"
-    title = "V2 semantic verification plan"
+    title = "Bunshin semantic verification plan"
     validate_semantic_verification_plan_shape(output, require_complete=True)
     reference_warnings = _preflight_verification_submission(output, workspace)
     if reference_warnings:
@@ -1173,7 +1173,7 @@ def _assert_tool_contract_allows(
     name: str,
     args: Mapping[str, Any],
 ) -> None:
-    binding = dict(workspace.get("bunshin_v2") or {})
+    binding = dict(workspace.get("bunshin") or {})
     contract = dict(binding.get("verification_tool_contract") or {})
     if not contract:
         return

@@ -87,7 +87,7 @@ class RoleWorkspaceInputBindingRootsTests(unittest.TestCase):
 
     def test_prepared_workspace_from_source_includes_the_repository(self) -> None:
         architect = _snapshot(AggregateType.ARCHITECTURE_REVISION, "arch-1", {})
-        workspace = {"repo_path": "/runtime/role-workspace", "v2_role_workspace": True}
+        workspace = {"repo_path": "/runtime/role-workspace", "role_workspace_prepared": True}
         repo_root, workspace_root = _role_workspace_input_binding_roots(
             workspace,
             snapshot=architect,
@@ -98,7 +98,7 @@ class RoleWorkspaceInputBindingRootsTests(unittest.TestCase):
 
     def test_prepared_workspace_without_source_materializes(self) -> None:
         architect = _snapshot(AggregateType.ARCHITECTURE_REVISION, "arch-2", {})
-        workspace = {"repo_path": "/runtime/empty-role-workspace", "v2_role_workspace": True}
+        workspace = {"repo_path": "/runtime/empty-role-workspace", "role_workspace_prepared": True}
         repo_root, workspace_root = _role_workspace_input_binding_roots(
             workspace,
             snapshot=architect,

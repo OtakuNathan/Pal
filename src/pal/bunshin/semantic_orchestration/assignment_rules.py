@@ -11,6 +11,7 @@ _ROLE_FAILURE_ATTEMPT_LIMIT = 3
 _UNCHARGED_ROLE_ATTEMPT_ERROR_KINDS = frozenset(
     {
         "manager_restart",
+        "waiting_for_user",
         "manager_shutdown",
     }
 )

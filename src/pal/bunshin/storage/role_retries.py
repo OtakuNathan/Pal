@@ -47,7 +47,7 @@ class RoleRetriesStore:
             )
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_attempts
+                UPDATE bunshin_role_attempts
                 SET status = ?, error_kind = ?, error_text = ?,
                     finished_at = ?, updated_at = ?
                 WHERE attempt_id = ?
@@ -63,14 +63,14 @@ class RoleRetriesStore:
             )
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_assignments
+                UPDATE bunshin_role_assignments
                 SET state = ?, last_error = ?, updated_at = ?
                 WHERE assignment_id = ?
                 """,
                 (target.value, str(error_text), now, str(assignment_id)),
             )
             row = connection.execute(
-                "SELECT * FROM bunshin_v2_role_assignments WHERE assignment_id = ?",
+                "SELECT * FROM bunshin_role_assignments WHERE assignment_id = ?",
                 (str(assignment_id),),
             ).fetchone()
             return _decode_role_assignment(row)
@@ -135,7 +135,7 @@ class RoleRetriesStore:
             now = utc_now()
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_attempts
+                UPDATE bunshin_role_attempts
                 SET status = ?, error_kind = ?, error_text = ?,
                     response_artifact_ref_json = ?, access_token_hash = '',
                     finished_at = ?, updated_at = ?
@@ -153,7 +153,7 @@ class RoleRetriesStore:
             )
             connection.execute(
                 """
-                UPDATE bunshin_v2_role_assignments
+                UPDATE bunshin_role_assignments
                 SET state = ?, submission_artifact_ref_json = ?,
                     submission_payload_hash = ?, settlement_action_json = ?,
                     last_error = ?, updated_at = ?
@@ -174,7 +174,7 @@ class RoleRetriesStore:
             if lease_resource and fencing_token:
                 connection.execute(
                     """
-                    DELETE FROM bunshin_v2_leases
+                    DELETE FROM bunshin_leases
                     WHERE resource_key = ? AND owner_id = ? AND fencing_token = ?
                     """,
                     (lease_resource, str(attempt_id_value), fencing_token),

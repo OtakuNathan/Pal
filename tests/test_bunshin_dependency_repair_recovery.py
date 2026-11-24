@@ -138,7 +138,7 @@ class RecoveryCase(Case):
 
     def effect(self, name="C", kind="reconcile_semantic_state"):
         with self.repository.database.read_connection() as connection:
-            row = connection.execute("SELECT * FROM bunshin_v2_outbox WHERE aggregate_id = ? AND effect_type = ? "
+            row = connection.execute("SELECT * FROM bunshin_outbox WHERE aggregate_id = ? AND effect_type = ? "
                 "ORDER BY rowid DESC LIMIT 1", (f"aggregate-{name}", kind)).fetchone()
         assert row is not None
         effect = dict(row)
@@ -148,7 +148,7 @@ class RecoveryCase(Case):
     def counts(self):
         with self.repository.database.read_connection() as connection:
             return tuple(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in (
-                "bunshin_v2_domain_events", "bunshin_v2_outbox", "bunshin_v2_role_assignments", "bunshin_v2_role_attempts"))
+                "bunshin_domain_events", "bunshin_outbox", "bunshin_role_assignments", "bunshin_role_attempts"))
 
 
 @pytest.mark.parametrize("name", ["C", "D", "X"])
@@ -310,7 +310,7 @@ def public_case():
 def _exhaust_on_next_claim(case, name="archive_verify"):
     effect = case.stored(name, "reconcile_dependency_repairs")
     with case.repository.database.write_connection() as connection:
-        connection.execute("UPDATE bunshin_v2_outbox SET max_attempts = 1 WHERE effect_id = ?", (effect["effect_id"],))
+        connection.execute("UPDATE bunshin_outbox SET max_attempts = 1 WHERE effect_id = ?", (effect["effect_id"],))
     return case.claim(name, "reconcile_dependency_repairs")
 
 
@@ -374,7 +374,7 @@ def test_workflow_resolution_restarts_exhausted_apply_after_all_frontier_closed(
         case.service.resolve_triage(workflow_id=case.workflow_id, actor="operator", source_channel="test",
             subject="phase:workflow", resolution="Resume the preserved, closed repair cohort after fixing apply.")
         with case.repository.database.read_connection() as connection:
-            row = connection.execute("SELECT effect_id FROM bunshin_v2_outbox WHERE aggregate_id = ? "
+            row = connection.execute("SELECT effect_id FROM bunshin_outbox WHERE aggregate_id = ? "
                 "AND effect_type = 'reconcile_workflow' ORDER BY rowid DESC LIMIT 1", (case.workflow_id,)).fetchone()
         assert row is not None
         claimed = case.repository.outbox_claims.claim_outbox(case.processor.worker_id, limit=1000, lease_seconds=120)
@@ -382,7 +382,7 @@ def test_workflow_resolution_restarts_exhausted_apply_after_all_frontier_closed(
         assert effect["effect_id"] != original["effect_id"]
         result = await case.processor._process_effect(effect)
         with case.repository.database.read_connection() as connection:
-            outcome = dict(connection.execute("SELECT * FROM bunshin_v2_outbox WHERE effect_id = ?", (effect["effect_id"],)).fetchone())
+            outcome = dict(connection.execute("SELECT * FROM bunshin_outbox WHERE effect_id = ?", (effect["effect_id"],)).fetchone())
         assert result == "completed", outcome["last_error"]
         assert case.graph().dependency_repairs.pending is None
         assert case.graph().dependency_repairs.history[-1].key == cohort.key

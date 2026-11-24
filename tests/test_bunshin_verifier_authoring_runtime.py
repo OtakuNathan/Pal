@@ -61,9 +61,9 @@ def test_consumed_finding_edit_contracts_hydrate_fresh_and_resumed_pack(verifier
         allowed.extend(EDIT_CAPABILITIES)
     else:
         allowed.append(ADD_FINDING_CAPABILITY)
-        workspace['bunshin_v2']['verification_tool_contract']['contract_version'] = '1'
-        workspace['bunshin_v2']['verification_tool_contract']['allowed_capabilities'] = [
-            *[name for name in workspace['bunshin_v2']['verification_tool_contract']['allowed_capabilities']
+        workspace['bunshin']['verification_tool_contract']['contract_version'] = '1'
+        workspace['bunshin']['verification_tool_contract']['allowed_capabilities'] = [
+            *[name for name in workspace['bunshin']['verification_tool_contract']['allowed_capabilities']
               if name not in EDIT_CAPABILITIES], ADD_FINDING_CAPABILITY,
         ]
     profile = {'profile_id': 'pinned-verifier', 'effective_capability_policy': {'mode': 'profile_only'}}
@@ -122,7 +122,7 @@ def test_consumed_finding_aliases_edit_then_delete_current_completed_finding(ver
 def test_legacy_add_replays_only_persisted_permission_without_live_exposure(verifier, deny_legacy):
     _, source, _, _, _, _ = verifier
     workspace = deepcopy(source)
-    workspace['bunshin_v2']['verification_tool_contract'].update(
+    workspace['bunshin']['verification_tool_contract'].update(
         contract_version='1', allowed_capabilities=[ADD_FINDING_CAPABILITY])
     policy = {'deny_capabilities': [ADD_FINDING_CAPABILITY]} if deny_legacy else {}
     pack = BunshinInvocationPack(invocation_id=workspace['invocation_id'], workspace=deepcopy(workspace),
@@ -191,9 +191,9 @@ def test_finding_edit_aliases_require_bound_verifier(
 ):
     _, source, _, _, _, _ = verifier
     workspace = deepcopy(source)
-    workspace['bunshin_v2']['role'] = role
+    workspace['bunshin']['role'] = role
     if remove_binding:
-        workspace['bunshin_v2'].pop('fencing_token')
+        workspace['bunshin'].pop('fencing_token')
     allowed = [*EDIT_CAPABILITIES, ADD_FINDING_CAPABILITY]
     base = ExecutionRuntime()
     runtime = BunshinScopedExecutionRuntime(base, allowed, workspace)
@@ -214,7 +214,7 @@ def test_finding_edit_aliases_require_bound_verifier(
 def test_partial_verifier_assignment_cannot_bypass_writer_guard(verifier, binding):
     _, source, _, _, _, _ = verifier
     workspace = deepcopy(source)
-    workspace['bunshin_v2'] = binding
+    workspace['bunshin'] = binding
     effects = []
     base = ExecutionRuntime()
     _mount(base, 'op_file_write', 'write_file', lambda _args: effects.append('write') or _completed())
@@ -236,7 +236,7 @@ def test_partial_verifier_assignment_cannot_bypass_writer_guard(verifier, bindin
 def test_hydration_keeps_invocation_evidence_contract_filter(verifier, allowed, expected_edits):
     _, workspace, _, _, current, _ = verifier
     bound = deepcopy(workspace)
-    bound['bunshin_v2']['verification_tool_contract'].update(contract_version='2', allowed_capabilities=allowed)
+    bound['bunshin']['verification_tool_contract'].update(contract_version='2', allowed_capabilities=allowed)
     base = ExecutionRuntime()
     runtime = BunshinScopedExecutionRuntime(base, current.allowed_capabilities, bound)
     try:
@@ -503,7 +503,7 @@ def test_nonverifier_keeps_outer_native_delegation_and_review_receipts(verifier)
 
     fixture, source, _, _, _, _ = verifier
     workspace = deepcopy(source)
-    workspace['bunshin_v2'].update(role='reviewer', mode='standalone')
+    workspace['bunshin'].update(role='reviewer', mode='standalone')
     delegated = []
 
     class Sessions:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from pal.bunshin.coroutine_runtime import NodeSlot
+from pal.bunshin.contracts import AggregateType
 from pal.bunshin.storage.role_assignments import semantic_business_lease
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_runtime import RoleSupervisor
@@ -22,7 +24,12 @@ class AttemptAdmission:
         role = stage_workspace_preparation.role
         run_id = stage_workspace_preparation.run_id
         snapshot = command.snapshot
-        await self.supervisor.acquire_process_slot(run_id)
+        node = None
+        if snapshot.aggregate_type == AggregateType.DAG_NODE_RUN:
+            node = NodeSlot(snapshot.workflow_id, str(snapshot.payload.get("epoch_id") or ""),
+                            int(snapshot.payload.get("graph_generation") or 0), snapshot.aggregate_id)
+        permit = await self.supervisor.acquire_process_slot(run_id, node=node)
+        permit.assignment_id = str(assignment["assignment_id"])
         attempt = self.repository.role_assignments.claim_role_assignment(
             str(assignment["assignment_id"]),
             harness_id=harness_spec.harness_id,

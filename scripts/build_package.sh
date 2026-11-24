@@ -415,8 +415,8 @@ with zipfile.ZipFile(wheel_path) as wheel:
 
     generated_models = read_text("pal/execution/generated_tool_models.py")
     for forbidden in (
-        "BunshinV2ContractBuilder",
-        "BunshinV2SkeletonBuilder",
+        "BunshinContractBuilder",
+        "BunshinSkeletonBuilder",
         "'executor': (Literal['profile', 'null']",
     ):
         if forbidden in generated_models:

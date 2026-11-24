@@ -174,7 +174,7 @@ class RoleLeases:
                     workflow_id=node.workflow_id,
                     aggregate_type=AggregateType.DAG_NODE_RUN,
                     aggregate_id=node.aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=node.version,
                     idempotency_key=f"rebind:{node.aggregate_id}:{action_type}:{lease.fencing_token}",
                     payload={
@@ -248,7 +248,7 @@ class RoleLeases:
                     workflow_id=review.workflow_id,
                     aggregate_type=AggregateType.STANDALONE_REVIEW,
                     aggregate_id=review.aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=review.version,
                     idempotency_key=f"rebind:{review.aggregate_id}:reviewer:{lease.fencing_token}",
                     payload={
@@ -331,7 +331,7 @@ class RoleLeases:
                     workflow_id=revision.workflow_id,
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                     aggregate_id=revision.aggregate_id,
-                    actor="bunshin-v2-recovery",
+                    actor="bunshin-recovery",
                     expected_version=revision.version,
                     idempotency_key=f"architecture-rebind:{revision.aggregate_id}:{action_type}:{lease.fencing_token}",
                     payload={

@@ -161,7 +161,7 @@ def _architect_root(workspace: Mapping[str, Any]) -> Path:
     # Falling through to artifact_stage_dir here creates two architect.yaml
     # files: the worker edits repo_path/architect.yaml while submission keeps
     # validating the untouched stage template.
-    if bool(workspace.get("v2_role_workspace")):
+    if bool(workspace.get("role_workspace_prepared")):
         for key in (
             "repo_path",
             "worktree_path",

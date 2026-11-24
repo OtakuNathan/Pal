@@ -14,12 +14,12 @@ class PromptContext:
     runtime_root: Path
 
     def render_durable_role_context(self) -> str:
-        binding = dict((self.pack.metadata or {}).get("bunshin_v2") or {})
+        binding = dict((self.pack.metadata or {}).get("bunshin") or {})
         workspace = {
             **dict(self.pack.workspace or {}),
             "runtime_root": str(self.runtime_root),
             "invocation_id": self.pack.invocation_id,
-            "bunshin_v2": binding,
+            "bunshin": binding,
         }
         if not str(binding.get("role") or ""):
             return ""
@@ -63,8 +63,8 @@ class PromptContext:
 
     def output_contract(self) -> str:
         contract = str(dict(self.pack.resolved_profile or {}).get("output_contract_fragment") or "")
-        binding = dict(dict(self.pack.metadata or {}).get("bunshin_v2") or {})
-        binding.update(dict(dict(self.pack.workspace or {}).get("bunshin_v2") or {}))
+        binding = dict(dict(self.pack.metadata or {}).get("bunshin") or {})
+        binding.update(dict(dict(self.pack.workspace or {}).get("bunshin") or {}))
         if (binding.get("role") != "architect" or not binding.get("submission_receipt_required")
                 or str(binding.get("harness_id") or "pal") != "pal"):
             return contract

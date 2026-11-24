@@ -7,7 +7,7 @@ def prepare_finding_edit(workspace: Mapping[str, Any], args: Mapping[str, Any]):
     from pal.bunshin.draft_values import (
         BunshinUpdateFindingInput, BunshinRemoveFindingInput, normalize_finding, _finding_hash,
     )
-    if dict(workspace.get("bunshin_v2") or {}).get("role") != "verifier":
+    if dict(workspace.get("bunshin") or {}).get("role") != "verifier":
         raise ValueError("only a verifier can edit its current draft findings")
     updating = "finding_kind" in args
     model = BunshinUpdateFindingInput if updating else BunshinRemoveFindingInput

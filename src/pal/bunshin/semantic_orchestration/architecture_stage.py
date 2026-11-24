@@ -111,7 +111,7 @@ class ArchitectureStage:
                         workflow_id=revision.workflow_id,
                         aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                         aggregate_id=revision.aggregate_id,
-                        actor="bunshin-v2-architect",
+                        actor="bunshin-architect",
                         expected_version=current.version,
                         idempotency_key=f"architect-output:{revision.aggregate_id}:{result_ref.sha256}",
                         payload={
@@ -125,10 +125,7 @@ class ArchitectureStage:
                             ),
                         },
                     ),
-                    **self.assignment_identity.role_submission_settlement(
-                        effect,
-                        assignment_id=self.assignment_identity.terminal_role_assignment_id(terminal),
-                    ),
+                    **self.assignment_identity.settlement_from_terminal(terminal),
                 )
                 WorkflowCoordinator(self.repository).submit_plan_product(
                     workflow_id=revision.workflow_id,

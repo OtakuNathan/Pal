@@ -6,6 +6,8 @@ claims/releases a lease, or applies a semantic result.
 """
 from __future__ import annotations
 
+from pal.shared.messages import normalize_bunshin_pack_fields
+
 import hashlib
 
 from dataclasses import dataclass, replace
@@ -188,7 +190,7 @@ class DependencyRepairCapture:
             self._durable({"sha256": sha})
             with self.repository.database.read_connection() as connection:
                 pending.extend(row["child_sha256"] for row in connection.execute(
-                    "SELECT child_sha256 FROM bunshin_v2_artifact_refs WHERE parent_sha256 = ?", (sha,),
+                    "SELECT child_sha256 FROM bunshin_artifact_refs WHERE parent_sha256 = ?", (sha,),
                 ))
         return root
 
@@ -259,10 +261,10 @@ class DependencyRepairCapture:
                 raise SubmissionInvariantError("capture original prompt is unavailable")
             return None, {}
         prompt_ref = self._durable(prompt_ref.to_dict())
-        prompt = dict(self.artifacts.read_json(prompt_ref))
+        prompt = normalize_bunshin_pack_fields(dict(self.artifacts.read_json(prompt_ref)))
         workspace = dict(prompt.get("workspace") or {})
         metadata = dict(prompt.get("metadata") or {})
-        binding = {**dict(metadata.get("bunshin_v2") or {}), **dict(workspace.get("bunshin_v2") or {})}
+        binding = {**dict(metadata.get("bunshin") or {}), **dict(workspace.get("bunshin") or {})}
         expected = {"workflow_id": node.workflow_id, "aggregate_type": node.aggregate_type.value,
                     "aggregate_id": node.aggregate_id, "role": "verifier", "mode": "module",
                     "invocation_id": assignment.get("active_attempt_id"),
@@ -283,7 +285,7 @@ class DependencyRepairCapture:
         if diff.get("target_sha") or diff_ref.artifact_type == "CandidateSemanticViewArtifact":
             with self.repository.database.read_connection() as connection:
                 linked = connection.execute(
-                    "SELECT 1 FROM bunshin_v2_artifact_refs WHERE parent_sha256 = ? AND child_sha256 = ? AND relation = ?",
+                    "SELECT 1 FROM bunshin_artifact_refs WHERE parent_sha256 = ? AND child_sha256 = ? AND relation = ?",
                     (diff_ref.sha256, candidate_ref.sha256, "candidate" if diff_ref.artifact_type == "CandidateSemanticViewArtifact" else "checkpoint"),
                 ).fetchone()
             if linked is None:
@@ -301,7 +303,7 @@ class DependencyRepairCapture:
             Path(str(workspace.get("repo_path") or "")).resolve() != Path(str(node.payload.get("workspace_path") or "")).resolve()
         ):
             raise SubmissionInvariantError("capture prompt is not bound to the original canonical workspace")
-        workspace["bunshin_v2"] = binding
+        workspace["bunshin"] = binding
         return prompt_ref, workspace
 
     def _pending(self, node, assignment, source, candidate_ref, digest, submission_ref, submission, workspace, scratch, adapter, incarnation):
@@ -344,8 +346,8 @@ class DependencyRepairCapture:
             self._validate_preserved_workspace(previous, workspace, node)
             return self._durable(previous["capture_ref"])
         scope = _verification_repair_scope(self.repository, node)
-        workspace["bunshin_v2"]["swe_verification_tool_contract"] = {
-            **dict(workspace["bunshin_v2"].get("swe_verification_tool_contract") or {}), **scope,
+        workspace["bunshin"]["swe_verification_tool_contract"] = {
+            **dict(workspace["bunshin"].get("swe_verification_tool_contract") or {}), **scope,
         }
         view = self.artifacts.read_json(self._durable(dict(dict(assignment.get("input_refs") or {}).get("module_work_view") or {})))
         receipt = self._durable(dict(assignment.get("submission_artifact_ref") or {}))
@@ -382,7 +384,7 @@ class DependencyRepairCapture:
     def _prior(self, key, artifact_type):
         with self.repository.database.read_connection() as connection:
             rows = connection.execute(
-                "SELECT sha256 FROM bunshin_v2_artifacts WHERE artifact_type = ? AND json_extract(metadata_json, '$.capture_key') = ?",
+                "SELECT sha256 FROM bunshin_artifacts WHERE artifact_type = ? AND json_extract(metadata_json, '$.capture_key') = ?",
                 (artifact_type, key),
             ).fetchall()
         if len(rows) > 1:

@@ -90,7 +90,7 @@ print(json.dumps({'result': 'PASS', 'worker_executable': sys.executable, 'python
             argv=[*harness.worker_argv, "--help"], env={"PATH": "/usr/bin:/bin"},
         )
         worker = subprocess.run(worker_argv, env=worker_env, cwd=workspace, capture_output=True, text=True, timeout=60)
-        if worker.returncode or "Run one isolated Bunshin V2 worker invocation" not in worker.stdout:
+        if worker.returncode or "Run one isolated Bunshin worker invocation" not in worker.stdout:
             raise SystemExit(f"FAIL: real worker --help exit {worker.returncode}\n{worker.stderr}\n{worker.stdout}")
         print("PASS: actual harness worker --help; no pack read, socket listener, or model call")
         assert not (workspace / ".git").exists()

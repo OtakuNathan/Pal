@@ -209,8 +209,8 @@ class VerifierToolDiagnostic(BaseModel):
 
 
 def is_verifier_pack(pack: BunshinInvocationPack) -> bool:
-    binding = dict((pack.metadata or {}).get("bunshin_v2") or {})
-    return binding.get("role") == "verifier" or pack.bunshin_profile == "bunshin_v2.verifier"
+    binding = dict((pack.metadata or {}).get("bunshin") or {})
+    return binding.get("role") == "verifier" or pack.bunshin_profile in {"bunshin.verifier", "bunshin_v2.verifier"}
 
 
 def verifier_tool_alias(call: ToolCallIR) -> str:

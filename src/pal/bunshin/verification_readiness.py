@@ -29,7 +29,7 @@ def verification_case_errors(
         if unresolved:
             errors.append("PASS requires resolved PASS evidence; failed or UNKNOWN cases (including unrecognized statuses): " + ", ".join(unresolved))
     if workspace is not None:
-        current_input = str(dict(workspace.get("bunshin_v2") or {}).get("authoring_input_fingerprint") or "")
+        current_input = str(dict(workspace.get("bunshin") or {}).get("authoring_input_fingerprint") or "")
         stale = [str(item.get("name") or "") for item in cases
                  if item.get("input_fingerprint") and item["input_fingerprint"] != current_input]
         if stale:
@@ -62,7 +62,7 @@ def case_definition_fingerprint(case: Mapping[str, Any]) -> str:
 def verification_case_revision(workspace: Mapping[str, Any]) -> int:
     if "verification_case_revision" in workspace:
         return int(workspace["verification_case_revision"])
-    binding = dict(workspace.get("bunshin_v2") or {})
+    binding = dict(workspace.get("bunshin") or {})
     if binding.get("role") != "verifier" or not workspace.get("runtime_root") or not binding.get("invocation_id"):
         return 0
     from pal.bunshin.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
@@ -133,8 +133,8 @@ def final_verification_errors(receipts: list[dict[str, Any]], *, outcome: str, c
         errors.append("fresh validation required: prior execution receipts do not prove the current Candidate and corpus")
     if changed and not checks:
         errors.append("run verification again after the final test edit")
-    if outcome == "pass" and not any(bool(item.get("ok")) for item in checks):
-        errors.append("PASS requires a successful final command or LSP receipt")
+    if outcome == "pass" and not any(item.get("kind") == "command" and item.get("ok") for item in checks):
+        errors.append("PASS requires a successful final command receipt")
     return errors
 
 
@@ -168,38 +168,48 @@ def report_evidence_errors(
     errors = []
     successful = set()
     diagnostics = set()
+    failed_lsp = False
     for index, receipt in latest.values():
         command = str((receipt.get("args") or {}).get("cmd") or "").strip()
         call_id = str(receipt.get("call_id") or "")
         if not receipt.get("ok"):
+            if receipt.get("kind") == "lsp":
+                failed_lsp = True
+                continue
             errors.append(f"unresolved failed verification check: {command or call_id}; rerun this check successfully")
             continue
         if index <= last_write:
             continue
-        successful.update(value for value in (command, call_id) if value)
         if receipt.get("kind") == "lsp":
             diagnostics.add(call_id)
+        else:
+            successful.update(value for value in (command, call_id) if value)
 
     areas = report.get("focus_areas")
     if not isinstance(areas, Mapping):
-        return errors
+        areas = {}
+    lsp = areas.get("lsp")
+    if failed_lsp and not (isinstance(lsp, Mapping) and str(lsp.get("notes") or "").strip()):
+        errors.append("explain the failed LSP check in focus_areas.lsp.notes")
     required = workspace.get("verification_report_focus_areas") or ("regressions", "candidate_delta", "adversarial_checks")
     for name in required:
         entry = areas.get(name)
         if not isinstance(entry, Mapping):
             errors.append(f"verification_report.yaml is missing required focus area {name}")
-        elif name != "adversarial_checks" and str(entry.get("status") or "").strip().lower() != "pass":
+        elif name not in {"adversarial_checks", "lsp"} and str(entry.get("status") or "").strip().lower() != "pass":
             errors.append(f"required focus area {name} needs passing execution evidence")
     for name, entry in areas.items():
         if not isinstance(entry, Mapping) or str(entry.get("status") or "").strip().lower() != "pass":
             continue
         commands = entry.get("commands")
+        passing_receipts = diagnostics if name == "lsp" else successful
         if not isinstance(commands, list) or not commands or any(
-            not isinstance(command, str) or command.strip() not in successful for command in commands
+            not isinstance(command, str) or command.strip() not in passing_receipts for command in commands
         ):
-            errors.append(f"focus area {name} must cite exact commands or call IDs with fresh passing receipts")
-        elif name == "lsp" and not diagnostics.intersection(commands):
-            errors.append("focus area lsp must cite a fresh passing LSP diagnostics call")
+            if name == "lsp":
+                errors.append("focus area lsp must cite a fresh passing LSP diagnostics call")
+            else:
+                errors.append(f"focus area {name} must cite exact commands or call IDs with fresh passing receipts")
     return errors
 
 
