@@ -366,14 +366,15 @@ def test_auxiliary_sdk_operation_preserves_raw_unknown_fields():
     assert "stream" not in seen[0]
 
 
-def test_cancel_interrupts_native_worker_without_a_followup_count():
+@pytest.mark.parametrize("blocked_operation", ["input_tokens", "compact"])
+def test_cancel_interrupts_native_worker_without_a_followup_count(blocked_operation):
     from threading import Event
     rt, ep, transport = runtime()
     entered, release = Event(), Event()
     original = transport.frames
 
     def frames(endpoint, req):
-        if req.operation == "compact":
+        if req.operation == blocked_operation:
             entered.set()
             release.wait(5)
             req.stream_control.raise_if_cancelled()
@@ -391,7 +392,8 @@ def test_cancel_interrupts_native_worker_without_a_followup_count():
         finally:
             release.set()
         await asyncio.gather(*rt._detached_stream_tasks, return_exceptions=True)
-        assert len(transport.requests) == 1  # source count only; no installed output
+        expected = ["input_tokens"] if blocked_operation == "compact" else []
+        assert [req.operation for req in transport.requests] == expected
 
     asyncio.run(scenario())
 
@@ -459,6 +461,57 @@ def test_sol_watermark_admits_full_standard_tier(count, compact):
     assert rt._target_input_budget(ep, 65_535) == 300_000 - 65_535 - 15_000
 
 
+@pytest.mark.parametrize("generation_submitted", [False, True])
+def test_websocket_count_over_https_preserves_generation_retry_boundary(generation_submitted):
+    from pal.llm.context_budget import standard_input_limit, provider_input_maximum
+    from pal.llm.transport import LLMStreamControl
+    from tests.test_chatgpt_websocket import _completed
+
+    ep = endpoint(model="gpt-6.2-sol", transport="websocket", base_url="wss://api.openai.com/v1/responses")
+    calls = []
+    control = LLMStreamControl()
+
+    class HTTP:
+        def frames(self, req):
+            calls.append(req.operation)
+            assert req.base_url == "https://api.openai.com/v1"
+            assert req.api_key == "test" and not req.stream
+            assert req.stream_control is not control
+            req.stream_control.mark_provider_started()
+            yield _JSONFrame(0, {"input_tokens": 10_000})
+
+    class Socket:
+        def frames(self, req):
+            assert req.base_url == ep.base_url and req.api_key == "test"
+            assert req.stream_control is control and not control.provider_started
+            calls.append(req.operation)
+            if calls.count("generate") == 1:
+                if generation_submitted:
+                    control.mark_provider_started()
+                raise ConnectionError("connection reset")
+            yield _JSONFrame(0, _completed())
+
+        def close(self):
+            pass
+
+    transport = DirectEndpointTransport(lambda _: "test", HTTP(), Socket())
+    rt = LLMRuntime(EndpointResolver(endpoints=(ep,)), Settings(),
+                    endpoint_invoker=ShapeEndpointInvoker(transport=transport))
+    try:
+        assert standard_input_limit(ep) == 272_000
+        assert provider_input_maximum(ep) == 922_000
+        with patch("pal.llm.runtime._retry_delay", return_value=0):
+            updates = list(rt._iter_stream_updates(request(user("x" * 420_000)), stream_control=control))
+        if generation_submitted:
+            assert calls == ["input_tokens", "generate"]
+            assert updates[-1].response.finish_reason == "error"
+        else:
+            assert calls == ["input_tokens", "generate", "generate"]
+            assert updates[-1].response.finish_reason == "stop"
+    finally:
+        rt.close()
+
+
 def test_standard_tier_on_openrouter_skips_remote_counter():
     from pal.llm.context_budget import counting_shape, standard_input_limit
     rt, ep, transport = runtime("openai/gpt-6.2-astra", context_window=1_050_000, base_url="https://openrouter.ai/api/v1")
@@ -479,7 +532,8 @@ def test_usage_baseline_covers_matching_prefix_and_estimates_only_new_messages()
     from pal.shared.tool_protocol import ToolDefinitionIR
     rt, ep, transport = runtime()
     ep.context_window = 320_384
-    initial = replace(request(user("history")), logical_scope_id="resident")
+    tool = ToolDefinitionIR("read", "read", {"type": "object"})
+    initial = replace(request(user("history")), tools=(tool,), logical_scope_id="resident")
     initial = rt._compile_request(ep, initial).request
     accepted = LLMResponseIR(assistant("done"), LLMFinishReason.STOP,
         usage=LLMUsageIR(input_tokens=100_000, output_tokens=6_000, cached_input_tokens=72_000,
@@ -490,9 +544,17 @@ def test_usage_baseline_covers_matching_prefix_and_estimates_only_new_messages()
     assert budget.budget_details["budget_source"] == "usage_delta"
     assert 106_000 < budget.estimated_input_tokens < 106_020
     assert transport.requests == []
-    tool = ToolDefinitionIR("read", "read", {"type": "object"})
+    transport.count = 260_000
+    near = replace(prompt, messages=(*prompt.messages, user("x" * 180_000)))
+    verified = rt._budget_request(ep, near, verify=True)
+    assert verified.estimated_input_tokens == transport.count
+    assert verified.budget_details["baseline_tokens"] == 106_000
+    assert [r.operation for r in transport.requests] == ["input_tokens"]
+    payload = transport.requests[0].payload
+    assert payload["tools"][0]["name"] == "read"
+    assert all(text in str(payload["input"]) for text in ("history", "done", "continue", "x" * 180_000))
     for changed in (replace(prompt, messages=(user("edited"), *prompt.messages[1:])),
-                    replace(prompt, tools=(tool,)), replace(prompt, logical_scope_id="another")):
+                    replace(prompt, tools=()), replace(prompt, logical_scope_id="another")):
         assert rt._budget_request(ep, changed, verify=True).budget_details["budget_source"] == "local"
     rt.release_context("resident")
     assert rt._budget_request(ep, prompt, verify=True).budget_details["baseline_tokens"] == 0

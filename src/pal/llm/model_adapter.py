@@ -4,8 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from pal.llm.context_budget import count_payload, counting_shape
 from pal.llm.endpoint_spec import LLMEndpointSpec
-from pal.llm.ir import LLMRequestIR
+from pal.llm.ir import LLMRequestIR, WireShape
 from pal.llm.model_hooks import ModelHook, ModelHookRegistry
 from pal.llm.response_hook_contracts import BoundResponseHooks
 from pal.llm.response_hooks import ProviderResponseHookRegistry
@@ -29,6 +30,14 @@ class BoundModelAdapter:
     response_hooks: BoundResponseHooks
     compaction_strategy: str
     response_revision: str = "builtin-v1"
+    input_counter: WireShape | None = None
+
+    @property
+    def input_count_field(self) -> str:
+        return "totalTokens" if self.input_counter == WireShape.GEMINI_INTERACTIONS else "input_tokens"
+
+    def input_count_payload(self, encoded: Mapping[str, Any]) -> dict[str, Any] | None:
+        return count_payload(self.input_counter, encoded)
 
     @property
     def identity(self) -> str:
@@ -69,5 +78,6 @@ def bind_model_adapter(
     if strategy == "openai_responses" and not supported:
         raise ValueError(f"{spec.endpoint_id}: native compaction requires a verified official OpenAI HTTP Responses model")
     registry = responses or ProviderResponseHookRegistry.builtin()
-    return BoundModelAdapter(spec, hook, registry.bind(
-        endpoint_id=spec.endpoint_id, provider_id=spec.provider), str(strategy), registry.revision)
+    response_hooks = registry.bind(endpoint_id=spec.endpoint_id, provider_id=spec.provider)
+    return BoundModelAdapter(spec, hook, response_hooks, str(strategy), registry.revision,
+                             input_counter=counting_shape(spec))

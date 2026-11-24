@@ -153,10 +153,11 @@ class ShapeEndpointInvoker:
         from pal.llm.usage_normalization import usage_from_mapping
         binding = self._binding(endpoint)
         from pal.llm.model_adapter import supports_native_compaction
-        from pal.llm.context_budget import counting_shape
-        supported = (counting_shape(binding.spec) is not None if operation == "input_tokens"
-                     else operation == "compact" and supports_native_compaction(binding.spec))
-        if binding.adapter is None or not supported:
+        if operation == "input_tokens":
+            supported = binding.adapter is not None and binding.adapter.input_counter is not None
+        else:
+            supported = operation == "compact" and supports_native_compaction(binding.spec)
+        if not supported:
             raise ValueError(f"endpoint does not support {operation}")
         request_id = f"llm_{operation}_{uuid4().hex}"
         request = EncodedTransportRequest(

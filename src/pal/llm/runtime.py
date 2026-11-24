@@ -57,7 +57,7 @@ from pal.llm.projection_contracts import (
 from pal.llm.projection_session import EndpointProjectionSession
 from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.context_budget import (
-    OUTPUT_LIMIT, UsageBoundary, count_payload, counting_shape, message_fingerprint,
+    OUTPUT_LIMIT, UsageBoundary, message_fingerprint,
     physical_window, provider_input_maximum, standard_input_limit,
 )
 from pal.llm.model_adapter import BoundModelAdapter, bind_model_adapter
@@ -269,8 +269,9 @@ class LLMRuntime:
         if not isinstance(invoker, ModelAdapterInvokerPort):
             raise LLMRequestPreparationError("Native history requires an endpoint with exact token counting")
         encoded = invoker.encode_request(endpoint, request)
-        payload = (self.model_adapters[endpoint.endpoint_id].compact_payload(encoded.payload)
-                   if compact_source else count_payload(counting_shape(endpoint), {**encoded.payload, **encoded.extra_body}))
+        adapter = self.model_adapters[endpoint.endpoint_id]
+        payload = (adapter.compact_payload(encoded.payload) if compact_source
+                   else adapter.input_count_payload({**encoded.payload, **encoded.extra_body}))
         if payload is None:
             raise LLMRequestPreparationError("Counter cannot represent the complete request")
         return self._count_payload(endpoint, payload, invoker, control)
@@ -281,8 +282,9 @@ class LLMRuntime:
         cached = self._native_token_counts.get(digest)
         if cached is not None:
             return cached
-        result = invoker.invoke_operation(endpoint, payload, operation="input_tokens", stream_control=control)
-        field = "totalTokens" if endpoint.wire_shape == WireShape.GEMINI_INTERACTIONS else "input_tokens"
+        count_control = control.for_auxiliary_request() if control is not None else None
+        result = invoker.invoke_operation(endpoint, payload, operation="input_tokens", stream_control=count_control)
+        field = self.model_adapters[endpoint.endpoint_id].input_count_field
         count = result.get(field)
         if type(count) is not int or count < 0:
             raise LLMRequestPreparationError(f"Token counting returned no valid {field}")
@@ -902,7 +904,7 @@ class LLMRuntime:
         )
 
     async def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        if any(counting_shape(LLMEndpointSpec.from_value(ep)) for ep in self._enabled_endpoints(request.request)):
+        if any(self.model_adapters[ep.endpoint_id].input_counter for ep in self._enabled_endpoints(request.request)):
             control = LLMStreamControl()
             return await self._await_native_job(lambda: self._preflight_response(request, stream_control=control), control)
         return self._preflight_response(request)
@@ -1876,7 +1878,7 @@ class LLMRuntime:
         # Probe the full request when even a byte-per-token suffix could cross the line.
         near = target and estimate + 3 * growth >= max(1, target - margin)
         uncertain = _request_has_image_input(delta)
-        counter = counting_shape(endpoint)
+        counter = self.model_adapters[endpoint.endpoint_id].input_counter
         if verify and counter and (near or uncertain or (native and tail is None)):
             try:
                 estimate = self._count_native_input(endpoint, request, control=control)

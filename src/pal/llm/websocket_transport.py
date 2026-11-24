@@ -98,6 +98,8 @@ class ResponsesWebSocketTransport:
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def frames(self, request: SDKTransportRequest) -> Iterator[_JSONFrame]:
+        if request.operation != "generate":
+            raise ValueError("Responses WebSocket only supports generation")
         if request.wire_shape != WireShape.OPENAI_RESPONSE:
             raise ValueError("WebSocket transport requires openai_response")
         _websocket_url(request.base_url)

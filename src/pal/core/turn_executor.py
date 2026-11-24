@@ -467,7 +467,6 @@ class TurnExecutor:
                 else self.select_turn_temperature(continuation.last_response_mode)
                 ),
             ),
-            tools=tuple(tool_definition_ir_from_dict(tool) for tool in tools),
             metadata={
                 **dict(prompt.metadata),
                 "failure_context": self._llm_failure_context(continuation),
@@ -1409,17 +1408,10 @@ class TurnExecutor:
             metadata["cache_policy_snapshot"] = continuation.turn_settings_snapshot["cache_policy_snapshot"]
         metadata["prompt_cache_scope_id"] = logical_scope_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
-        metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(
-            assembly_context,
-            base_messages=[m for m in prompt_messages if m.prompt_region not in {
-                PromptRegionIR.ACTIVE_INPUT, PromptRegionIR.ACTIVE_HISTORY, PromptRegionIR.ACTIVE_DYNAMIC}],
-            active_messages=[m for m in prompt_messages if m.prompt_region in {
-                PromptRegionIR.ACTIVE_INPUT, PromptRegionIR.ACTIVE_HISTORY, PromptRegionIR.ACTIVE_DYNAMIC}],
-            tools=list(tools or []),
-        )
         prompt = replace(
             prompt,
             messages=tuple(prompt_messages),
+            tools=tuple(tool_definition_ir_from_dict(tool) for tool in tools) if tools is not None else prompt.tools,
             logical_scope_id=logical_scope_id,
             metadata=metadata,
         )
@@ -1445,67 +1437,6 @@ class TurnExecutor:
         if continuation.interrupted:
             raise asyncio.CancelledError(continuation.interrupt_reason or "interrupted")
 
-    def _build_prompt_budget_snapshot(
-        self,
-        assembly_context,
-        *,
-        base_messages: list[LLMMessageIR],
-        active_messages: list[LLMMessageIR],
-        tools: list[dict[str, Any]],
-    ) -> dict[str, int]:
-        system_chars = sum(
-            self._estimate_ir_message_chars(message)
-            for message in base_messages
-            if message.role == MessageRole.SYSTEM
-        )
-        primary_input = ""
-        if assembly_context.event is not None:
-            primary_input = extract_text_from_payload(assembly_context.event.payload).strip()
-        if not primary_input:
-            for message in reversed(base_messages):
-                if message.role == MessageRole.USER:
-                    primary_input = message.text.strip()
-                    if primary_input:
-                        break
-        current_user_chars = len(primary_input)
-        base_non_system_chars = sum(
-            self._estimate_ir_message_chars(message)
-            for message in base_messages
-            if message.role != MessageRole.SYSTEM
-        )
-        protocol_messages = list(active_messages)
-        if (
-            primary_input
-            and protocol_messages
-            and protocol_messages[0].role == MessageRole.USER
-        ):
-            protocol_messages = protocol_messages[1:]
-        tool_protocol_chars = sum(
-            self._estimate_ir_message_chars(message)
-            for message in protocol_messages
-        )
-        tools_schema_chars = self._estimate_tools_schema_chars(tools)
-        conversation_chars = max(base_non_system_chars - current_user_chars, 0)
-        estimated_input_chars = system_chars + current_user_chars + conversation_chars + tool_protocol_chars + tools_schema_chars
-        return {
-            "system_chars": system_chars,
-            "tool_protocol_chars": tool_protocol_chars,
-            "tools_schema_chars": tools_schema_chars,
-            "conversation_chars": conversation_chars,
-            "current_user_chars": current_user_chars,
-            "estimated_input_chars": estimated_input_chars,
-            "hard_keep_chars": system_chars + current_user_chars + tool_protocol_chars + tools_schema_chars,
-        }
-
-    @staticmethod
-    def _estimate_tools_schema_chars(tools: list[dict[str, Any]]) -> int:
-        if not tools:
-            return 0
-        try:
-            return len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
-        except TypeError:
-            return len(str(tools))
-
     def _build_tool_call_budget(self, continuation, *, execution_call=None) -> ToolCallBudget:
         cfg = self._config
         token_limit = cfg.max_tool_result_tokens
@@ -1527,17 +1458,6 @@ class TurnExecutor:
             max_stdout_chars=max_output_chars,
             timeout_ms=None,
         )
-
-    @staticmethod
-    def _estimate_ir_message_chars(message: LLMMessageIR) -> int:
-        total = len(message.text) + len(message.reasoning_text)
-        for call in message.tool_calls:
-            total += len(call.call_id) + len(call.name)
-            total += len(json.dumps(thaw_json(call.arguments), ensure_ascii=False, sort_keys=True))
-        for part in message.parts:
-            if isinstance(part, ToolResultIR):
-                total += len(part.call_id) + len(part.name) + len(part.content)
-        return total
 
     def _project_messages_for_prompt(
         self,

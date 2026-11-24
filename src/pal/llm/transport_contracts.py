@@ -60,6 +60,10 @@ class LLMStreamControl:
         with self._lock:
             return max(self.started_at, self._last_network_activity_at)
 
+    def for_auxiliary_request(self) -> LLMStreamControl:
+        """Share cancellation while keeping generation submission evidence independent."""
+        return LLMStreamControl(_fd=self._fd)
+
     def bind(self, capability: FdCapability[Any]) -> None:
         self._fd.bind(capability)
 

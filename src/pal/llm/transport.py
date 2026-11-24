@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
+from contextlib import closing
+from dataclasses import dataclass, field, replace
 from threading import RLock
 from typing import Any
 
@@ -49,18 +50,31 @@ class DirectEndpointTransport:
             # Access profile selects credential/failure policy, never transport.
             auth_type = ChatGPTEndpointAuth if is_chatgpt(spec) else EndpointAuth
             auth = auth_type(compiled.spec, self.credential_resolver)
+            http_count_frames = None
             if spec.transport == "websocket":
+                if compiled.adapter is not None and compiled.adapter.input_counter is not None:
+                    http_count_frames = self._http_count_frames
                 port = self.websocket_transport or ResponsesWebSocketTransport()
             else:
                 port = self.sdk_transport or SDKJSONTransport()
             bound = LLMEndpoint(compiled.spec, compiled.codec, compiled.context, auth, port,
-                                response_hooks=compiled.response_hooks, adapter=compiled.adapter)
+                                response_hooks=compiled.response_hooks, adapter=compiled.adapter,
+                                http_count_frames=http_count_frames)
             previous = self._endpoints.get(spec.endpoint_id)
             self._endpoints[spec.endpoint_id] = bound
             self._fingerprints[spec.endpoint_id] = fingerprint
         if previous is not None:
             previous.retire(close_transport=previous.transport is not bound.transport)
         return bound
+
+    def _http_count_frames(self, request: AuthenticatedTransportRequest) -> Iterator[_JSONFrame]:
+        request = replace(request, base_url="https://api.openai.com/v1")
+        if self.sdk_transport is not None:
+            yield from self.sdk_transport.frames(request)
+            return
+        # An occasional count owns its HTTP client independently of the persistent socket.
+        with closing(SDKJSONTransport()) as http:
+            yield from http.frames(request)
 
     def configure_model_hooks(self, registry: ModelHookRegistry) -> None:
         with self._lock:

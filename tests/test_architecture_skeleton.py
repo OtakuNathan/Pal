@@ -3402,6 +3402,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate"}]
+        preflights = [value.request for kind, value in scripted_llm.requests if kind == "preflight"]
+        self.assertTrue(generate_requests[0].tools)
+        self.assertEqual([req.tools for req in preflights], [req.tools for req in generate_requests])
         self.assertEqual(generate_requests[0].policy.temperature, 0.7)
         self.assertEqual(generate_requests[1].policy.temperature, 0.2)
 

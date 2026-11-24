@@ -78,7 +78,10 @@ For a matching conversation prefix and endpoint, Pal starts with the preceding
 response's normalized input plus output usage and estimates the uncovered
 suffix. A changed prefix or tool schema starts a fresh estimate. Close to a
 limit, first-party API routes count the complete encoded input, including tools.
-Gemini counts only requests that can be represented by its countTokens API.
+Official OpenAI API-key Responses endpoints use the HTTPS input-token counter
+for both HTTP and WebSocket generation. The count shares cancellation with the
+generation and has its own submission state. Gemini counts only requests that
+can be represented by its countTokens API.
 An unavailable counter uses a conservative local estimate. Pal requires an
 exact count for opaque native history without a matching usage baseline.
 

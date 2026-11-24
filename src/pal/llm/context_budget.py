@@ -24,12 +24,18 @@ OPENROUTER_STANDARD_MODELS = frozenset({
 
 
 def counting_shape(endpoint: LLMEndpointSpec) -> WireShape | None:
-    if (endpoint.transport != "http" or endpoint.auth_kind != "api_key_ref"
+    if (endpoint.auth_kind != "api_key_ref"
             or (endpoint.capabilities_blob or {}).get("access_profile")):
         return None
     url = (endpoint.base_url or "").rstrip("/")
     model = endpoint.model_id
     shape = endpoint.wire_shape
+    if endpoint.transport == "websocket":
+        # Only the official TLS Responses socket shares the public HTTPS counter.
+        if url not in {"https://api.openai.com/v1", "https://api.openai.com/v1/responses",
+                       "wss://api.openai.com/v1", "wss://api.openai.com/v1/responses"}:
+            return None
+        url = "https://api.openai.com/v1"
     if url == "https://api.openai.com/v1" and shape == WireShape.OPENAI_RESPONSE and re.fullmatch(r"(?:gpt-[a-zA-Z0-9.-]+|o[1-9](?:-[a-zA-Z0-9.-]+)?)", model):
         return WireShape.OPENAI_RESPONSE
     if url in {"https://api.anthropic.com", "https://api.anthropic.com/v1"} and shape == WireShape.ANTHROPIC_MESSAGES and model.startswith("claude-"):

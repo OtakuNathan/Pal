@@ -860,7 +860,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(continuation.turn_settings_snapshot["think_levels"], {"stub": "deep"})
         self.assertEqual(prompt.metadata["think_levels"], {"stub": "deep"})
 
-    async def test_turn_prompt_budget_snapshot_counts_tools_schema(self) -> None:
+    async def test_turn_prompt_carries_complete_tool_schema_for_llm_preflight(self) -> None:
         envelope = self._make_channel_envelope(turn_id="turn-budget-tools", request_id="req-budget-tools", text="hello")
         continuation = self.core.turn_manager.start(envelope)
         tools = [
@@ -884,13 +884,10 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             tools=tools,
         )
 
-        snapshot = prompt.metadata["prompt_budget_snapshot"]
-        expected_tool_chars = len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
-        self.assertEqual(snapshot["tools_schema_chars"], expected_tool_chars)
-        self.assertEqual(
-            snapshot["hard_keep_chars"],
-            snapshot["system_chars"] + snapshot["current_user_chars"] + snapshot["tool_protocol_chars"] + expected_tool_chars,
-        )
+        tool, = prompt.tools
+        self.assertEqual(tool.name, "op_test_tool")
+        self.assertEqual(tool.description, "tool schema budget")
+        self.assertEqual(tool.input_schema, tools[0]["function"]["parameters"])
 
     async def test_typed_ingress_keeps_precompiled_control_scope_binding(self) -> None:
         envelope = ChannelEnvelope(

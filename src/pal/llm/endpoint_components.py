@@ -1,7 +1,7 @@
 """Immutable endpoint composition; credentials and connections remain renewable."""
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from threading import RLock
 
@@ -54,6 +54,7 @@ def compile_endpoint_codec(
 class LLMEndpoint(EndpointCodec):
     auth: EndpointAuth
     transport: AuthenticatedFrameTransport
+    http_count_frames: Callable[[AuthenticatedTransportRequest], Iterator[_JSONFrame]] | None = field(default=None, kw_only=True)
     _lifetime: "_EndpointLifetime" = field(default_factory=lambda: _EndpointLifetime(), compare=False, repr=False)
 
     lineage_generation: object = field(default_factory=object, compare=False, repr=False)
@@ -78,14 +79,18 @@ class LLMEndpoint(EndpointCodec):
         if request.wire_shape != self.context.wire_shape:
             raise ValueError("encoded request does not match the bound endpoint shape")
         credential = self.auth.resolve()
-        iterator = self.transport.frames(AuthenticatedTransportRequest(
+        authenticated = AuthenticatedTransportRequest(
             request_id=request.request_id, endpoint_id=self.spec.endpoint_id,
             wire_shape=self.context.wire_shape, api_key=credential, base_url=self.spec.base_url,
             timeout_seconds=request.timeout_seconds, payload=request.payload, extra_body=request.extra_body,
             stream=self.auth.force_stream or request.stream, stream_control=request.stream_control,
             on_submitted=request.on_submitted, operation=request.operation, response_prefix=request.response_prefix,
             on_wire_send=request.on_wire_send,
-        ))
+        )
+        if request.operation == "input_tokens" and self.http_count_frames is not None:
+            iterator = self.http_count_frames(authenticated)
+        else:
+            iterator = self.transport.frames(authenticated)
         try:
             for frame in iterator:
                 self.auth.observe(frame)

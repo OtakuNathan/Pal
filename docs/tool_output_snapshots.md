@@ -68,9 +68,14 @@ must retain its output directory alongside its checkpoint.
 ## Shell and compatibility
 
 The built-in shell and native extension copy oversized stdout/stderr incrementally
-before their original output resources retire. Native observations copy captured
-byte intervals; remote transport keeps its existing incremental download and
-capacity rules. Snapshot creation and L1 delivery precede output acknowledgment.
+before their original output resources retire. The native extension saves one
+readable receipt containing the operation status followed by captured stdout and
+stderr. The native shell applies the inline character limit to stdout and stderr
+combined. Its model-facing tool metadata carries status and returncode even for
+empty output. Oversized output includes a head/tail preview and one file link.
+Background observations may cover only new byte intervals and label their offsets.
+Remote transport keeps its existing incremental download and capacity rules.
+Snapshot creation and L1 delivery precede output acknowledgment.
 Failed delivery retries output preparation, never command execution. ACK retry
 does not create another L1 event. A save failure delivers an honest error without
 acknowledging or releasing native output. `read_shell_session` can retry a failed
