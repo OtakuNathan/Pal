@@ -385,7 +385,9 @@ knowledge tools and authorization; live state is not durable truth.
 PAL_PLUGIN_DEVELOPMENT_MANUAL = """# Pal Plugin Development and Maintenance
 
 Use this manual to update, diagnose, create or review a Pal plugin. It includes
-the public contracts needed to develop one without access to the host source.
+the public contracts needed to develop one without access to the host source. If
+the work requires changing a shared runtime contract, host configuration, or
+host-wide policy, consult `pal.self.maintenance` for that part.
 
 ## Update an installed plugin
 
