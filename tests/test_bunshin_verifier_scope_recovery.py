@@ -516,7 +516,7 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
         self.assertEqual(self._node(), node)
         self.assertEqual(self.coordinator.execution(workflow_id=self.workflow_id), execution)
 
-    def test_correction_findings_seed_required_next_verifier_tasks(self):
+    def test_correction_keeps_all_findings_visible_without_seeding_a_checklist(self):
         from pal.bunshin.workflow_catalog import BunshinWorkflowCatalog
         from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
         from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
@@ -557,10 +557,10 @@ class VerifierScopeRecoveryTests(unittest.TestCase):
             return await PlaybookBinding(self.artifacts).execute(command, prompt, prepared)
 
         pack = asyncio.run(bind()).pack
-        seeds = pack.metadata["bunshin"]["work_item_seed"]
-        tasks = [item for item in seeds if item["origin"] == "manager_routed_finding"]
-        self.assertEqual({item["summary"] for item in tasks}, {"resolve finding: finding_fifo", "resolve finding: finding_stub"})
-        self.assertTrue(all(item["required"] and item["status"] == "pending" for item in tasks))
+        self.assertEqual(pack.metadata["bunshin"]["work_item_seed"], [])
+        bill_path = next(item["path"] for item in pack.workspace["reference_paths"] if item["name"] == "repair_bill")
+        bill = json.loads(Path(bill_path).read_text())
+        self.assertEqual({item["finding_id"] for item in bill["findings"]}, {"finding_fifo", "finding_stub"})
 
     def test_stale_node_version_and_candidate_cannot_enter_correction(self):
         self._accept_provider()

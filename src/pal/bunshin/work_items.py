@@ -532,7 +532,7 @@ def render_work_item_context(workspace: Mapping[str, Any]) -> str:
         for item in ledger["items"]
         if str(item.get("kind") or "") in {"phase", "task"}
     ]
-    if not items:
+    if not items and not workspace.get("verification_verdict_scope"):
         if workspace.get("repair_precheck"):
             return "Use the complete bound RepairBill. An optional checklist can hold recovery notes."
         text = (
@@ -546,7 +546,7 @@ def render_work_item_context(workspace: Mapping[str, Any]) -> str:
         return text
     lines = [
         "Manager-owned work checklist (execution cursor, not truth or evidence):"
-    ]
+    ] if items else []
     for item in items:
         lines.append(
             f"- {item.get('status')}: {item.get('summary')}"

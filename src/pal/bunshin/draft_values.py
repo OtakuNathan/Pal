@@ -34,7 +34,14 @@ class BunshinAddFindingInput(StrictToolModel):
     )
 
 
-class BunshinUpdateFindingInput(BunshinAddFindingInput):
+class VerifierFindingInput(BunshinAddFindingInput):
+    evidence_call_id: str | None = Field(
+        default=None, min_length=1,
+        description="Execution receipt supporting this finding. Use the call_id shown by the verification tool.",
+    )
+
+
+class BunshinUpdateFindingInput(VerifierFindingInput):
     finding_id: str = Field(min_length=1, max_length=128)
     expected_revision: int = Field(ge=0)
 
@@ -66,7 +73,7 @@ def submission_work_items(value: Any) -> list[dict[str, str]]:
 
 
 def normalize_finding(value: Mapping[str, Any]) -> dict[str, Any]:
-    validated = BunshinAddFindingInput.model_validate(value, strict=True)
+    validated = VerifierFindingInput.model_validate(value, strict=True)
     finding = validated.model_dump(mode="python", exclude_none=True)
     if finding["disposition"] == "advisory" and finding["priority"] != "p2":
         raise ValueError("advisory findings must use priority p2")
@@ -86,7 +93,7 @@ def normalize_finding(value: Mapping[str, Any]) -> dict[str, Any]:
 def _finding_hash(finding: Mapping[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(
-            dict(finding),
+            {key: value for key, value in finding.items() if key != "evidence_call_id"},
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

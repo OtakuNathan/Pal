@@ -156,7 +156,7 @@ async def run_shell_evidence(
             "request_fingerprint": request_fingerprint,
             "recorded_case_revision": (int(snapshot.payload.get("case_revision") or 0) + 1
                                        if context.role == "verifier" else 0),
-            "execution_id": str(call.call_id or request_fingerprint),
+            "execution_id": execution_call.call_id,
             "case_binding": case_corpus_binding(before),
             "input_fingerprint": context.input_fingerprint,
         }
@@ -307,7 +307,7 @@ async def run_lsp_evidence(
             "request_fingerprint": request_fingerprint,
             "recorded_case_revision": (int(snapshot.payload.get("case_revision") or 0) + 1
                                        if context.role == "verifier" else 0),
-            "execution_id": str(call.call_id or request_fingerprint),
+            "execution_id": execution_call.call_id,
             "case_binding": case_corpus_binding(before),
             "input_fingerprint": context.input_fingerprint,
         }
@@ -738,11 +738,15 @@ def _success_result(
     llm_text: str | None = None,
     snapshot_refs: tuple[ResultSnapshotRef, ...] = (),
 ) -> ToolExecutionResult:
+    shown = str(llm_text or text)
+    case = structured.get("case") or {}
+    if execution_id := case.get("execution_id"):
+        shown = f"Verification call_id: {execution_id}\n{shown}"
     return ToolExecutionResult(
         name=call.name,
         ok=True,
         text=text,
-        llm_text=str(llm_text or text),
+        llm_text=shown,
         structured=dict(structured),
         call_id=call.call_id,
         status=RuntimeStatus.OK,

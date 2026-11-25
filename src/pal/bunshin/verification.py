@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.bunshin.repository import BunshinRepository
+from pal.bunshin.review_receipts import finding_execution_receipt
 
 
 class VerificationStatus(StrEnum):
@@ -322,6 +323,22 @@ class DefectPropagationService:
         return tuple(sorted(affected))
 
 
+def _coder_finding_evidence(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    result = receipt.get("structured") or {}
+    if result.get("kind") in {"failed", "rejected"}:
+        result = result.get("details") or {}
+    # Preserve separate shell streams and their recorded truncation flags.
+    # LSP and transport failures have a textual tool result instead.
+    result_fields = (
+        "returncode", "exit_code", "stdout", "stderr", "truncated", "stdout_truncated",
+        "stderr_truncated", "timed_out", "cancelled", "signal",
+    )
+    execution = {key: result[key] for key in result_fields if key in result}
+    if not (execution.get("stdout") or execution.get("stderr")):
+        execution["output"] = receipt.get("output_text") or receipt.get("summary") or ""
+    return {"tool": receipt["tool_name"], "args": receipt["args"], "ok": receipt["ok"], **execution}
+
+
 def repair_bill_semantic_view(
     artifacts: ContentAddressedArtifactStore,
     repair_bill_ref: ArtifactRef | Mapping[str, Any],
@@ -338,6 +355,17 @@ def repair_bill_semantic_view(
             related_findings = [item for item in findings if module_name not in owners.get(
                 str(item.get("finding_id") or item.get("finding_key") or ""), [])]
             findings = [item for item in findings if item not in related_findings]
+        receipt_sets: dict[str, list[dict[str, Any]]] = {}
+        for finding in findings + related_findings:
+            ref = finding.pop("tool_receipts_ref", None) or bill.get("tool_receipts_ref")
+            if module_name and finding.get("evidence_call_id"):
+                if not ref:
+                    raise ValueError("referenced finding has no verification receipt set")
+                digest = ref["sha256"]
+                if digest not in receipt_sets:
+                    receipt_sets[digest] = artifacts.read_json(ref)["receipts"]
+                receipt = finding_execution_receipt(finding["evidence_call_id"], receipt_sets[digest])
+                finding["execution"] = _coder_finding_evidence(receipt)
         return {
             "artifact_kind": "semantic_repair_packet",
             "module_name": module_name or str(bill.get("module_name") or ""),

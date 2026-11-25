@@ -27,6 +27,7 @@ from pydantic import Field, create_model
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult, ExecutionRuntimePort
 from pal.execution.tool_facade import (
     CompleteResult,
+    EmptyToolInput,
     EffectKind,
     EffectOutcome,
     EffectReceipt,
@@ -213,6 +214,8 @@ def _scoped_workspace_tool_spec(
     workspace: dict[str, Any],
 ) -> dict[str, Any]:
     value = dict(spec)
+    if name == "op_bunshin_verification_pass" and not workspace.get("verification_verdict_scope"):
+        value["InputModel"] = EmptyToolInput
     if name != ADD_FINDING_CAPABILITY:
         return value
     role = str(dict(workspace.get("bunshin") or {}).get("role") or "")
@@ -1005,6 +1008,8 @@ class BunshinScopedExecutionRuntime:
             record_verification_execution(self.workspace, new_tool_call(
                 name=target_name, args=effective_bunshin_tool_args(call), call_id=call.call_id,
             ), result, before)
+            if call.call_id:
+                result = replace(result, llm_text=f"Verification call_id: {call.call_id}\n{result.llm_text}")
         return result
 
     async def _execute_admitted(

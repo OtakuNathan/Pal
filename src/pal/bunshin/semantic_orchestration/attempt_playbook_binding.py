@@ -50,11 +50,16 @@ class PlaybookBinding:
             for item in list(playbook.get("steps") or [])
             if isinstance(item, Mapping)
         ]
+        verdict_only = (
+            activation.role == OrchestrationRole.VERIFIER
+            and role_protocol.get("protocol_id") == "module_verification.v2"
+        )
         if playbook_steps:
             pack_value = pack.to_dict()
             metadata = dict(pack_value.get("metadata") or {})
             bunshin = dict(metadata.get("bunshin") or {})
             bunshin["role_protocol"] = role_protocol
+            seed_checklist = not verdict_only and not pack.workspace.get("repair_precheck")
             work_item_seed = [
                 {
                     "kind": "phase",
@@ -64,20 +69,19 @@ class PlaybookBinding:
                     "required": True,
                 }
                 for item in playbook_steps
-                if str(item.get("key") or "").strip() and not pack.workspace.get("repair_precheck")
+                if str(item.get("key") or "").strip() and seed_checklist
             ]
             routed_seen: set[str] = set()
-            for reference_name in (
+            routed_references = (
                 "repair_bill",
                 "prior_finding",
                 "revision_finding",
                 "replan_finding_batch",
-            ):
+            ) if seed_checklist else ()
+            for reference_name in routed_references:
                 reference = bound_reference_refs.get(reference_name)
                 if reference is None:
                     continue
-                if pack.workspace.get("repair_precheck"):
-                    continue  # The bound RepairBill already lists all findings.
                 payload = dict(self.artifacts.read_json(reference))
                 for finding in _manager_routed_findings(payload):
                     identity = str(
@@ -99,6 +103,7 @@ class PlaybookBinding:
                     )
             if (
                 activation.role == OrchestrationRole.VERIFIER
+                and not verdict_only
                 and "system_delivery_view" in bound_reference_refs
             ):
                 system_delivery = self.artifacts.read_json(
@@ -116,6 +121,10 @@ class PlaybookBinding:
             # assignment binding prevents a missing checklist seed or role
             # protocol from masquerading as a submission/orchestration bug.
             workspace_value = dict(pack_value.get("workspace") or {})
+            if verdict_only:
+                sink = snapshot.payload.get("graph_sink") or "system_delivery_view" in bound_reference_refs
+                workspace_value["verification_verdict_scope"] = "sink" if sink else "module"
+                workspace_value["verification_candidate_digest"] = str(snapshot.payload.get("candidate_digest") or "")
             workspace_bunshin = dict(workspace_value.get("bunshin") or {})
             workspace_bunshin.update(
                 {

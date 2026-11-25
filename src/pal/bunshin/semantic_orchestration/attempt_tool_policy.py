@@ -168,7 +168,7 @@ class ToolPolicy:
                     "workspace": bound_workspace,
                 }
             )
-        if activation.role == OrchestrationRole.VERIFIER:
+        if activation.role == OrchestrationRole.VERIFIER and not pack.workspace.get("verification_verdict_scope"):
             pack = self._bind_verifier_report(pack, bound_reference_refs, snapshot)
         return PreparedRolePrompt(pack=pack)
 

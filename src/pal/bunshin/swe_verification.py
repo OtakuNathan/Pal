@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pal.bunshin.repair_precheck import suite_command
+from pal.bunshin.review_receipts import finding_evidence_errors
 from pal.bunshin.workspace_paths import path_scope_matches
 
 from pal.bunshin.verifier_tool_diagnostics import record_verifier_failure
@@ -20,7 +21,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
-from pal.execution.tool_facade import EmptyToolInput
+from pydantic import Field
+from pal.execution.tool_facade import StrictToolModel
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.workspace_git import git_changed_paths
 from pal.bunshin.review_findings import (
@@ -32,7 +34,7 @@ from pal.bunshin.review_findings import (
 )
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.semantic_evidence import recorded_cases
-from pal.bunshin.verification_readiness import current_verification_receipts, final_verification_errors, report_evidence_errors, verification_case_errors, verification_corpus_snapshot
+from pal.bunshin.verification_readiness import current_verification_receipts, verdict_pass_errors, final_verification_errors, report_evidence_errors, verification_case_errors, verification_corpus_snapshot
 from pal.bunshin.verification_corpus import verification_corpus_files
 from pal.bunshin.verification_report import load_and_validate_verification_report
 from pal.bunshin.submission_errors import submission_error_result, submission_validation
@@ -46,6 +48,7 @@ from pal.bunshin.verification import (
 from pal.bunshin.work_items import (
     assert_work_items_complete,
     findings_from_work_items,
+    read_work_items,
     submission_work_items,
 )
 from pal.bunshin.workspace_paths import module_developer_test_path
@@ -76,6 +79,11 @@ SEMANTIC_VERIFICATION_OUTCOMES = frozenset(
 )
 
 
+class VerificationPassInput(StrictToolModel):
+    system_test_calls: list[str] = Field(default_factory=list, description="Sink only: successful call IDs exercising the delivered public entrypoint.")
+    note: str = Field(default="", description="Explain failed or unavailable LSP evidence when behavioral tests pass.")
+
+
 def semantic_verification_submission_errors(
     submission: Mapping[str, Any],
     *,
@@ -103,9 +111,14 @@ def semantic_verification_submission_errors(
     allow_legacy = accepted_legacy_receipt and "verification_binding" not in submission
     if allow_legacy and workspace is not None:
         workspace = {**dict(workspace), "verification_case_revision": 0}
+    verdict_scope = (workspace or {}).get("verification_verdict_scope")
+    if verdict_scope and not isinstance(accepted_binding, Mapping):
+        errors.append("submission is missing its verification binding")
     if workspace is not None and isinstance(accepted_binding, Mapping):
         workspace = {**dict(workspace), "verification_case_revision": int(
             workspace.get("verification_case_revision", accepted_binding.get("case_revision", 0)))}
+        if verdict_scope and not scratch_only and accepted_binding.get("candidate_digest") != workspace.get("verification_candidate_digest"):
+            errors.append("verification workspace no longer matches the assigned Candidate")
         if dict(accepted_binding) != verification_corpus_snapshot(workspace):
             errors.append("accepted verification identity does not match the current corpus and case revision")
     if outcome not in SEMANTIC_VERIFICATION_OUTCOMES:
@@ -114,9 +127,9 @@ def semantic_verification_submission_errors(
         )
     try:
         findings = structured_findings(submission)
-        structured_advisories(submission)
+        advisories = structured_advisories(submission)
     except ValueError as exc:
-        findings = []
+        findings, advisories = [], []
         errors.append(str(exc))
     if workspace is not None:
         contract = dict(dict(workspace.get("bunshin") or {}).get("swe_verification_tool_contract") or {})
@@ -202,10 +215,10 @@ def semantic_verification_submission_errors(
     non_report_case_paths = [
         path for path in current_case_paths if path != (workspace or {}).get("verification_report_relpath")
     ]
-    if (outcome == "module_repair" and (workspace or {}).get("repair_suite_required")
+    if (not verdict_scope and outcome == "module_repair" and (workspace or {}).get("repair_suite_required")
             and non_report_case_paths and not suite_command(corpus_scope, non_report_case_paths)):
         errors.append("Provide run-tests.sh in the verifier corpus to run all of its cases from the repository root.")
-    if outcome != "unknown" and not non_report_case_paths:
+    if not verdict_scope and outcome != "unknown" and not non_report_case_paths:
         errors.append(
             "verification requires at least one durable verifier-authored case; "
             "the bound verification corpus is empty"
@@ -215,7 +228,10 @@ def semantic_verification_submission_errors(
         for item in list(submission.get("tool_receipts") or [])
         if isinstance(item, Mapping)
     ]
-    if not receipts:
+    errors.extend(finding_evidence_errors(
+        findings + advisories, receipts, accepted_binding if isinstance(accepted_binding, Mapping) else {},
+    ))
+    if not receipts and not verdict_scope:
         errors.append(
             "verification requires Manager-recorded shell, Git, or LSP evidence"
         )
@@ -224,7 +240,12 @@ def semantic_verification_submission_errors(
     test_changed_paths = [
         path for path in changed_paths if path != (workspace or {}).get("verification_report_relpath")
     ]
-    errors.extend(final_verification_errors(receipts, outcome=outcome, changed=bool(test_changed_paths)))
+    if workspace is not None and verdict_scope:
+        if outcome == "pass":
+            errors.extend(verdict_pass_errors(workspace, receipts, scope=corpus_scope, case_paths=non_report_case_paths,
+                                              system_test_calls=submission.get("system_test_calls", []), note=submission.get("note", "")))
+    else:
+        errors.extend(final_verification_errors(receipts, outcome=outcome, changed=bool(test_changed_paths)))
     if outcome == "pass" and report is not None:
         errors.extend(report_evidence_errors(report, receipts, workspace or {}))
     return tuple(dict.fromkeys(errors))
@@ -273,19 +294,19 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "search_objects": ('pass', 'outcome', 'outcomes'),
             "purpose": "Submit a successful semantic verification outcome.",
             "use_when": (
-                "Use with no arguments only after every required regression, diff-risk, "
-                "behavioral, consumer, and delivery obligation for the bound scope passes."
+                "Use after every required regression, diff-risk, "
+                "behavioral, consumer, and delivery obligation passes. At a verdict-mode sink cite the public-entrypoint runs in system_test_calls."
             ),
             "do_not_use_when": (
                 "Do not use with a blocking finding, missing required evidence, an untested "
                 "final corpus edit, or a merely green compilation or LSP summary."
             ),
             "failure_next_steps": (
-                "Run or record the missing obligation, correct any incomplete checklist or "
+                "Run the missing check, correct the "
                 "finding state, and retry only after the current assignment genuinely passes."
             ),
         },
-        "InputModel": EmptyToolInput,
+        "InputModel": VerificationPassInput,
     },
     "op_bunshin_verification_request_module_repair": {
         "alias": "request_verification_module_repair",
@@ -301,7 +322,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "or unavailable-environment outcome."
             ),
             "failure_next_steps": (
-                "Correct missing or misclassified findings and complete the checklist before retrying."
+                "Correct missing or misclassified findings before retrying."
             ),
         },
         "InputModel": BunshinSweVerificationOpBunshinVerificationRequestModuleRepairInput,
@@ -316,7 +337,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "or lifecycle/state-model defect with update_finding."
             ),
             "do_not_use_when": "Do not use when the current module can be repaired without changing its accepted contract.",
-            "failure_next_steps": "Correct the finding classification or complete the checklist before retrying.",
+            "failure_next_steps": "Correct the finding classification before retrying.",
         },
         "InputModel": BunshinSweVerificationOpBunshinVerificationRequestContractRevisionInput,
     },
@@ -330,7 +351,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "bootstrap, or scenario-topology defect that cannot be repaired locally."
             ),
             "do_not_use_when": "Do not use for an implementation defect or a frozen-contract defect with unchanged topology.",
-            "failure_next_steps": "Correct the finding classification or complete the checklist before retrying.",
+            "failure_next_steps": "Correct the finding classification before retrying.",
         },
         "InputModel": BunshinSweVerificationOpBunshinVerificationRequestArchitectureRevisionInput,
     },
@@ -344,7 +365,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "Do not use for an implementation, contract, or architecture defect, and do not "
                 "author replacement requirement records."
             ),
-            "failure_next_steps": "Correct the requirements finding or complete the checklist before retrying.",
+            "failure_next_steps": "Correct the requirements finding before retrying.",
         },
         "InputModel": BunshinSweVerificationOpBunshinVerificationRequestRequirementsRevisionInput,
     },
@@ -408,6 +429,7 @@ def compile_swe_verification_tool_contract(
     dependency_modules = sorted(str(item) for item in dict(repair_scope or {}).get("dependency_modules") or [])
     guidance_overrides: dict[str, dict[str, str]] = {}
     guidance_overrides[UPDATE_FINDING_CAPABILITY] = {"use_when": (
+        "For an observed execution, set evidence_call_id to the displayed call_id. For a static defect cite its location. "
         "Upsert one evidence-backed current verifier finding: unused finding_id with expected_revision=0 creates; current ID/revision from Role Working State or the prior update_finding result replaces. Correct an incorrect Verifier-owned probe "
         "in this session before submission; use module_defect for the current implementation, "
         "dependency_defect only for an accepted upstream product bound to this check, contract_defect for a frozen public contract, "
@@ -418,17 +440,6 @@ def compile_swe_verification_tool_contract(
         "Test the current module against the declared contract using focused probes or doubles. "
         f"Bound upstream implementation repair targets: {json.dumps(dependency_modules)}."
     )}
-    if verification_corpus:
-        guidance_overrides["op_bunshin_verification_pass"] = {"use_when": (
-            f"Submit PASS only after reading and running the existing {verification_corpus}/ corpus, "
-            "adding or strengthening coverage only for a demonstrated gap, running a successful "
-            "shell or LSP check against the final corpus state, and filling out verification_report.yaml. "
-            "PASS takes no arguments."
-        )}
-    elif requirements:
-        guidance_overrides["op_bunshin_verification_pass"] = {"use_when": (
-            "Submit PASS with no arguments only after testing the exact assembled scenario against its contract flow, requirements, and success/failure observations."
-        )}
     return {
         "module_name": module_name,
         "repair_path_owners": compiled_repair_path_owners,
@@ -451,8 +462,7 @@ def swe_verification_tool_result(
         outcome = _OUTCOME_BY_CAPABILITY[call.name]
         args = dict(call.args or {})
         reason = str(args.get("reason") or "").strip()
-        if outcome == "pass" and args:
-            raise ValueError("submit_verification_pass takes no arguments")
+        pass_args = VerificationPassInput()
         context = SubmissionDraftContext.from_workspace(
             workspace,
             draft_kind="verification",
@@ -463,8 +473,12 @@ def swe_verification_tool_result(
             findings_from_work_items(workspace)
         )
         with submission_validation():
+            if outcome == "pass":
+                pass_args = VerificationPassInput.model_validate(args, strict=True)
+                if not workspace.get("verification_verdict_scope") and pass_args.model_dump(exclude_defaults=True):
+                    raise ValueError("submit_verification_pass takes no arguments for this pinned assignment")
             readiness = verification_outcome_readiness(
-                workspace, snapshot.payload, outcome=outcome, reason=reason,
+                workspace, snapshot.payload, outcome=outcome, reason=reason, pass_args=pass_args,
             )
             if readiness["blockers"]:
                 raise ValueError("Submission has the following errors:\n- " + "\n- ".join(readiness["blockers"]))
@@ -488,6 +502,7 @@ def swe_verification_tool_result(
             "advisories": advisories,
             "work_items": submission_work_items(work_items.get("items")),
             **({"reason": reason} if reason else {}),
+            **pass_args.model_dump(exclude_defaults=True),
             **({"target_modules": target_modules} if target_modules else {}),
             **(
                 {"verification_report": verification_report, "verification_report_yaml": readiness["verification_report_yaml"]}
@@ -578,26 +593,30 @@ def swe_verification_tool_result(
 
 def verification_outcome_readiness(
     workspace: Mapping[str, Any], payload: Mapping[str, Any], *,
-    outcome: str, reason: str = "", require_outcome_arguments: bool = True,
+    outcome: str, reason: str = "", require_outcome_arguments: bool = True, pass_args: VerificationPassInput | None = None,
 ) -> dict[str, Any]:
     """The single read-only preflight used by status and semantic submit."""
     workspace = {**dict(workspace), "verification_case_revision": int(payload.get("case_revision") or 0)}
-    findings, _ = partition_findings(findings_from_work_items(workspace))
-    expected_digest = str(verification_corpus_snapshot(workspace).get("candidate_digest") or "")
+    findings, advisories = partition_findings(findings_from_work_items(workspace))
+    binding = verification_corpus_snapshot(workspace)
+    expected_digest = str(binding.get("candidate_digest") or "")
     report, report_path, raw_report, report_errors = load_and_validate_verification_report(
         workspace,
         outcome=outcome,
         expected_candidate_digest=expected_digest,
     )
     errors = _submission_errors(outcome=outcome, findings=findings, reason=reason, workspace=workspace, report=report,
-                                require_outcome_arguments=require_outcome_arguments)
+                                require_outcome_arguments=require_outcome_arguments, pass_args=pass_args or VerificationPassInput())
+    if workspace.get("verification_verdict_scope") and not workspace.get("verification_scratch_only") and expected_digest != workspace.get("verification_candidate_digest"):
+        errors.append("verification workspace no longer matches the assigned Candidate")
+    errors.extend(finding_evidence_errors(findings + advisories, workspace.get("review_tool_evidence_refs") or [], binding))
     cases = recorded_cases(payload)
     if cases:
         errors.extend(semantic_verification_draft_errors(payload, workspace))
     errors.extend(report_errors)
     work_items: dict[str, Any] = {}
     try:
-        work_items = assert_work_items_complete(workspace)
+        work_items = read_work_items(workspace) if workspace.get("verification_verdict_scope") else assert_work_items_complete(workspace)
     except ValueError as exc:
         errors.append(str(exc))
     targets: list[str] = []
@@ -623,6 +642,7 @@ def _submission_errors(
     reason: str,
     workspace: Mapping[str, Any],
     report: Mapping[str, Any] | None,
+    pass_args: VerificationPassInput,
     require_outcome_arguments: bool = True,
 ) -> list[str]:
     errors: list[str] = []
@@ -631,9 +651,10 @@ def _submission_errors(
         for item in list(workspace.get("review_tool_evidence_refs") or [])
         if isinstance(item, Mapping)
     ]
-    if not receipts:
+    verdict_scope = workspace.get("verification_verdict_scope")
+    if not receipts and not verdict_scope:
         errors.append("run at least one shell, Git, or LSP verification before submitting")
-    if outcome == "pass" and not any(bool(item.get("ok")) for item in receipts):
+    if not verdict_scope and outcome == "pass" and not any(bool(item.get("ok")) for item in receipts):
         errors.append("PASS requires at least one successful recorded verification tool result")
     if outcome not in {"pass", "unknown"} and not findings:
         errors.append("repair or revision outcomes require at least one update_finding call")
@@ -651,7 +672,7 @@ def _submission_errors(
             "correct Verifier-owned probes in this session before submitting"
         )
     changed_paths = _changed_paths(workspace)
-    if outcome != "unknown" and not _verification_case_files(workspace):
+    if not verdict_scope and outcome != "unknown" and not _verification_case_files(workspace):
         errors.append(
             "verification requires at least one durable verifier-authored case; "
             "add coverage because the bound verification corpus is empty"
@@ -674,7 +695,13 @@ def _submission_errors(
     test_changed_paths = [
         path for path in changed_paths if path != workspace.get("verification_report_relpath")
     ]
-    errors.extend(final_verification_errors(receipts, outcome=outcome, changed=bool(test_changed_paths)))
+    if verdict_scope:
+        if outcome == "pass":
+            errors.extend(verdict_pass_errors(workspace, receipts, scope=next(iter(write_scopes), {}),
+                                              case_paths=_verification_case_files(workspace),
+                                              system_test_calls=pass_args.system_test_calls, note=pass_args.note))
+    else:
+        errors.extend(final_verification_errors(receipts, outcome=outcome, changed=bool(test_changed_paths)))
     if outcome == "pass" and report is not None:
         errors.extend(report_evidence_errors(report, receipts, workspace))
     return errors

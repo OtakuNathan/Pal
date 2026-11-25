@@ -138,7 +138,7 @@ def _role_mode_profile_payload(
         role["playbook"] = {"steps": [
             {"key": "inspect_task", "instruction": "Read the complete task and inspect relevant source and evidence.", "done_when": "Task, constraints, outputs and focused checks are understood."},
             {"key": "perform_work", "instruction": "Implement or independently verify the bound task; maintain evidence and findings.", "done_when": "All required work and current-Candidate checks are complete."},
-            {"key": "submit", "instruction": "Inspect final evidence and complete this checklist item before semantic submission.", "done_when": "The outcome matches the task and observed evidence."},
+            {"key": "submit", "instruction": "Inspect final evidence before semantic submission.", "done_when": "The outcome matches the task and observed evidence."},
         ]}
         compiled["role"] = role
     for name in (

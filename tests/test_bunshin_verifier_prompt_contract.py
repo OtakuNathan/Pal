@@ -1,4 +1,4 @@
-"""Exercise consumed module/sink prompts and the required checklist spine.
+"""Exercise consumed module/sink prompts and optional progress tracking.
 
 These are offline prompt-contract tests, not claims about model behavior or
 TLC coverage. They use the live reference, mode-fragment, playbook, scaffold,
@@ -28,6 +28,7 @@ from pal.bunshin.semantic_orchestration.attempt_playbook_binding import Playbook
 from pal.bunshin.semantic_orchestration.attempt_prompt_construction import PromptConstruction
 from pal.bunshin.semantic_orchestration.attempt_reference_binding import ReferenceBinding
 from pal.bunshin.semantic_orchestration.attempt_verifier_context import VerifierContext
+from pal.bunshin.semantic_orchestration.attempt_tool_policy import ToolPolicy
 from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
 from pal.bunshin.task_ledger import TaskLedgerService
 from pal.bunshin.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
@@ -47,7 +48,9 @@ async def _bound_pack(root, *, sink, legacy_playbook=False):
     binding = dict(artifacts.read_json(binding_ref))
     if legacy_playbook:
         # Existing family bindings retain their pinned four-phase playbook.
-        steps = binding["role_bindings"]["verifier"]["role_profile"]["role"]["playbook"]["steps"]
+        role = binding["role_bindings"]["verifier"]["role_profile"]["role"]
+        role["protocol_id"] = "module_verification.v1"
+        steps = role["playbook"]["steps"]
         steps.insert(2, {
             "key": "smash_green",
             "instruction": "Use bounded adversarial cases when required checks are green.",
@@ -88,6 +91,7 @@ async def _bound_pack(root, *, sink, legacy_playbook=False):
         bound_input_entries=[], bound_reference_refs=refs,
         contract_authoring=False, family_policies=dict(binding.get("policies") or {}),
         llm_policy={}, mode="module", role="verifier",
+        run_id="run-prompt", uses_bound_durable_workspace=False, retry_prompt_ref=None,
         workspace={"runtime_root": str(root), "repo_path": str(root / "repo")},
     )
     facts = WorkflowFacts(artifacts, repository)
@@ -97,7 +101,7 @@ async def _bound_pack(root, *, sink, legacy_playbook=False):
     ).execute(command, prepared)
     prompt = await PromptConstruction(facts).execute(command, references, verifier, prepared)
     bound = await PlaybookBinding(artifacts).execute(command, prompt, prepared)
-    return bound.pack
+    return (await ToolPolicy(artifacts, repository, root).execute(command, bound, prompt, prepared)).pack
 
 
 def _render(pack, root):
@@ -131,7 +135,7 @@ def test_consumed_prompt_preserves_evidence_and_completion_gates(tmp_path, sink)
         "accepted contract is authoritative: never weaken it",
         "cannot repair product code",
         "every named current/historical RepairBill reproducer",
-        "record every result even when one fails",
+        "collect all independent failures",
         "never permits skipping this bounded current-delta review",
         "genuinely independent verifier-owned boundary checks",
         "risk-matched repository-supported dynamic analyzers",
@@ -139,9 +143,8 @@ def test_consumed_prompt_preserves_evidence_and_completion_gates(tmp_path, sink)
         "positive and negative consumer compile probe against the actual public API",
         "missing required enforcement is blocking",
         "execute affected checks after the final corpus edit",
-        "fill out the Manager-preseeded verification_report.yaml",
-        "complete the required checklist",
-        "failed or UNKNOWN check is not PASS",
+        "batch findings with concrete counterexamples",
+        "fresh successful verifier suite",
         "For UNKNOWN, supply the concrete environmental reason and follow-up verification plan",
         "advisory p2 entries do not prevent PASS",
         "exactly one semantic outcome",
@@ -149,7 +152,10 @@ def test_consumed_prompt_preserves_evidence_and_completion_gates(tmp_path, sink)
         assert rule in developer, rule
     assert developer.index("First replay") < developer.index("Then inspect the current Git review range")
     assert "current/historical regression" in user
-    assert "verification_report.yaml" in user
+    assert "verification_report_path" not in pack.workspace
+    assert not list(tmp_path.rglob("verification_report.yaml"))
+    assert "verification_report.yaml" not in full
+    assert "complete the required checklist" not in full
     assert "read_verification_draft_status" not in context.tool_session.visible_capability_aliases
     assert "extra_obligations" not in full
     assert "write_verification_scratch" not in full
@@ -167,7 +173,7 @@ def test_current_candidate_reuses_analysis_and_cases_without_second_attack_phase
         "Reuse unchanged contract analysis and coverage mapping",
         "rerun the required evidence on the current Candidate",
         "prior Candidate's verdict or execution cannot settle this assignment",
-        "multiple contract risks and checklist obligations",
+        "multiple contract risks",
         "Execute all checks directly with ordinary shell, file, and LSP tools",
         "Existing verifier cases can supply these attacks",
         "do not invent another test merely to start a separate adversarial phase",
@@ -178,18 +184,8 @@ def test_current_candidate_reuses_analysis_and_cases_without_second_attack_phase
     assert [step["key"] for step in steps] == ["regress", "changed_boundary", "verdict"]
     assert "independently challenge material boundaries" in steps[1]["instruction"]
     assert "Existing independent cases may cover multiple risks" in steps[1]["done_when"]
-    assert "mark this checklist item complete before submission" in steps[2]["done_when"]
-
-    workspace = {**pack.workspace, "bunshin": pack.metadata["bunshin"]}
-    reordered = update_checklist_tool_result(new_tool_call(
-        name="op_bunshin_update_checklist", call_id="reorder-risk-before-history",
-        args={"plan": [
-            {"step": step, "status": "pending"}
-            for step in ("changed boundary", "regress", "verdict")
-        ]},
-    ), workspace)
-    assert not reordered.ok
-    assert "order" in reordered.llm_text.lower()
+    assert pack.metadata["bunshin"]["work_item_seed"] == []
+    assert pack.workspace["verification_verdict_scope"] == "module"
 
 
 def test_sink_retains_every_system_scenario_and_real_entrypoint_gate(tmp_path):
@@ -201,19 +197,9 @@ def test_sink_retains_every_system_scenario_and_real_entrypoint_gate(tmp_path):
     assert "invoke the real CLI" in developer
     assert "start the real service and use its client" in developer
     assert "reference:system_delivery_view" in user
-    seed = pack.metadata["bunshin"]["work_item_seed"]
-    assert [item["summary"] for item in seed] == [
-        "regress", "changed boundary", "verdict",
-        "verify system scenario: leading TAB rejected", "verify system scenario: valid input",
-    ]
-    assert all(item["required"] for item in seed)
-    workspace = {**pack.workspace, "bunshin": pack.metadata["bunshin"]}
-    omitted_scenario = update_checklist_tool_result(new_tool_call(
-        name="op_bunshin_update_checklist", call_id="omit-sink-scenario",
-        args={"plan": [{"step": item["summary"], "status": "completed"} for item in seed[:-1]]},
-    ), workspace)
-    assert not omitted_scenario.ok
-    assert "verify system scenario: valid input" in omitted_scenario.llm_text
+    assert pack.workspace["verification_verdict_scope"] == "sink"
+    assert "system_test_calls" in user
+    assert pack.metadata["bunshin"]["work_item_seed"] == []
 
 
 @pytest.mark.parametrize("sink", [False, True], ids=["module", "sink"])
@@ -246,6 +232,7 @@ def test_distinct_brief_acceptance_and_non_verifier_invocations_are_preserved(tm
 def test_old_pinned_playbook_keeps_its_required_phase(tmp_path):
     pack = asyncio.run(_bound_pack(tmp_path, sink=False, legacy_playbook=True))
     developer, user, _ = _render(pack, tmp_path)
+    assert "verification_report_path" in pack.workspace
     assert "Preserve every phase in the bound playbook" in user
     assert "do not add a separate adversarial phase" not in user
     seed = pack.metadata["bunshin"]["work_item_seed"]

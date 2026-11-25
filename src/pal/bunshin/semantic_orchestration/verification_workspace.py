@@ -96,14 +96,14 @@ def _semantic_verifier_instruction(*, graph_sink: bool, direct: bool = False) ->
         "Put every transient configure, build, and test output under the exact "
         "workspace.build_scratch_dir from your invocation pack (for example, pass that path to "
         "CMake with `-B`). Never create build output in the repository worktree; write only durable "
-        "verifier cases and the Manager-preseeded verification_report.yaml under the bound verification corpus. "
+        "verifier cases under the bound verification corpus. "
     )
     if direct:
         return scratch_rule + (
             "Verify the current Candidate against reference:task and the exact shared module_work_view. "
             "Independently check requested report files and conclusions against original evidence, or run "
             "focused behavioral checks for code changes. Regress prior findings, inspect the current delta, "
-            "and submit one evidence-backed outcome. No authored architecture or dependency assumptions apply."
+            "and submit one evidence-backed outcome. Exercise the delivered entrypoint as its consumer would."
         )
     if graph_sink:
         return (
@@ -111,8 +111,7 @@ def _semantic_verifier_instruction(*, graph_sink: bool, direct: bool = False) ->
             + "This is the terminal delivery module in the contract graph. Assume accepted dependencies satisfy their public "
             "contracts. Use reference:module_work_view for this module and the separate "
             "reference:system_delivery_view for whole-system requirements and scenarios; then test the real consumer "
-            "entrypoint end to end in this node's assembled worktree. The Manager-seeded `verify system scenario: ...` "
-            "checklist items are exhaustive: complete each one only after executable evidence covers that scenario's "
+            "entrypoint end to end in this node's assembled worktree. Cover each scenario's "
             "declared entrypoint, observable behavior, and material failure behavior. Replay the "
             "bound corpora and findings, cover success and material failure paths, and inspect the current diff for new "
             "defects. Submit one outcome bound to this Candidate; no earlier verdict settles it."

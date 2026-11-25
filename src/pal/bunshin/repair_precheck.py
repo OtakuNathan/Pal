@@ -35,12 +35,16 @@ def suite_command(scope: Mapping[str, Any], files: list[str]) -> str:
     }
     mixed = any(case.suffix.lower() in other_test_sources for case in cases)
     if discoverable and not mixed:
-        executable = str(Path(sys.executable).resolve(strict=True))
-        return shlex.join([
-            executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",
-            "--maxfail=0", "--tb=short", "--", path,
-        ])
+        return pytest_suite_command(path)
     return ""
+
+
+def pytest_suite_command(path: str) -> str:
+    executable = str(Path(sys.executable).resolve(strict=True))
+    return shlex.join([
+        executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",
+        "--maxfail=0", "--tb=short", "--", path,
+    ])
 
 
 def repair_precheck_plan(repo: Path, scope: Mapping[str, Any]) -> dict[str, Any]:

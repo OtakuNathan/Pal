@@ -290,6 +290,8 @@ def _combined_packet(store, cohort, provider, own_history, captures):
                           or packet.get("route") in {"verification_correction", "contract_revision",
                                                     "architecture_revision", "requirements_revision"})
             targets = list(mapping.get(identity, [] if correction else [origin]))
+            if finding.get("evidence_call_id") and packet.get("tool_receipts_ref"):
+                finding.setdefault("tool_receipts_ref", packet["tool_receipts_ref"])
             original = (finding, targets)
             scoped_identity = identity
             if identity in identities:

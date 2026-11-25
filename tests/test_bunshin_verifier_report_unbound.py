@@ -86,7 +86,7 @@ def _valid_report_yaml(
     return yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
 
 
-def _setup_unbound_verifier(tmp_path: Path, *, with_test_file: bool = True, scratch_only: bool = False):
+def _setup_unbound_verifier(tmp_path: Path, *, with_test_file: bool = True, scratch_only: bool = False, verdict_scope: str = ""):
     from tests.test_bunshin_verification import BunshinVerificationTests
 
     fixture = BunshinVerificationTests()
@@ -114,18 +114,18 @@ def _setup_unbound_verifier(tmp_path: Path, *, with_test_file: bool = True, scra
             "artifact_stage_dir": str(tmp_path / "stage"),
             "write_path_scopes": [view["verification_corpus"]],
             "verification_scratch_only": scratch_only,
+            **({"verification_verdict_scope": verdict_scope, "verification_candidate_digest": digest,
+                "repair_suite_required": not scratch_only} if verdict_scope else {}),
             "review_tool_evidence_refs": [],
         },
         role="verifier",
     )
     workspace["bunshin"]["verification_tool_contract"] = contract
     workspace["invocation_id"] = workspace["bunshin"]["invocation_id"]
-    workspace = bind_verification_report_file(
-        workspace,
-        work_view=view,
-        verification_policy=contract["verification_policy"],
-        candidate_digest=digest,
-    )
+    if not verdict_scope:
+        workspace = bind_verification_report_file(
+            workspace, work_view=view, verification_policy=contract["verification_policy"], candidate_digest=digest,
+        )
     pack = apply_role_capability_policy(
         BunshinInvocationPack(
             invocation_id=workspace["invocation_id"],
@@ -271,7 +271,7 @@ def test_writing_report_after_final_shell_run_keeps_receipts_fresh_while_test_ed
         report_path.write_text(
             _valid_report_yaml(
                 candidate_digest=digest,
-                command=f"{sys.executable} tests/router/verifier/test_probe.py",
+                command="shell-1",
                 adversarial_status="not_applicable",
                 adversarial_notes="No concurrency or FFI surface in this pure module.",
             ),
@@ -713,3 +713,188 @@ def test_failed_lsp_is_explained_but_cannot_replace_strong_evidence():
     assert final_verification_errors([lsp], outcome="pass", changed=False)
     report["focus_areas"]["regressions"]["commands"] = ["diagnostics"]
     assert report_evidence_errors(report, [command, lsp], workspace)
+
+
+def test_coder_finding_resolves_failed_shell_receipt_from_accepted_verification(tmp_path):
+    from pal.bunshin.verification import repair_bill_semantic_view
+
+    fixture, workspace, _, runtime, base_runtime, repo, digest, view = _setup_unbound_verifier(tmp_path)
+    try:
+        command = "echo 'wrong route' >&2; exit 7"
+        result = asyncio.run(runtime.execute_tool_async(new_tool_call(
+            name="run_shell", args={"cmd": command, "cwd": str(repo)}, call_id="router-probe",
+        )))
+        assert "Verification call_id: router-probe" in result.llm_text
+        workspace["bunshin"]["swe_verification_tool_contract"] = {
+            "repair_path_owners": {"router": [{"kind": "file", "path": "router.py"}]},
+        }
+        Path(workspace["verification_report_path"]).write_text(_valid_report_yaml(candidate_digest=digest))
+        fields = {
+            "finding_id": "wrong-route", "expected_revision": 0, "finding_kind": "module_defect",
+            "summary": "The router selects the wrong destination.", "priority": "p1",
+            "locations": [{"scope": "workspace", "file": "router.py", "line": 1}],
+            "evidence_call_id": "router-probe",
+        }
+        finding = asyncio.run(runtime.execute_tool_async(new_tool_call(name="update_finding", args=fields)))
+        assert finding.ok, finding.llm_text
+        submit = new_tool_call(name="op_bunshin_verification_request_module_repair", args={})
+        result = swe_verification_tool_result(submit, workspace, [])
+        assert result.ok, result.llm_text
+        submission = json.loads((tmp_path / "stage/verification_submission.json").read_text())
+        receipts = submission["tool_receipts"]
+        store = fixture.store
+        receipt_set = store.put_json({"receipts": receipts}, artifact_type="VerificationToolReceiptSetArtifact")
+        packet = store.put_json({
+            "artifact_kind": "semantic_repair_packet", "module_name": "router",
+            "findings": submission["findings"], "tool_receipts_ref": receipt_set.to_dict(),
+        }, artifact_type="RepairPacketArtifact")
+        item, = repair_bill_semantic_view(store, packet, module_name="router")["findings"]
+        assert item["evidence_call_id"] == "router-probe"
+        execution = item["execution"]
+        assert execution["args"] == {"cmd": command, "cwd": str(repo)}
+        assert execution["returncode"] == 7 and execution["ok"] is False
+        assert execution["stderr"] == "wrong route\n"
+
+        def validate():
+            return semantic_verification_submission_errors(
+                submission, work_view=view, changed_paths=[], current_case_paths=["tests/router/verifier/test_router.py"],
+                corpus_scope=view["verification_corpus"], scratch_only=False, workspace=workspace,
+            )
+
+        assert not validate()
+        receipts.append(dict(receipts[0]))
+        assert any("must identify one execution" in msg for msg in validate())
+        receipts.pop()
+        receipts[0]["verification_binding"]["candidate_digest"] = "different-candidate"
+        assert any("different Candidate" in msg for msg in validate())
+        receipts[0]["verification_binding"]["candidate_digest"] = digest
+        submission["findings"][0]["evidence_call_id"] = "unrelated"
+        assert any("unrelated" in msg for msg in validate())
+        del submission["findings"][0]["evidence_call_id"]
+        assert not validate()
+    finally:
+        runtime._execution.runtime.shutdown()
+        base_runtime.shutdown()
+        fixture.tearDown()
+
+
+@pytest.mark.parametrize("scope", ["module", "sink"])
+def test_verdict_accepts_one_fresh_complete_suite_without_report_or_checklist(tmp_path, scope):
+    from pal.bunshin.repair_precheck import suite_command
+
+    fixture, workspace, _, runtime, base, repo, _, view = _setup_unbound_verifier(
+        tmp_path, verdict_scope=scope, with_test_file=False)
+    try:
+        corpus = view["verification_corpus"]
+        runner = f"{corpus['path']}/run-tests.sh"
+        script = repo / runner
+        # Exercise a real consumer via stdin and stdout, including an empty input.
+        (repo / "src/router.py").write_text("import sys\nprint(sys.stdin.read().strip().upper())\n")
+        subprocess.run(["git", "-C", str(repo), "commit", "-qam", "add CLI"], check=True)
+        workspace["verification_candidate_digest"] = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        script.write_text('set -eu\ntest "$(printf hello | python src/router.py)" = HELLO\n'
+                          'test "$(python src/router.py </dev/null)" = ""\n')
+        command = suite_command(corpus, [runner])
+
+        def run(command, call_id):
+            return asyncio.run(runtime.execute_tool_async(new_tool_call(
+                name="run_shell", args={"cwd": str(repo), "cmd": command}, call_id=call_id)))
+
+        def submit(**args):
+            return asyncio.run(runtime.execute_tool_async(new_tool_call(name="submit_verification_pass", args=args)))
+
+        assert run("git status --short", "status").ok
+        assert "complete verifier suite" in submit().llm_text
+        assert run(command, "first").ok
+        script.write_text(script.read_text() + "# added a case\n")
+        assert "complete verifier suite" in submit(system_test_calls=["first"]).llm_text
+        assert run(command, "suite").ok
+        if scope == "sink":
+            assert "system_test_calls" in submit().llm_text
+            for invalid in ["first", "unknown"]:
+                assert not submit(system_test_calls=[invalid]).ok
+        passed = submit(**({"system_test_calls": ["suite"]} if scope == "sink" else {}))
+        assert passed.ok, passed.llm_text
+        sub = json.loads((tmp_path / "stage/verification_submission.json").read_text())
+        assert sub["work_items"] == []
+        assert "verification_report" not in sub
+        assert not (script.parent / VERIFICATION_REPORT_FILENAME).exists()
+
+        def manager_errors(submission):
+            return semantic_verification_submission_errors(
+                submission, work_view=view, changed_paths=[runner], current_case_paths=[runner],
+                corpus_scope=corpus, scratch_only=False, workspace=workspace)
+        assert not manager_errors(sub)
+        if scope == "sink":
+            assert manager_errors({**sub, "system_test_calls": []})
+            assert manager_errors({**sub, "system_test_calls": ["first"]})
+        script.write_text("exit 1\n")
+        assert manager_errors(sub)
+    finally:
+        runtime._execution.runtime.shutdown()
+        base.shutdown()
+        fixture.tearDown()
+
+
+def test_verdict_returns_static_counterexamples_together_without_a_green_suite(tmp_path):
+    fixture, workspace, _, runtime, base, repo, _, view = _setup_unbound_verifier(
+        tmp_path, verdict_scope="module", with_test_file=False)
+    try:
+        workspace["bunshin"]["swe_verification_tool_contract"] = {
+            "repair_path_owners": {"router": [{"kind": "file", "path": "src/router.py"}]}}
+        for name, example in [("blank", "Empty input returns an empty route instead of raising."),
+                              ("case", "Input ABC returns ABC instead of abc.")]:
+            result = asyncio.run(runtime.execute_tool_async(new_tool_call(name="update_finding", args={
+                "finding_id": name, "expected_revision": 0, "finding_kind": "module_defect",
+                "summary": example, "priority": "p1",
+                "locations": [{"scope": "workspace", "file": "src/router.py", "line": 1}],
+            })))
+            assert result.ok, result.llm_text
+        assert "case (rev 1)" in render_work_item_context(workspace)
+        result = swe_verification_tool_result(new_tool_call(name="op_bunshin_verification_request_module_repair"),
+                                              workspace, [])
+        assert result.ok, result.llm_text
+        sub = json.loads((tmp_path / "stage/verification_submission.json").read_text())
+        assert {f["finding_id"] for f in sub["findings"]} == {"blank", "case"}
+        assert not semantic_verification_submission_errors(
+            sub, work_view=view, changed_paths=[], current_case_paths=[], corpus_scope=view["verification_corpus"],
+            scratch_only=False, workspace=workspace)
+    finally:
+        runtime._execution.runtime.shutdown()
+        base.shutdown()
+        fixture.tearDown()
+
+
+def test_verdict_distinguishes_consumer_inputs_and_explains_weak_lsp():
+    from pal.bunshin.verification_readiness import verdict_pass_errors
+
+    corpus = {"kind": "directory", "path": "cases"}
+    workspace = {"repair_suite_required": True, "verification_verdict_scope": "sink", "repo_path": "/repo"}
+    receipts = [
+        {"kind": "command", "tool_name": "op_exec_shell", "args": {"cmd": cmd, "stdin": stdin}, "ok": True, "call_id": key}
+        for key, cmd, stdin in [("suite", "sh cases/run-tests.sh", None), ("empty", "cli", ""), ("value", "cli", "1")]
+    ]
+    receipts.append({"kind": "lsp", "tool_name": "op_lsp_diagnostics", "ok": False,
+                     "args": {"file_path": "module.py"}, "call_id": "lsp"})
+
+    def errors(note):
+        return verdict_pass_errors(workspace, receipts, scope=corpus, case_paths=["cases/run-tests.sh"],
+                                   system_test_calls=["empty", "value"], note=note)
+
+    assert any("LSP" in error for error in errors(""))
+    assert not errors("Language server could not resolve the dependency. CLI scenarios passed.")
+    receipts.append({**receipts[0], "ok": False, "call_id": "suite-again"})
+    assert any("complete verifier suite" in error for error in errors("Language server unavailable."))
+
+
+def test_verdict_ignores_a_legacy_report_left_in_scratch():
+    from pal.bunshin.verification_readiness import verdict_pass_errors
+
+    workspace = {"verification_verdict_scope": "module", "verification_scratch_only": True}
+    receipt = {"kind": "command", "tool_name": "op_exec_shell", "args": {"cmd": "check"}, "ok": True}
+    def verify(paths):
+        return verdict_pass_errors(workspace, [receipt], scope={}, case_paths=paths, system_test_calls=[], note="")
+
+    assert verify(["review_scratch/verification_report.yaml"])
+    assert not verify(["review_scratch/cases/check.sh", "review_scratch/verification_report.yaml"])

@@ -402,6 +402,7 @@ class VerificationSettlement:
                 "candidate_ref": accepted_candidate_ref.to_dict(),
                 "implementation_candidate_ref": candidate_ref.to_dict(),
                 "tool_receipts_ref": receipts_ref.to_dict(),
+                **{key: submission[key] for key in ("system_test_calls", "note") if key in submission},
                 **report_fields,
             }
         if workspace_evidence_ref is not None:

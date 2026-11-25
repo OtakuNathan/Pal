@@ -1296,9 +1296,8 @@ workspace_policy: {}
                                 "op_bunshin_update_finding", "op_bunshin_remove_finding",
                             }
                         )
-                        # Editing targets a returned current-draft finding;
-                        # creation and every other Manager identity stay hidden.
-                        if not draft_finding_target:
+                        receipt_citation = lowered == "evidence_call_id" and capability == "op_bunshin_update_finding"
+                        if not (draft_finding_target or receipt_citation):
                             self.assertFalse(lowered.endswith("_id"), name)
                         self.assertFalse(lowered.endswith("_ref"), name)
                         self.assertFalse(lowered.endswith("_sha"), name)

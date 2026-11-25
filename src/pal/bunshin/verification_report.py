@@ -144,7 +144,7 @@ def render_verification_report_template(
         name: {"status": "", "commands": [], "notes": ""}
         for name in _focus_areas(work_view, verification_policy or {}, system_delivery_view)
     }
-    lines.append("# For pass, list the exact successful shell commands or tool call IDs in commands.")
+    lines.append("# For pass, cite the successful verification call_id(s) in commands.")
 
     payload: dict[str, Any] = {
         "schema_version": "1",

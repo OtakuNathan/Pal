@@ -146,6 +146,15 @@ def test_corpus_edit_invalidates_receipt_until_real_rerun(verifier):
     assert payload(call('submit_verification_pass'))['submitted'] is True
 
 
+def test_reused_verification_tool_result_names_original_execution(verifier):
+    first = run_delta(verifier)
+    repeated = run_delta(verifier)
+    assert repeated.call_id != first.call_id
+    assert payload(repeated)["reused"] is True
+    assert f"Verification call_id: {first.call_id}\n" in repeated.llm_text
+    assert len(verifier[1]["review_tool_evidence_refs"]) == 1
+
+
 def test_missing_final_receipt_cannot_be_invented_by_replaying_semantic_case(verifier):
     fixture, workspace, _, _, _, _ = verifier
     payload(run_delta(verifier))

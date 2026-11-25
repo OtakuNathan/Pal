@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import shlex
 from pathlib import PurePosixPath
 from typing import Any, Callable
 
@@ -385,6 +386,18 @@ def _execution_discipline_lines(pack: BunshinInvocationPack) -> list[str]:
         lines.append(
             "- Implementation: once the owned contract, edit path, and one sufficient validation path are clear, implement directly. When the checklist is complete and focused checks pass, call submit_candidate immediately."
         )
+    elif role == "verifier" and pack.workspace.get("verification_verdict_scope"):
+        lines[1] = "- Use the playbook to guide verification. Batch all material findings with counterexamples and submit one verdict."
+        if pack.workspace.get("repair_suite_required"):
+            from pal.bunshin.repair_precheck import pytest_suite_command
+            for scope in pack.workspace.get("write_path_scopes") or []:
+                path = str(scope["path"])
+                runner = path if scope["kind"] == "file" else f"{path}/run-tests.sh"
+                lines.append(f"- Run the complete verifier suite from the repository root. For pytest run "
+                             f"`{pytest_suite_command(path)}`. For a shell suite run `{shlex.join(['sh', runner])}`.")
+        if pack.workspace["verification_verdict_scope"] == "sink":
+            lines.append("- Exercise the delivered public entrypoint for all bound system scenarios and dogfood it as a user. "
+                         "Supply the successful call IDs in system_test_calls. One suite run may cover both.")
     elif role == "verifier":
         lines.extend(
             [

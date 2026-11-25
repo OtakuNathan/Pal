@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from pal.bunshin.repair_precheck import suite_command
+from pal.bunshin.verification_report import VERIFICATION_REPORT_FILENAME
 from pal.shared.tool_protocol import FailedResult
 
 
@@ -144,6 +146,48 @@ def final_verification_checks(receipts: list[dict[str, Any]]) -> list[dict[str, 
     return [item for i, item in enumerate(receipts)
             if i > last_write and item.get("kind") in {"command", "lsp"}
             and not item.get("stale")]
+
+
+def verdict_pass_errors(
+    workspace: Mapping[str, Any], receipts: list[dict[str, Any]], *,
+    scope: Mapping[str, Any], case_paths: list[str], system_test_calls: Any, note: Any,
+) -> list[str]:
+    checks = final_verification_checks(receipts)
+    errors = []
+    # A newer failure of the same execution supersedes its earlier green run.
+    latest = {}
+    for item in checks:
+        args = item.get("args") or {}
+        if item.get("tool_name") == "op_exec_shell" and args.get("target", 0) == 0:
+            key = (args.get("cmd"), args.get("cwd") or workspace.get("repo_path"), args.get("stdin"))
+            latest[key] = item
+    if workspace.get("repair_suite_required"):
+        command = suite_command(scope, case_paths)
+        if not command:
+            errors.append("Add a discoverable verifier test or a run-tests.sh that exercises the complete verifier corpus.")
+        elif not latest.get((command, workspace.get("repo_path"), None), {}).get("ok"):
+            errors.append(f"Run the complete verifier suite successfully from the repository root: {command}")
+    elif not any(path != f"review_scratch/{VERIFICATION_REPORT_FILENAME}" for path in case_paths) or not any(
+        item.get("ok") for item in latest.values()
+    ):
+        errors.append("PASS requires a durable verifier case and a fresh successful command.")
+    if workspace.get("verification_verdict_scope") == "sink" and not system_test_calls:
+        errors.append("Exercise the delivered entrypoint and cite its successful call ID in system_test_calls.")
+    if not isinstance(system_test_calls, list) or any(not isinstance(i, str) or not i for i in system_test_calls):
+        errors.append("system_test_calls must contain execution call IDs")
+    else:
+        for call_id in system_test_calls:
+            matches = [item for item in receipts if item.get("call_id") == call_id]
+            if len(matches) != 1 or matches[0] not in latest.values() or not matches[0].get("ok"):
+                errors.append(f"system test {call_id!r} needs a fresh successful execution on this Candidate.")
+    diagnostics = {}
+    for item in checks:
+        if item.get("tool_name") == "op_lsp_diagnostics":
+            args = {key: val for key, val in (item.get("args") or {}).items() if key != "timeout_ms"}
+            diagnostics[json.dumps(args, sort_keys=True)] = item
+    if any(not item.get("ok") for item in diagnostics.values()) and not (isinstance(note, str) and note.strip()):
+        errors.append("Explain the failed or unavailable LSP diagnostic in note.")
+    return errors
 
 
 def report_evidence_errors(

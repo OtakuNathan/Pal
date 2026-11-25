@@ -266,6 +266,30 @@ def test_correction_findings_remain_preserved_without_implementation_ownership(t
     assert "invalid-scope" in {finding["summary"] for finding in view["related_findings"]}
 
 
+def test_combined_repair_resolves_same_call_id_in_each_source_verification(tmp_path):
+    case = Case(tmp_path)
+    history = []
+    for source in ("first", "second"):
+        receipts = case.put({"receipts": [{
+            "call_id": "call-1", "kind": "command", "tool_name": "op_exec_shell", "ok": False,
+            "args": {"cmd": f"test {source}"}, "structured": {"returncode": 1, "stderr": source},
+        }]}, "VerificationToolReceiptSetArtifact")
+        history.append(case.put({
+            "artifact_kind": "semantic_repair_packet", "module_name": "P",
+            "findings": [{"finding_id": source, "summary": source, "evidence_call_id": "call-1"}],
+            "tool_receipts_ref": receipts,
+        }, "RepairPacketArtifact"))
+    node = case.node("P")
+    with case.repository.database.write_connection() as connection:
+        case.repository.snapshots.write_snapshot_locked(connection, node,
+            replace(node, payload={**node.payload, "historical_repair_bill_refs": history}))
+    case.apply()
+    view = repair_bill_semantic_view(case.artifacts, case.node("P").payload["repair_bill_ref"], module_name="P")
+    assert {item["summary"]: item["execution"]["stderr"] for item in view["findings"] if "execution" in item} == {
+        "first": "first", "second": "second",
+    }
+
+
 def test_joined_cohort_reopens_all_and_only_validated_providers(tmp_path):
     case = Case(tmp_path, join_peer=True)
     case.apply()

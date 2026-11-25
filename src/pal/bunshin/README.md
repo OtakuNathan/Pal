@@ -17,6 +17,15 @@ same graph scheduler. Workflow finalization packages the commit recorded for the
 accepted sink with its bound verification reference and queues delivery to Pal.
 Memory candidates follow the existing review path.
 
+New Verifier assignments using `module_verification.v2` submit a verdict and
+batch findings with counterexamples. Execution findings can cite a tool call ID.
+Software PASS requires a successful run of the complete verifier suite on the
+current candidate and corpus. At the sink the Verifier exercises the delivered
+entrypoint across the system scenarios and cites the successful calls. A suite
+that drives the public entrypoint can supply that evidence in one run. A failed
+LSP diagnostic can be explained in the PASS note. Pinned v1 profiles and retries
+retain their checklist and YAML report contract.
+
 The explicit stopped-runtime cutover upgrades schema 29 or 30 to 31 in place and
 preserves the database and checkpoint files. Ordinary repository opens require
 the cutover first. Manager startup and cutover hold the same runtime ownership

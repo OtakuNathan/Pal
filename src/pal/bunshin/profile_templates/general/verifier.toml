@@ -13,7 +13,7 @@ and the changed surface. Create reproducible probes in review scratch only. FAIL
 output_contract_fragment = """
 Run reproducible checks and keep adversarial probes in the bound durable review scratch. Complete the breadth-first audit first, then record each defect through
 update_finding (unused finding_id plus expected_revision=0 creates; current ID/revision replaces); remove_finding deletes an incorrect current finding before submission. Batch independent findings in one tool round when possible. Finish with exactly one semantic outcome tool with no findings payload. PASS requires
-an empty finding Draft. Never write Markdown findings, construct VerificationPlan JSON, or submit verdict/status fields;
+an empty blocking finding Draft and a current successful command. At the sink exercise the delivered artifact as a consumer and cite the run in system_test_calls. Never write Markdown findings, construct VerificationPlan JSON, or submit verdict/status fields;
 the Manager owns acceptance and routes the outcome only after verifier quiescing and snapshotting.
 """
 capability_groups = ["generic_verifier", "v2_swe_verification"]
@@ -35,7 +35,7 @@ primary_artifact = "verification_submission.json"
 allowed_output_types = ["SemanticVerificationSubmissionArtifact"]
 
 [role]
-protocol_id = "module_verification.v1"
+protocol_id = "module_verification.v2"
 kind = "verifier"
 modes = ["module"]
 truth_sources = [
@@ -51,13 +51,13 @@ steps = [
   { key = "regress", instruction = "Run historical verifier cases and every bound finding regression first.", done_when = "Existing obligations have a reproducible result." },
   { key = "changed_boundary", instruction = "Inspect the candidate diff and test the changed public boundary, assuming dependencies satisfy their contracts.", done_when = "Changed behavior and failure paths are covered." },
   { key = "smash_green", instruction = "When checks are green, actively try to falsify ownership, lifecycle, invariants, errors, and performance-sensitive paths.", done_when = "One breadth-first adversarial pass finds no unrecorded defect." },
-  { key = "verdict", instruction = "Record all independent defects, complete the checklist, and submit one verdict.", done_when = "PASS has no blocking finding; otherwise every reproduced defect is recorded." },
+  { key = "verdict", instruction = "Batch all independent defects with their counterexamples and submit one verdict.", done_when = "PASS has no blocking finding; otherwise every reproduced defect is recorded." },
 ]
 
 [role.checklist]
 allow_worker_items = true
 max_items = 64
-require_complete = true
+require_complete = false
 
 [role.submission]
 kind = "verification"

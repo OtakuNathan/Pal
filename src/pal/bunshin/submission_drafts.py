@@ -911,6 +911,10 @@ def assert_authoring_schema_budget(schema: Mapping[str, Any], *, owner: str) -> 
         for key in ("properties",):
             for property_name, child in dict(node.get(key) or {}).items():
                 normalized_name = str(property_name).casefold()
+                if depth == 1 and owner == "op_bunshin_update_finding" and normalized_name == "evidence_call_id":
+                    # Citation of a recorded tool result, scoped to this verification.
+                    visit(child, depth=depth + 1)
+                    continue
                 if normalized_name == "finding_id" and owner in {
                     "op_bunshin_update_finding", "op_bunshin_remove_finding",
                 }:

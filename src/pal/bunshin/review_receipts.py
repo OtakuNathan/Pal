@@ -78,3 +78,34 @@ def _review_tool_evidence_ref(
         "output_text": output_text[:65536],
         "structured": structured,
     }
+
+
+def finding_execution_receipt(call_id: str, receipts: list[dict[str, Any]]) -> dict[str, Any]:
+    matches = [
+        item for item in receipts
+        if item.get("call_id") == call_id and item.get("kind") in {"command", "lsp"}
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"finding call_id {call_id!r} must identify one execution in this verification")
+    return matches[0]
+
+
+def finding_evidence_errors(
+    findings: list[dict[str, Any]], receipts: list[dict[str, Any]], binding: Mapping[str, Any],
+) -> list[str]:
+    errors = []
+    for finding in findings:
+        call_id = finding.get("evidence_call_id")
+        if not call_id:
+            continue
+        try:
+            receipt = finding_execution_receipt(call_id, receipts)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        executed = receipt.get("verification_binding")
+        if not isinstance(executed, Mapping) or any(
+            key not in binding or executed.get(key) != binding[key] for key in ("candidate_digest", "input_fingerprint")
+        ):
+            errors.append(f"finding call_id {call_id!r} belongs to a different Candidate or assignment")
+    return errors

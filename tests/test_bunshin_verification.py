@@ -1350,7 +1350,7 @@ class BunshinVerificationTests(unittest.TestCase):
             }
         )
         Path(str(workspace["review_scratch_dir"])).mkdir(parents=True, exist_ok=True)
-        if role in {"reviewer", "verifier"}:
+        if role in {"reviewer", "verifier"} and not workspace.get("verification_verdict_scope"):
             initialized = update_checklist_tool_result(
                 new_tool_call(
                     name="op_bunshin_update_checklist",
