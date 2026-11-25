@@ -4,6 +4,7 @@ from pal.shared.tool_protocol import ToolCallIR
 
 import hashlib
 import mimetypes
+from glob import escape
 from pathlib import Path
 from typing import Any
 
@@ -104,7 +105,10 @@ def _normalize_reference_path_item(raw: Any, *, index: int) -> dict[str, Any]:
     ).strip()
     if not raw_path:
         return {}
-    root_path, include = _reference_root_and_include(raw_path)
+    bound_input = _coerce_bool(payload.get("bound_input"), default=False)
+    # Frozen inputs already live at their verified in-workspace file paths.
+    # Only external references need a mount root and an include filter.
+    root_path, include = (raw_path, []) if bound_input else _reference_root_and_include(raw_path)
     extra_include = _string_list(payload.get("include") or payload.get("includes"))
     if extra_include:
         include = extra_include
@@ -115,11 +119,11 @@ def _normalize_reference_path_item(raw: Any, *, index: int) -> dict[str, Any]:
         "path": str(root),
         "mode": "read_only",
         "truth_source": _coerce_bool(payload.get("truth_source"), default=True),
-        "bound_input": _coerce_bool(payload.get("bound_input"), default=False),
+        "bound_input": bound_input,
     }
     if include:
         item["include"] = include
-    for key in ("description", "role", "required"):
+    for key in ("description", "role", "required", "declared_input_name"):
         if key in payload:
             item[key] = payload.get(key)
     return item
@@ -127,10 +131,10 @@ def _normalize_reference_path_item(raw: Any, *, index: int) -> dict[str, Any]:
 
 def _reference_root_and_include(raw_path: str) -> tuple[str, list[str]]:
     path = str(raw_path or "").strip()
-    if not _has_glob(path):
-        expanded = Path(path).expanduser()
-        if expanded.exists() and expanded.is_file():
-            return str(expanded.parent), [expanded.name]
+    expanded = Path(path).expanduser()
+    if expanded.is_file():
+        return str(expanded.parent), [escape(expanded.name)]
+    if expanded.is_dir() or not _has_glob(path):
         return path, []
     normalized = path.replace("\\", "/")
     parts = normalized.split("/")

@@ -9,10 +9,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from pal.bunshin.artifacts import ArtifactRef
+from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT
+from pal.bunshin.direct_contract import DIRECT_EXECUTION_ARTIFACT
 from pal.bunshin.contracts import (
     ActionEnvelope,
     AggregateSnapshot,
     AggregateType,
+    DeferredEffectError,
     PermanentEffectError,
 )
 from pal.bunshin.workflow_publication import WorkflowPublication
@@ -39,9 +42,9 @@ from pal.bunshin.sessions import (
 from pal.bunshin.verification import DefectPropagationService
 from pal.bunshin.workflow_control import (
     _active_control_children, _reconcile_cycle_control_projection,
-    _workflow_pauses_cycles, reconcile_control_requests,
+    _workflow_pauses_cycles, control_effect_is_current, reconcile_control_requests,
 )
-from pal.bunshin.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.workflow_runtime import WorkflowCoordinator, role_pause_must_drain
 
 
 class SemanticEffectPort(Protocol):
@@ -278,9 +281,10 @@ class WorkflowEffects(WorkflowEffectContext):
         if effect_type == "schedule_ready_nodes":
             snapshot = self._effect_snapshot(effect)
             epoch_id = snapshot.aggregate_id if snapshot.aggregate_type == AggregateType.EXECUTION_EPOCH else str(snapshot.payload.get("epoch_id") or "")
-            DagScheduler(self.repository).schedule_ready_nodes(
+            self._advance_graph(
                 workflow_id=snapshot.workflow_id,
                 epoch_id=epoch_id,
+                generation=int(snapshot.payload.get("graph_generation") or 0),
             )
             return {}
         if effect_type == "notify_node_accepted":
@@ -304,13 +308,16 @@ class WorkflowEffects(WorkflowEffectContext):
         }:
             return self._control_epoch_nodes(effect_type, effect)
         if effect_type == "suspend_stale_node_assignments":
-            node = self._effect_snapshot(effect)
-            self.repository.role_cancellation.cancel_role_assignments(
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-                reason="node became stale before its queued activation started",
-            )
+            with self.repository.transaction() as work:
+                node = work.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, str(effect["aggregate_id"]))
+                if node is None or not control_effect_is_current(effect_type, node):
+                    return {"status": "superseded"}
+                work.role_cancellation.cancel_role_assignments(
+                    workflow_id=node.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node.aggregate_id,
+                    reason="node became stale before its queued activation started",
+                )
             return {}
         if effect_type == "reopen_dependency_and_stale_descendants":
             node = self._effect_snapshot(effect)
@@ -515,7 +522,7 @@ class WorkflowEffects(WorkflowEffectContext):
             return {}
         if epoch.state == "RUNNING":
             self._control_epoch_nodes("resume_epoch_nodes", effect)
-            DagScheduler(self.repository).advance(
+            self._advance_graph(
                 workflow_id=epoch.workflow_id, epoch_id=epoch.aggregate_id,
                 generation=int(epoch.payload.get("graph_generation") or 0),
             )
@@ -525,30 +532,27 @@ class WorkflowEffects(WorkflowEffectContext):
                 {**dict(effect), "effect_type": "publish_final_deliverable"}
             )
         if epoch.state == "STARTING":
-            self._control_epoch_nodes("resume_epoch_nodes", effect)
-            nodes = [
-                item
-                for item in self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
-                if item.aggregate_type == AggregateType.DAG_NODE_RUN
-                and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
-            ]
-            sinks = [item for item in nodes if bool(item.payload.get("graph_sink"))]
-            if not nodes or len(sinks) != 1:
-                raise RuntimeError("execution compilation is incomplete and requires operator triage")
-            payload = {"node_ids": [item.aggregate_id for item in nodes]}
-            payload["implementation_node_ids"] = [item.aggregate_id for item in nodes]
-            payload["sink_node_id"] = sinks[0].aggregate_id
-            self.repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type="NODES_COMPILED",
-                    workflow_id=epoch.workflow_id,
-                    aggregate_type=AggregateType.EXECUTION_EPOCH,
-                    aggregate_id=epoch.aggregate_id,
-                    actor="bunshin-recovery",
-                    expected_version=epoch.version,
-                    idempotency_key=f"effect:{effect['effect_key']}:nodes-compiled",
-                    payload=payload,
+            manifest_ref = dict(epoch.payload.get("architecture_manifest_ref") or {})
+            record = self.repository.artifacts.read_artifact_record(str(manifest_ref.get("sha256") or ""))
+            if record is not None and record["artifact_type"] in {CONTRACT_ARTIFACT, DIRECT_EXECUTION_ARTIFACT}:
+                source_epoch_id = str(epoch.payload.get("source_execution_epoch_id") or "")
+                if "source_execution_epoch_id" not in epoch.payload and int(epoch.payload.get("graph_generation") or 0) > 1:
+                    # Historical preparations did not persist the source.
+                    # The still-linked predecessor is the only admissible
+                    # recovery authority; never guess from node membership.
+                    workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
+                    source_epoch_id = str(workflow.payload.get("execution_epoch_id") or "") if workflow else ""
+                    if not source_epoch_id or source_epoch_id == epoch.aggregate_id:
+                        raise PermanentEffectError("legacy replan preparation lost its source epoch")
+                return self._compile_execution(
+                    workflow_id=epoch.workflow_id, manifest_ref=manifest_ref,
+                    causation_key=str(effect["effect_key"]), source_epoch_id=source_epoch_id,
+                    initial_repair_bill_ref=dict(epoch.payload.get("initial_repair_bill_ref") or {}) or None,
+                    epoch_id=epoch.aggregate_id,
                 )
+            WorkflowCoordinator(self.repository).activate_graph(
+                workflow_id=epoch.workflow_id, epoch_id=epoch.aggregate_id,
+                actor="bunshin-recovery",
             )
         return {}
 
@@ -1143,6 +1147,7 @@ class WorkflowEffects(WorkflowEffectContext):
         causation_key: str,
         source_epoch_id: str = "",
         initial_repair_bill_ref: Mapping[str, Any] | None = None,
+        epoch_id: str = "",
     ) -> Mapping[str, Any]:
         record = self.repository.artifacts.read_artifact_record(str(manifest_ref.get("sha256") or ""))
         if record is None:
@@ -1155,7 +1160,7 @@ class WorkflowEffects(WorkflowEffectContext):
             byte_size=int(record["byte_size"]),
             durable=True,
         )
-        epoch_id = _execution_epoch_id(
+        epoch_id = epoch_id or _execution_epoch_id(
             workflow_id=workflow_id,
             manifest_sha=ref.sha256,
             source_epoch_id=source_epoch_id,
@@ -1163,6 +1168,36 @@ class WorkflowEffects(WorkflowEffectContext):
                 dict(initial_repair_bill_ref or {}).get("sha256") or ""
             ),
         )
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        if workflow is None:
+            raise PermanentEffectError("execution preparation has no parent workflow")
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+        linked = str(workflow.payload.get("execution_epoch_id") or "")
+        if epoch is not None and (epoch.workflow_id != workflow_id
+                or epoch.payload.get("architecture_manifest_ref") != ref.to_dict()
+                or epoch.payload.get("source_execution_epoch_id", source_epoch_id) != source_epoch_id):
+            raise PermanentEffectError("execution epoch belongs to another compilation request")
+        # A committed activation can be acknowledged without reopening a
+        # paused or cancelled generation. Otherwise a parent control intent
+        # fences the original compile effect before any materialization.
+        if (linked == epoch_id and epoch is not None and epoch.state not in {"STARTING", "NOT_STARTED"}
+                and epoch.payload.get("node_ids")):
+            # The compiler's existing-epoch path is read-only and checks the
+            # exact persisted graph membership before acknowledging replay.
+            compiled = ExecutionCompiler(self.repository, self.service.contracts).compile_epoch(
+                workflow_id=workflow_id, epoch_id=epoch_id, manifest_ref=ref,
+                source_epoch_id=source_epoch_id, initial_repair_bill_ref=initial_repair_bill_ref,
+            )
+            return {"epoch_id": epoch_id, "node_ids": list(compiled.node_run_ids)}
+        if (workflow.state in {"CANCEL_REQUESTED", "CANCELLED", "RESTARTING", "COMPLETED", "REJECTED"}
+                or (linked and linked not in {source_epoch_id, epoch_id})):
+            return {"epoch_id": epoch_id, "status": "superseded"}
+        if epoch is not None and epoch.state in {"CANCELLED", "SUPERSEDED"}:
+            return {"epoch_id": epoch_id, "status": "superseded"}
+        if (workflow.state != "ACTIVE" or (epoch is not None and epoch.state in {
+                "PAUSE_REQUESTED", "PAUSED", "TRIAGE_REQUIRED", "CANCEL_REQUESTED",
+        })):
+            raise DeferredEffectError("workflow control fences execution preparation")
         compilation = ExecutionCompiler(self.repository, self.service.contracts).compile_epoch(
             workflow_id=workflow_id,
             epoch_id=epoch_id,
@@ -1170,25 +1205,12 @@ class WorkflowEffects(WorkflowEffectContext):
             source_epoch_id=source_epoch_id,
             initial_repair_bill_ref=initial_repair_bill_ref,
         )
-        self._link_workflow(workflow_id, "LINK_EXECUTION_EPOCH", {"execution_epoch_id": epoch_id}, causation_key)
-        if source_epoch_id:
-            previous = self.repository.snapshots.read_snapshot(
-                AggregateType.EXECUTION_EPOCH,
-                source_epoch_id,
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        if workflow is not None and workflow.payload.get("execution_epoch_id") != epoch_id:
+            # Only historical compiled-but-unlinked epochs need this path.
+            WorkflowCoordinator(self.repository).reconcile_activated_graph_link(
+                workflow_id=workflow_id, epoch_id=epoch_id, source_epoch_id=source_epoch_id, actor="bunshin-recovery",
             )
-            if previous is not None and previous.state == "REPLAN_REQUIRED":
-                self.repository.transitions.dispatch(
-                    ActionEnvelope(
-                        action_type="SUCCESSOR_EPOCH_STARTED",
-                        workflow_id=workflow_id,
-                        aggregate_type=AggregateType.EXECUTION_EPOCH,
-                        aggregate_id=source_epoch_id,
-                        actor="bunshin-manager",
-                        expected_version=previous.version,
-                        idempotency_key=f"successor-epoch:{source_epoch_id}:{epoch_id}",
-                        payload={"successor_execution_epoch_id": epoch_id},
-                    )
-                )
         return {"epoch_id": epoch_id, "node_ids": list(compilation.node_run_ids)}
 
     def _start_replacement_workflow_from_architecture(
@@ -1252,7 +1274,8 @@ class WorkflowEffects(WorkflowEffectContext):
                     "research_mode": str(request.get("research_mode") or "none"),
                     "actor": str(request.get("actor") or "pal"),
                     "source_channel": "bunshin-manager",
-                }
+                },
+                replacing_workflow_id=source.workflow_id,
             )
             replacement = self.repository.snapshots.read_snapshot(
                 AggregateType.WORKFLOW,
@@ -1297,106 +1320,85 @@ class WorkflowEffects(WorkflowEffectContext):
             )
         return {"replacement_workflow_id": replacement_id}
 
+    def _advance_graph(self, *, workflow_id: str, epoch_id: str, generation: int) -> None:
+        if generation:
+            installed = self.repository.cycles.read_graph_execution(workflow_id=workflow_id)
+            if installed is None or installed.graph.generation != generation:
+                return
+        DagScheduler(self.repository).schedule_ready_nodes(workflow_id=workflow_id, epoch_id=epoch_id)
+        WorkflowCoordinator(self.repository).complete_graph(
+            workflow_id=workflow_id, epoch_id=epoch_id, generation=generation,
+        )
+
     def _node_accepted(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
-        DagScheduler(self.repository).advance(
+        self._advance_graph(
             workflow_id=node.workflow_id, epoch_id=str(node.payload.get("epoch_id") or ""),
             generation=int(node.payload.get("graph_generation") or 0),
         )
         return {}
 
     def _propagate_workflow_control(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        workflow = self._effect_snapshot(effect)
-        snapshots = self.repository.queries.list_workflow_snapshots(workflow.workflow_id)
-        children = _active_control_children(snapshots, workflow)
-        if effect_type == "propagate_resume":
+        with self.repository.transaction() as work:
+            # Reconcile the current control episode, never the one in an old
+            # delivery. Check its authority in the same write transaction as
+            # all child requests and the acknowledgement of their settlement.
+            workflow = work.snapshots.read_snapshot(AggregateType.WORKFLOW, str(effect["aggregate_id"]))
+            if workflow is None or not control_effect_is_current(effect_type, workflow):
+                return {"status": "superseded"}
+            children = _active_control_children(work.queries.list_workflow_snapshots(workflow.workflow_id), workflow)
+            intent = {
+                "propagate_resume": None,
+                "propagate_cancel": ControlIntent.CANCEL,
+                "propagate_pause": ControlIntent.PAUSE,
+                "freeze_workflow_children": ControlIntent.PAUSE,
+            }[effect_type]
             for child in children:
-                if "RESUME" not in self.repository.transitions.legal_actions(
-                    child.aggregate_type,
-                    child.state,
-                ):
-                    continue
-                self.repository.transitions.dispatch(
-                    ActionEnvelope(
-                        action_type="RESUME",
-                        workflow_id=workflow.workflow_id,
-                        aggregate_type=child.aggregate_type,
-                        aggregate_id=child.aggregate_id,
-                        actor="bunshin-control",
-                        expected_version=child.version,
-                        idempotency_key=f"effect:{effect['effect_key']}:{child.aggregate_id}",
-                    )
-                )
-            return {}
-
-        intent = (
-            ControlIntent.CANCEL
-            if effect_type == "propagate_cancel"
-            else ControlIntent.PAUSE
-        )
-        for child in children:
-            machine = machine_spec_for(child.aggregate_type)
-            if machine.control_disposition(intent, child.state) != ControlDisposition.REQUEST:
-                continue
-            action_type = machine.control_policies[intent].request_action
-            self.repository.transitions.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id=workflow.workflow_id,
-                    aggregate_type=child.aggregate_type,
-                    aggregate_id=child.aggregate_id,
-                    actor="bunshin-control",
-                    expected_version=child.version,
-                    idempotency_key=f"effect:{effect['effect_key']}:{child.aggregate_id}",
-                )
-            )
-
-        if effect_type in {"propagate_pause", "propagate_cancel"}:
-            latest_snapshots = self.repository.queries.list_workflow_snapshots(workflow.workflow_id)
-            latest_workflow = self.repository.snapshots.read_snapshot(
-                AggregateType.WORKFLOW,
-                workflow.workflow_id,
-            )
-            if latest_workflow is None:
-                raise RuntimeError("workflow disappeared during control propagation")
-            latest_children = _active_control_children(latest_snapshots, latest_workflow)
-            all_settled = all(
-                machine_spec_for(child.aggregate_type).control_disposition(
-                    intent,
-                    child.state,
-                )
-                == ControlDisposition.SETTLED
+                machine = machine_spec_for(child.aggregate_type)
+                if intent is None:
+                    action_type = "RESUME"
+                    if action_type not in work.transitions.legal_actions(child.aggregate_type, child.state):
+                        continue
+                else:
+                    if intent == ControlIntent.PAUSE and role_pause_must_drain(child, work.queries):
+                        continue
+                    if machine.control_disposition(intent, child.state) != ControlDisposition.REQUEST:
+                        continue
+                    action_type = machine.control_policies[intent].request_action
+                work.transitions.dispatch(ActionEnvelope(
+                    action_type=action_type, workflow_id=workflow.workflow_id,
+                    aggregate_type=child.aggregate_type, aggregate_id=child.aggregate_id,
+                    actor="bunshin-control", expected_version=child.version,
+                    idempotency_key=f"control:{workflow.aggregate_id}:{workflow.version}:{child.aggregate_id}:{child.version}:{action_type}",
+                ))
+            if effect_type not in {"propagate_pause", "propagate_cancel"} or intent is None:
+                return {}
+            latest_children = _active_control_children(work.queries.list_workflow_snapshots(workflow.workflow_id), workflow)
+            if all(
+                machine_spec_for(child.aggregate_type).control_disposition(intent, child.state) == ControlDisposition.SETTLED
                 for child in latest_children
-            )
-        else:
-            all_settled = False
-        if all_settled:
-            confirmation = "CHILDREN_PAUSED" if effect_type == "propagate_pause" else "CHILDREN_CANCELLED"
-            latest = self.repository.snapshots.read_snapshot(
-                AggregateType.WORKFLOW,
-                workflow.workflow_id,
-            )
-            if confirmation in self.repository.transitions.legal_actions(
-                AggregateType.WORKFLOW,
-                latest.state,
             ):
-                self.repository.transitions.dispatch(
-                    ActionEnvelope(
-                        action_type=confirmation,
-                        workflow_id=workflow.workflow_id,
-                        aggregate_type=AggregateType.WORKFLOW,
-                        aggregate_id=workflow.workflow_id,
-                        actor="bunshin-control",
-                        expected_version=latest.version,
-                        idempotency_key=f"effect:{effect['effect_key']}:confirm",
-                    )
-                )
+                confirmation = "CHILDREN_PAUSED" if intent == ControlIntent.PAUSE else "CHILDREN_CANCELLED"
+                work.transitions.dispatch(ActionEnvelope(
+                    action_type=confirmation, workflow_id=workflow.workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW, aggregate_id=workflow.aggregate_id,
+                    actor="bunshin-control", expected_version=workflow.version,
+                    idempotency_key=f"control:{workflow.aggregate_id}:{workflow.version}:{confirmation}",
+                ))
         return {}
 
     def _control_epoch_nodes(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         intent = {"cancel_epoch_nodes": ControlIntent.CANCEL, "pause_epoch_nodes": ControlIntent.PAUSE,
                   "freeze_epoch_nodes": ControlIntent.PAUSE, "resume_epoch_nodes": None}[effect_type]
-        DagScheduler(self.repository).control_nodes(intent, self._effect_snapshot(effect), str(effect["effect_key"]))
+        with self.repository.transaction() as work:
+            epoch = work.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, str(effect["aggregate_id"]))
+            if epoch is None or not control_effect_is_current(effect_type, epoch):
+                return {"status": "superseded"}
+            if intent is None:
+                workflow = work.snapshots.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
+                if workflow is not None and workflow.state not in {"CREATED", "ACTIVE"}:
+                    return {"status": "superseded"}
+            DagScheduler(self.repository).control_nodes(intent, epoch, unit_of_work=work)
         return {}
 
     def _failed_effect_triage_action(

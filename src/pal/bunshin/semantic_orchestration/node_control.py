@@ -11,7 +11,6 @@ from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvar
 from pal.bunshin.workspace_resources import WorkspaceLockRegistry
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.repository import BunshinRepository
-from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.implementation_snapshot import ImplementationSnapshot
 from pal.bunshin.semantic_orchestration.node_admission import NodeAdmission
@@ -74,31 +73,33 @@ class NodeControl:
                 )
         self.workspace_locks.release(node.aggregate_id)
         self.workspace_locks.release(f"verification:{node.aggregate_id}")
-        current = self.repository.snapshots.read_snapshot(
-            AggregateType.DAG_NODE_RUN,
-            node.aggregate_id,
-        )
-        if current is None:
-            raise SubmissionInvariantError("controlled node disappeared before worker retirement")
-        cancel_target = str(current.payload.get("cancel_target") or "CANCELLED")
-        terminal_cancel = bool(cancel and cancel_target == "CANCELLED")
-        self.repository.role_cancellation.cancel_role_assignments(
-            preserve_interactions=not cancel,
-            workflow_id=node.workflow_id,
-            aggregate_type=AggregateType.DAG_NODE_RUN,
-            aggregate_id=node.aggregate_id,
-            reason=(
-                "node cancelled"
-                if terminal_cancel
-                else "node frozen for stale dependency"
-                if cancel
-                else "node paused"
-            ),
-        )
-        if confirm:
-            action_type = "CANCEL_CONFIRMED" if cancel or current.state == "CANCEL_REQUESTED" else "PAUSE_CONFIRMED"
-            with self.repository.transaction() as connection:
-                (connection or self.repository).transitions.dispatch(
+        with self.repository.transaction() as connection:
+            current = connection.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
+            if current is None:
+                raise SubmissionInvariantError("controlled node disappeared before worker retirement")
+            cancel_requested = cancel or current.state == "CANCEL_REQUESTED"
+            cancel_target = str(current.payload.get("cancel_target") or "CANCELLED")
+            terminal_cancel = cancel_requested and cancel_target == "CANCELLED"
+            connection.role_cancellation.cancel_role_assignments(
+                preserve_interactions=not cancel_requested,
+                workflow_id=node.workflow_id,
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node.aggregate_id,
+                reason=(
+                    "node cancelled"
+                    if terminal_cancel
+                    else "node frozen for stale dependency"
+                    if cancel_requested
+                    else "node paused"
+                ),
+            )
+            if confirm:
+                action_type = "CANCEL_CONFIRMED" if cancel_requested else "PAUSE_CONFIRMED"
+                if action_type == "PAUSE_CONFIRMED":
+                    connection.role_attempts.reconcile_interrupted_interactions(
+                        node.workflow_id, node.aggregate_type.value, node.aggregate_id, allow_unproven=True,
+                    )
+                connection.transitions.dispatch(
                     ActionEnvelope(
                         action_type=action_type,
                         workflow_id=node.workflow_id,
@@ -117,6 +118,7 @@ class NodeControl:
                         or ""
                     ),
                     cancel=action_type == "CANCEL_CONFIRMED",
+                    generation=int(node.payload.get("graph_generation") or 0),
                     unit_of_work=connection,
                 )
         fencing_token = int(node.payload.get("fencing_token") or 0)
@@ -141,30 +143,8 @@ class NodeControl:
         node = self.effect_reads.effect_snapshot(effect)
         if self.dependency_repairs is not None and self.dependency_repairs.owns(node):
             return await self.dependency_repairs.reconcile(effect)
-        if node.state == "QUEUED":
-            return self.node_admission.admit_node_worker(
-                effect,
-                action_type="START_PRODUCING",
-                activation=RoleActivation(
-                    OrchestrationRole.IMPLEMENTATION,
-                    RoleMode.PRODUCE,
-                ),
-            )
-        if node.state == "REVIEW_QUEUED":
-            return self.node_admission.admit_node_worker(
-                effect,
-                action_type="START_REVIEW",
-                activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
-            )
-        if node.state == "REPAIR_QUEUED":
-            return self.node_admission.admit_node_worker(
-                effect,
-                action_type="START_REPAIR",
-                activation=RoleActivation(
-                    OrchestrationRole.IMPLEMENTATION,
-                    RoleMode.REPAIR,
-                ),
-            )
+        if node.state in {"QUEUED", "REVIEW_QUEUED", "REPAIR_QUEUED"}:
+            return self.node_admission.resume_queued_node(effect)
         if node.state == "QUIESCING":
             return await self.implementation_snapshot.quiesce_node(effect)
         if node.state == "SNAPSHOTTING":

@@ -59,6 +59,7 @@ def interaction_command(service: BunshinWorkflowService, method: str, auth: Mapp
             assignment_id=assignment_id, attempt_id_value=attempt_id,
             fencing_token=int(auth["fencing_token"]), expected_sequence=int(payload["sequence"]),
             allow_submitted=method == "interaction_consumed",
+            parked_wait_id=wait_id if method == "interaction_park" else None,
         )
         return reply
 

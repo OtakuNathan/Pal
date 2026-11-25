@@ -77,7 +77,7 @@ def group_for(case: dict) -> str:
 
 def check_generated(group: str | None) -> list[str]:
     # Compare against production renderers; never regenerate stale files in CI.
-    from pal.bunshin.formal import render_implementation_topology
+    from pal.bunshin.formal import render_implementation_topology, render_node_scheduling_relation
     from pal.channel.formal import render_endpoint_hub_implementation_relation
     from pal.foundation.fd_lease_formal import render_fd_lease_implementation_topology
 
@@ -87,6 +87,11 @@ def check_generated(group: str | None) -> list[str]:
         "foundation": ("spec/foundation/FdLeaseImplementationTopology.tla", render_fd_lease_implementation_topology),
     }
     checked = []
+    if group is None or group == "bunshin":
+        path = "spec/bunshin/NodeSchedulingReducer.tla"
+        if (ROOT / path).read_text() != render_node_scheduling_relation():
+            raise ValueError(f"Generated implementation model is stale: {path}")
+        checked.append(path)
     if group is None or group == "memory":
         from pal.memory.swap_formal import render_swap_relation
         path = "spec/memory/MemorySwapReducer.tla"

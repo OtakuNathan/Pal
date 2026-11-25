@@ -43,6 +43,7 @@ async def ask_question_tool_result(
     request_user: (
         Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None
     ),
+    requires_task_revision: bool = True,
 ) -> ToolExecutionResult:
     if request_user is None:
         return _question_failure(
@@ -100,6 +101,13 @@ async def ask_question_tool_result(
                 details={"status": "cancelled"},
             )
         revision = dict(response.get("task_revision") or {})
+        if not requires_task_revision and not revision:
+            return ToolExecutionResult(
+                name=call.name, ok=True, text=f"User answered: {answer}",
+                llm_text=f"User answered: {answer}\nContinue within the accepted module contract.",
+                structured={"status": "answered", "answer": answer},
+                call_id=call.call_id, status=RuntimeStatus.OK,
+            )
         if not bool(revision.get("appended")):
             raise RuntimeError(
                 "Manager returned an answer without appending task.yaml"

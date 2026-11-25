@@ -25,6 +25,7 @@ from pal.bunshin.semantic_orchestration.effect_reads import EffectReads
 from pal.bunshin.semantic_orchestration.plan_assignments import PlanAssignments
 from pal.bunshin.semantic_orchestration.role_reports import RoleReports
 from pal.bunshin.semantic_orchestration.workflow_facts import WorkflowFacts
+from pal.bunshin.input_binding import is_repo_relative_input_reference
 
 
 @dataclass
@@ -205,7 +206,7 @@ class ArchitectureStage:
                 "rediscovering the architecture, and preserve all unrelated semantics."
             )
         for index, reference in enumerate(list(request.get("references") or []) if base_manifest_ref is None else []):
-            if not isinstance(reference, Mapping):
+            if not isinstance(reference, Mapping) or is_repo_relative_input_reference(reference):
                 continue
             path = str(reference.get("path") or "").strip()
             if path and Path(path).expanduser().exists():

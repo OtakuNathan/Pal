@@ -6,7 +6,7 @@ from typing import Any
 
 from pal.lsp.ipc import LspManagerClient
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
-from pal.bunshin.workspace_resources import workspace_process_holders
+from pal.bunshin.workspace_resources import inherited_process_group_live, workspace_process_holders
 from pal.bunshin.workflow_control import reconcile_control_requests
 from pal.bunshin.replan import architecture_revision_finding_value
 from pal.bunshin.service import BunshinWorkflowService
@@ -36,7 +36,10 @@ class BunshinRecovery:
                     pass
             holders = workspace_process_holders(worktree) if worktree is not None else ()
             clean_worktree = not holders
-            if clean_worktree:
+            group = metadata.get("process_group_id")
+            birth = str(metadata.get("process_group_birth") or "")
+            live_worker = bool(birth and type(group) is int and inherited_process_group_live(group, birth))
+            if clean_worktree and not live_worker:
                 if self.repository.leases.clear_expired_lease(
                     str(lease["resource_key"]),
                     int(lease["fencing_token"]),
@@ -51,7 +54,8 @@ class BunshinRecovery:
                 if snapshot is not None and "ENTER_TRIAGE" in self.repository.transitions.legal_actions(aggregate_type, snapshot.state):
                     failure_ref = self.service.artifacts.put_json(
                         {
-                            "reason": "expired worker still has observable workspace holders",
+                            "reason": ("expired lease still has its Bunshin worker group"
+                                       if live_worker else "expired worker still has observable workspace holders"),
                             "lease": lease,
                             "process_group_reaped": False,
                             "worktree_clean": clean_worktree,

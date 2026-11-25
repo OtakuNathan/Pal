@@ -16,6 +16,7 @@ from pal.bunshin.cycle_protocol import (
     NodeCycleState,
 )
 from pal.bunshin.graph_protocol import EdgeKind, GraphIR
+from pal.bunshin.node_schedule import NodeSchedule
 from pal.bunshin.dependency_repair_protocol import (
     DependencyRepairCohort,
     DependencyRepairDeferred,
@@ -160,54 +161,29 @@ class GraphExecution:
     def pending_scope(self) -> frozenset[str]:
         return self.dependency_repairs.fenced_nodes
 
+    @property
+    def schedule(self) -> NodeSchedule:
+        return NodeSchedule(self.graph, self.cycles, self.repair_barriers, self.pending_scope)
+
     @classmethod
     def start(cls, graph: GraphIR) -> "GraphExecution":
         cycles: dict[str, NodeCycle] = {}
         for name in graph.nodes:
-            state = (
-                NodeCycleState.PRODUCER_READY
-                if not graph.producer_predecessors(name)
-                else NodeCycleState.BLOCKED
-            )
             cycles[name] = NodeCycle(
                 cycle_id=f"{graph.graph_id}:g{graph.generation}:{name}",
                 node_name=name,
                 generation=graph.generation,
-                state=state,
             )
         return cls(
             graph=graph,
             state=GraphExecutionState.RUNNING,
             cycles=cycles,
-        )
+        ).refresh()
 
     def runnable_nodes(self) -> tuple[str, ...]:
         if self.state != GraphExecutionState.RUNNING:
             return ()
-        ready: list[str] = []
-        for name, cycle in self.cycles.items():
-            if name in self.pending_scope:
-                continue
-            if cycle.state not in {
-                NodeCycleState.PRODUCER_READY,
-                NodeCycleState.REPAIR_READY,
-                NodeCycleState.CHECKER_READY,
-            }:
-                continue
-            predecessors = (
-                self.graph.checker_predecessors(name)
-                if cycle.state == NodeCycleState.CHECKER_READY
-                else self.graph.producer_predecessors(name)
-            )
-            if all(
-                self.cycles[dependency].state == NodeCycleState.ACCEPTED
-                for dependency in predecessors
-            ) and all(
-                self.cycles[provider].state == NodeCycleState.ACCEPTED
-                for provider in self.repair_barriers.get(name, ())
-            ):
-                ready.append(name)
-        return tuple(sorted(ready))
+        return self.schedule.runnable_nodes()
 
     def with_cycle(self, cycle: NodeCycle) -> "GraphExecution":
         if cycle.node_name not in self.cycles:
@@ -639,38 +615,8 @@ class GraphExecution:
     def _refresh_readiness_and_terminal(self) -> "GraphExecution":
         if self.state not in {GraphExecutionState.RUNNING, GraphExecutionState.COMPLETED}:
             return self
-        cycles = dict(self.cycles)
-        changed = True
-        while changed:
-            changed = False
-            for name, cycle in list(cycles.items()):
-                if name in self.pending_scope:
-                    continue
-                if cycle.state not in {
-                    NodeCycleState.BLOCKED,
-                    NodeCycleState.STALE,
-                }:
-                    continue
-                if all(
-                    cycles[dependency].state == NodeCycleState.ACCEPTED
-                    for dependency in self.graph.producer_predecessors(name)
-                ) and all(
-                    cycles[provider].state == NodeCycleState.ACCEPTED
-                    for provider in self.repair_barriers.get(name, ())
-                ):
-                    cycles[name] = replace(
-                        cycle,
-                        state=NodeCycleState.PRODUCER_READY,
-                    )
-                    changed = True
-        barriers = {
-            name: providers
-            for name, providers in self.repair_barriers.items()
-            if not all(
-                cycles[provider].state == NodeCycleState.ACCEPTED
-                for provider in providers
-            )
-        }
+        cycles = self.schedule.unblock_ready()
+        barriers = self.schedule.outstanding_barriers()
         sink_cycle = cycles[self.graph.sink]
         if sink_cycle.state == NodeCycleState.ACCEPTED and not self.dependency_repairs.pending:
             if any(

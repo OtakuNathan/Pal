@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -12,6 +13,7 @@ from uuid import uuid4
 from pal.core.runtime_state import validate_runtime_snapshot
 from pal.foundation.encryption import EncryptedJsonEnvelopeCodec
 from pal.bunshin.ipc import bunshin_runtime_dir
+from pal.bunshin.config import bunshin_db_path
 from pal.bunshin.contracts import PermanentEffectError
 
 
@@ -188,7 +190,7 @@ def open_agent_session_checkpoint(
 
 @dataclass(frozen=True)
 class LogicalCoroutineCheckpointStore:
-    """One atomically replaceable encrypted checkpoint per logical coroutine."""
+    """Read the SQLite-selected interaction checkpoint or the legacy safe point."""
 
     runtime_root: Path
 
@@ -200,6 +202,31 @@ class LogicalCoroutineCheckpointStore:
         return self.root / _safe_component(logical_coroutine_id) / "current.json"
 
     def read(self, logical_coroutine_id: str) -> dict[str, Any] | None:
+        path = bunshin_db_path(self.runtime_root)
+        if path.is_file():
+            with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_schema WHERE name='bunshin_role_checkpoint_heads'"
+                ).fetchone():
+                    return self.read_locked(connection, logical_coroutine_id)
+        return self._read_legacy(logical_coroutine_id)
+
+    def read_locked(self, connection: sqlite3.Connection, logical_coroutine_id: str) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT envelope_json FROM bunshin_role_checkpoint_heads WHERE session_id=?",
+            (logical_coroutine_id,),
+        ).fetchone()
+        if row is None:
+            return self._read_legacy(logical_coroutine_id)
+        try:
+            value = normalize_agent_session_checkpoint(json.loads(row[0]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AgentSessionCheckpointError("selected interaction checkpoint is unreadable") from exc
+        if value["logical_coroutine_id"] != logical_coroutine_id:
+            raise AgentSessionCheckpointError("logical-coroutine checkpoint has the wrong identity")
+        return value
+
+    def _read_legacy(self, logical_coroutine_id: str) -> dict[str, Any] | None:
         path = self.current_path(logical_coroutine_id)
         if not path.is_file():
             if path.exists() or path.is_symlink():
@@ -239,7 +266,17 @@ class LogicalCoroutineCheckpointStore:
             raise AgentSessionCheckpointError(
                 "worker checkpoint output has a stale fencing token"
             )
-        current = self.read(coroutine_id)
+        current = self._read_legacy(coroutine_id)
+        self.validate_advance(value, current)
+        target = self.current_path(coroutine_id)
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(PermissionError):
+            target.parent.chmod(0o700)
+        self._write_envelope(value, target)
+        return target
+
+    @staticmethod
+    def validate_advance(value: Mapping[str, Any], current: Mapping[str, Any] | None) -> None:
         if current is not None:
             for field_name in ("workflow_id", "stage_key", "runtime_spec_hash"):
                 if value[field_name] != current[field_name]:
@@ -250,10 +287,19 @@ class LogicalCoroutineCheckpointStore:
                 raise AgentSessionCheckpointError(
                     "worker checkpoint sequence did not advance"
                 )
-        target = self.current_path(coroutine_id)
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with contextlib.suppress(PermissionError):
-            target.parent.chmod(0o700)
+
+    def select_locked(
+        self, connection: sqlite3.Connection, value: dict[str, Any],
+    ) -> None:
+        """Select an encrypted continuation in its owning SQLite transaction."""
+        connection.execute(
+            "INSERT INTO bunshin_role_checkpoint_heads(session_id,envelope_json) VALUES(?,?) "
+            "ON CONFLICT(session_id) DO UPDATE SET envelope_json=excluded.envelope_json",
+            (value["logical_coroutine_id"], json.dumps(value, ensure_ascii=False, sort_keys=True)),
+        )
+
+    @staticmethod
+    def _write_envelope(value: Mapping[str, Any], target: Path) -> None:
         temporary = target.parent / (
             f".{target.name}.{os.getpid()}.{uuid4().hex}.tmp"
         )
@@ -276,31 +322,15 @@ class LogicalCoroutineCheckpointStore:
                 pass
         with contextlib.suppress(PermissionError):
             target.chmod(0o600)
-        return target
 
-    def materialize_input(self, logical_coroutine_id: str, target: Path) -> Path | None:
-        value = self.read(logical_coroutine_id)
+    def materialize_input(
+        self, logical_coroutine_id: str, target: Path, *, selected: Mapping[str, Any] | None = None,
+    ) -> Path | None:
+        value = selected if selected is not None else self.read(logical_coroutine_id)
         if value is None:
             return None
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.parent / (
-            f".{target.name}.{os.getpid()}.{uuid4().hex}.tmp"
-        )
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as stream:
-                json.dump(value, stream, ensure_ascii=False, sort_keys=True)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-            _fsync_directory(target.parent)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                temporary.unlink()
+        self._write_envelope(value, target)
         return target
 
     def delete(self, logical_coroutine_id: str) -> None:

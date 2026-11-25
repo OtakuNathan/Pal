@@ -18,8 +18,35 @@ _UNSAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 _UNSAFE_REF_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 
 
+class BunshinRuntimeBusy(RuntimeError):
+    """Another lifecycle operation owns the Bunshin runtime."""
+
+
 def bunshin_data_root(runtime_root: Path) -> Path:
     return Path(runtime_root) / "data" / "bunshin"
+
+
+@contextmanager
+def bunshin_runtime_ownership(runtime_root: Path) -> Iterator[None]:
+    """Hold exclusive Manager or cutover ownership across runtime directory swaps."""
+
+    lock_path = bunshin_data_root(runtime_root).with_name(".bunshin-lifecycle.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise BunshinRuntimeBusy("Bunshin runtime is owned by a Manager or cutover in progress") from exc
+        yield
+
+
+def bunshin_archive_cutover_marker(runtime_root: Path) -> Path:
+    return bunshin_data_root(runtime_root).with_name(".bunshin-archive-cutover.json")
+
+
+def require_bunshin_archive_cutover_complete(runtime_root: Path) -> None:
+    if bunshin_archive_cutover_marker(runtime_root).exists():
+        raise RuntimeError("Bunshin archive cutover is pending. Rerun pal setup --upgrade.")
 
 
 def artifact_store_root(runtime_root: Path) -> Path:
@@ -107,6 +134,13 @@ def artifact_epoch_root(runtime_root: Path) -> Path:
     return runtime_spool_root(runtime_root) / "artifact-epochs"
 
 
+def workflow_runtime_root(runtime_root: Path, workflow_id: str) -> Path:
+    normalized = str(workflow_id).strip()
+    if not normalized or _path_component(normalized, fallback="") != normalized:
+        raise ValueError(f"invalid workflow id: {workflow_id!r}")
+    return artifact_epoch_root(runtime_root) / normalized
+
+
 def cleanup_workflow_runtime(
     runtime_root: Path,
     *,
@@ -114,10 +148,7 @@ def cleanup_workflow_runtime(
 ) -> tuple[str, ...]:
     """Delete workflow-owned scratch that is reproducible from durable state."""
 
-    normalized = str(workflow_id).strip()
-    if not normalized or _path_component(normalized, fallback="") != normalized:
-        raise ValueError(f"invalid workflow id: {workflow_id!r}")
-    candidate = artifact_epoch_root(runtime_root) / normalized
+    candidate = workflow_runtime_root(runtime_root, workflow_id)
     if not candidate.exists() and not candidate.is_symlink():
         return ()
     if candidate.is_symlink() or candidate.is_file():

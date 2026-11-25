@@ -6,15 +6,16 @@ CONSTANTS MaxFailures, MaxStarts, MaxSequence, AllowMissingResumeAsFresh
 SessionStates == {"Uninitialized", "Active", "Suspended"}
 Phases == {"Admission", "Prepared", "Launching", "AwaitingAck", "Running", "Stopped", "Rejected", "Terminal"}
 CheckpointStates == {"Missing", "Valid", "Invalid"}
+NoCandidate == [sequence |-> 0, fence |-> 0, closed |-> FALSE]
 Errors == {"none", "startup_failure", "worker_failure", "checkpoint_missing", "checkpoint_invalid"}
 
 VARIABLES session, phase, checkpoint, sequence, producerFence, fence,
           admission, failures, error, errorVisible, initializedEver,
-          freshAfterInitialization, semanticWork, initializationFence
+          freshAfterInitialization, semanticWork, initializationFence, localCandidate
 
 vars == <<session, phase, checkpoint, sequence, producerFence, fence,
           admission, failures, error, errorVisible, initializedEver,
-          freshAfterInitialization, semanticWork, initializationFence>>
+          freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 Init ==
     /\ session = "Uninitialized"
@@ -31,6 +32,7 @@ Init ==
     /\ freshAfterInitialization = FALSE
     /\ semanticWork = FALSE
     /\ initializationFence = 0
+    /\ localCandidate = NoCandidate
 
 AdmitFresh ==
     /\ phase = "Admission"
@@ -40,7 +42,7 @@ AdmitFresh ==
     /\ admission' = "Fresh"
     /\ freshAfterInitialization' = (freshAfterInitialization \/ initializedEver)
     /\ UNCHANGED <<session, checkpoint, sequence, producerFence, fence,
-                    failures, error, errorVisible, initializedEver, semanticWork, initializationFence>>
+                    failures, error, errorVisible, initializedEver, semanticWork, initializationFence, localCandidate>>
 
 AdmitResume ==
     /\ phase = "Admission"
@@ -53,7 +55,7 @@ AdmitResume ==
     /\ admission' = "Resume"
     /\ UNCHANGED <<checkpoint, sequence, producerFence, fence,
                     failures, error, errorVisible,
-                    freshAfterInitialization, semanticWork, initializationFence>>
+                    freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 RejectCheckpoint ==
     /\ phase = "Admission"
@@ -63,7 +65,7 @@ RejectCheckpoint ==
     /\ errorVisible' = TRUE
     /\ UNCHANGED <<session, checkpoint, sequence, producerFence, fence,
                     admission, failures, initializedEver,
-                    freshAfterInitialization, semanticWork, initializationFence>>
+                    freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 StartProcess ==
     /\ phase = "Prepared"
@@ -71,6 +73,7 @@ StartProcess ==
     /\ phase' = IF admission = "Fresh" THEN "Launching" ELSE "Running"
     /\ session' = IF session = "Uninitialized" THEN "Uninitialized" ELSE "Active"
     /\ fence' = fence + 1
+    /\ localCandidate' = NoCandidate
     /\ UNCHANGED <<checkpoint, sequence, producerFence,
                     admission, failures, error, errorVisible, initializedEver,
                     freshAfterInitialization, semanticWork, initializationFence>>
@@ -83,8 +86,34 @@ PublishCheckpoint(token) ==
     /\ sequence' = sequence + 1
     /\ producerFence' = fence
     \* Publication and durable initialization are separate crash boundaries.
+    /\ localCandidate' = NoCandidate
     /\ UNCHANGED <<session, phase, fence, admission, failures, error,
                     errorVisible, initializedEver, freshAfterInitialization, semanticWork, initializationFence>>
+
+WriteLocalCandidate(token, closed) ==
+    /\ phase = "Running"
+    /\ sequence < MaxSequence
+    /\ localCandidate = NoCandidate
+    /\ localCandidate' = [sequence |-> sequence + 1, fence |-> token, closed |-> closed]
+    /\ UNCHANGED <<session, phase, checkpoint, sequence, producerFence, fence,
+                    admission, failures, error, errorVisible, initializedEver,
+                    freshAfterInitialization, semanticWork, initializationFence>>
+
+CanRecoverClosed ==
+    /\ phase = "Stopped"
+    /\ checkpoint = "Valid"
+    /\ localCandidate.sequence > sequence
+    /\ localCandidate.fence = fence
+    /\ localCandidate.closed
+
+RecoverClosedCandidate ==
+    /\ CanRecoverClosed
+    /\ sequence' = localCandidate.sequence
+    /\ producerFence' = localCandidate.fence
+    /\ localCandidate' = NoCandidate
+    /\ UNCHANGED <<session, phase, checkpoint, fence, admission, failures, error,
+                    errorVisible, initializedEver, freshAfterInitialization,
+                    semanticWork, initializationFence>>
 
 CommitInitialization(token) ==
     /\ phase = "Launching"
@@ -96,7 +125,7 @@ CommitInitialization(token) ==
     /\ initializationFence' = token
     /\ phase' = "AwaitingAck"
     /\ UNCHANGED <<checkpoint, sequence, producerFence, fence, admission,
-                    failures, error, errorVisible, freshAfterInitialization, semanticWork>>
+                    failures, error, errorVisible, freshAfterInitialization, semanticWork, localCandidate>>
 
 
 ReceiveInitializationAck ==
@@ -104,7 +133,7 @@ ReceiveInitializationAck ==
     /\ phase' = "Running"
     /\ UNCHANGED <<session, checkpoint, sequence, producerFence, fence, admission,
                     failures, error, errorVisible, initializedEver,
-                    freshAfterInitialization, semanticWork, initializationFence>>
+                    freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 RejectStaleInitialization(token) ==
     /\ phase \in {"Launching", "AwaitingAck", "Running"}
@@ -118,7 +147,7 @@ DoSemanticWork ==
     /\ semanticWork' = TRUE
     /\ UNCHANGED <<session, phase, checkpoint, sequence, producerFence, fence,
                     admission, failures, error, errorVisible, initializedEver,
-                    freshAfterInitialization, initializationFence>>
+                    freshAfterInitialization, initializationFence, localCandidate>>
 
 FailAttempt ==
     /\ phase \in {"Prepared", "Launching", "AwaitingAck", "Running"}
@@ -130,16 +159,16 @@ FailAttempt ==
     /\ errorVisible' = TRUE
     /\ admission' = "None"
     /\ UNCHANGED <<checkpoint, sequence, producerFence, fence, initializedEver,
-                    freshAfterInitialization, semanticWork, initializationFence>>
+                    freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 CrashBeforeAck ==
-    /\ phase \in {"Launching", "AwaitingAck"}
+    /\ phase \in {"Launching", "AwaitingAck", "Running"}
     /\ phase' = "Stopped"
     /\ session' = IF session = "Uninitialized" THEN "Uninitialized" ELSE "Suspended"
     /\ admission' = "None"
     \* Manager/process loss is an uncharged rebind, unlike FailAttempt.
     /\ UNCHANGED <<checkpoint, sequence, producerFence, fence, failures,
-                    error, errorVisible, initializedEver, freshAfterInitialization, semanticWork, initializationFence>>
+                    error, errorVisible, initializedEver, freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 Suspend ==
     /\ phase = "Running"
@@ -147,25 +176,27 @@ Suspend ==
     /\ session' = "Suspended"
     /\ admission' = "None"
     /\ UNCHANGED <<checkpoint, sequence, producerFence, fence, failures,
-                    error, errorVisible, initializedEver, freshAfterInitialization, semanticWork, initializationFence>>
+                    error, errorVisible, initializedEver, freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 RetryOrResume ==
     /\ phase = "Stopped"
+    /\ ~CanRecoverClosed
     /\ failures < MaxFailures
     /\ phase' = "Admission"
     /\ error' = "none"
     /\ errorVisible' = FALSE
     /\ UNCHANGED <<session, checkpoint, sequence, producerFence, fence, admission,
-                    failures, initializedEver, freshAfterInitialization, semanticWork, initializationFence>>
+                    failures, initializedEver, freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 ExhaustFailures ==
     /\ phase = "Stopped"
+    /\ ~CanRecoverClosed
     /\ failures = MaxFailures
     /\ phase' = "Terminal"
     \* Exhaustion does not pretend that a never-created coroutine was suspended.
     /\ UNCHANGED <<session, checkpoint, sequence, producerFence, fence, admission,
                     failures, error, errorVisible, initializedEver,
-                    freshAfterInitialization, semanticWork, initializationFence>>
+                    freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 DamageCheckpoint(value) ==
     /\ phase \in {"Stopped", "Admission"}
@@ -175,7 +206,7 @@ DamageCheckpoint(value) ==
     \* Loss/corruption cannot erase the durable initialization fact.
     /\ UNCHANGED <<session, phase, sequence, producerFence, fence, admission,
                     failures, error, errorVisible, initializedEver,
-                    freshAfterInitialization, semanticWork, initializationFence>>
+                    freshAfterInitialization, semanticWork, initializationFence, localCandidate>>
 
 Next ==
     \/ AdmitFresh
@@ -183,6 +214,8 @@ Next ==
     \/ RejectCheckpoint
     \/ StartProcess
     \/ \E token \in 0..fence : PublishCheckpoint(token)
+    \/ \E token \in 0..fence, closed \in BOOLEAN : WriteLocalCandidate(token, closed)
+    \/ RecoverClosedCandidate
     \/ \E token \in 0..fence : CommitInitialization(token)
     \/ ReceiveInitializationAck
     \/ \E token \in 0..fence : RejectStaleInitialization(token)
@@ -201,6 +234,7 @@ Spec ==
     /\ WF_vars(AdmitFresh)
     /\ WF_vars(AdmitResume)
     /\ WF_vars(RejectCheckpoint)
+    /\ WF_vars(RecoverClosedCandidate)
     /\ WF_vars(ExhaustFailures)
 
 TypeOK ==
@@ -218,6 +252,7 @@ TypeOK ==
     /\ initializedEver \in BOOLEAN
     /\ freshAfterInitialization \in BOOLEAN
     /\ semanticWork \in BOOLEAN
+    /\ localCandidate \in [sequence: 0..MaxSequence, fence: 0..fence, closed: BOOLEAN]
 
 InitializationIsDurable == initializedEver <=> session # "Uninitialized"
 FreshStartNeverForgetsInitialization == ~freshAfterInitialization
@@ -237,6 +272,11 @@ CheckpointFailureIsVisibleAndPermanent ==
     error \in {"checkpoint_missing", "checkpoint_invalid"} => phase = "Rejected" /\ errorVisible
 FailureRemainsVisible == error # "none" => errorVisible
 ExhaustedBudgetDoesNotRestart == failures = MaxFailures => phase \in {"Stopped", "Terminal"}
+
+LatestClosedSelectedBeforeReadmission ==
+    phase = "Admission" =>
+        ~(checkpoint = "Valid" /\ localCandidate.sequence > sequence /\
+          localCandidate.fence = fence /\ localCandidate.closed)
 
 InitializationNeverReverts == [][initializedEver => initializedEver']_vars
 CheckpointSequenceNeverRegresses == [][sequence' >= sequence]_vars

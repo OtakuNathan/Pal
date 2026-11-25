@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pal.bunshin.contracts import DeferredEffectError
+from pal.bunshin.checkpoint import AgentSessionCheckpointError
 from pal.bunshin.storage.serialization import _decode_role_assignment
 from pal.bunshin.storage.serialization import _decode_role_attempt
 from pal.bunshin.storage.serialization import _json
@@ -16,6 +16,33 @@ from pal.bunshin.storage.artifacts import ArtifactsStore
 from pal.bunshin.storage.connection_contracts import DatabasePort
 from pal.bunshin.storage.role_session_checks import RoleSessionChecksStore
 from pal.bunshin.storage.role_business_leases import record_role_attempt_business_lease_locked
+
+
+def pending_role_receipt_locked(connection: sqlite3.Connection, snapshot: AggregateSnapshot) -> bool:
+    """A result awaiting application belongs to the aggregate's admitted session."""
+    session_id = str(snapshot.payload.get("active_worker_id") or "")
+    if not session_id:
+        return False
+    return connection.execute(
+        """SELECT 1 FROM bunshin_role_assignments
+           WHERE workflow_id=? AND aggregate_type=? AND aggregate_id=? AND session_id=?
+             AND state='result_recorded' AND submission_payload_hash<>'' LIMIT 1""",
+        (snapshot.workflow_id, snapshot.aggregate_type.value, snapshot.aggregate_id, session_id),
+    ).fetchone() is not None
+
+
+def assert_role_result_pause_open_locked(connection: sqlite3.Connection, assignment: sqlite3.Row) -> None:
+    """Pause fences new receipts; cancellation closes the exact assignment.
+
+    Dependency-repair capture deliberately accepts a result which wins the
+    assignment-cancellation transaction even after the node is frozen.
+    """
+    row = connection.execute(
+        "SELECT state FROM bunshin_aggregate_snapshots WHERE aggregate_type=? AND aggregate_id=?",
+        (assignment["aggregate_type"], assignment["aggregate_id"]),
+    ).fetchone()
+    if row is not None and row["state"] in {"PAUSE_REQUESTED", "PAUSED"}:
+        raise DeferredEffectError("aggregate pause fenced the role result before submission")
 
 
 def semantic_business_lease(snapshot: AggregateSnapshot, *, owner_id: str, resource_key: str, fencing_token: int) -> dict[str, Any]:
@@ -210,9 +237,14 @@ class RoleAssignmentsStore:
             ).fetchone()
             if assignment is None:
                 raise KeyError(f"unknown role assignment: {assignment_id}")
-            if connection.execute("SELECT 1 FROM bunshin_interaction_waits WHERE assignment_id=? AND state='open'",
-                                  (assignment_id,)).fetchone():
+            wait = connection.execute(
+                "SELECT state FROM bunshin_interaction_waits WHERE assignment_id=? AND state IN ('open','resuming')",
+                (assignment_id,),
+            ).fetchone()
+            if wait is not None and wait["state"] == "open":
                 raise DeferredEffectError("role is waiting for user interaction")
+            if wait is not None:
+                raise AgentSessionCheckpointError("interrupted interaction requires checkpoint reconciliation before resuming")
             assert_semantic_role_admission_locked(
                 connection, workflow_id=str(assignment["workflow_id"]),
                 aggregate_type=str(assignment["aggregate_type"]),

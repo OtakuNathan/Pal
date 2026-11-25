@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -971,6 +972,109 @@ class BunshinExecutionTests(unittest.TestCase):
             self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, third.unit_node_ids["a"]).state,
             "BLOCKED_BY_DEPS",
         )
+
+    def test_replan_recovery_replays_preparation_before_activation(self) -> None:
+        from pal.bunshin.contracts import SubmissionInvariantError
+        from pal.bunshin.orchestration import WorkflowEffects
+        from pal.bunshin.service import BunshinWorkflowService
+
+        workflow_id = "wf_replan_recovery"
+        manifest = self._manifest()
+        first = self._compile_epoch(workflow_id=workflow_id, epoch_id="source", manifest_ref=manifest)
+        scheduler = DagScheduler(self.repository)
+        scheduler.schedule_ready_nodes(workflow_id=workflow_id, epoch_id=first.epoch_id)
+        self._accept_node(first.unit_node_ids["a"])
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        self.repository.transitions.dispatch(ActionEnvelope(
+            action_type="START_WORKFLOW", aggregate_type=AggregateType.WORKFLOW,
+            aggregate_id=workflow_id, workflow_id=workflow_id, actor="test", expected_version=workflow.version,
+        ))
+        with patch("pal.bunshin.data_contract_compilation.reconcile_module_identities",
+                   side_effect=RuntimeError("crash before carry receipts")):
+            with self.assertRaisesRegex(RuntimeError, "crash before carry"):
+                self._compile_epoch(workflow_id=workflow_id, epoch_id="successor", manifest_ref=manifest,
+                                    source_epoch_id=first.epoch_id)
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, "successor")
+        self.assertEqual(epoch.state, "STARTING")
+        coordinator = WorkflowCoordinator(self.repository)
+        with self.assertRaisesRegex(SubmissionInvariantError, "preparation has not completed"):
+            coordinator.activate_graph(workflow_id=workflow_id, epoch_id=epoch.aggregate_id, actor="recovery")
+        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id=workflow_id, epoch_id=epoch.aggregate_id), ())
+        recovered = WorkflowEffects(BunshinWorkflowService(self.runtime_root))
+        asyncio.run(recovered._reconcile_execution_epoch({
+            "aggregate_type": "execution_epoch", "aggregate_id": epoch.aggregate_id, "effect_key": "recover-preparation",
+        }))
+        final = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
+        self.assertEqual(final.state, "RUNNING")
+        self.assertEqual(self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id).payload["execution_epoch_id"], epoch.aggregate_id)
+        carried = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, "successor:node:a")
+        self.assertEqual(carried.state, "ACCEPTED")
+        self.assertEqual(coordinator.execution(workflow_id=workflow_id).cycles["a"].accepted_product_ref,
+                         carried.payload["candidate_ref"]["sha256"])
+        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id=workflow_id, epoch_id=epoch.aggregate_id),
+                         ("successor:node:b",))
+
+    def test_fully_carried_graph_completes_from_activation_wake(self) -> None:
+        from pal.bunshin.orchestration import WorkflowEffects
+        from pal.bunshin.service import BunshinWorkflowService
+
+        workflow_id = "wf_fully_carried"
+        manifest = self._manifest()
+        first = self._compile_epoch(workflow_id=workflow_id, epoch_id="complete-source", manifest_ref=manifest)
+        scheduler = DagScheduler(self.repository)
+        for name in ("a", "b", "delivery"):
+            scheduler.schedule_ready_nodes(workflow_id=workflow_id, epoch_id=first.epoch_id)
+            self._accept_node(first.unit_node_ids[name])
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        self.repository.transitions.dispatch(ActionEnvelope(
+            action_type="START_WORKFLOW", workflow_id=workflow_id, aggregate_type=AggregateType.WORKFLOW,
+            aggregate_id=workflow_id, actor="test", expected_version=workflow.version,
+        ))
+        second = self._compile_epoch(workflow_id=workflow_id, epoch_id="complete-successor", manifest_ref=manifest,
+                                     source_epoch_id=first.epoch_id)
+        effects = WorkflowEffects(BunshinWorkflowService(self.runtime_root))
+        asyncio.run(effects._execute_mechanical({"effect_type": "schedule_ready_nodes", "aggregate_type": "execution_epoch",
+            "aggregate_id": second.epoch_id, "effect_key": "activation-wake"}))
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, second.epoch_id)
+        self.assertEqual(epoch.state, "FINALIZING")
+        self.assertEqual(epoch.payload["accepted_sink"]["node_id"], second.sink_node_id)
+
+    def test_initial_activation_recovers_partially_materialized_nodes(self) -> None:
+        from pal.bunshin.orchestration import WorkflowEffects
+        from pal.bunshin.service import BunshinWorkflowService
+
+        workflow_id = "wf_partial_materialization"
+        store_type = type(self.repository.transitions)
+        real_dispatch = store_type.dispatch
+        created = 0
+
+        def interrupted(store, action, **kwargs):
+            nonlocal created
+            if action.action_type == "CREATE_NODE_RUN":
+                if created:
+                    raise RuntimeError("crash after first node")
+                created += 1
+            return real_dispatch(store, action, **kwargs)
+
+        with patch.object(store_type, "dispatch", interrupted):
+            with self.assertRaisesRegex(RuntimeError, "crash after first node"):
+                self._compile_epoch(workflow_id=workflow_id, epoch_id="partial", manifest_ref=self._manifest())
+        epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, "partial")
+        self.assertEqual(epoch.state, "STARTING")
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        self.repository.transitions.dispatch(ActionEnvelope(
+            action_type="START_WORKFLOW", aggregate_type=AggregateType.WORKFLOW,
+            aggregate_id=workflow_id, workflow_id=workflow_id, actor="test", expected_version=workflow.version,
+        ))
+        recovered = WorkflowEffects(BunshinWorkflowService(self.runtime_root))
+        asyncio.run(recovered._reconcile_execution_epoch({
+            "aggregate_type": "execution_epoch", "aggregate_id": epoch.aggregate_id, "effect_key": "partial-recovery",
+        }))
+        committed = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, "partial")
+        self.assertEqual(committed.state, "RUNNING")
+        self.assertEqual(len(committed.payload["node_ids"]), 3)
+        self.assertEqual(DagScheduler(self.repository).schedule_ready_nodes(workflow_id=workflow_id, epoch_id="partial"),
+                         ("partial:node:a",))
 
     def test_replan_contract_only_dependency_change_requeues_consumer(self) -> None:
         """A GraphDiff stale decision must beat an unchanged node projection.

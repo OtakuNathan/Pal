@@ -1442,6 +1442,10 @@ class GitBackedSkeletonService:
                     )
             if completed.returncode != 0:
                 raise RuntimeError(completed.stderr or completed.stdout or "failed to persist synthetic workspace snapshot")
+        if source is not None and original_head:
+            # A synthetic working-tree snapshot has no Git ancestry of its
+            # own. Retain the original HEAD for architecture restore checks.
+            _git_dir(common_git_dir, "fetch", "--no-tags", str(source), f"+{original_head}:{snapshot_ref}-source")
         return {
             "schema_version": "2",
             "snapshot_commit_sha": snapshot_sha,
@@ -1792,26 +1796,18 @@ def _architect_private_implementation_changes(
         )
         if path
     )
-    changed_from_original: set[str] | None = None
-    if original_head and candidate_paths:
-        if base_sha and original_head == base_sha:
-            changed_from_original = set(candidate_paths)
-        else:
-            changed_from_original = {
-                str(path).replace("\\", "/").strip().lstrip("./")
-                for path in _git_changed_paths(worktree, original_head)
-            }
-
-    violations: list[str] = []
-    for path in candidate_paths:
-        if changed_from_original is not None and path not in changed_from_original:
-            continue
-        if path in contract_paths:
-            continue
-        if any(scope.matches(path) for scope in implementation_scopes):
-            continue
-        violations.append(path)
-    return sorted(set(violations))
+    violations = set(candidate_paths).difference(contract_paths)
+    violations = {path for path in violations if not any(scope.matches(path) for scope in implementation_scopes)}
+    if (
+        violations and original_head and original_head != base_sha
+        and _optional_git(worktree, "cat-file", "-t", original_head) == "commit"
+    ):
+        changed_from_original = {
+            path.replace("\\", "/").strip().lstrip("./")
+            for path in _git_changed_paths(worktree, original_head)
+        }
+        violations.intersection_update(changed_from_original)
+    return sorted(violations)
 
 
 def architecture_revision_path_states(worktree: Path, base_sha: str) -> dict[str, str]:

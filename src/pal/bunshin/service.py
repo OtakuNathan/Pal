@@ -33,6 +33,7 @@ from pal.bunshin.input_binding import (
     INPUT_BINDING_MANIFEST_ARTIFACT,
     INPUT_BINDING_SCHEMA_VERSION,
     BoundInputError,
+    InputBindingManifest,
     capture_input_binding,
     declared_inputs_from_references,
 )
@@ -92,7 +93,27 @@ class BunshinWorkflowService:
         self.task_ledger = TaskLedgerService(Path(self.runtime_root), self.artifacts)
 
     def create_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        data = dict(request)
+        create_action = self._prepare_task_creation(request)
+        delivery_binding = request.get("delivery_binding")
+        result = (
+            self.repository.transitions.dispatch_task_with_delivery(
+                create_action,
+                binding=dict(delivery_binding),
+            )
+            if isinstance(delivery_binding, Mapping) and delivery_binding
+            else self.repository.transitions.dispatch(create_action)
+        )
+        return {
+            "status": "created",
+            "task_id": create_action.aggregate_id,
+            "state": result.snapshot.state,
+            "profile": create_action.payload["primary_profile_id"],
+            "family": create_action.payload["family_id"],
+            "family_binding_ref": create_action.payload["family_binding_ref"],
+            "task_revision_ref": create_action.payload["task_revision_ref"],
+        }
+
+    def _prepare_task_creation(self, data: Mapping[str, Any]) -> ActionEnvelope:
         task_id = str(data.get("task_id") or f"task_{uuid4().hex}").strip()
         title = str(data.get("title") or "").strip()
         objective = str(data.get("objective") or data.get("goal") or "").strip()
@@ -116,7 +137,7 @@ class BunshinWorkflowService:
             policies=dict(data.get("policies") or {}),
             actor=str(data.get("actor") or "pal"),
         )
-        create_action = ActionEnvelope(
+        return ActionEnvelope(
             action_type="CREATE_TASK",
             workflow_id="",
             aggregate_type=AggregateType.TASK,
@@ -137,24 +158,6 @@ class BunshinWorkflowService:
                 "owner": str(data.get("actor") or "pal"),
             },
         )
-        delivery_binding = data.get("delivery_binding")
-        result = (
-            self.repository.transitions.dispatch_task_with_delivery(
-                create_action,
-                binding=dict(delivery_binding),
-            )
-            if isinstance(delivery_binding, Mapping) and delivery_binding
-            else self.repository.transitions.dispatch(create_action)
-        )
-        return {
-            "status": "created",
-            "task_id": task_id,
-            "state": result.snapshot.state,
-            "profile": primary_profile_id,
-            "family": family_id,
-            "family_binding_ref": family_binding_ref.to_dict(),
-            "task_revision_ref": revision_ref.to_dict(),
-        }
 
     def prepare_requirements(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Publish the immutable initial task specification used by every V2 role."""
@@ -303,30 +306,35 @@ class BunshinWorkflowService:
     def archive_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         task_id = str(data.get("task_id") or "").strip()
-        task = self.repository.snapshots.read_snapshot(AggregateType.TASK, task_id)
-        if task is None or task.state != "ACTIVE":
-            raise ValueError(f"active task not found: {task_id}")
-        if self.repository.queries.has_nonterminal_workflows_for_task(task_id):
-            raise ValueError("task has nonterminal workflows")
-        result = self.repository.transitions.dispatch(
-            ActionEnvelope(
-                action_type="ARCHIVE_TASK",
-                workflow_id="",
-                aggregate_type=AggregateType.TASK,
-                aggregate_id=task_id,
-                actor=str(data.get("actor") or "pal"),
-                source_channel=str(data.get("source_channel") or "local"),
-                expected_version=task.version,
-                idempotency_key=f"archive-task:{task_id}",
-                payload={"archive_reason": str(data.get("reason") or "")},
+        with self.repository.transaction() as unit:
+            task = unit.snapshots.read_snapshot(AggregateType.TASK, task_id)
+            if task is None or task.state != "ACTIVE":
+                raise ValueError(f"active task not found: {task_id}")
+            if unit.queries.has_nonterminal_workflows_for_task(task_id):
+                raise ValueError("task has nonterminal workflows")
+            result = unit.transitions.dispatch(
+                ActionEnvelope(
+                    action_type="ARCHIVE_TASK",
+                    workflow_id="",
+                    aggregate_type=AggregateType.TASK,
+                    aggregate_id=task_id,
+                    actor=str(data.get("actor") or "pal"),
+                    source_channel=str(data.get("source_channel") or "local"),
+                    expected_version=task.version,
+                    idempotency_key=f"archive-task:{task_id}",
+                    payload={"archive_reason": str(data.get("reason") or "")},
+                )
             )
-        )
         return {"status": "archived", "task_id": task_id, "state": result.snapshot.state}
 
-    def start_workflow(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    def start_workflow(self, request: Mapping[str, Any], *, replacing_workflow_id: str = "") -> dict[str, Any]:
         data = dict(request)
         _validate_start_workflow_shape(data)
         actor = str(data.get("actor") or "pal").strip()
+        recovered_workflow_id = ""
+        if data.get("restart_cancelled_plan"):
+            recovered_workflow_id, recovered_inputs = self._cancelled_plan_start_inputs(data, actor=actor)
+            data.update(recovered_inputs)
         source_channel = str(data.get("source_channel") or "local").strip()
         delivery_binding = dict(data.get("delivery_binding") or {})
         operation = str(data.get("operation") or "new_requirement").strip().lower()
@@ -352,53 +360,35 @@ class BunshinWorkflowService:
 
         task_id = str(data.get("task_id") or "").strip()
         task_was_selected = bool(task_id)
+        create_task = None
         if not task_id:
             if not delivery_binding:
                 raise ValueError(
                     "one-click start_workflow requires delivery_binding"
                 )
-            task_id = self._create_or_reuse_task_for_workflow(data)
-        task = self.repository.snapshots.read_snapshot(AggregateType.TASK, task_id)
-        if task is None or task.state != "ACTIVE":
-            raise ValueError("start_workflow requires an active task_id")
-        existing_delivery = self.repository.delivery_bindings.read_task_delivery(task_id)
-        if existing_delivery is None:
-            self.repository.delivery_bindings.bind_task_delivery(
-                task_id=task_id,
-                binding=delivery_binding,
-            )
+            task_id, create_task = self._prepare_task_for_workflow(data)
+        if create_task is None:
+            task = self.repository.snapshots.read_snapshot(AggregateType.TASK, task_id)
+            if task is None or task.state != "ACTIVE":
+                raise ValueError("start_workflow requires an active task_id")
+            task_payload = task.payload
+        else:
+            task_payload = create_task.payload
         workflow_id = str(data.get("workflow_id") or f"wf_{uuid4().hex}").strip()
-        active_for_task = self.repository.search.search_workflows(
-            actor_id=actor,
-            task_id=task_id,
-            include_terminal=False,
-            limit=2,
-        )
-        conflicting = [
-            item
-            for item in active_for_task
-            if str(item.get("workflow_id") or "") != workflow_id
-            and str(item.get("workflow_state") or "") != "RESTARTING"
-        ]
-        if conflicting:
-            raise ValueError(
-                "Task already has an active workflow. Use the Task title with "
-                "status or control tools instead of starting another."
-            )
         if task_was_selected and data.get("workspace"):
             raise ValueError("workflow workspace is owned by Task; update the Task instead")
         if task_was_selected and data.get("profile"):
             raise ValueError("workflow profile is owned by Task; create a new Task to change it")
-        task_revision_ref = dict(task.payload.get("task_revision_ref") or {})
+        task_revision_ref = dict(task_payload.get("task_revision_ref") or {})
         task_revision = dict(self.artifacts.read_json(task_revision_ref))
         workflow_name = str(
             task_revision.get("title") or goal or "Bunshin workflow"
         ).strip()
         workspace = _normalize_workspace(task_revision.get("workspace"))
-        family_binding_ref = _artifact_ref_mapping(task.payload.get("family_binding_ref"))
+        family_binding_ref = _artifact_ref_mapping(task_payload.get("family_binding_ref"))
         if not family_binding_ref:
             raise ValueError("Task has no pinned FamilyBindingArtifact")
-        primary_profile_id = str(task.payload.get("primary_profile_id") or "").strip()
+        primary_profile_id = str(task_payload.get("primary_profile_id") or "").strip()
         if operation == "new_requirement" and not artifact_ref and primary_profile_id:
             try:
                 family_binding_ref = self.catalog.publish_family_binding(
@@ -450,7 +440,7 @@ class BunshinWorkflowService:
                 raise ValueError(
                     "task truth must reference a durable TaskLedgerArtifact"
                 )
-        if operation == "review_and_repair" and str(task.payload.get("family_id") or "") == "software_engineering":
+        if operation == "review_and_repair" and str(task_payload.get("family_id") or "") == "software_engineering":
             self._validate_external_architecture_ref(
                 artifact_ref,
                 trusted_required=False,
@@ -475,9 +465,18 @@ class BunshinWorkflowService:
             from pal.bunshin.direct_contract import deliverable_paths
             deliverable_paths(self.artifacts.read_json(requirements_ref)["original"])
         skill_refs = _normalize_skill_refs(data.get("skill_refs"))
-        references = _normalize_references(
-            [*list(task_revision.get("references") or []), *list(data.get("references") or [])]
-        )
+        references = list(data.get("references") or [])
+        frozen_source_id = recovered_workflow_id
+        if replacing_workflow_id and execution_mode == "planned":
+            source_workflow = self._workflow_snapshot(replacing_workflow_id)
+            original_request = workflow_request_from_snapshot(self, source_workflow)
+            references = original_request["references"]
+            inherited_planned_inputs = source_workflow.payload.get("input_binding_ref") or original_request.get("input_binding_ref")
+            frozen_source_id = replacing_workflow_id
+        else:
+            inherited_planned_inputs = data.get("input_binding_ref") if recovered_workflow_id else None
+        if not frozen_source_id:
+            references = _normalize_references([*list(task_revision.get("references") or []), *references])
         direct_source = self.artifacts.read_json(artifact_ref) if execution_mode == "direct" and artifact_ref else {}
         if direct_source and direct_source.get("execution_mode") != "direct":
             raise ValueError("direct restart requires a direct execution artifact")
@@ -486,16 +485,18 @@ class BunshinWorkflowService:
             from pal.bunshin.direct_contract import capture_direct_references
             direct_references = (dict(direct_source.get("direct_reference_refs") or {}) if direct_source
                                  else capture_direct_references(self.artifacts, references))
-        inherited_inputs = direct_source.get("input_binding_ref")
+        inherited_inputs = inherited_planned_inputs or direct_source.get("input_binding_ref")
+        input_binding_ref = None
         if inherited_inputs:
-            from pal.bunshin.input_binding import InputBindingManifest
             manifest = InputBindingManifest.from_payload(self.artifacts.read_json(inherited_inputs))
+            if frozen_source_id and manifest.workflow_id != frozen_source_id:
+                raise BoundInputError("inherited input binding belongs to a different workflow")
             input_binding_ref = self.artifacts.put_json(
                 {**manifest.to_payload(), "workflow_id": workflow_id},
                 artifact_type=INPUT_BINDING_MANIFEST_ARTIFACT,
                 child_refs=((inherited_inputs["sha256"], "original_inputs"),),
             )
-        else:
+        elif not frozen_source_id:
             input_binding_ref = self._capture_input_binding(
                 workflow_id=workflow_id, workspace=workspace, references=references,
                 actor=actor, source_channel=source_channel,
@@ -520,6 +521,7 @@ class BunshinWorkflowService:
             "input_artifact_ref": artifact_ref,
             **({"direct_reference_refs": direct_references} if direct_references else {}),
             "actor": actor,
+            **({"recovered_from_workflow_id": frozen_source_id} if frozen_source_id else {}),
             **({"input_binding_ref": input_binding_ref.to_dict()} if input_binding_ref else {}),
         }
         request_ref = self.artifacts.put_json(
@@ -536,8 +538,49 @@ class BunshinWorkflowService:
             ),
         )
         from pal.bunshin.memory_binding import workflow_memory_binding
-        with workflow_memory_binding(self.runtime_root, self.repository, workflow_id):
-            result = self.repository.transitions.dispatch(
+        with (
+            workflow_memory_binding(self.runtime_root, self.repository, workflow_id),
+            self.repository.transaction() as unit,
+        ):
+            if create_task is not None:
+                match = unit.search.matching_workflow_task(
+                    owner=str(task_payload["owner"]), profile_id=primary_profile_id,
+                    workspace_key=str(task_payload["workspace_key"]), objective=str(task_payload["objective"]),
+                )
+                if match:
+                    if unit.queries.has_nonterminal_workflows_for_task(match):
+                        raise ValueError("Task already has an active workflow or execution restart.")
+                    raise ValueError("A matching Task was created during workflow start. Retry with its Task title.")
+                unit.transitions.dispatch_task_with_delivery(create_task, binding=delivery_binding)
+            current_task = unit.snapshots.read_snapshot(AggregateType.TASK, task_id)
+            if current_task is None or current_task.state != "ACTIVE":
+                raise ValueError("start_workflow requires an active task_id")
+            if current_task.payload.get("task_revision_ref") != task_revision_ref:
+                raise ValueError("Task context changed during workflow start. Retry with its current context.")
+            if replacing_workflow_id:
+                source = unit.snapshots.read_snapshot(AggregateType.WORKFLOW, replacing_workflow_id)
+                if (
+                    source is None
+                    or source.state != "RESTARTING"
+                    or source.payload.get("task_id") != task_id
+                    or source.payload.get("owner") != actor
+                    or source.workflow_id == workflow_id
+                ):
+                    raise ValueError("execution restart no longer owns this Task")
+            if unit.queries.has_nonterminal_workflows_for_task(
+                task_id, workflow_id=workflow_id, replacing_workflow_id=replacing_workflow_id,
+            ):
+                raise ValueError(
+                    "Task already has an active workflow or execution restart. Use the Task title with "
+                    "status or control tools instead of starting another."
+                )
+            if recovered_workflow_id:
+                latest = unit.search.latest_task_workflow(actor_id=actor, task_id=task_id)
+                if not latest or latest["workflow_id"] != recovered_workflow_id or latest["workflow_state"] != "CANCELLED":
+                    raise ValueError("Task workflow changed during cancelled plan recovery")
+            if unit.delivery_bindings.read_task_delivery(task_id) is None:
+                unit.delivery_bindings.bind_task_delivery(task_id=task_id, binding=delivery_binding)
+            result = unit.transitions.dispatch(
                 ActionEnvelope(
                     action_type="CREATE_WORKFLOW",
                     workflow_id=workflow_id,
@@ -578,6 +621,57 @@ class BunshinWorkflowService:
             "request_ref": request_ref.to_dict(),
             "next_action": "manager_outbox_tick",
         }
+
+    def _cancelled_plan_start_inputs(
+        self, data: Mapping[str, Any], *, actor: str,
+    ) -> tuple[str, dict[str, Any]]:
+        task_id = str(data.get("task_id") or "").strip()
+        if not task_id:
+            raise ValueError("restart_cancelled_plan requires the same Task")
+        inherited_fields = ("goal", "constraints", "approved_evidence", "references", "skill_refs")
+        if (
+            (data.get("operation") or "new_requirement") != "new_requirement"
+            or (data.get("execution_mode") or "planned") != "planned"
+            or (data.get("research_mode") or "local_only") != "local_only"
+            or any(data.get(name) for name in (*inherited_fields, "artifact_ref", "requirements_ref"))
+            or data.get("task_spec") is not None
+            or data.get("task_spec_file") is not None
+        ):
+            raise ValueError("restart_cancelled_plan reuses the original workflow inputs; supply the Task only")
+        latest = self.repository.search.latest_task_workflow(actor_id=actor, task_id=task_id)
+        if not latest or latest["workflow_state"] != "CANCELLED":
+            raise ValueError("restart_cancelled_plan requires the Task's latest workflow to be cancelled")
+        source = self._workflow_snapshot(str(latest["workflow_id"]))
+        if not self._is_unapproved_plan(source):
+            raise ValueError("restart_cancelled_plan requires a workflow cancelled before plan acceptance")
+        if data.get("workflow_id") == source.workflow_id:
+            raise ValueError("restart_cancelled_plan requires a new workflow identity")
+        original = workflow_request_from_snapshot(self, source)
+        revision_id = str(source.payload.get("architecture_revision_id") or "")
+        ledger = original.get("requirements_ref")
+        if revision_id:
+            revision = self.repository.snapshots.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
+            if revision is None or revision.workflow_id != source.workflow_id or not revision.payload.get("requirements_ref"):
+                raise ValueError("cancelled architecture revision has no recoverable task ledger")
+            ledger = revision.payload["requirements_ref"]
+        if not ledger:
+            raise ValueError("cancelled plan has no recoverable task ledger")
+        return source.workflow_id, {
+            **{name: original.get(name) for name in (*inherited_fields, "research_mode")},
+            "requirements_ref": ledger,
+            "input_binding_ref": source.payload.get("input_binding_ref") or original.get("input_binding_ref"),
+        }
+
+    def _is_unapproved_plan(self, workflow: AggregateSnapshot) -> bool:
+        return (
+            workflow.payload.get("operation") == "new_requirement"
+            and workflow.payload.get("execution_mode") != "direct"
+            and not workflow.payload.get("execution_epoch_id")
+            and not any(
+                item.aggregate_type == AggregateType.ARCHITECTURE_REVISION and item.state == "ACCEPTED"
+                for item in self.repository.queries.list_workflow_snapshots(workflow.workflow_id)
+            )
+        )
 
     def _capture_input_binding(
         self,
@@ -627,36 +721,20 @@ class BunshinWorkflowService:
             ),
         )
 
-    def _create_or_reuse_task_for_workflow(self, data: Mapping[str, Any]) -> str:
+    def _prepare_task_for_workflow(self, data: Mapping[str, Any]) -> tuple[str, ActionEnvelope | None]:
         goal = str(data.get("goal") or data.get("objective") or "").strip()
         primary_profile = self.catalog.profile(str(data.get("profile") or "").strip())
         primary_profile_id = primary_profile.canonical_profile_id
-        family_id = primary_profile.profile_group.replace("/", ".")
         workspace = _normalize_workspace(data.get("workspace"))
         title = str(data.get("title") or goal or "Bunshin workflow").strip()
         if not workspace:
             raise ValueError("one-click start_workflow requires workspace when task_id is omitted")
-        workspace_key = _workspace_key(workspace)
-        candidates = self.repository.search.search_tasks(
-            query="",
-            family_id=family_id,
-            include_archived=False,
-            limit=100,
-        )
-        match = next(
-            (
-                item
-                for item in candidates
-                if str(item.get("workspace_key") or "") == workspace_key
-                and str(item.get("objective") or "") == goal
-                and str(item.get("profile_id") or "") == primary_profile_id
-                and str(item.get("owner") or "") == str(data.get("actor") or "pal")
-            ),
-            None,
-        )
-        if match is not None:
-            return str(match["task_id"])
-        created = self.create_task(
+        owner = str(data.get("actor") or "pal")
+        selection = dict(owner=owner, profile_id=primary_profile_id, workspace_key=_workspace_key(workspace), objective=goal)
+        match = self.repository.search.matching_workflow_task(**selection)
+        if match:
+            return match, None
+        create_action = self._prepare_task_creation(
             {
                 "title": title,
                 "objective": goal,
@@ -664,12 +742,11 @@ class BunshinWorkflowService:
                 "workspace": workspace,
                 "references": list(data.get("references") or []),
                 "policies": dict(data.get("policies") or {}),
-                "actor": str(data.get("actor") or "pal"),
+                "actor": owner,
                 "source_channel": str(data.get("source_channel") or "local"),
-                "delivery_binding": dict(data.get("delivery_binding") or {}),
             }
         )
-        return str(created["task_id"])
+        return create_action.aggregate_id, create_action
 
     def _publish_task_revision(
         self,
@@ -787,6 +864,7 @@ class BunshinWorkflowService:
         selector: str,
         actor: str,
         include_terminal: bool,
+        include_restarting: bool = False,
     ) -> tuple[str, str]:
         """Resolve a public Task name to its single current workflow.
 
@@ -815,6 +893,7 @@ class BunshinWorkflowService:
             actor_id=actor,
             task_id=task_id,
             include_terminal=include_terminal,
+            include_restarting=include_restarting,
         )
         active = tuple(
             item
@@ -826,7 +905,7 @@ class BunshinWorkflowService:
             raise ValueError(
                 "Task/workflow invariant violated: one Task has multiple active workflows."
             )
-        selected = active or (workflows[:1] if include_terminal else ())
+        selected = active or (workflows[:1] if include_terminal or include_restarting else ())
         workflow_id = str(selected[0]["workflow_id"]) if selected else ""
         return task_id, workflow_id
 
@@ -1113,7 +1192,15 @@ class BunshinWorkflowService:
                 }
             )
         coordinator = WorkflowCoordinator(self.repository)
+        from pal.bunshin.storage.role_attempts import UnprovenInteractionOutcome
+
         with self.repository.transaction() as connection:
+            try:
+                connection.role_attempts.reconcile_interrupted_interactions(
+                    workflow_id, selected.aggregate_type.value, selected.aggregate_id,
+                )
+            except UnprovenInteractionOutcome as exc:
+                raise ValueError(f"{exc} {self._unproven_interaction_recovery(workflow_id)}") from exc
             if selected.aggregate_type == AggregateType.DAG_NODE_RUN:
                 from pal.bunshin.semantic_orchestration.dependency_repair_recovery import pending_repair_incarnation
                 # Validate terminal blockers before RESOLVE_TRIAGE's ordinary
@@ -1164,6 +1251,26 @@ class BunshinWorkflowService:
             "state": result.snapshot.state,
             "resolution": summary,
         }
+
+    def _unproven_interaction_recovery(self, workflow_id: str) -> str:
+        workflow = self._workflow_snapshot(workflow_id)
+        restartable = "REQUEST_EXECUTION_RESTART" in self.repository.transitions.legal_actions(
+            AggregateType.WORKFLOW, workflow.state,
+        )
+        if restartable and workflow.payload.get("execution_mode") != "direct":
+            try:
+                self._accepted_architecture_revision_for_restart(workflow)
+            except ValueError:
+                restartable = False
+        if restartable:
+            return "Check the original tool effect before using restart_bunshin_execution."
+        cancel_first = ("Check the original tool effect, cancel this workflow with control_bunshin_workflow, "
+                        "and wait for cancellation to finish.")
+        if self._is_unapproved_plan(workflow):
+            return (f"{cancel_first} Then use start_bunshin_workflow with the same Task and "
+                    "restart_cancelled_plan=true to reuse its recorded requirements.")
+        return (f"{cancel_first} Then use start_bunshin_workflow with the same Task. Supply the original "
+                "goal and authoritative task specification or the original named artifact, as required by its operation.")
 
     def _triage_candidates(self, workflow_id: str) -> tuple[AggregateSnapshot, ...]:
         snapshots = self.repository.queries.list_workflow_snapshots(workflow_id)
@@ -1698,6 +1805,8 @@ def workflow_request_from_snapshot(
 
 
 def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
+    if "restart_cancelled_plan" in data and not isinstance(data["restart_cancelled_plan"], bool):
+        raise ValueError("restart_cancelled_plan must be a boolean")
     if "source_files" in data:
         raise ValueError(
             "source_files was removed; supply task_spec or one task_spec_file"

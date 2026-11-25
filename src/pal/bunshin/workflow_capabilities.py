@@ -68,7 +68,8 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
         "manuals still need discovery; read_tool is needed only for missing contract information. For newly selected "
         "manuals without approval, ask whether to provide them and wait; pass only explicitly approved names in "
         "skill_refs. Supply the profile, goal, workspace, and complete task specification as described by their fields. "
-        "The short goal and title are routing metadata only and cannot substitute for the full task specification."
+        "The short goal and title are routing metadata only and cannot substitute for the full task specification. "
+        "To recover an unapproved plan after its cancellation settles, supply the same task and restart_cancelled_plan=true."
     ),
     do_not_use_when=(
         "Do not use for work strongly bound to Pal's relationship with the user, including conversation, Q&A, "
@@ -117,6 +118,10 @@ class BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput(StrictToolModel
         default=None,
         description="Existing actor-owned active Task title; omit profile/workspace when supplied. Otherwise provide profile and workspace to create or reuse a Task.",
     )
+    restart_cancelled_plan: bool = Field(
+        default=False,
+        description="With the same Task title, start fresh planning from its cancelled, unapproved plan. Reuse its goal and durable task ledger, including recorded Architect answers. Omit other workflow inputs.",
+    )
     title: str | None = None
     profile: str | None = Field(
         default=None,
@@ -135,13 +140,13 @@ class BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput(StrictToolModel
         "review_then_execute",
         "standalone_review",
         "review_and_repair",
-    ] = Field(default="new_requirement", description="new_requirement requires nonempty goal and task_spec or task_spec_file. Other operations require artifact and forbid task_spec/task_spec_file. execute_trusted requires trusted architecture; software review_and_repair requires a ContractArtifact with one implementation module.")
+    ] = Field(default="new_requirement", description="new_requirement requires nonempty goal and task_spec or task_spec_file unless restart_cancelled_plan=true. Other operations require artifact and forbid task_spec/task_spec_file. execute_trusted requires trusted architecture; software review_and_repair requires a ContractArtifact with one implementation module.")
     goal: str | None = Field(
         default=None,
         description=(
             "Short routing objective only. It cannot substitute for, summarize, or carry "
-            "the authoritative requirements; for new_requirement, task_spec or task_spec_file supplies the "
-            "complete semantic source of truth."
+            "the authoritative requirements. Supply those in task_spec or task_spec_file, "
+            "or use restart_cancelled_plan to reuse the durable ledger."
         ),
     )
     workspace: BunshinStartWorkflowWorkspace | None = Field(default=None, description="Required when task is omitted; omit for an existing task.")
@@ -819,16 +824,18 @@ class BunshinPublicProvider:
     def _pause_or_cancel_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
+            operation = str(call.args.get("operation") or "")
             _, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
                 include_terminal=False,
+                include_restarting=operation == "cancel",
             )
             if not workflow_id:
                 raise ValueError("Task has no active workflow to control")
             payload = self.service.control_workflow(
                 workflow_id=workflow_id,
-                command=str(call.args.get("operation") or ""),
+                command=operation,
                 actor=actor,
                 source_channel=channel,
                 reason=str(call.args.get("reason") or ""),

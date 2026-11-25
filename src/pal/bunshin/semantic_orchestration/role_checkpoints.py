@@ -9,8 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.skill_context import normalized_skill_injection
-from pal.bunshin.checkpoint import AgentSessionCheckpointError, LogicalCoroutineCheckpointStore, normalize_agent_session_checkpoint
+from pal.bunshin.checkpoint import (
+    AgentSessionCheckpointError, LogicalCoroutineCheckpointStore, normalize_agent_session_checkpoint,
+    open_agent_session_checkpoint,
+)
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.bunshin.harnesses import PAL_HARNESS_ID
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.paths import invocation_root
 from pal.bunshin.repository import BunshinRepository
@@ -42,6 +46,25 @@ class RoleCheckpoints:
         if self.repository.artifacts.read_artifact_record(prompt_ref.sha256) is None:
             return None
         return prompt_ref
+
+    def retry_assignment_prompt_ref(
+        self, assignment: Mapping[str, Any], *, harness_id: str,
+    ) -> ArtifactRef | None:
+        """Select the pinned prompt only for a retry of the same harness."""
+        # A newly claimed shell may be lost before it publishes its prompt.
+        # In that window the active attempt is no longer the author of the
+        # continuation's retained workspace. Walk back to the last publication.
+        for attempt in reversed(self.repository.role_attempts.list_role_attempts(str(assignment["assignment_id"]))):
+            if str(attempt.get("harness_id") or PAL_HARNESS_ID) != harness_id:
+                return None
+            value = dict(attempt.get("prompt_pack_ref") or {})
+            if not value.get("sha256"):
+                continue
+            ref = _ref_from_mapping(value)
+            if self.repository.artifacts.read_artifact_record(ref.sha256) is None:
+                raise SubmissionInvariantError("durable role retry prompt is unavailable")
+            return ref
+        return None
 
     def durable_session_skill_injections(
         self,
@@ -87,6 +110,11 @@ class RoleCheckpoints:
             return prior
         return _workflow_skill_injections(request, self.inject_skill)
 
+    @staticmethod
+    def require_success_receipt(assignment: Mapping[str, Any]) -> None:
+        if dict(assignment.get("settlement_action") or {}).get("action_type") == "ROLE_FAILED":
+            raise SubmissionInvariantError("recorded ROLE_FAILED receipt requires failure settlement")
+
     def terminal_from_assignment_receipt(
         self,
         assignment: Mapping[str, Any],
@@ -95,6 +123,7 @@ class RoleCheckpoints:
         summary: str,
         original_terminal: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self.require_success_receipt(assignment)
         artifact_ref = dict(assignment.get("submission_artifact_ref") or {})
         if not artifact_ref:
             raise SubmissionInvariantError("role assignment has no submission artifact")
@@ -169,11 +198,6 @@ class RoleCheckpoints:
         attempt_dir.mkdir(parents=True, exist_ok=True)
         restore_path = attempt_dir / "continuation-input.json"
         checkpoint_path = attempt_dir / "continuation-output.json"
-        with contextlib.suppress(FileNotFoundError):
-            restore_path.unlink()
-        with contextlib.suppress(FileNotFoundError):
-            checkpoint_path.unlink()
-
         store = LogicalCoroutineCheckpointStore(self.runtime_root)
         checkpoint = store.read(session_id)
         if checkpoint is None:
@@ -181,6 +205,8 @@ class RoleCheckpoints:
                 raise AgentSessionCheckpointError(
                     "role session requires a logical-coroutine checkpoint but it is missing"
                 )
+            for path in (restore_path, checkpoint_path):
+                path.unlink(missing_ok=True)
             return None, checkpoint_path
         restored = normalize_agent_session_checkpoint(checkpoint)
         if str(restored.get("logical_coroutine_id") or "") != session_id:
@@ -200,9 +226,11 @@ class RoleCheckpoints:
             raise AgentSessionCheckpointError(
                 "role session continuation has the wrong stage"
             )
-        materialized = store.materialize_input(session_id, restore_path)
+        self._validate_interaction_cursor(session_id, attempt_id, restored)
+        materialized = store.materialize_input(session_id, restore_path, selected=restored)
         if materialized is None:
             raise AgentSessionCheckpointError("logical-coroutine checkpoint disappeared during restoration")
+        checkpoint_path.unlink(missing_ok=True)
         # Reconcile a first publication whose file persisted but DB/ACK did
         # not. Never erase or bypass that continuation to fresh-start.
         with self.repository.database.write_connection() as connection:
@@ -210,6 +238,51 @@ class RoleCheckpoints:
                 connection, session_id, RoleSessionAction.INITIALIZE, now=utc_now(),
             )
         return materialized, checkpoint_path
+
+    def _validate_interaction_cursor(self, session_id: str, attempt_id: str, checkpoint: Mapping[str, Any]) -> None:
+        """Admit an actionable interaction or a definitively superseded tool cursor."""
+        coroutine_state = open_agent_session_checkpoint(self.runtime_root, checkpoint)["coroutine_state"]
+        parked = coroutine_state.get("parked_batch")
+        if parked is not None and (not isinstance(parked, Mapping) or not parked.get("wait_id")):
+            raise AgentSessionCheckpointError("parked checkpoint has an invalid interaction cursor")
+        with self.repository.database.read_connection() as connection:
+            waits = connection.execute(
+                "SELECT w.wait_id,w.state,w.assignment_id,w.resume_attempt_id,a.state AS assignment_state "
+                "FROM bunshin_interaction_waits w JOIN bunshin_role_assignments a "
+                "ON a.assignment_id=w.assignment_id WHERE a.session_id=?", (session_id,),
+            ).fetchall()
+            current = connection.execute(
+                "SELECT p.assignment_id FROM bunshin_role_attempts p JOIN bunshin_role_assignments a "
+                "ON a.assignment_id=p.assignment_id WHERE p.attempt_id=? AND a.session_id=? "
+                "AND a.active_attempt_id=p.attempt_id AND a.state IN ('claimed','running') "
+                "AND p.status IN ('starting','running')",
+                (attempt_id, session_id),
+            ).fetchone()
+        unfinished = {row["wait_id"] for row in waits if row["state"] in {"open", "answered", "resuming"}}
+        if parked is None:
+            if unfinished:
+                raise AgentSessionCheckpointError("closed checkpoint has an uncommitted interaction outcome")
+            return
+        wait = next((row for row in waits if row["wait_id"] == parked["wait_id"]), None)
+        if wait is None:
+            raise AgentSessionCheckpointError("parked checkpoint has no committed actionable interaction")
+        if wait["state"] == "resuming" or (wait["state"] == "cancelled" and wait["resume_attempt_id"]):
+            raise AgentSessionCheckpointError("interrupted interaction requires checkpoint reconciliation before resuming")
+        if current is None:
+            raise AgentSessionCheckpointError("parked checkpoint has no committed actionable interaction")
+        if unfinished - {wait["wait_id"]}:
+            raise AgentSessionCheckpointError("parked checkpoint has another uncommitted interaction outcome")
+        response_key = str(coroutine_state.get("active_response_key") or "")
+        if response_key and response_key != wait["assignment_id"]:
+            raise AgentSessionCheckpointError("parked checkpoint has the wrong interaction assignment")
+        if wait["state"] in {"open", "answered"} and current["assignment_id"] == wait["assignment_id"]:
+            return
+        if (wait["state"] == "cancelled" and wait["assignment_state"] in {"cancelled", "settled"}
+                and current["assignment_id"] != wait["assignment_id"]):
+            # The worker normalizes the obsolete tool turn when its current
+            # response key differs from this superseded assignment.
+            return
+        raise AgentSessionCheckpointError("parked checkpoint has no committed actionable interaction")
 
     def publish_agent_session_checkpoint(
         self,

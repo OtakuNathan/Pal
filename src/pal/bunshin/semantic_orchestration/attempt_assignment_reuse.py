@@ -1,12 +1,10 @@
 from __future__ import annotations
-import pal.bunshin.turns as _dependency_turns
 from dataclasses import dataclass
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contracts import DeferredEffectError
 from pal.bunshin.repository import BunshinRepository
-from pal.bunshin.role_contracts import OrchestrationRole
 from pal.bunshin.semantic_orchestration.role_environment import _role_submission_kind
-from pal.bunshin.semantic_orchestration.role_policy import _role_primary_artifact_name
-from pal.bunshin.contracts import SubmissionInvariantError
+from pal.bunshin.semantic_orchestration.attempt_assignment_replay import replay_assignment_receipt
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity
 from pal.bunshin.semantic_orchestration.assignment_retries import AssignmentRetries
@@ -70,6 +68,15 @@ class AssignmentReuse:
             )
         )
         if reusable_assignment is not None:
+            if self.assignment_retries.role_assignment_attempt_is_live(reusable_assignment):
+                raise DeferredEffectError("role receipt still has a live process attempt")
+            self.repository.role_maintenance.reconcile_retired_role_checkpoint(
+                str(reusable_assignment["session_id"]),
+            )
+            replay = replay_assignment_receipt(
+                self.artifacts, self.role_checkpoints, reusable_assignment,
+                summary="Reconciled an equivalent durable role submission receipt.",
+            )
             self.repository.role_cancellation.cancel_role_assignments(
                 workflow_id=snapshot.workflow_id,
                 aggregate_type=snapshot.aggregate_type,
@@ -81,37 +88,5 @@ class AssignmentReuse:
                 exclude_assignment_id=str(reusable_assignment["assignment_id"]),
             )
             self.background.signal_ready(effect, str(reusable_assignment["assignment_id"]))
-            prompt_ref = self.role_checkpoints.durable_assignment_prompt_ref(reusable_assignment)
-            if prompt_ref is None:
-                if activation.role == OrchestrationRole.VERIFIER:
-                    raise SubmissionInvariantError(
-                        "durable verifier receipt lost its original prompt workspace binding"
-                    )
-                pack = _dependency_turns.sanitize_runner_session_pack(pack)
-                prompt_ref = self.artifacts.put_json(
-                    pack.to_dict(),
-                    artifact_type="RolePromptPackArtifact",
-                    child_refs=tuple(
-                        (ref.sha256, name)
-                        for name, ref in bound_reference_refs.items()
-                        if ref.artifact_type != "LocalPathReference"
-                    ),
-                )
-            terminal = self.role_checkpoints.terminal_from_assignment_receipt(
-                reusable_assignment,
-                primary_artifact_name=_role_primary_artifact_name(pack),
-                summary="Reconciled an equivalent durable role submission receipt.",
-            )
-            terminal_ref = self.artifacts.put_json(
-                terminal,
-                artifact_type="RoleTerminalArtifact",
-                child_refs=(
-                    (prompt_ref.sha256, "prompt_pack"),
-                    (
-                        str(dict(reusable_assignment["submission_artifact_ref"])["sha256"]),
-                        "submission_receipt",
-                    ),
-                ),
-            )
-            return AttemptReplay((terminal, prompt_ref, terminal_ref))
+            return replay
         return AssignmentReuseResult(assignment=assignment, durable_input_refs=durable_input_refs, pack=pack, submission_kind=submission_kind)

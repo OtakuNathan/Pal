@@ -114,6 +114,8 @@ class BunshinControlEventHandler(EventHandler):
             for part_key, part_delivery in deliveries:
                 if part_key in completed_parts:
                     continue
+                if not self.provider.may_send_event(payload):
+                    return []
                 if not await self.controls.deliver(part_delivery, require_provider=True):
                     accepted = False
                     error = "channel provider did not accept bunshin delivery"

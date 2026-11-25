@@ -4,8 +4,7 @@ from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.contracts import AggregateType
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import family_execution_adapter, validate_family_binding_payload
-from pal.bunshin.graph_protocol import graph_ir_from_mapping
-from pal.bunshin.workflow_runtime import InstalledGraph, WorkflowCoordinator
+from pal.bunshin.graph_protocol import GraphIR, graph_ir_from_mapping
 
 
 def _workflow_execution_adapter(
@@ -30,12 +29,11 @@ def _workflow_execution_adapter(
     return family_execution_adapter(binding.get("execution_adapter"))
 
 
-def _install_execution_graph(
+def _read_execution_graph(
     artifact: Mapping[str, Any],
     *,
     workflow_id: str,
-    repository: BunshinRepository,
-) -> InstalledGraph:
+) -> GraphIR:
     raw = artifact.get("graph_ir")
     if not isinstance(raw, Mapping) or not raw:
         raise ValueError(
@@ -45,7 +43,4 @@ def _install_execution_graph(
     graph = graph_ir_from_mapping(raw)
     if graph.graph_id != workflow_id:
         raise ValueError("ContractArtifact GraphIR belongs to another workflow")
-    return WorkflowCoordinator(repository).install_graph(
-        workflow_id=workflow_id,
-        graph=graph,
-    )
+    return graph

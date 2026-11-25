@@ -192,6 +192,246 @@ class BunshinRoleGatewayTests(unittest.TestCase):
         value = self.call("bound_input_json", name="module_work_view")
         self.assertEqual(value["value"]["module"], "router")
 
+    def test_retry_removes_legacy_repo_relative_alias_from_gateway_inputs(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from pal.shared import BunshinInvocationPack
+        from pal.bunshin.harnesses import builtin_harness_generation
+        from pal.bunshin.sandbox import with_bunshin_sandbox_metadata
+        from pal.bunshin.semantic_orchestration.attempt_harness_binding import HarnessBinding
+        from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
+
+        frozen = self.workspace / "facts.json"
+        frozen.write_text('{"facts":"frozen"}', encoding="utf-8")
+        unrelated = self.runtime_root / "other-facts.json"
+        unrelated.write_text('{"facts":"unrelated"}', encoding="utf-8")
+        prompt = self.service.artifacts.read_json(self.prompt_ref.to_dict())
+        references = prompt["metadata"]["requirements_brief"]["references"]
+        alias = {"name": "user_facts", "path": str(unrelated)}
+        bound = {"name": "facts", "path": str(frozen), "include": ["facts.json"], "bound_input": True}
+        prompt["workspace"]["reference_paths"] = [*references, alias, bound]
+        current = BunshinInvocationPack.from_dict(copy.deepcopy({**prompt, "workspace": {
+            **prompt["workspace"], "reference_paths": [*references, bound],
+        }}))
+        prompt["metadata"]["requirements_brief"]["references"] = [*references, alias, {**bound, "path": str(unrelated)}]
+        with patch("pal.bunshin.sandbox.sandbox_supported_backend", return_value="bwrap"):
+            durable = with_bunshin_sandbox_metadata(self.runtime_root, BunshinInvocationPack.from_dict(prompt), run_id="old")
+        repository = self.service.repository
+        legacy_ref = self.service.artifacts.put_json(durable.to_dict(), artifact_type="RolePromptPackArtifact")
+        with repository.database.write_connection() as connection:
+            connection.execute("UPDATE bunshin_role_attempts SET prompt_pack_ref_json=? WHERE attempt_id=?",
+                               (json.dumps(legacy_ref.to_dict()), self.attempt_id))
+        repository.role_retries.queue_role_attempt_retry(assignment_id=self.assignment_id,
+            attempt_id_value=self.attempt_id, error_kind="manager_restart", error_text="retry old prompt")
+        repository.leases.release_lease(self.lease_resource, self.attempt_id, self.fencing_token)
+        binding = asyncio.run(HarnessBinding(self.service.artifacts, repository,
+            RoleCheckpoints(self.service.artifacts, None, repository, self.runtime_root)).execute(
+                SimpleNamespace(invocation_id="session-router"), SimpleNamespace(pack=current),
+                SimpleNamespace(assignment=repository.role_assignments.read_role_assignment(self.assignment_id),
+                    durable_prompt_reused=False, role_session=repository.role_sessions.read_role_session("session-router")),
+                SimpleNamespace(harness_generation=builtin_harness_generation(), role="implementation",
+                    request={"references": [{"name": "facts", "path": "facts.json"}]},
+                    retry_prompt_ref=legacy_ref, bound_input_entries=[bound]),
+            ))
+        self.assertTrue(binding.durable_prompt_reused)
+        with patch("pal.bunshin.sandbox.sandbox_supported_backend", return_value="bwrap"):
+            revised = with_bunshin_sandbox_metadata(self.runtime_root, binding.pack, run_id="retry")
+        ref = self.service.artifacts.put_json(revised.to_dict(), artifact_type="RolePromptPackArtifact")
+        new_attempt = repository.role_assignments.claim_role_assignment(self.assignment_id)
+        new_attempt_id = new_attempt["attempt_id"]
+        lease = repository.leases.claim_lease(self.lease_resource, new_attempt_id)
+        repository.role_attempts.start_role_attempt(assignment_id=self.assignment_id, attempt_id_value=new_attempt_id,
+            lease_resource_key=self.lease_resource, fencing_token=lease.fencing_token, prompt_pack_ref=ref.to_dict())
+        self.access_token = repository.role_access.issue_role_attempt_access_token(assignment_id=self.assignment_id,
+            attempt_id_value=new_attempt_id, fencing_token=lease.fencing_token)
+        with self.assertRaisesRegex(ValueError, "not part of the authenticated prompt"):
+            self.call("bound_input_json", name="user_facts")
+        self.assertEqual(self.call("bound_input_json", name="facts")["value"], {"facts": "frozen"})
+        self.assertEqual(self.call("bound_input_json", name="module_work_view")["value"]["module"], "router")
+
+    def _prepared_workspace_retry(self, *, drift: bool, artifact_style: bool = False,
+                                  live_group: bool = False, lost_prelaunch: bool = False,
+                                  colliding_name: bool = False, legacy_collision: bool = False) -> None:
+        import asyncio
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from pal.shared import BunshinInvocationPack
+        from pal.bunshin.background_assignments import BackgroundAssignments
+        from pal.bunshin.input_binding import (
+            BoundInputError, capture_input_binding, declared_inputs_from_references,
+        )
+        from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+        from pal.bunshin.semantic_orchestration.assignment_retries import AssignmentRetries
+        from pal.bunshin.semantic_orchestration.attempt_harness_binding import HarnessBinding
+        from pal.bunshin.semantic_orchestration.attempt_inputs import AttemptInputs
+        from pal.bunshin.semantic_orchestration.attempt_models import RoleAttemptRequest
+        from pal.bunshin.semantic_orchestration.attempt_reference_binding import ReferenceBinding
+        from pal.bunshin.semantic_orchestration.attempt_workspace_preparation import WorkspacePreparation
+        from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
+        from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
+        from pal.bunshin.semantic_orchestration.role_environment import _bind_role_attempt_sandbox
+        from pal.bunshin.semantic_orchestration.workflow_requests import WorkflowRequests
+
+        repo, artifacts = self.service.repository, self.service.artifacts
+        facts = self.workspace / "facts.json"
+        facts.write_text('{"facts":"frozen"}', encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.workspace, check=True)
+        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                        "commit", "-qm", "Fixture"], cwd=self.workspace, check=True)
+        refs = [{"name": "module_work_view" if colliding_name else "facts", "path": "facts.json"}]
+        manifest = capture_input_binding(repo_root=self.workspace, workflow_id="workflow-router",
+                                        declarations=declared_inputs_from_references(refs), artifacts=artifacts)
+        manifest_ref = artifacts.put_json(manifest.to_payload(), artifact_type="InputBindingManifestArtifact")
+        request_ref = artifacts.put_json({"workspace": {"kind": "existing_repo", "repo_path": str(self.workspace)},
+            "references": refs, "input_binding_ref": manifest_ref.to_dict()}, artifact_type="WorkflowRequestArtifact")
+        family_ref = artifacts.put_json({"policies": {"workspace": {"prepare": True}}}, artifact_type="FamilyBindingArtifact")
+        workflow = repo.snapshots.read_snapshot(AggregateType.WORKFLOW, "workflow-router")
+        node = repo.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, "node-router")
+        with repo.database.write_connection() as conn:
+            conn.execute("UPDATE bunshin_aggregate_snapshots SET payload_json=? WHERE aggregate_type=? AND aggregate_id=?",
+                        (json.dumps({**workflow.payload, "request_ref": request_ref.to_dict(),
+                                     "family_binding_ref": family_ref.to_dict()}), workflow.aggregate_type.value, workflow.aggregate_id))
+        node = replace(node, payload={**node.payload, "execution_adapter":
+                                     "artifact_bundle.v2" if artifact_style else "software_git.v2"})
+        checkpoints = RoleCheckpoints(artifacts, None, repo, self.runtime_root)
+        retries = AssignmentRetries(BackgroundAssignments(), repo)
+        preparation = WorkspacePreparation(artifacts, AttemptInputs(artifacts), repo,
+                                           WorkflowRequests(artifacts), self.runtime_root, retries, checkpoints)
+        cmd = RoleAttemptRequest(effect={"effect_key": "same-effect"}, snapshot=node, invocation_id="session-router",
+            lease_resource=self.lease_resource, fencing_token=1, profile="software_engineering.v2_coder",
+            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
+            instruction="Read the frozen facts", reference_refs={"module_work_view": self.input_ref} if colliding_name else {},
+            workspace_override=None, prepare_workspace=True)
+        component = SemanticOrchestrator(self.service)
+        reference_binding = ReferenceBinding(repo, self.service.task_ledger, component.components.workflow_facts)
+
+        async def pack_for(stage, command):
+            refs = await reference_binding.execute(command, stage)
+            return BunshinInvocationPack(invocation_id=command.invocation_id, workspace=stage.workspace,
+                                         metadata={"requirements_brief": {"references": refs.references}})
+
+        first = asyncio.run(preparation.execute(cmd))
+        pack = asyncio.run(pack_for(first, cmd))
+        with patch("pal.bunshin.sandbox.sandbox_supported_backend", return_value="bwrap"):
+            durable = _bind_role_attempt_sandbox(self.runtime_root, pack, run_id=first.run_id, durable_prompt_reused=False)
+        if legacy_collision:
+            # Before aliases were allocated the first projection kept the
+            # Manager's reference and omitted the colliding declaration.
+            value = durable.to_dict()
+            for section in (value["workspace"], value["metadata"]["requirements_brief"]):
+                key = "reference_paths" if "reference_paths" in section else "references"
+                section[key] = [item for item in section[key] if not item.get("declared_input_name")]
+            durable = BunshinInvocationPack.from_dict(value)
+        prompt_ref = artifacts.put_json(durable.to_dict(), artifact_type="RolePromptPackArtifact")
+        if live_group:
+            from pal.bunshin.workspace_resources import process_group_birth
+            worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                      cwd=first.workspace["repo_path"], start_new_session=True)
+            def retire_worker():
+                if worker.poll() is None:
+                    worker.terminate()
+                worker.wait(timeout=5)
+            self.addCleanup(retire_worker)
+            birth = process_group_birth(worker.pid)
+            self.assertTrue(birth)
+            repo.leases.update_lease_metadata(self.lease_resource, self.attempt_id, self.fencing_token,
+                                             {"process_group_id": worker.pid, "process_group_birth": birth})
+        with repo.database.write_connection() as conn:
+            conn.execute("UPDATE bunshin_role_attempts SET prompt_pack_ref_json=? WHERE attempt_id=?",
+                         (json.dumps(prompt_ref.to_dict()), self.attempt_id))
+            conn.execute("UPDATE bunshin_role_assignments SET execution_spec_json=? WHERE assignment_id=?",
+                         (json.dumps({"effect_type": "run_implementation_role", "effect_key": "same-effect"}), self.assignment_id))
+        repo.role_retries.queue_role_attempt_retry(assignment_id=self.assignment_id, attempt_id_value=self.attempt_id,
+                                                   error_kind="manager_restart", error_text="retired worker")
+        repo.leases.release_lease(self.lease_resource, self.attempt_id, self.fencing_token)
+        if lost_prelaunch:
+            shell = repo.role_assignments.claim_role_assignment(self.assignment_id)
+            repo.role_retries.queue_role_attempt_retry(assignment_id=self.assignment_id,
+                attempt_id_value=shell["attempt_id"], error_kind="manager_restart", error_text="lost before prompt publication")
+        # The old working tree is the continuation's work, not a disposable clone.
+        old = Path(first.workspace["repo_path"])
+        (old / "in-progress.txt").write_text("preserve this work", encoding="utf-8")
+        frozen = Path(first.bound_input_entries[0]["path"])
+        if drift:
+            frozen.write_text('{"facts":"changed"}', encoding="utf-8")
+        if live_group:
+            from pal.bunshin.contracts import DeferredEffectError
+            with self.assertRaisesRegex(DeferredEffectError, "live process attempt"):
+                asyncio.run(preparation.execute(replace(cmd, fencing_token=2)))
+            self.assertEqual(frozen.read_text(), '{"facts":"changed"}')
+            retire_worker()
+        if drift and not artifact_style:
+            with self.assertRaisesRegex(BoundInputError, "drifted"):
+                asyncio.run(preparation.execute(replace(cmd, fencing_token=2)))
+            return
+        # Even if the task's current source changed, a valid continuation must
+        # use the retained workspace, not re-clone a different source commit.
+        facts.write_text('{"facts":"new source"}', encoding="utf-8")
+        subprocess.run(["git", "add", "facts.json"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                        "commit", "-qm", "Change source"], cwd=self.workspace, check=True)
+        cmd = replace(cmd, fencing_token=2)
+        # No process-local effect mapping survives restart.
+        preparation.assignment_retries = AssignmentRetries(BackgroundAssignments(), repo)
+        second = asyncio.run(preparation.execute(cmd))
+        self.assertEqual(Path(second.workspace["repo_path"]), old)
+        self.assertEqual(second.retry_prompt_ref, prompt_ref)
+        self.assertEqual(Path(second.bound_input_entries[0]["path"]), frozen)
+        self.assertEqual(frozen.read_text(), '{"facts":"frozen"}')
+        self.assertEqual((old / "in-progress.txt").read_text(), "preserve this work")
+        current = asyncio.run(pack_for(second, cmd))
+        binding = asyncio.run(HarnessBinding(artifacts, repo, checkpoints).execute(
+            cmd, SimpleNamespace(pack=current),
+            SimpleNamespace(assignment=repo.role_assignments.read_role_assignment(self.assignment_id),
+                durable_prompt_reused=False, role_session=repo.role_sessions.read_role_session("session-router")), second))
+        final = _bind_role_attempt_sandbox(self.runtime_root, binding.pack, run_id=second.run_id, durable_prompt_reused=True)
+        self.assertTrue(binding.durable_prompt_reused)
+        self.assertEqual(Path(final.metadata["sandbox"]["workspace_path"]), old)
+        self.assertEqual(final.workspace["prepared_environment_fingerprint"], second.workspace["prepared_environment_fingerprint"])
+        self.assertEqual(next(item for item in final.metadata["requirements_brief"]["references"] if item["name"] == "workspace_preparation"),
+                         next(item for item in current.metadata["requirements_brief"]["references"] if item["name"] == "workspace_preparation"))
+        self.assertIn(frozen.relative_to(old).as_posix(), final.workspace["read_only_overlay_paths"])
+        self.assertFalse(old.with_name("fence-2").exists())
+        if colliding_name:
+            def named(pack):
+                return {item["name"]: item for item in pack.workspace["reference_paths"]}
+            first_refs, final_refs = named(durable), named(final)
+            self.assertEqual(first_refs["module_work_view"], final_refs["module_work_view"])
+            self.assertFalse(final_refs["module_work_view"]["bound_input"])
+            if not legacy_collision:
+                self.assertEqual(first_refs["declared_module_work_view"], final_refs["declared_module_work_view"])
+            self.assertTrue(final_refs["declared_module_work_view"]["bound_input"])
+            prompt_ref = artifacts.put_json(final.to_dict(), artifact_type="RolePromptPackArtifact")
+            attempt = repo.role_assignments.claim_role_assignment(self.assignment_id)
+            lease = repo.leases.claim_lease(self.lease_resource, attempt["attempt_id"])
+            repo.role_attempts.start_role_attempt(assignment_id=self.assignment_id, attempt_id_value=attempt["attempt_id"],
+                lease_resource_key=self.lease_resource, fencing_token=lease.fencing_token, prompt_pack_ref=prompt_ref.to_dict())
+            self.access_token = repo.role_access.issue_role_attempt_access_token(assignment_id=self.assignment_id,
+                attempt_id_value=attempt["attempt_id"], fencing_token=lease.fencing_token)
+            self.assertEqual(self.call("bound_input_json", name="module_work_view")["value"]["module"], "router")
+            self.assertEqual(self.call("bound_input_json", name="declared_module_work_view")["value"], {"facts": "frozen"})
+
+    def test_retry_checks_retained_git_workspace_not_new_clone(self) -> None:
+        self._prepared_workspace_retry(drift=True)
+
+    def test_retry_preserves_verified_checkout_when_source_advances(self) -> None:
+        self._prepared_workspace_retry(drift=False)
+
+    def test_retry_rematerializes_artifact_inputs_in_retained_workspace(self) -> None:
+        self._prepared_workspace_retry(drift=True, artifact_style=True)
+
+    def test_retry_waits_for_recorded_worker_before_rematerializing_inputs(self) -> None:
+        self._prepared_workspace_retry(drift=True, artifact_style=True, live_group=True)
+
+    def test_retry_keeps_workspace_after_later_shell_lost_before_publication(self) -> None:
+        self._prepared_workspace_retry(drift=False, lost_prelaunch=True)
+
+    def test_retry_preserves_semantic_reference_when_declaration_has_same_name(self) -> None:
+        self._prepared_workspace_retry(drift=False, colliding_name=True)
+
+    def test_retry_repairs_legacy_first_projection_of_colliding_declaration(self) -> None:
+        self._prepared_workspace_retry(drift=False, colliding_name=True, legacy_collision=True)
+
     def test_gateway_persists_harness_continuation_by_logical_session(self) -> None:
         written = self.call(
             "harness_state_write",
@@ -1067,9 +1307,12 @@ class BunshinRoleGatewayTests(unittest.TestCase):
         corpus = self.workspace / "verifier"
         corpus.mkdir()
         (corpus / "test_old.py").write_text("def test_previous_regression(): assert 1 + 1 == 2")
+        (corpus / "expected.golden").write_text("fixed")
         (corpus / "test_new.py").write_text(
             "from pathlib import Path\n"
-            "def test_current_regression(): assert Path('README.md').read_text() == 'fixed'"
+            "def test_current_regression():\n"
+            "    expected = Path(__file__).with_name('expected.golden').read_text()\n"
+            "    assert Path('README.md').read_text() == expected\n"
         )
         self._bind_git_scope_workspace(repair_precheck=True, repair_corpus_scope={"kind": "directory", "path": "verifier"})
         with self.service.repository.database.write_connection() as db:

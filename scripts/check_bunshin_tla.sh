@@ -50,6 +50,7 @@ models=(
 )
 
 cd "${repo_root}"
+python scripts/run_tlc.py --group bunshin --inventory-only
 for model in "${models[@]}"; do
     echo "==> TLC ${model}"
     java -XX:+UseParallelGC -jar "${tla_jar}" \
@@ -58,6 +59,24 @@ for model in "${models[@]}"; do
         -config "spec/bunshin/${model}.cfg" \
         "spec/bunshin/${model}.tla"
 done
+
+echo "==> TLC ProduceCheckNodeCycle"
+java -XX:+UseParallelGC -jar "${tla_jar}" \
+    -workers "${workers}" -cleanup \
+    -config spec/bunshin/ProduceCheckNodeCycle.cfg \
+    spec/bunshin/ProduceCheckCycle.tla
+
+echo "==> TLC GraphExecutionProgressWitness (expected completion witness)"
+set +e
+progress_output="$(java -XX:+UseParallelGC -jar "${tla_jar}" -workers "${workers}" -cleanup \
+    -config spec/bunshin/GraphExecutionProgressWitness.cfg spec/bunshin/GraphExecutionLifecycle.tla 2>&1)"
+progress_status=$?
+set -e
+if [[ ${progress_status} -eq 0 ]] || [[ "${progress_output}" != *"Invariant NeverCompletes is violated"* ]]; then
+    echo "GraphExecutionProgressWitness did not reach terminal publication" >&2
+    echo "${progress_output}" >&2
+    exit 1
+fi
 
 # A previous incarnation's checkpoint must never authorize the next release.
 echo "==> TLC ProcessCapacityLifecycleReuseCheckpoint (expected counterexample)"

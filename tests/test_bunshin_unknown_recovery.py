@@ -167,6 +167,7 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             bound_input_entries=[], bound_reference_refs={"candidate_diff": self.candidate},
             contract_authoring=False, workspace={"output_policy": {"primary_artifact": "verification.json"}}, role="verifier", mode="module",
             binding={}, binding_ref={"sha256": "family"}, llm_policy={},
+            request={},
             harness_generation=BunshinHarnessRegistryGeneration("harness", (spec,)),
             preferred_harness=spec,
         )
@@ -185,6 +186,8 @@ class BlockingUnknownRecoveryTests(unittest.TestCase):
             self.worker.components.assignment_retries, self.worker.background,
             self.repository, self.worker.components.role_checkpoints,
         ).execute(command, references, PreparedRolePrompt(prompt.pack), workspace)
+        workspace.retry_prompt_ref = (self.worker.components.role_checkpoints.retry_assignment_prompt_ref(
+            reuse.assignment, harness_id=spec.harness_id) if not isinstance(reuse, AttemptReplay) and reuse.assignment else None)
         return command, workspace, references, prompt, reuse
 
     async def assignment(self, prepared):

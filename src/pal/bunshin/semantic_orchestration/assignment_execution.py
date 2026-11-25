@@ -55,6 +55,11 @@ class AssignmentExecution:
                             "provider_request_id": assignment_id,
                             "status": disposition,
                         }
+                    if dict(assignment.get("settlement_action") or {}).get("action_type") == "ROLE_FAILED":
+                        # Recovery consumes the original failure fact without
+                        # entering the normal role business/worker wrapper.
+                        self.role_leases.release_background_business_lease(effect)
+                        return self.assignment_failures.settle_background_role_failure(effect, assignment)
             try:
                 result = await runner(effect)
                 assignment_id = self.background.assignment_id(effect_key, "")

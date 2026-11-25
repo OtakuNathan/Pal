@@ -801,6 +801,7 @@ class BunshinScopedExecutionRuntime:
             return lambda call, _ctx: ask_question_tool_result(
                 call,
                 request_user=self.request_user_clarification,
+                requires_task_revision=dict(self.workspace.get("bunshin") or {}).get("role") != "implementation",
             )
         if is_verification_builder_capability(name):
             return lambda call, ctx: verification_builder_tool_result(

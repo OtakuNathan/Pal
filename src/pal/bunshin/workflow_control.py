@@ -6,7 +6,33 @@ from typing import Any
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.bunshin.machine_dsl import ControlDisposition, ControlIntent
 from pal.bunshin.machines import machine_spec_for
-from pal.bunshin.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.workflow_runtime import WorkflowCoordinator, node_pause_must_drain, role_pause_must_drain, workflow_pauses_cycles as _workflow_pauses_cycles
+
+
+# A durable control effect is a wake-up for the current owner, not authority
+# to reinstate the intent which originally enqueued it.
+CONTROL_EFFECT_SOURCES = {
+    "propagate_pause": (AggregateType.WORKFLOW, "PAUSE_REQUESTED"),
+    "propagate_cancel": (AggregateType.WORKFLOW, "CANCEL_REQUESTED"),
+    "propagate_resume": (AggregateType.WORKFLOW, "ACTIVE"),
+    "freeze_workflow_children": (AggregateType.WORKFLOW, "TRIAGE_REQUIRED"),
+    "pause_epoch_nodes": (AggregateType.EXECUTION_EPOCH, "PAUSE_REQUESTED"),
+    "cancel_epoch_nodes": (AggregateType.EXECUTION_EPOCH, "CANCEL_REQUESTED"),
+    "resume_epoch_nodes": (AggregateType.EXECUTION_EPOCH, "RUNNING"),
+    "freeze_epoch_nodes": (AggregateType.EXECUTION_EPOCH, "TRIAGE_REQUIRED"),
+    "suspend_stale_node_assignments": (AggregateType.DAG_NODE_RUN, "STALE"),
+}
+CONTROL_FREEZE_ORIGINS = {
+    "freeze_workflow_children": frozenset({"ACTIVE"}),
+    "freeze_epoch_nodes": frozenset({"STARTING", "RUNNING", "REPLAN_COLLECTING", "REPLAN_REQUIRED", "FINALIZING"}),
+}
+
+
+def control_effect_is_current(effect_type: str, snapshot: AggregateSnapshot) -> bool:
+    if CONTROL_EFFECT_SOURCES[effect_type] != (snapshot.aggregate_type, snapshot.state):
+        return False
+    origins = CONTROL_FREEZE_ORIGINS.get(effect_type)
+    return origins is None or str(snapshot.payload.get("triage_resume_state") or "") in origins
 
 
 def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
@@ -22,10 +48,15 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
     _reconcile_cycle_control_projection(repository, workflow, snapshots)
     requested_intent = {
         "PAUSE_REQUESTED": ControlIntent.PAUSE,
+        "PAUSED": ControlIntent.PAUSE,
         "CANCEL_REQUESTED": ControlIntent.CANCEL,
+        "CANCELLED": ControlIntent.CANCEL,
+        "RESTARTING": ControlIntent.CANCEL,
     }.get(workflow.state)
     if requested_intent is not None:
         for child in _active_control_children(snapshots, workflow):
+            if requested_intent == ControlIntent.PAUSE and role_pause_must_drain(child, repository.queries):
+                continue
             machine = machine_spec_for(child.aggregate_type)
             if (
                 machine.control_disposition(requested_intent, child.state)
@@ -87,7 +118,10 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             "CANCEL_REQUESTED": ControlIntent.CANCEL,
         }.get(epoch.state)
         if epoch_intent is not None:
+            execution = repository.cycles.read_graph_execution(workflow_id=workflow_id) if epoch_intent == ControlIntent.PAUSE else None
             for node in nodes:
+                if epoch_intent == ControlIntent.PAUSE and node_pause_must_drain(node, execution, repository.queries):
+                    continue
                 if (
                     node_machine.control_disposition(epoch_intent, node.state)
                     != ControlDisposition.REQUEST
@@ -239,18 +273,6 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
         )
 
 
-def _workflow_pauses_cycles(workflow: AggregateSnapshot) -> bool:
-    # An ACTIVE workflow's triage freezes its children through the ordinary
-    # pause protocol. The semantic cursors must receive that same intent
-    # before process retirement can confirm PAUSED and clear the old slot.
-    # Triage during cancellation/restart must not replace its cancel intent.
-    return workflow.state in {"PAUSE_REQUESTED", "PAUSED"} or (
-        workflow.state == "TRIAGE_REQUIRED"
-        and str(workflow.payload.get("triage_resume_state") or "")
-        in {"ACTIVE", "PAUSE_REQUESTED"}
-    )
-
-
 def _reconcile_cycle_control_projection(
     repository: Any,
     workflow: AggregateSnapshot,
@@ -297,6 +319,7 @@ def _reconcile_cycle_control_projection(
                     or ""
                 ),
                 cancel=item.state == "CANCELLED",
+                generation=int(item.payload.get("graph_generation") or 0),
             )
 
 
@@ -325,6 +348,18 @@ def _active_control_children(
         and item.aggregate_id in active_ids
     ]
     if active_ids:
+        active_epoch = str(workflow.payload.get("execution_epoch_id") or "")
+        # A pinned preparation belongs to the current lineage before it
+        # becomes the active execution pointer. Include it in control and
+        # confirmation, without dragging unrelated historical epochs in.
+        children.extend(
+            item for item in snapshots
+            if item.aggregate_type == AggregateType.EXECUTION_EPOCH
+            and item.aggregate_id not in active_ids
+            and item.state not in {"SUPERSEDED", "COMPLETED", "CANCELLED"}
+            and "source_execution_epoch_id" in item.payload
+            and str(item.payload["source_execution_epoch_id"] or "") == active_epoch
+        )
         return children
     return [
         item

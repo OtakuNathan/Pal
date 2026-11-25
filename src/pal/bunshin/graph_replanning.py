@@ -82,7 +82,8 @@ class GraphReplanning(WorkflowEffectContext):
         epoch = self._effect_snapshot(effect)
         if epoch.aggregate_type != AggregateType.EXECUTION_EPOCH:
             raise ValueError("freeze_epoch_for_replan requires an execution epoch")
-        self._stale_non_drain_nodes(epoch)
+        # The reconciler checks the current REPLAN_COLLECTING state before
+        # touching nodes. A delayed freeze must not mutate a paused epoch.
         self.reconcile_replan_collection(epoch)
         return {}
 

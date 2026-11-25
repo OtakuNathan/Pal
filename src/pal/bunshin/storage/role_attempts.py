@@ -3,7 +3,8 @@ from pal.bunshin.storage.serialization import _decode_role_attempt
 from pal.bunshin.storage.serialization import _json
 import json
 import sqlite3
-from pal.bunshin.checkpoint import AgentSessionCheckpointError
+from pal.bunshin.checkpoint import AgentSessionCheckpointError, LogicalCoroutineCheckpointStore, open_agent_session_checkpoint
+from pal.bunshin.workspace_resources import inherited_process_group_live
 from pal.bunshin.paths import invocation_root
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -17,6 +18,10 @@ from pal.bunshin.storage.role_assignments import assert_semantic_role_admission_
 from pal.bunshin.storage.role_business_leases import (
     read_role_attempt_business_lease_locked, record_role_attempt_business_lease_locked,
 )
+
+
+class UnprovenInteractionOutcome(ValueError):
+    """The retired attempt has no authenticated closed continuation."""
 
 
 @dataclass
@@ -127,6 +132,7 @@ class RoleAttemptsStore:
         fencing_token: int,
         allow_submitted: bool = False,
         expected_sequence: int | None = None,
+        parked_wait_id: str | None = None,
     ) -> dict[str, Any]:
         """Acknowledge only this authenticated live attempt's first safe point."""
         self.database.ensure_schema()
@@ -143,25 +149,97 @@ class RoleAttemptsStore:
                 allowed.add(RoleAttemptState.SUBMITTED.value)
             if str(attempt["status"]) not in allowed:
                 raise AgentSessionCheckpointError("checkpoint initialization requires a running attempt")
-            # Paths come only from durable Manager identities, never worker
-            # parameters or sandbox path aliases.
-            path = (
-                invocation_root(self.database.runtime_root)
-                / str(assignment["session_id"]) / "session-attempts"
-                / str(attempt_id_value) / "continuation-output.json"
-            )
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise AgentSessionCheckpointError("initial worker checkpoint is unreadable") from exc
-            if not isinstance(payload, dict):
-                raise AgentSessionCheckpointError("initial worker checkpoint is not an object")
+            payload = self._read_attempt_checkpoint(str(assignment["session_id"]), attempt_id_value)
             if expected_sequence is not None and payload.get("sequence") != expected_sequence:
                 raise AgentSessionCheckpointError("interaction checkpoint sequence changed")
             return self.role_sessions.publish_role_session_checkpoint_locked(
                 connection, session_id=str(assignment["session_id"]),
                 fencing_token=fencing_token, checkpoint=payload,
+                interaction=expected_sequence is not None,
+                parked_wait_id=parked_wait_id,
             )
+
+    def _read_attempt_checkpoint(self, session_id: str, attempt_id_value: str) -> dict[str, Any]:
+        path = (invocation_root(self.database.runtime_root) / session_id / "session-attempts"
+                / str(attempt_id_value) / "continuation-output.json")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AgentSessionCheckpointError("worker checkpoint is unreadable") from exc
+        if not isinstance(payload, dict):
+            raise AgentSessionCheckpointError("worker checkpoint is not an object")
+        return payload
+
+    def reconcile_interrupted_interactions(
+        self, workflow_id: str, aggregate_type: str, aggregate_id: str, *, allow_unproven: bool = False,
+    ) -> None:
+        """Adopt the closed boundary of a retired attempt in the affected sessions.
+
+        A module or architecture-cycle session can outlive its aggregate. The
+        next aggregate's assignment may still be waiting on the selected
+        checkpoint of an earlier assignment in that same session.
+        """
+        with self.database.write_connection() as connection:
+            rows = connection.execute(
+                """SELECT w.wait_id, w.state, a.session_id, p.attempt_id, p.fencing_token, p.status,
+                          l.metadata_json
+                   FROM bunshin_interaction_waits w
+                   JOIN bunshin_role_assignments a ON a.assignment_id=w.assignment_id
+                   JOIN bunshin_role_attempts p ON p.attempt_id=w.resume_attempt_id
+                       AND p.assignment_id=a.assignment_id
+                   LEFT JOIN bunshin_leases l ON l.resource_key=p.lease_resource_key
+                       AND l.fencing_token=p.fencing_token
+                   WHERE w.state IN ('resuming','cancelled')
+                     AND a.workflow_id=? AND a.session_id IN (
+                         SELECT session_id FROM bunshin_role_assignments
+                         WHERE workflow_id=? AND aggregate_type=? AND aggregate_id=?
+                     )""",
+                (workflow_id, workflow_id, aggregate_type, aggregate_id),
+            ).fetchall()
+            for wait_id, wait_state, session_id, attempt_id, fence, status, metadata_json in rows:
+                store = LogicalCoroutineCheckpointStore(self.database.runtime_root)
+                try:
+                    current = store.read_locked(connection, session_id)
+                    parked = (open_agent_session_checkpoint(self.database.runtime_root, current)
+                              ["coroutine_state"].get("parked_batch") if current else None)
+                except AgentSessionCheckpointError as exc:
+                    if allow_unproven:
+                        continue
+                    raise UnprovenInteractionOutcome("Interaction outcome has no proven closed checkpoint.") from exc
+                matches_cursor = isinstance(parked, Mapping) and parked.get("wait_id") == wait_id
+                # Supersession may have closed a claimed wait. Only the
+                # still-selected cursor can require outcome reconciliation.
+                if wait_state == "cancelled" and not matches_cursor:
+                    continue
+                if status not in {"lost", "failed", "cancelled", "completed"}:
+                    raise ValueError("Wait for the original interaction attempt to retire before resolving triage")
+                if connection.execute(
+                    """SELECT 1 FROM bunshin_role_attempts p
+                       JOIN bunshin_role_assignments a ON a.assignment_id=p.assignment_id
+                       WHERE a.session_id=? AND p.status IN ('starting','running','submitted')""",
+                    (session_id,),
+                ).fetchone():
+                    raise ValueError("Wait for the role session's running attempt to retire before resolving triage")
+                metadata = json.loads(metadata_json or "{}")
+                group = metadata.get("process_group_id")
+                birth = str(metadata.get("process_group_birth") or "")
+                if type(group) is int and inherited_process_group_live(group, birth):
+                    raise ValueError("Wait for the original interaction worker group to exit before resolving triage")
+                try:
+                    payload = self._read_attempt_checkpoint(session_id, attempt_id)
+                    if current is None:
+                        raise AgentSessionCheckpointError("no previously selected interaction checkpoint")
+                    if current != payload and not matches_cursor:
+                        raise AgentSessionCheckpointError("selected checkpoint has a different interaction cursor")
+                    self.role_sessions.publish_role_session_checkpoint_locked(
+                        connection, session_id=session_id, fencing_token=fence,
+                        checkpoint=payload, interaction=True,
+                    )
+                except AgentSessionCheckpointError as exc:
+                    if allow_unproven:
+                        continue
+                    raise UnprovenInteractionOutcome("Interaction outcome has no proven closed checkpoint.") from exc
+                connection.execute("UPDATE bunshin_interaction_waits SET state='consumed' WHERE wait_id=?", (wait_id,))
 
     def read_role_attempt_business_lease(self, attempt_id_value: str) -> dict[str, Any] | None:
         """Read actual claimed ownership, never a later aggregate/snapshot lease."""

@@ -7,6 +7,7 @@ from pal.bunshin.contracts import AggregateSnapshot, SubmissionInvariantError
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_protocol import RoleAssignmentState
+from pal.bunshin.workspace_resources import inherited_process_group_live
 
 
 @dataclass
@@ -160,9 +161,13 @@ class AssignmentRetries:
         if not resource or token <= 0:
             return False
         lease = self.repository.leases.read_lease(resource)
-        return bool(
-            lease is not None
-            and str(lease.get("owner_id") or "") == attempt_id_value
-            and int(lease.get("fencing_token") or 0) == token
-            and _lease_is_live(lease)
-        )
+        if lease is None or int(lease.get("fencing_token") or 0) != token:
+            return False
+        if str(lease.get("owner_id") or "") == attempt_id_value and _lease_is_live(lease):
+            return True
+        # Expiration is not process retirement. Reusing the old working
+        # directory must wait for the original native group, not just its
+        # database lease (which may already have been released).
+        metadata = dict(lease.get("metadata") or {})
+        group = metadata.get("process_group_id")
+        return type(group) is int and inherited_process_group_live(group, str(metadata.get("process_group_birth") or ""))

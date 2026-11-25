@@ -88,9 +88,12 @@ class BunshinRepository:
                     outbox_results=stores.outbox_results,
                     role_access=stores.role_access,
                     role_attempts=stores.role_attempts,
+                    role_cancellation=stores.role_cancellation,
                     interaction_waits=stores.interaction_waits,
                     deliveries=stores.deliveries,
+                    delivery_bindings=stores.delivery_bindings,
                     queries=stores.queries,
+                    search=stores.search,
                 )
             finally:
                 session.finish()

@@ -69,20 +69,47 @@ class SearchStore:
             ).fetchall()
         return {str(state): int(count) for state, count in rows}
 
+    def latest_task_workflow(self, *, actor_id: str, task_id: str) -> dict[str, Any] | None:
+        """Select the latest launch, independent of later archive timestamps."""
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                "SELECT aggregate_id AS workflow_id, state AS workflow_state "
+                "FROM bunshin_aggregate_snapshots WHERE aggregate_type = ? "
+                "AND json_extract(payload_json, '$.owner') = ? "
+                "AND json_extract(payload_json, '$.task_id') = ? "
+                "ORDER BY created_at DESC, aggregate_id LIMIT 1",
+                (AggregateType.WORKFLOW.value, actor_id, task_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def matching_workflow_task(self, *, owner: str, profile_id: str, workspace_key: str, objective: str) -> str:
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT task_id FROM bunshin_task_projection
+                WHERE state = 'ACTIVE' AND owner = ? AND profile_id = ? AND workspace_key = ? AND objective = ?
+                ORDER BY updated_at DESC, task_id LIMIT 1
+                """,
+                (owner, profile_id, workspace_key, objective),
+            ).fetchone()
+        return str(row["task_id"]) if row else ""
+
     def task_workflow_candidates(
         self,
         *,
         actor_id: str,
         task_id: str,
         include_terminal: bool,
+        include_restarting: bool = False,
     ) -> tuple[dict[str, Any], ...]:
         """Return at most two current-first candidates, never a history page.
 
         Rank before LIMIT: ordinary nonterminal workflows, RESTARTING recovery,
         then terminal history. Two rows suffice to detect multiple active
-        workflows; history volume cannot hide either active row. Controls keep
-        excluding RESTARTING, terminal, and archived rows. Status may fall back
-        to recovery/history, including archived workflows, as before.
+        workflows; history volume cannot hide either active row. Cancel can
+        also target a pending restart; status can include terminal history.
         """
         self.database.ensure_schema()
         clauses = [
@@ -92,9 +119,11 @@ class SearchStore:
         ]
         if not include_terminal:
             clauses.extend((
-                "state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED', 'RESTARTING')",
+                "state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')",
                 "coalesce(json_extract(payload_json, '$.archived'), 0) = 0",
             ))
+            if not include_restarting:
+                clauses.append("state != 'RESTARTING'")
         with self.database.read_connection() as connection:
             rows = connection.execute(
                 "SELECT aggregate_id AS workflow_id, state AS workflow_state "

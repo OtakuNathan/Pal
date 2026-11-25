@@ -1,5 +1,5 @@
 -------------------- MODULE GraphExecutionLifecycle --------------------
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, FiniteSets, NodeSchedulingReducer
 
 CONSTANT A, B, Sink, MaxRepairs, MaxCorrections
 
@@ -39,8 +39,7 @@ Init ==
 StartProducer(n) ==
     /\ graphState = "Running"
     /\ n \in Nodes
-    /\ nodeState[n] \in {"ProducerReady", "RepairReady"}
-    /\ repairBarrier[n] = {}
+    /\ NodeRunnable(nodeState[n], repairBarrier[n] = {}, FALSE, "producer")
     /\ nodeState' = [nodeState EXCEPT ![n] = "Producing"]
     /\ UNCHANGED <<graphState, productReady, publishedSink, repairBarrier, repairs>>
     /\ UNCHANGED <<corrections, invalidSubmissionPreserved>>
@@ -58,10 +57,9 @@ SubmitProduct(n) ==
 StartChecker(n) ==
     /\ graphState = "Running"
     /\ n \in Nodes
-    /\ nodeState[n] = "CheckerReady"
     /\ productReady[n]
-    /\ repairBarrier[n] = {}
-    /\ \A m \in CheckerProviders(n) : nodeState[m] = "Accepted"
+    /\ NodeRunnable(nodeState[n], repairBarrier[n] = {} /\
+                    (\A m \in CheckerProviders(n) : nodeState[m] = "Accepted"), FALSE, "checker")
     /\ nodeState' = [nodeState EXCEPT ![n] = "Checking"]
     /\ UNCHANGED <<graphState, productReady, publishedSink, repairBarrier, repairs>>
     /\ UNCHANGED <<corrections, invalidSubmissionPreserved>>
@@ -228,5 +226,9 @@ ExhaustedCorrectionRequiresTriage ==
 
 ReplanNeverPublishes ==
     graphState = "ReplanRequired" => ~publishedSink
+
+\* Reachability witness: in the bounded graph, successful submissions must
+\* have a path to terminal publication. An inert scheduler cannot witness it.
+NeverCompletes == ~publishedSink
 
 =======================================================================

@@ -52,6 +52,7 @@ class PreparedRoleWorkspace:
     run_id: str
     uses_bound_durable_workspace: bool
     workspace: dict[str, Any]
+    retry_prompt_ref: ArtifactRef | None
 
 
 @dataclass(frozen=True)

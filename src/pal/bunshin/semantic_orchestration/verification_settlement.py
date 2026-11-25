@@ -284,6 +284,7 @@ class VerificationSettlement:
                 unit_of_work=connection,
                 correction_errors=routing_errors or (),
             )
+            coordinator.pause_after_node_settlement(workflow_id=node.workflow_id, unit_of_work=connection)
 
     def collect_verification_report(
         self, candidate: Mapping[str, Any], candidate_digest: str, candidate_ref: ArtifactRef, execution_adapter: str,

@@ -30,6 +30,7 @@ def _module_role_session_generations(
     *,
     workflow_id: str,
     source_epoch_id: str,
+    target_epoch_id: str = "",
     target_subjects: set[str],
     replaced_subjects: set[str] | None = None,
 ) -> dict[str, int]:
@@ -41,6 +42,8 @@ def _module_role_session_generations(
     for snapshot in repository.queries.list_workflow_snapshots(workflow_id):
         if snapshot.aggregate_type != AggregateType.DAG_NODE_RUN:
             continue
+        if target_epoch_id and snapshot.payload.get("epoch_id") == target_epoch_id:
+            continue  # A partial compilation cannot allocate another identity on replay.
         subject = str(
             snapshot.payload.get("module_name")
             or snapshot.payload.get("unit_id")

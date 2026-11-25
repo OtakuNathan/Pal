@@ -10,6 +10,7 @@ tests never download/install a checker or use scratch-directory artifacts.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -234,6 +235,8 @@ def test_dependency_repair_tlc_when_pinned_jar_available(tmp_path, module, confi
     assert java is not None, "TLA2TOOLS_JAR is set but Java is unavailable"
     for name in (f"{module}.tla", f"{config}.cfg"):
         shutil.copyfile(SPEC_ROOT / name, tmp_path / name)
+    if module == "GraphExecutionLifecycle":
+        shutil.copyfile(SPEC_ROOT / "NodeSchedulingReducer.tla", tmp_path / "NodeSchedulingReducer.tla")
     result = subprocess.run(
         [java, "-XX:+UseParallelGC", "-jar", str(jar), "-workers", "1",
          "-cleanup", "-config", f"{config}.cfg", f"{module}.tla"],
@@ -242,3 +245,27 @@ def test_dependency_repair_tlc_when_pinned_jar_available(tmp_path, module, confi
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "Model checking completed. No error has been found." in output
+
+
+def test_generated_scheduler_cannot_pass_by_disabling_all_admissions(tmp_path):
+    jar_value = os.environ.get("TLA2TOOLS_JAR")
+    if not jar_value:
+        pytest.skip("TLC not run: set TLA2TOOLS_JAR to an existing pinned tla2tools.jar")
+    jar = Path(jar_value).expanduser().resolve()
+    java = shutil.which("java")
+    assert jar.is_file() and java is not None
+    for name in ("GraphExecutionLifecycle.tla", "GraphExecutionLifecycle.cfg"):
+        shutil.copyfile(SPEC_ROOT / name, tmp_path / name)
+    generated = (SPEC_ROOT / "NodeSchedulingReducer.tla").read_text()
+    disabled, count = re.subn(r'("(?:producer|checker)", TRUE>>)', '"none", FALSE>>', generated)
+    assert count > 0
+    (tmp_path / "NodeSchedulingReducer.tla").write_text(disabled)
+    result = subprocess.run(
+        [java, "-XX:+UseParallelGC", "-jar", str(jar), "-workers", "1", "-cleanup",
+         "-config", "GraphExecutionLifecycle.cfg", "GraphExecutionLifecycle.tla"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180, check=False,
+    )
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert ("Invariant NodeSchedulingSafety is violated" in output
+            or "The invariant of NodeSchedulingSafety is equal to FALSE" in output), output

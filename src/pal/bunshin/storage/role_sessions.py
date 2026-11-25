@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping
 from pal.foundation import utc_now
-from pal.bunshin.checkpoint import AgentSessionCheckpointError, LogicalCoroutineCheckpointStore, normalize_agent_session_checkpoint
+from pal.bunshin.checkpoint import AgentSessionCheckpointError, LogicalCoroutineCheckpointStore, normalize_agent_session_checkpoint, open_agent_session_checkpoint
 from pal.bunshin.contracts import AggregateType
 from pal.bunshin.paths import cleanup_role_runtime
 from pal.bunshin.role_protocol import RoleAssignmentState, RoleSessionAction, RoleSessionState, canonical_role_profile_parts, role_session_target
@@ -154,6 +154,9 @@ class RoleSessionsStore:
         session_id: str,
         fencing_token: int,
         checkpoint: Mapping[str, Any],
+        interaction: bool = False,
+        parked_wait_id: str | None = None,
+        recovering: bool = False,
     ) -> dict[str, Any]:
         """Persist the file before acknowledging that fresh admission is over.
 
@@ -185,12 +188,34 @@ class RoleSessionsStore:
         # The first safe point is acknowledged while the worker is alive and
         # can be observed again at process retirement or after a lost ACK.
         # Only an exact replay is idempotent; equal-sequence mutations fail.
-        if store.read(session_id) != payload:
-            store.publish(
-                payload,
-                expected_logical_coroutine_id=session_id,
-                current_fencing_token=fencing_token,
-            )
+        current = store.read_locked(connection, session_id)
+        if current != payload:
+            store.validate_advance(payload, current)
+        if interaction:
+            private = open_agent_session_checkpoint(self.database.runtime_root, payload)
+            cursor = private["coroutine_state"].get("parked_batch")
+            if (cursor is not None and not isinstance(cursor, Mapping)
+                    or (cursor or {}).get("wait_id") != parked_wait_id):
+                raise AgentSessionCheckpointError("interaction checkpoint does not match the selected park or close")
+        if current != payload:
+            use_head = interaction or recovering or connection.execute(
+                "SELECT 1 FROM bunshin_role_checkpoint_heads WHERE session_id=?", (session_id,)
+            ).fetchone()
+            if not interaction:
+                private = open_agent_session_checkpoint(self.database.runtime_root, payload)
+                unfinished = connection.execute(
+                    "SELECT 1 FROM bunshin_interaction_waits w JOIN bunshin_role_assignments a "
+                    "ON a.assignment_id=w.assignment_id WHERE a.session_id=? "
+                    "AND w.state IN ('open','answered','resuming')", (session_id,),
+                ).fetchone()
+                if private["coroutine_state"].get("parked_batch") or unfinished:
+                    raise AgentSessionCheckpointError("uncommitted interaction checkpoint cannot replace the selected continuation")
+            if use_head:
+                store.select_locked(connection, payload)
+            else:
+                store.publish(
+                    payload, expected_logical_coroutine_id=session_id, current_fencing_token=fencing_token,
+                )
         self.transition_role_session_locked(
             connection, session_id, RoleSessionAction.INITIALIZE, now=utc_now(),
         )
@@ -278,6 +303,8 @@ class RoleSessionsStore:
                     )
                 self.projections.rebuild_workflow_projection_locked(connection, str(owner["workflow_id"]), "")
                 completed = True
+            if completed:
+                connection.execute("DELETE FROM bunshin_role_checkpoint_heads WHERE session_id=?", (str(session_id),))
         # The database transition is the durable authority. Delete the
         # encrypted worker payload only after COMMIT succeeds, so a failed
         # transition cannot strand an otherwise resumable coroutine.

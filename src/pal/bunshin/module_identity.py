@@ -28,7 +28,7 @@ def reconcile_module_identities(
         AggregateType.EXECUTION_EPOCH, source_epoch_id
     )
     if source_epoch is None:
-        return ()
+        raise ValueError("replan source epoch is unavailable")
     source_manifest_ref = ArtifactRef.from_mapping(
         dict(source_epoch.payload.get("architecture_manifest_ref") or {})
     )
@@ -42,7 +42,7 @@ def reconcile_module_identities(
         _artifact_is_contract(source_record)
         and _artifact_is_contract(target_record)
     ):
-        return ()
+        raise ValueError("replan preparation requires its pinned source and target contracts")
     graph_diff = _replan_graph_diff(
         repository=repository,
         workflow_id=workflow_id,

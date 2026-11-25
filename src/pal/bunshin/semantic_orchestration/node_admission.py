@@ -4,8 +4,8 @@ from pal.bunshin.semantic_orchestration.role_inputs import _node_role_session_id
 import hashlib
 from dataclasses import dataclass
 from typing import Any, Mapping
-from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DeferredEffectError, LeaseConflict, StaleFencingToken
-from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot
+from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DeferredEffectError, LeaseConflict, StaleFencingToken, SubmissionInvariantError
+from pal.bunshin.cycle_protocol import AssignmentKind, CycleAssignment, CycleSlot, CycleWork, NodeCycle, NodeCycleState
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
@@ -22,6 +22,47 @@ class NodeAdmission:
     verifier_tests: VerifierTests
     workflow_facts: WorkflowFacts
     repository: BunshinRepository
+
+    @staticmethod
+    def _activation_for_work(work: CycleWork | CycleAssignment) -> tuple[str, RoleActivation]:
+        if work.slot == CycleSlot.CHECKER:
+            return "START_REVIEW", RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE)
+        if work.kind == AssignmentKind.REPAIR:
+            return "START_REPAIR", RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR)
+        return "START_PRODUCING", RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE)
+
+    def _cycle(self, node: AggregateSnapshot, *, unit_of_work: BunshinUnitOfWork | None = None) -> NodeCycle:
+        execution = WorkflowCoordinator(self.repository).execution(workflow_id=node.workflow_id, unit_of_work=unit_of_work)
+        name = str(node.payload.get("module_name") or node.payload.get("unit_id") or "")
+        generation = int(node.payload.get("graph_generation") or execution.graph.generation)
+        if generation != execution.graph.generation or name not in execution.cycles:
+            raise SubmissionInvariantError("node admission does not belong to the active graph")
+        if name in execution.pending_scope:
+            raise DeferredEffectError("pending dependency repair fences role admission")
+        return execution.cycles[name]
+
+    def resume_queued_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
+        node = self.effect_reads.effect_snapshot(effect)
+        cycle = self._cycle(node)
+        if node.state == "REPAIR_QUEUED" and cycle.state == NodeCycleState.PRODUCER_READY:
+            cycle = WorkflowCoordinator(self.repository).recover_legacy_repair_cursor(node)
+        work = cycle.pending_work
+        if work is None:
+            if cycle.is_running and cycle.active_assignment is not None:
+                raise SubmissionInvariantError(
+                    f"{cycle.node_name} already runs a different {cycle.active_assignment.slot.value} assignment; "
+                    "queued resume requires the old cursor to be retired"
+                )
+            raise SubmissionInvariantError("queued node has no pending NodeCycle work")
+        action, activation = self._activation_for_work(work)
+        if action not in self.repository.transitions.legal_actions(AggregateType.DAG_NODE_RUN, node.state):
+            raise SubmissionInvariantError("queued node effect disagrees with its NodeCycle cursor")
+        if activation.mode == RoleMode.PRODUCE and self.workflow_facts.role_participant_kind(
+            node.workflow_id, OrchestrationRole.IMPLEMENTATION.value,
+        ) == "null":
+            return self.null_execution.accept_null_execution(effect)
+        extra = self.verifier_tests.install_verifier_tests_for_repair(node) if activation.mode == RoleMode.REPAIR else None
+        return self.admit_node_worker(effect, action_type=action, activation=activation, extra_payload=extra)
 
     def admit_implementation_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         mode = RoleMode(self.effect_reads.effect_role_mode(effect))
@@ -201,32 +242,19 @@ class NodeAdmission:
         implementation: bool,
         unit_of_work: BunshinUnitOfWork | None = None,
     ) -> None:
-        module_name = str(
-            node.payload.get("module_name")
-            or node.payload.get("unit_id")
-            or ""
-        )
         coordinator = WorkflowCoordinator(self.repository)
-        execution = coordinator.execution(workflow_id=node.workflow_id, unit_of_work=unit_of_work)
-        if module_name in execution.pending_scope:
-            raise DeferredEffectError("pending dependency repair fences role admission")
-        cycle = execution.cycles[module_name]
+        cycle = self._cycle(node, unit_of_work=unit_of_work)
+        work = cycle.active_assignment if cycle.is_running else cycle.pending_work
+        if work is None:
+            raise SubmissionInvariantError("node has no semantic assignment to admit")
+        expected_action, _ = self._activation_for_work(work)
+        if expected_action != action_type or implementation != (work.slot == CycleSlot.PRODUCER):
+            raise SubmissionInvariantError("node admission disagrees with the NodeCycle cursor")
         coordinator.start_assignment(
             workflow_id=node.workflow_id,
-            node_name=module_name,
-            slot=(
-                CycleSlot.PRODUCER
-                if implementation
-                else CycleSlot.CHECKER
-            ),
-            kind=(
-                AssignmentKind.REPAIR
-                if action_type == "START_REPAIR"
-                else AssignmentKind.RECHECK
-                if action_type == "START_REVIEW"
-                and cycle.last_verdict is not None
-                else AssignmentKind.INITIAL
-            ),
+            node_name=cycle.node_name,
+            slot=work.slot,
+            kind=work.kind,
             input_fingerprint=str(effect["effect_key"]),
             unit_of_work=unit_of_work,
         )

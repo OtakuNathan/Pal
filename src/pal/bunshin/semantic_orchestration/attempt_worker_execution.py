@@ -12,7 +12,7 @@ from pal.bunshin.semantic_orchestration.callbacks import BrokerRunRegistrar
 from pal.bunshin.semantic_orchestration.callbacks import BrokerRunUnregistrar
 import contextlib
 from pal.bunshin.contracts import LeaseConflict, StaleFencingToken
-from pal.bunshin.workspace_resources import WorkspaceLockRegistry
+from pal.bunshin.workspace_resources import WorkspaceLockRegistry, process_group_birth
 from pal.bunshin.worker_processes import WorkerProcesses
 from pal.bunshin.process_lifecycle import WorkerProcessOwner
 from pal.memory.storage import MemoryStorage
@@ -62,6 +62,8 @@ class WorkerExecution:
                 "aggregate_id": snapshot.aggregate_id,
                 "workspace_path": str(pack.workspace.get("repo_path") or ""),
                 "run_id": run_id,
+                "process_group_id": owner.pid,
+                "process_group_birth": process_group_birth(owner.pid),
             }
             self.repository.leases.update_lease_metadata(
                 assignment_lease_resource,

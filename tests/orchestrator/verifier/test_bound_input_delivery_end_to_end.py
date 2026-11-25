@@ -274,12 +274,19 @@ class GeneralFamilyHappyPathTests(BoundInputDeliveryHarness):
 
         # The spawned worker's prompt advertises the deterministic in-workspace
         # path with exact read args and no host repository path.
-        prompt = render_bunshin_task_prompt(
-            BunshinInvocationPack(
-                invocation_id="inv-producer",
-                workspace={"reference_paths": entries},
-            )
+        from pal.bunshin.semantic_orchestration.role_environment import _bind_role_attempt_sandbox
+        from unittest.mock import patch
+
+        pack = BunshinInvocationPack(
+            invocation_id="inv-producer",
+            workspace={"reference_paths": entries, "repo_path": str(workspace)},
         )
+        with patch("pal.bunshin.sandbox.sandbox_supported_backend", return_value="bwrap"):
+            pack = _bind_role_attempt_sandbox(
+                self.runtime_root, pack, run_id="inv-producer", durable_prompt_reused=False,
+            )
+        self.assertEqual(pack.metadata["sandbox"]["reference_binds"], [])
+        prompt = render_bunshin_task_prompt(pack)
         spec_path = str(workspace / "inputs" / "spec" / SPEC_REPO_PATH)
         self.assertIn(f"path={spec_path}", prompt)
         self.assertIn('"file_path":"' + spec_path.replace('"', '\\"') + '"', prompt)

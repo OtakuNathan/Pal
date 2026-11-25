@@ -1,7 +1,8 @@
 from __future__ import annotations
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.semantic_orchestration.workflow_requests import WorkflowRequests
-from pal.bunshin.semantic_orchestration.verification_workspace import _prepare_standalone_review_workspace
+from pal.bunshin.semantic_orchestration.verification_workspace import _prepare_standalone_review_workspace, _verification_workspace_from_prompt_pack
+from pal.bunshin.semantic_orchestration.workspace_safety import _git_output
 from pal.bunshin.semantic_orchestration.worker_results import _named_json_output
 from pal.bunshin.semantic_orchestration.worker_results import _recorded_role_metrics
 from pal.bunshin.semantic_orchestration.review_results import _ref_from_mapping
@@ -64,6 +65,9 @@ class StandaloneReview:
         )
         contract_review_workspace = None
         workspace = dict(request.get("workspace") or {})
+        activation = RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE)
+        retained = self.attempt_execution.retained_role_prompt(effect, review, activation)
+        contract_target = ""
         if contract_review:
             artifact = dict(self.artifacts.read_json(request_ref))
             requirements_ref = _ref_from_mapping(artifact.get("requirements_ref"))
@@ -82,6 +86,22 @@ class StandaloneReview:
                 "contract": review_view_ref,
             }
             if self.workflow_facts.uses_git_skeleton(review.workflow_id):
+                contract_target = str(artifact.get("skeleton_commit_sha") or "")
+        else:
+            reviewer_inputs = {"review_request": request_ref}
+
+        if retained is not None:
+            workspace_override = dict(retained.workspace)
+            if not workspace_override.get("repo_path") or not workspace_override.get("review_scratch_dir"):
+                raise SubmissionInvariantError("retained standalone review has no workspace binding")
+            review_repo = Path(str(workspace_override["repo_path"]))
+            base_sha = str(workspace_override.get("standalone_review_target_sha") or contract_target)
+            if not base_sha:
+                # Historical isolated review packs did not pin a SHA. Their
+                # own retained checkout, not the live source, is authoritative.
+                base_sha = _git_output(review_repo, "rev-parse", "HEAD")
+        else:
+            if contract_review and self.workflow_facts.uses_git_skeleton(review.workflow_id):
                 projected = {
                     **artifact,
                     "submission": software_contract_projection(contract),
@@ -97,7 +117,7 @@ class StandaloneReview:
                     contract_review_workspace.root / "review-scratch"
                 )
                 review_scratch.mkdir(parents=True, exist_ok=True)
-                base_sha = str(artifact.get("skeleton_commit_sha") or "")
+                base_sha = contract_target
             else:
                 repo_path = str(
                     workspace.get("repo_path")
@@ -111,14 +131,16 @@ class StandaloneReview:
                         Path(repo_path),
                     )
                 )
-        else:
-            repo_path = str(workspace.get("repo_path") or workspace.get("cwd") or self.runtime_root)
-            review_repo, review_scratch, base_sha = _prepare_standalone_review_workspace(
-                self.runtime_root,
-                review.aggregate_id,
-                Path(repo_path),
-            )
-            reviewer_inputs = {"review_request": request_ref}
+            # A standalone clone is already isolated. Use it directly instead
+            # of provisioning a second checkout and a second evidence directory.
+            workspace_override = {
+                "kind": "existing_repo", "repo_path": str(review_repo),
+                "workspace_binding": "canonical", "project_name": "standalone-review",
+                "review_scratch_dir": str(review_scratch), "standalone_review_target_sha": base_sha,
+            }
+        if (not base_sha or (contract_target and base_sha != contract_target)
+                or _git_output(review_repo, "rev-parse", "HEAD") != base_sha):
+            raise SubmissionInvariantError("standalone review workspace no longer matches the bound target")
         terminal, prompt_ref, terminal_ref = await self.attempt_execution.run_profile(
             effect=effect,
             snapshot=review,
@@ -126,22 +148,19 @@ class StandaloneReview:
             lease_resource=lease_resource,
             fencing_token=fencing_token,
             profile=self.workflow_facts.profile_for_role(review.workflow_id, "reviewer"),
-            activation=RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
+            activation=activation,
             instruction="Perform the requested standalone review. Report evidence-grounded findings and do not modify the target. Repair is a separate explicit workflow.",
             reference_refs=reviewer_inputs,
-            workspace_override={
-                "kind": "existing_repo",
-                "repo_path": str(review_repo),
-                "workspace_binding": (
-                    "canonical"
-                    if contract_review_workspace is not None
-                    else "ephemeral_artifact"
-                ),
-                "project_name": "standalone-review",
-                "review_scratch_dir": str(review_scratch),
-            },
+            workspace_override=workspace_override,
             prepare_workspace=True,
         )
+        review_repo, review_scratch = _verification_workspace_from_prompt_pack(
+            artifacts=self.artifacts, prompt_ref=prompt_ref,
+        )
+        prompt_workspace = dict(self.artifacts.read_json(prompt_ref).get("workspace") or {})
+        recorded_target = str(prompt_workspace.get("standalone_review_target_sha") or base_sha)
+        if recorded_target != base_sha or _git_output(review_repo, "rev-parse", "HEAD") != recorded_target:
+            raise SubmissionInvariantError("standalone review workspace no longer matches the bound target")
         report_ref = self.record_standalone_review(base_sha, effect, fencing_token, invocation_id, prompt_ref, request_ref, review, review_scratch, terminal, terminal_ref)
         if contract_review_workspace is not None:
             contract_review_workspace.cleanup()

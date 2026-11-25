@@ -38,6 +38,11 @@ class ToolPolicy:
         run_id = stage_workspace_preparation.run_id
         snapshot = command.snapshot
         uses_bound_durable_workspace = stage_workspace_preparation.uses_bound_durable_workspace
+        if stage_workspace_preparation.retry_prompt_ref is not None:
+            # The retry retains its pinned authoring policy and files. The
+            # newly prepared pack supplies only refreshed execution inputs.
+            # Re-seeding a report/contract here could overwrite ongoing work.
+            return PreparedRolePrompt(pack=pack)
         if activation.role == OrchestrationRole.VERIFIER:
             view_ref = bound_reference_refs.get("module_work_view")
             if view_ref is not None:

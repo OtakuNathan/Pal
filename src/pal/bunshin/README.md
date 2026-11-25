@@ -13,12 +13,17 @@ whose completion is joined through cancellation.
 Workflow progress is reconstructed from the Task binding, workflow aggregates,
 persisted graph generation, nodes and role receipts. The effect dispatcher
 leases and acknowledges durable work. Node acceptance and recovery enter the
-same graph scheduler. Workflow finalization packages the published sink and
-queues delivery to Pal. Memory candidates follow the existing review path.
+same graph scheduler. Workflow finalization packages the commit recorded for the
+accepted sink with its bound verification reference and queues delivery to Pal.
+Memory candidates follow the existing review path.
 
-Schema 30 adds durable interaction waits to schema 29 in place. Drain live
-workers (including old stdin-based questions) before replacing the host.
-The stopped-runtime cutover preserves the database and checkpoint files.
+The explicit stopped-runtime cutover upgrades schema 29 or 30 to 31 in place and
+preserves the database and checkpoint files. Ordinary repository opens require
+the cutover first. Manager startup and cutover hold the same runtime ownership
+lock. Keep pre-lock Managers stopped throughout the upgrade and drain live workers,
+including old stdin-based questions, before replacing the host.
+For older databases, archive cutover records the staged installation before
+moving the old runtime. Rerunning setup after interruption resumes that operation.
 
 The Manager web broker constructs only Execution, Web Search and Web Fetch.
 Its shared runtime has no workflow or memory dependency. Runtime constructors
@@ -61,7 +66,15 @@ cleanup. The durable SQLite records support recovery across Manager restarts.
 Recording a submission writes its artifact receipt and the attempt's submitted
 state together. Applying the business action settles that exact assignment and
 payload hash in the transaction that writes the aggregate, events and outbox.
-A replay checks the same receipt against the same aggregate.
+A replay checks the same receipt against the same aggregate and outcome. A
+recorded `ROLE_FAILED` is replayed through failure settlement without entering
+the role wrapper, and cannot discharge a successful business action. Exact recorded
+results are replayed before worker preparation, using the original prompt
+binding rather than the current source or a new clone. The settlement wrapper
+may still validate the execution workspace needed to publish its evidence.
+Standalone reviews pin one isolated checkout and its scratch directory. Their
+published evidence names that checkout's bound target, not the source
+repository's latest HEAD, and collects files from the actual prompt workspace.
 
 Sandboxed workers mount `llm/models`, `llm/providers`, and `llm/endpoints`
 read-only so the shared LLM runtime loads the same hook configuration as Pal.
@@ -91,7 +104,7 @@ original required message on stderr. Manager recovers structured failure and
 retry metadata from these fallback records when stdout has no terminal event.
 
 New workflow tools, SQL tables and role pack bindings use the Bunshin name.
-Opening a current v29 database atomically renames the versioned tables and their
+The explicit v29 cutover renames the versioned tables and their
 indexes, including FTS. Active tasks, artifacts and checkpoint bytes keep their
 identities. Pinned packs normalize their legacy binding on read. Delivered review
 buttons and stored interaction IDs continue to resolve. Role profile IDs and
@@ -128,7 +141,9 @@ read-only sandbox with private build scratch. It binds the passing result to
 the candidate contents. An unsuccessful run
 returns its output to the same Coder. Use ordinary pytest discovery for Python
 corpora or a verifier-owned `run-tests.sh` in the bound corpus for native or
-mixed projects. The script runs from the repository root, reports all failures
+mixed projects. Known non-Python source files require that runner regardless
+of the filenames, while ordinary data fixtures can accompany pytest. The script
+runs from the repository root, reports all failures
 and returns the suite exit status. The precheck has a 240-second execution budget
 inside the five-minute submission RPC. A provider with only consumer-side tests or an older corpus
 without a runnable suite goes to independent review with an explicit pending
@@ -161,9 +176,49 @@ Interaction rule:
   only validates topology, persists/hash-compares satellites, and carries the
   common workspace policy; it does not interpret Family requirement, scenario,
   contract, or domain fields
-- `WorkflowCoordinator` is the single mechanical owner of `PlanCycle` and
-  `GraphExecution`. `GraphIR` is data; `GraphExecution` alone decides
-  readiness, traversal, repair routing, replan reuse, and sink publication
+- `GraphIR` is immutable node identity, contracts, and topology. Each
+  `NodeCycle` owns its semantic producer/checker/repair cursor and exposes the
+  next assignment's role and kind. `NodeSchedule` decides dependency readiness,
+  fencing, and whether that cursor can retain a node slot. `NodeScheduler`
+  materializes runnable work and its dependency baseline; it has no second
+  persisted scheduling cursor. `GraphExecution` owns traversal, repair routing,
+  replan reuse and overall completion; `WorkflowCoordinator` persists its
+  facts and installs/activates the full graph generation. The immutable
+  graph can exist while its Epoch remains `STARTING`; installation and the
+  pinned preparation request (source epoch and contract) commit together.
+  This prepared Epoch belongs to the current Workflow lineage even before
+  active linkage. Parent pause/cancel fences compilation and activation;
+  resuming replays the same preparation. Normal compilation and recovery
+  commit complete membership, carried acceptance receipts, active workflow
+  binding and predecessor retirement together. A Git
+  carry may rebind checkpoint provenance only for the identical verified
+  commit; a changed commit retains the worktree but must be checked again.
+- existing `DagNodeRun` states are the durable effect progress and historical
+  status projection (queued, process running, quiescing, snapshotting, receipt
+  settled, control cleanup). They are not a separate decision about the next
+  semantic role or dependency readiness. A settled operational receipt must
+  match the accepted `NodeCycle` candidate; disagreement is an invariant
+  failure, not permission for another scheduler to advance the graph.
+  Recorder, event and outbox formats remain compatible. Workflow completion
+  consumes the complete graph's exact accepted candidate/verification receipts
+- a workflow pause is an admission fence, not permission to discard a
+  committed result. The aggregate's pause request and new role receipt
+  admission are fenced in the same SQLite write boundary. An already
+  recorded result (including `ROLE_FAILED`) is consumed through its own
+  settlement, not retired by pause. Architect, Producer and Verifier
+  quiescence/snapshot phases drain while their admitted cycle cursor remains
+  alive; the settled result is then paused at its next assignment boundary.
+  A failed receipt enters triage; ordinary resume does not resolve that blocker.
+  Dependency-repair capture keeps its existing assignment-cancellation boundary:
+  freezing a node does not reject a receipt that wins the assignment transaction.
+  Such a receipt belongs to the persistent cohort. Cancellation can still
+  retire pending work through the exact assignment.
+- mechanical control outbox effects are wake-ups for the current aggregate
+  control intent. Workflow and epoch projection check that intent and write
+  child requests in one transaction, with keys derived from current versions.
+  A delayed pause, triage freeze or stale-assignment cleanup cannot retire a
+  resumed assignment. An old wake-up for an intent that is current again may
+  reconcile that new episode without replaying the old action identity.
 - planning is Architect producer -> Architecture Reviewer checker -> Human.
   Every executable graph node, including the authored sink, is a Coder
   producer -> Verifier checker cycle. Software Coders run in parallel from
@@ -251,11 +306,29 @@ Interaction rule:
   tool-protocol safe point, including role-stage entry, structured terminal
   boundaries, and cooperative restart. A hard crash therefore resumes from
   the latest closed boundary plus durable worktree, checklist, findings, and
-  pending Manager input. A role waiting for approval or clarification also
+  pending Manager input. On rebind or successful receipt replay, session storage
+  first reconciles the latest retired PAL attempt's authenticated local output.
+  A strictly newer closed point for that session, assignment and fence is
+  selected in SQLite; a live or superseded attempt, missing selected checkpoint,
+  and an unresolved interaction cannot authorize that promotion. The attempt
+  file itself is only a candidate, not another recovery head.
+  A role waiting for approval or clarification also
   checkpoints its exact tool-call cursor and completed prefix before exiting.
-  Manager records the wait and its Task delivery together. A replacement
+  Manager selects the encrypted envelope in the same SQLite transaction as
+  the wait and its Task delivery. Closing the batch commits the replacement
+  envelope and consumes the answer together. A replacement
   worker consumes the answer for the original call and continues the suffix.
   Ambiguous execution after an answer has been claimed requires reconciliation
+  before replay. A replacement assignment can normalize the cancelled,
+  unclaimed cursor of a superseded assignment; a claimed outcome needs a
+  proven closed checkpoint. Pause and triage retain the claimed interaction
+  while retiring its attempt. Pause adopts a proven closed boundary when available. The triage
+  action can adopt a retired attempt's authenticated
+  closed checkpoint and consume the answer in the same transaction, including
+  when a successor aggregate reuses the same logical role session. Historical
+  cancelled waits that do not own the selected cursor are left alone. Without
+  a closed checkpoint the operator must check the tool effect before restarting
+  the execution.
 - closed tool calls and results enter L1 incrementally. Compaction reads only
   that frozen L1; role contracts, checklists, task fallback, and memory recall
   remain independently projected authority
@@ -265,9 +338,9 @@ Interaction rule:
   checklist, finding, question, or submit action instead of generic continuation
 - compaction retires file authority owned by tool results it removes from L1.
   Output copies survive only when the replacement L1 retains their references
-- Bunshin runtime schema v29 is a fresh cutover. Older or unrecognized runtime
-  databases are archived atomically; only explicit profile and family
-  overrides are copied after validation
+- Bunshin runtime databases older than v29 and valid SQLite databases without
+  recognized schema metadata use the resumable archive cutover. Explicit
+  profile and family overrides are copied after validation
 - legacy workflow state, aliases, managed seed migrations, and plaintext
   checkpoint schemas through v7 are not migrated in place
 - Manager records one origin/current delivery binding on the Task, outside
@@ -294,7 +367,20 @@ Interaction rule:
   materialize them deterministically at `inputs/<name>/<repo_path>` from the
   durable content — never from the mutable host repository — and re-verify the
   same hashes on every retry, restart, or fenced attempt; repository-including
-  workspaces verify the in-repo paths instead. The Manager-owned `inputs`
+  workspaces verify the in-repo paths instead. Repo-relative declarations are
+  handled exclusively by this binding; ordinary references use host paths.
+  Recovery of existing prompt packs removes obsolete host aliases for declared
+  inputs and asks the role to recheck any decisions based on those aliases.
+  An assignment retry chooses its retained prompt workspace before binding
+  inputs or preparing the environment. The subsequent harness binding must
+  consume that same prompt and workspace. Repository files are verified in
+  place, artifact-style inputs are restored there from durable content, and
+  ongoing role work is preserved rather than replaced by a new clone.
+  Manager semantic reference names remain fixed. Declared inputs receive a
+  deterministic distinct alias if their normalized names collide, and both
+  initial and resumed prompts use the same allocation rule. The original
+  declaration name stays recorded on the input projection.
+  The Manager-owned `inputs`
   workspace root is excluded from candidate snapshots, tree fingerprints, and
   deliverables solely by the first-path-component predicate
   `is_bound_input_path`; worker-authored paths that merely contain an `inputs`
@@ -314,13 +400,19 @@ the former public `command` parameter is replaced by `operation`.
 
 `restart_bunshin_execution` and `resolve_bunshin_triage` remain separate, as do
 architecture decisions and Architect answers. `start_bunshin_workflow` remains
-direct. `rebind_bunshin_task_delivery` is now indirect: discover/read its contract
+direct. After a plan is cancelled before acceptance, its Task can start fresh
+planning with `restart_cancelled_plan=true`. The new workflow uses the previous
+goal, durable task ledger, and frozen repository-relative inputs. The new
+planning pass captures the current source tree. In Git workspaces, both plan
+recovery and planned execution restart expose frozen inputs through `/pal/references/`
+from workflow-owned runtime storage. Artifact workspaces materialize them under `inputs/`.
+`rebind_bunshin_task_delivery` is now indirect: discover/read its contract
 and invoke through `call_tool`; its destination selection and Manager binding
 validation are unchanged. Main Pal now has 11 authored Bunshin aliases with one
 direct tool. The 36 role-only aliases are outside this change.
 
-Resident manager events implement `BunshinEventPort`: readiness, draining,
-accepted-part lookup and delivery acknowledgements are required operations.
+`BunshinEventPort` covers event readiness, draining, delivery eligibility,
+accepted-part lookup, and acknowledgements.
 The handler submits `ControlDelivery` directly through `CORE_CONTROL` and
 acknowledges each accepted part before settling the event. Failed channel or
 manager acknowledgements preserve the pending event and accepted-part ledger.

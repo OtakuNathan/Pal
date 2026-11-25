@@ -91,11 +91,11 @@ def test_encrypted_parked_batch_resumes_at_same_call(tmp_path, two_questions):
     asyncio.run(scenario())
 
 
-def test_recovered_workspace_counts_once_until_its_holder_leaves(tmp_path):
+def test_recovered_worker_group_counts_once_until_it_exits():
     async def scenario():
         pool = CoroutineRunSemaphore(2)
-        with patch("pal.bunshin.coroutine_runtime.workspace_process_holders", return_value=("live",)) as holders:
-            await pool.recover_occupancy((("old", "a", str(tmp_path)), ("old", "a", str(tmp_path))))
+        with patch("pal.bunshin.coroutine_runtime.inherited_process_group_live", return_value=True) as observed:
+            await pool.recover_occupancy((("old", "a", 123, "original"), ("old", "a", 123, "original")))
             assert pool.inherited_count == 1
             other = await pool.try_acquire("other")
             assert other and await pool.try_acquire("third") is None
@@ -103,7 +103,114 @@ def test_recovered_workspace_counts_once_until_its_holder_leaves(tmp_path):
             await other.release()
             await asyncio.sleep(0)
             assert not handoff.done()
-            holders.return_value = ()
+            observed.return_value = False
             await pool.recheck_occupancy()
             await (await asyncio.wait_for(handoff, 1)).release()
     asyncio.run(scenario())
+
+
+def test_unrelated_worktree_holder_does_not_reserve_worker_capacity(tmp_path):
+    import subprocess
+
+    from pal.bunshin.repository import BunshinRepository
+
+    leases = BunshinRepository(tmp_path / "runtime").leases
+    leases.claim_lease("old", "gone-worker", metadata={
+        "run_id": "old", "aggregate_id": "a", "workspace_path": str(tmp_path),
+    })
+
+    async def run():
+        pool = CoroutineRunSemaphore(1)
+        await pool.recover_occupancy(leases.inherited_role_process_groups())
+        permit = await pool.try_acquire("new")
+        assert permit is not None
+        await permit.release()
+
+    with subprocess.Popen(["sleep", "30"], cwd=tmp_path) as ordinary_process:
+        try:
+            asyncio.run(run())
+        finally:
+            ordinary_process.terminate()
+
+
+def test_resize_checks_live_capacity_before_promoting_a_reservation():
+    async def run():
+        pool = CoroutineRunSemaphore(2)
+        first, second = (NodeSlot("w", "e", 1, node) for node in ("a", "b"))
+        for node in (first, second):
+            coder = await pool.acquire("coder-" + node.node_id, node=node)
+            await coder.release(reserve_successor=True)
+        await pool.resize(1)
+        verifier = await pool.acquire("verifier-a", node=first)
+        waiter = asyncio.create_task(pool.acquire("verifier-b", node=second))
+        await asyncio.sleep(0)
+        assert pool.active_count == 1
+        assert not waiter.done()
+        await verifier.release()
+        await (await asyncio.wait_for(waiter, 1)).release()
+
+    asyncio.run(run())
+
+
+def test_inherited_supervisor_group_retains_capacity_after_leader_exit(tmp_path):
+    import os
+    from pathlib import Path
+    import signal
+    import socket
+    import subprocess
+    import sys
+
+    from pal.bunshin.workspace_resources import process_group_birth
+
+    supervisor = Path(__file__).resolve().parents[1] / "src/pal/bunshin/process_group_supervisor.py"
+    manager, lifeline = socket.socketpair()
+    with manager, lifeline, subprocess.Popen(
+        [sys.executable, str(supervisor), str(lifeline.fileno()),
+         sys.executable, "-c", "import os,time; print(os.getpid(), flush=True); time.sleep(30)"],
+        cwd=tmp_path, stdout=subprocess.PIPE, text=True, start_new_session=True,
+        pass_fds=(lifeline.fileno(),),
+    ) as leader:
+        try:
+            child = int(leader.stdout.readline())
+            birth = process_group_birth(leader.pid)
+            assert birth and os.getpgid(child) == leader.pid
+            leader.kill()
+            leader.wait(timeout=5)
+            assert os.getpgid(child) == leader.pid
+
+            async def run():
+                pool = CoroutineRunSemaphore(1)
+                await pool.recover_occupancy((("old", "a", leader.pid, birth),))
+                assert pool.inherited_count == 1
+                assert await pool.try_acquire("new") is None
+
+            asyncio.run(run())
+        finally:
+            try:
+                os.killpg(leader.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_mixed_verifier_suite_requires_an_explicit_runner(tmp_path):
+    import subprocess
+
+    from pal.bunshin.repair_precheck import repair_precheck_plan, repair_receipt_fields, suite_command
+
+    scope = {"kind": "directory", "path": "tests"}
+    python_corpus = ["tests/test_parser.py", "tests/cases.json", "tests/expected.golden", "tests/sample.bin"]
+    assert "pytest" in suite_command(scope, python_corpus)
+    for native in ("tests/test_native.sh", "tests/parser_tests.cpp", "tests/native_check.sh"):
+        mixed_corpus = [*python_corpus, native]
+        assert not suite_command(scope, mixed_corpus)
+        assert suite_command(scope, [*mixed_corpus, "tests/run-tests.sh"]) == "sh tests/run-tests.sh"
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    corpus = tmp_path / "tests"
+    corpus.mkdir()
+    (corpus / "test_parser.py").write_text("def test_parser(): assert True\n")
+    (corpus / "parser_tests.cpp").write_text("int main() { return 1; }\n")
+    plan = repair_precheck_plan(tmp_path, scope)
+    assert repair_receipt_fields(plan)["status"] == "requires_verifier"
+    (corpus / "run-tests.sh").write_text("exit 1\n")
+    assert repair_precheck_plan(tmp_path, scope)["command"] == "sh tests/run-tests.sh"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any, Final, Mapping
+from typing import Any, Final, Mapping, overload
 
 
 class CycleKind(StrEnum):
@@ -21,6 +21,14 @@ class AssignmentKind(StrEnum):
     REPAIR = "repair"
     RECHECK = "recheck"
     RESUME = "resume"
+
+
+@dataclass(frozen=True)
+class CycleWork:
+    """The semantic role of the next assignment, not a scheduling decision."""
+
+    slot: CycleSlot
+    kind: AssignmentKind
 
 
 class ProduceCheckState(StrEnum):
@@ -229,6 +237,19 @@ class NodeCycle:
     @property
     def kind(self) -> CycleKind:
         return CycleKind.NODE
+
+    @property
+    def pending_work(self) -> CycleWork | None:
+        if self.state == NodeCycleState.PRODUCER_READY:
+            return CycleWork(CycleSlot.PRODUCER, AssignmentKind.INITIAL)
+        if self.state == NodeCycleState.REPAIR_READY:
+            return CycleWork(CycleSlot.PRODUCER, AssignmentKind.REPAIR)
+        if self.state == NodeCycleState.CHECKER_READY:
+            return CycleWork(
+                CycleSlot.CHECKER,
+                AssignmentKind.RECHECK if self.last_verdict is not None else AssignmentKind.INITIAL,
+            )
+        return None
 
     @property
     def is_running(self) -> bool:
@@ -572,88 +593,57 @@ def _common_target(state: str, action: CycleAction) -> str | None:
     return _COMMON_TRANSITIONS.get((state, action))
 
 
+@overload
+def _common_control_transition(cycle: PlanCycle, action: CycleAction) -> PlanCycle: ...
+
+
+@overload
+def _common_control_transition(cycle: NodeCycle, action: CycleAction) -> NodeCycle: ...
+
+
 def _common_control_transition(
     cycle: PlanCycle | NodeCycle,
     action: CycleAction,
 ) -> PlanCycle | NodeCycle:
-    enum_type = type(cycle.state)
     state = cycle.state.value
-    if action == CycleAction.WAIT_EXTERNAL and state in {
-        "PRODUCING",
-        "CHECKING",
-    }:
-        return replace(
-            cycle,
-            state=enum_type("WAITING_EXTERNAL"),
-            active_assignment=None,
-            resume_state=enum_type(
-                "PRODUCER_READY" if state == "PRODUCING" else "CHECKER_READY"
-            ),
-        )
-    if action == CycleAction.EXTERNAL_RESUMED and state == "WAITING_EXTERNAL":
-        target = cycle.resume_state or enum_type("PRODUCER_READY")
-        return replace(cycle, state=target, resume_state=None)
-    if action == CycleAction.REQUEST_PAUSE and state not in {
-        "CANCELLED",
-        "REJECTED",
-    }:
-        resume_state = (
-            enum_type("PRODUCER_READY")
-            if state == "PRODUCING"
-            else enum_type("CHECKER_READY")
-            if state == "CHECKING"
-            else cycle.state
-        )
-        return replace(
-            cycle,
-            state=enum_type("PAUSE_REQUESTED"),
-            resume_state=(
-                resume_state
-                if state not in {"PAUSE_REQUESTED", "PAUSED"}
-                else cycle.resume_state
-            ),
-        )
-    if action == CycleAction.PAUSED and state == "PAUSE_REQUESTED":
-        return replace(
-            cycle,
-            state=enum_type("PAUSED"),
-            active_assignment=None,
-        )
-    if action == CycleAction.RESUME and state == "PAUSED":
-        target = cycle.resume_state or enum_type("PRODUCER_READY")
-        return replace(cycle, state=target, resume_state=None)
-    if action == CycleAction.REQUEST_CANCEL and state not in {
-        "CANCELLED",
-        "REJECTED",
-    }:
-        return replace(cycle, state=enum_type("CANCEL_REQUESTED"))
-    if action == CycleAction.CANCELLED and state == "CANCEL_REQUESTED":
-        return replace(
-            cycle,
-            state=enum_type("CANCELLED"),
-            active_assignment=None,
-            resume_state=None,
-        )
-    if action == CycleAction.REQUIRE_TRIAGE and state not in {
-        "CANCELLED",
-        "REJECTED",
-    }:
-        resume_state = (
-            enum_type("PRODUCER_READY")
-            if state == "PRODUCING"
-            else enum_type("CHECKER_READY")
-            if state == "CHECKING"
-            else cycle.state
-        )
-        return replace(
-            cycle,
-            state=enum_type("TRIAGE_REQUIRED"),
-            active_assignment=None,
-            resume_state=resume_state,
-        )
-    if action == CycleAction.RESOLVE_TRIAGE and state == "TRIAGE_REQUIRED":
-        target = cycle.resume_state or enum_type("PRODUCER_READY")
-        return replace(cycle, state=target, resume_state=None)
-    raise CycleTransitionError(
-        f"{cycle.kind.value} cycle cannot {action.value} from {state}"
+    resume = cycle.resume_state.value if cycle.resume_state is not None else None
+    active = cycle.active_assignment
+    # A repair must not turn into an initial producer assignment when a
+    # pause, triage or external wait yields the node's slot.
+    producer_resume = (
+        "REPAIR_READY"
+        if isinstance(cycle, NodeCycle) and active is not None and active.kind == AssignmentKind.REPAIR
+        else "PRODUCER_READY"
     )
+    interrupted = producer_resume if state == "PRODUCING" else "CHECKER_READY" if state == "CHECKING" else state
+
+    if action == CycleAction.WAIT_EXTERNAL and state in {"PRODUCING", "CHECKING"}:
+        target, resume, active = "WAITING_EXTERNAL", interrupted, None
+    elif action == CycleAction.EXTERNAL_RESUMED and state == "WAITING_EXTERNAL":
+        target, resume = resume or "PRODUCER_READY", None
+    elif action == CycleAction.REQUEST_PAUSE and state not in {"CANCELLED", "REJECTED"}:
+        target = "PAUSE_REQUESTED"
+        if state not in {"PAUSE_REQUESTED", "PAUSED"}:
+            resume = interrupted
+    elif action == CycleAction.PAUSED and state == "PAUSE_REQUESTED":
+        target, active = "PAUSED", None
+    elif action == CycleAction.RESUME and state == "PAUSED":
+        target, resume = resume or "PRODUCER_READY", None
+    elif action == CycleAction.REQUEST_CANCEL and state not in {"CANCELLED", "REJECTED"}:
+        target = "CANCEL_REQUESTED"
+    elif action == CycleAction.CANCELLED and state == "CANCEL_REQUESTED":
+        target, resume, active = "CANCELLED", None, None
+    elif action == CycleAction.REQUIRE_TRIAGE and state not in {"CANCELLED", "REJECTED"}:
+        target, resume, active = "TRIAGE_REQUIRED", interrupted, None
+    elif action == CycleAction.RESOLVE_TRIAGE and state == "TRIAGE_REQUIRED":
+        target, resume = resume or "PRODUCER_READY", None
+    else:
+        raise CycleTransitionError(f"{cycle.kind.value} cycle cannot {action.value} from {state}")
+
+    if isinstance(cycle, NodeCycle):
+        return replace(cycle, state=NodeCycleState(target),
+                       resume_state=NodeCycleState(resume) if resume is not None else None,
+                       active_assignment=active)
+    return replace(cycle, state=PlanCycleState(target),
+                   resume_state=PlanCycleState(resume) if resume is not None else None,
+                   active_assignment=active)

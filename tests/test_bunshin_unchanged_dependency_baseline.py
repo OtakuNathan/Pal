@@ -535,7 +535,7 @@ def test_recovery_and_delayed_sink_notification_finalize_the_same_graph_once(cas
             await case.process(accepted.aggregate_id, "notify_node_accepted")
         sink = await case.accept_provider("backup_cli")
         assert case.coordinator.published_sink_ref(workflow_id=case.workflow_id) == sink.payload["candidate_ref"]["sha256"]
-        case.scheduler.advance(workflow_id=case.workflow_id, epoch_id=case.epoch_id, generation=case.graph.generation + 1)
+        assert not case.coordinator.complete_graph(workflow_id=case.workflow_id, epoch_id=case.epoch_id, generation=case.graph.generation + 1)
         assert case.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, case.epoch_id).state == "RUNNING"
         recovered = WorkflowEffects(BunshinWorkflowService(case.repository.runtime_root))
         await recovered._reconcile_execution_epoch({
@@ -544,9 +544,119 @@ def test_recovery_and_delayed_sink_notification_finalize_the_same_graph_once(cas
         epoch = case.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, case.epoch_id)
         assert epoch.state == "FINALIZING"
         assert epoch.payload["sink_candidate_ref"] == sink.payload["candidate_ref"]
+        assert epoch.payload["accepted_sink"] == {
+            "node_id": sink.aggregate_id, "candidate_digest": sink.payload["candidate_digest"],
+            "verification_ref": sink.payload["verification_artifact_ref"],
+        }
         await case.process(sink.aggregate_id, "notify_node_accepted")
         assert case.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, case.epoch_id) == epoch
         with case.repository.database.read_connection() as db:
             assert db.execute("SELECT COUNT(*) FROM bunshin_outbox WHERE aggregate_id = ? "
                               "AND effect_type = 'publish_final_deliverable'", (case.epoch_id,)).fetchone()[0] == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("changed_commit", [False, True])
+def test_git_replan_commits_only_exact_verified_carry_receipts(case, changed_commit):
+    from pal.bunshin.artifacts import ArtifactRef
+    from pal.bunshin.contract_runtime import ContractArtifactAccess
+    from pal.bunshin.cycle_protocol import NodeCycleState
+    from pal.bunshin.git_replan import _reconcile_skeleton_module_identities
+
+    async def run():
+        accepted = await case.ready()
+        source_epoch = case.epoch_id
+        graph = replace(case.graph, generation=2)
+        installation = case.coordinator.install_graph(workflow_id=case.workflow_id, graph=graph)
+        new_epoch = "replanned"
+        compiler = SkeletonEpochCompiler(case.repository, ContractArtifactAccess(case.artifacts, case.repository))
+        old_epoch = case.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, source_epoch)
+        manifest = ArtifactRef.from_mapping(old_epoch.payload["architecture_manifest_ref"])
+        refs = {name: ArtifactRef.from_mapping(case.node(name).payload["unit_contract_ref"]) for name in graph.nodes}
+        ids = {name: f"{new_epoch}:{name}" for name in graph.nodes}
+        skeleton = case.base
+        if changed_commit:
+            (case.source / "architecture-note.txt").write_text("changed architecture tree\n")
+            case.git(case.source, "add", ".")
+            case.git(case.source, "commit", "-qm", "new architecture")
+            skeleton = case.git(case.source, "rev-parse", "HEAD")
+        compiler.publish_epoch("test", {"skeleton_commit_sha": skeleton}, new_epoch, graph,
+                               manifest, manifest, case.workflow_id, source_epoch_id=source_epoch)
+        compiler.create_node_runs(
+            workflow_id=case.workflow_id, epoch_id=new_epoch, actor="test", graph=graph,
+            unit_node_ids=ids, module_responsibilities={name: spec.responsibility for name, spec in graph.nodes.items()},
+            module_refs=refs, manifest_ref=manifest, source_role_generations={},
+            environment_fingerprint="existing-repository-fixture", initial_repair_bill_ref=None,
+            workspaces={name: {"workspace_path": str(path), "base_sha": skeleton,
+                              "epoch_base_sha": skeleton, "execution_adapter": "software_git.v2"}
+                        for name, path in case.workspaces.items()},
+        )
+        kwargs = dict(repository=case.repository, contracts=compiler.contracts, workflow_id=case.workflow_id,
+                      source_epoch_id=source_epoch, target_epoch_id=new_epoch, source_manifest_ref=manifest,
+                      target_manifest_ref=manifest, target_graph=graph, graph_diff=installation.diff, actor="test")
+        _reconcile_skeleton_module_identities(**kwargs)
+        # Replay the preparation after the carry receipts committed, before activation.
+        _reconcile_skeleton_module_identities(**kwargs)
+        assert case.coordinator.activate_graph(workflow_id=case.workflow_id, epoch_id=new_epoch,
+            actor="test", source_epoch_id=source_epoch, module_identity_delta={"preserved": list(graph.nodes)})
+        node = case.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, ids["manifest_model"])
+        cycle = case.coordinator.execution(workflow_id=case.workflow_id).cycles["manifest_model"]
+        if changed_commit:
+            assert node.state == "BLOCKED_BY_DEPS"
+            assert cycle.state != NodeCycleState.ACCEPTED
+        else:
+            assert node.state == cycle.state == "ACCEPTED"
+            assert node.payload["candidate_digest"] == accepted.payload["candidate_digest"]
+            assert node.payload["candidate_ref"]["sha256"] == cycle.accepted_product_ref
+            assert node.payload["candidate_ref"] != accepted.payload["candidate_ref"]
+            assert node.payload["verification_artifact_ref"] == accepted.payload["verification_artifact_ref"]
+        scheduled = case.scheduler.schedule_ready_nodes(workflow_id=case.workflow_id, epoch_id=new_epoch)
+        assert bool(scheduled)
+        assert (ids["manifest_model"] in scheduled) == changed_commit
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["QUIESCING", "SNAPSHOTTING"])
+def test_pause_drains_submitted_producer_before_freezing_cycle(case, phase):
+    from pal.bunshin.cycle_protocol import NodeCycleState
+
+    async def run():
+        name = "manifest_model"
+        case.scheduler.schedule_ready_nodes(workflow_id=case.workflow_id, epoch_id=case.epoch_id)
+        await case.process(case.node_ids[name], "admit_implementation_role")
+        node = case.node(name)
+        case.node_action(name, "SUBMIT_CANDIDATE", {"fencing_token": node.payload["fencing_token"]})
+        workspace = case.workspaces[name]
+        if phase == "SNAPSHOTTING":
+            case.worker.workspace_locks.acquire(node.aggregate_id, workspace)
+            case.node_action(name, "QUIESCE_COMPLETED", {"fencing_token": node.payload["fencing_token"],
+                "process_group_reaped": True, "exclusive_workspace_lock": True,
+                "workspace_fingerprint": workspace_content_fingerprint(workspace)})
+        case.service.control_workflow(workflow_id=case.workflow_id, command="pause", actor="test", source_channel="test")
+        assert case.coordinator.execution(workflow_id=case.workflow_id).cycles[name].state == NodeCycleState.PRODUCING
+        if phase == "QUIESCING":
+            case.worker.workspace_locks.acquire(node.aggregate_id, workspace)
+            case.node_action(name, "QUIESCE_COMPLETED", {"fencing_token": node.payload["fencing_token"],
+                "process_group_reaped": True, "exclusive_workspace_lock": True,
+                "workspace_fingerprint": workspace_content_fingerprint(workspace)})
+        await case.process(case.node_ids[name], "snapshot_implementation_result")
+        cycle = case.coordinator.execution(workflow_id=case.workflow_id).cycles[name]
+        assert cycle.state == NodeCycleState.PAUSED
+        assert cycle.resume_state == NodeCycleState.CHECKER_READY
+        assert cycle.product_ref == case.node(name).payload["candidate_ref"]["sha256"]
+        assert case.scheduler.schedule_ready_nodes(workflow_id=case.workflow_id, epoch_id=case.epoch_id) == ()
+        saved_candidate = case.node(name).payload["candidate_ref"]
+        for subject in case.graph.nodes:
+            if case.node(subject).state == "PAUSE_REQUESTED":
+                await case.process(case.node_ids[subject], "pause_role")
+        assert case.workflow().state == "PAUSED"
+        assert case.service.resume_workflow(workflow_id=case.workflow_id, actor="test", source_channel="test")["status"] == "resumed"
+        await case.process(case.workflow_id, "propagate_resume")
+        await case.process(case.epoch_id, "reconcile_execution_epoch")
+        assert case.node(name).state == "REVIEW_QUEUED"
+        assert case.node(name).payload["candidate_ref"] == saved_candidate
+        await case.process(case.node_ids[name], "admit_verifier_role")
+        assert case.coordinator.execution(workflow_id=case.workflow_id).cycles[name].state == NodeCycleState.CHECKING
+
     asyncio.run(run())

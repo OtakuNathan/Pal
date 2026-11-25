@@ -1,7 +1,6 @@
 from __future__ import annotations
 from pal.bunshin.semantic_orchestration.workflow_requests import WorkflowRequests
 from pal.bunshin.semantic_orchestration.review_results import _ref_from_mapping
-from pal.bunshin.semantic_orchestration.workspace_safety import _git_output
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -26,38 +25,18 @@ class FinalDelivery:
 
     async def publish_final_deliverable(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         epoch = self.effect_reads.effect_snapshot(effect)
-        snapshots = self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
-        epoch_nodes = [
-            item
-            for item in snapshots
-            if item.aggregate_type == AggregateType.DAG_NODE_RUN
-            and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
-        ]
-        sink = next(
-            (
-                item for item in epoch_nodes
-                if bool(item.payload.get("graph_sink"))
-                and item.state == "ACCEPTED"
-            ),
-            None,
-        )
-        if sink is None or any(item.state != "ACCEPTED" for item in epoch_nodes):
-            raise ValueError(
-                "final delivery requires the declared sink and every executable node ACCEPTED"
-            )
-        published_sink_ref = WorkflowCoordinator(
-            self.repository
-        ).published_sink_ref(workflow_id=epoch.workflow_id)
-        if (
-            str(dict(sink.payload.get("candidate_ref") or {}).get("sha256") or "")
-            != published_sink_ref
-        ):
-            raise ValueError(
-                "delivery sink Candidate disagrees with GraphExecution publication"
-            )
-        verification_ref = _ref_from_mapping(
-            sink.payload.get("verification_artifact_ref")
-        )
+        binding = dict(epoch.payload.get("accepted_sink") or {})
+        if binding:
+            sink = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, binding["node_id"])
+            if (sink is None or sink.state != "ACCEPTED" or sink.workflow_id != epoch.workflow_id
+                    or sink.payload.get("epoch_id") != epoch.aggregate_id
+                    or sink.payload.get("candidate_ref") != epoch.payload.get("sink_candidate_ref")
+                    or sink.payload.get("candidate_digest", "") != binding["candidate_digest"]
+                    or sink.payload.get("verification_artifact_ref") != binding["verification_ref"]):
+                raise ValueError("delivery sink disagrees with the persisted epoch acceptance")
+        else:
+            sink = self._legacy_delivery_sink(epoch)
+        verification_ref = _ref_from_mapping(sink.payload.get("verification_artifact_ref"))
         adapter = self.workflow_facts.execution_adapter(sink)
         if adapter == SOFTWARE_GIT_ADAPTER:
             repository = Path(str(sink.payload.get("workspace_path") or ""))
@@ -93,6 +72,41 @@ class FinalDelivery:
         )
         return {"result_artifact_ref": deliverable_ref.to_dict()}
 
+    def _legacy_delivery_sink(self, epoch: AggregateSnapshot) -> AggregateSnapshot:
+        snapshots = self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
+        epoch_nodes = [
+            item
+            for item in snapshots
+            if item.aggregate_type == AggregateType.DAG_NODE_RUN
+            and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
+        ]
+        sink = next(
+            (
+                item for item in epoch_nodes
+                if bool(item.payload.get("graph_sink"))
+                and item.state == "ACCEPTED"
+            ),
+            None,
+        )
+        if sink is None or any(item.state != "ACCEPTED" for item in epoch_nodes):
+            raise ValueError(
+                "final delivery requires the declared sink and every executable node ACCEPTED"
+            )
+        published_sink_ref = WorkflowCoordinator(
+            self.repository
+        ).published_sink_ref(workflow_id=epoch.workflow_id)
+        if (
+            str(dict(sink.payload.get("candidate_ref") or {}).get("sha256") or "")
+            != published_sink_ref
+        ):
+            raise ValueError(
+                "delivery sink Candidate disagrees with GraphExecution publication"
+            )
+        candidate_ref = epoch.payload.get("sink_candidate_ref")
+        if candidate_ref and sink.payload.get("candidate_ref") != candidate_ref:
+            raise ValueError("delivery sink Candidate disagrees with the recorded epoch acceptance")
+        return sink
+
     def publish_verified_git_delivery(
         self,
         *,
@@ -105,12 +119,9 @@ class FinalDelivery:
             raise ValueError("delivery requires the accepted sink module worktree")
         manifest_ref = _ref_from_mapping(epoch.payload.get("architecture_manifest_ref"))
         manifest = dict(self.artifacts.read_json(manifest_ref))
-        if manifest.get("execution_mode") == "direct":
-            commit_sha = str(delivery_node.payload.get("candidate_digest") or "").strip()
-            if not commit_sha:
-                raise ValueError("direct delivery requires the accepted Candidate commit")
-        else:
-            commit_sha = _git_output(repository, "rev-parse", "HEAD")
+        commit_sha = str(delivery_node.payload.get("candidate_digest") or "").strip()
+        if not commit_sha:
+            raise ValueError("delivery requires the accepted Candidate commit")
         snapshot_value = manifest.get("workspace_snapshot_ref")
         source_snapshot: dict[str, Any]
         if isinstance(snapshot_value, Mapping) and snapshot_value.get("sha256"):

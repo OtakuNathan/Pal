@@ -3,7 +3,8 @@ from __future__ import annotations
 import sqlite3
 
 
-BUNSHIN_SCHEMA_VERSION = 30
+BUNSHIN_SCHEMA_VERSION = 31
+BUNSHIN_IN_PLACE_VERSIONS = frozenset({29, 30})
 
 
 def schema_meta_table(connection: sqlite3.Connection) -> str:
@@ -25,7 +26,7 @@ def _rename_versioned_tables(connection: sqlite3.Connection) -> None:
             row = connection.execute(
                 "SELECT schema_value FROM bunshin_v2_schema_meta WHERE schema_key='schema_version'"
             ).fetchone()
-            if row is None or str(row[0]) not in {"29", str(BUNSHIN_SCHEMA_VERSION)}:
+            if row is None or str(row[0]) not in {"29", "30"}:
                 raise RuntimeError("legacy Bunshin runtime schema requires archive cutover")
             # FTS5 renames its own shadow tables. Explicit indexes retain their
             # old names on ALTER TABLE, so recreate them in the same transaction.
@@ -58,8 +59,23 @@ def _rename_versioned_tables(connection: sqlite3.Connection) -> None:
         connection.commit()
 
 
-def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
-    _rename_versioned_tables(connection)
+def require_current_bunshin_schema(connection: sqlite3.Connection) -> None:
+    table = schema_meta_table(connection)
+    existing = connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if existing:
+        row = connection.execute(f"SELECT schema_value FROM {table} WHERE schema_key='schema_version'").fetchone()
+        version = str(row[0]) if row else ""
+        if version in {"29", "30"} or table != "bunshin_schema_meta":
+            raise RuntimeError("Bunshin runtime requires explicit cutover with the old Manager and workers stopped")
+
+
+def ensure_bunshin_schema(connection: sqlite3.Connection, *, migrate_in_place: bool = False) -> None:
+    if migrate_in_place:
+        _rename_versioned_tables(connection)
+    else:
+        require_current_bunshin_schema(connection)
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS bunshin_schema_meta (
@@ -69,7 +85,10 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
         """
     )
     previous_version = _schema_version(connection)
-    if previous_version not in {0, 29, BUNSHIN_SCHEMA_VERSION}:
+    allowed_versions = {0, BUNSHIN_SCHEMA_VERSION}
+    if migrate_in_place:
+        allowed_versions.update(BUNSHIN_IN_PLACE_VERSIONS)
+    if previous_version not in allowed_versions:
         raise RuntimeError(
             "legacy Bunshin runtime schema is not migrated in place; "
             "archive the old runtime and initialize a fresh Bunshin runtime"
@@ -276,6 +295,11 @@ def ensure_bunshin_schema(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'active',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS bunshin_role_checkpoint_heads (
+            session_id TEXT PRIMARY KEY REFERENCES bunshin_role_sessions(session_id) ON DELETE CASCADE,
+            envelope_json TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS bunshin_role_assignments (

@@ -5,6 +5,7 @@ from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from collections.abc import Sequence
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.graph_executor import GraphDiff, NodeReuseKind
+from pal.bunshin.cycle_protocol import NodeCycleState
 from pal.bunshin.graph_protocol import GraphIR
 from pal.bunshin.execution_values import _action
 from pal.bunshin.replan_workspaces import _checkpoint_preserved_module_head
@@ -33,7 +34,10 @@ def _reconcile_skeleton_module_identities(
     source_nodes, source_contracts = _epoch_module_contracts(snapshots, contracts, source_epoch_id)
     target_nodes, target_contracts = _epoch_module_contracts(snapshots, contracts, target_epoch_id)
     if set(target_graph.nodes) != set(target_nodes):
-        return ()
+        raise RuntimeError("replan requires the complete target node set")
+    staged = repository.cycles.read_graph_execution(workflow_id=workflow_id, generation=target_graph.generation)
+    if staged is None:
+        raise RuntimeError("replan has no staged graph")
     dependencies = {
         name: [
             provider
@@ -50,6 +54,14 @@ def _reconcile_skeleton_module_identities(
             target_nodes[module_name].aggregate_id,
         )
         if source_node is None or target_node is None:
+            continue
+        if target_node.state == "ACCEPTED":
+            # Preparation replay consumes the committed carry receipt; the
+            # activation transaction validates its exact predecessor.
+            carried_forward.append(target_node.aggregate_id)
+            continue
+        if (target_node.payload.get("module_replan_prepared")
+                and target_node.payload.get("preserved_from_epoch_id") == source_epoch_id):
             continue
         decision = graph_diff.decisions.get(module_name)
         if decision is None:
@@ -99,8 +111,14 @@ def _reconcile_skeleton_module_identities(
         }
         can_carry_acceptance = (
             decision.kind == NodeReuseKind.REUSE_ACCEPTED
+            and staged.cycles[module_name].state == NodeCycleState.ACCEPTED
+            and staged.cycles[module_name].accepted_product_ref == source_candidate_ref.get("sha256")
             and source_node.state == "ACCEPTED"
             and bool(verification_ref)
+            and module_head == source_candidate_digest
+            and bool(source_node.payload.get("base_sha"))
+            and source_node.payload.get("environment_fingerprint") == target_node.payload.get("environment_fingerprint")
+            and all(target_nodes[name].state == "ACCEPTED" for name in dependencies[module_name])
         )
         if not can_carry_acceptance:
             result = repository.transitions.dispatch(
@@ -124,39 +142,12 @@ def _reconcile_skeleton_module_identities(
             )
             target_nodes[module_name] = result.snapshot
             continue
-        candidate_ref = _checkpoint_preserved_module_head(
-            contracts=contracts,
-            target_node=target_node,
-            source_candidate_ref=source_candidate_ref,
-            source_candidate_digest=source_candidate_digest,
-            target_contract_ref=target_contract[0],
-            module_head=module_head,
+        target_nodes[module_name] = _carry_verified_module_acceptance(
+            repository=repository, contracts=contracts, source=source_node, target=target_node,
+            module_head=module_head, actor=actor,
+            accepted_dependency_ids=[target_nodes[name].aggregate_id for name in dependencies[module_name]],
         )
-        result = repository.transitions.dispatch(
-            _action(
-                "CARRY_FORWARD_MODULE",
-                workflow_id,
-                AggregateType.DAG_NODE_RUN,
-                target_node.aggregate_id,
-                actor,
-                target_node.version,
-                {
-                    "candidate_ref": candidate_ref.to_dict(),
-                    "candidate_digest": module_head,
-                    "verification_artifact_ref": verification_ref,
-                    "graph_contract_hash": target_graph.nodes[
-                        module_name
-                    ].contract_hash,
-                    "accepted_dependency_node_ids": [],
-                    "epoch_frozen": False,
-                    "output_hashes": dict(source_node.payload.get("output_hashes") or {}),
-                    "carried_forward_from_epoch_id": source_epoch_id,
-                    **baseline,
-                },
-            )
-        )
-        target_nodes[module_name] = result.snapshot
-        carried_forward.append(result.snapshot.aggregate_id)
+        carried_forward.append(target_node.aggregate_id)
     _retire_removed_module_resources(
         repository=repository,
         workflow_id=workflow_id,
@@ -164,6 +155,37 @@ def _reconcile_skeleton_module_identities(
         target_module_names=set(target_nodes),
     )
     return tuple(carried_forward)
+
+
+def _carry_verified_module_acceptance(
+    *, repository: BunshinRepository, contracts: ContractArtifactAccess,
+    source: AggregateSnapshot, target: AggregateSnapshot, module_head: str,
+    actor: str, accepted_dependency_ids: list[str],
+) -> AggregateSnapshot:
+    candidate_ref = _checkpoint_preserved_module_head(
+        contracts=contracts, target_node=target,
+        source_candidate_ref=dict(source.payload["candidate_ref"]),
+        source_candidate_digest=str(source.payload["candidate_digest"]),
+        target_contract_ref=dict(target.payload["unit_contract_ref"]), module_head=module_head,
+    )
+    return repository.transitions.dispatch(_action(
+        "CARRY_FORWARD_MODULE", target.workflow_id, AggregateType.DAG_NODE_RUN,
+        target.aggregate_id, actor, target.version,
+        {
+            "candidate_ref": candidate_ref.to_dict(), "candidate_digest": module_head,
+            "verification_artifact_ref": source.payload["verification_artifact_ref"],
+            "graph_contract_hash": target.payload["graph_contract_hash"],
+            "accepted_dependency_node_ids": accepted_dependency_ids, "epoch_frozen": False,
+            "output_hashes": dict(source.payload.get("output_hashes") or {}),
+            "carried_forward_from_epoch_id": source.payload["epoch_id"],
+            "carried_forward_from_node_run_id": source.aggregate_id,
+            # Keep the verified product's original integration delta.
+            "base_sha": source.payload["base_sha"],
+            "base_digest": source.payload.get("base_digest") or source.payload["base_sha"],
+            "accepted_dependency_candidate_digests": list(source.payload.get("accepted_dependency_candidate_digests") or []),
+            "dependency_output_hashes": {}, "dependency_outputs": {}, "dependency_fingerprint": "",
+        },
+    )).snapshot
 
 
 def _epoch_module_contracts(snapshots: Sequence[AggregateSnapshot], contracts: ContractArtifactAccess, epoch_id: str):

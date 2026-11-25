@@ -3,7 +3,6 @@ from pal.bunshin.workspace_git import _git as _git
 from pal.bunshin.workspace_git import _git_dir as _git_dir
 from pal.bunshin.workspace_git import _git_bytes as _git_bytes
 from pal.bunshin.workspace_git import _git_is_ancestor as _git_is_ancestor
-from pal.bunshin.workspace_git import git_changed_paths as git_changed_paths
 from pal.bunshin.workspace_git import _git_branch_exists as _git_branch_exists
 from pal.bunshin.workspace_git import _add_branch_worktree as _add_branch_worktree
 from pal.bunshin.workspace_git import _safe_ref as _safe_ref
@@ -141,23 +140,19 @@ def _checkpoint_preserved_module_head(
     target_contract_ref: Mapping[str, Any],
     module_head: str,
 ) -> ArtifactRef:
-    worktree = Path(str(target_node.payload.get("workspace_path") or ""))
-    changed_paths = git_changed_paths(worktree, source_candidate_digest)
+    if module_head != source_candidate_digest:
+        raise ValueError("replan cannot carry verification onto another Git commit")
+    # Rebind provenance to the new node without changing the verified product
+    # or its original integration delta. In particular an unchanged-product
+    # checkpoint retains its tree and empty-delta evidence.
+    source = dict(contracts.artifacts.read_json(source_candidate_ref))
+    if str(source.get("candidate_digest") or "") != source_candidate_digest:
+        raise ValueError("replan predecessor checkpoint does not match its verified commit")
     payload = {
-        "schema_version": "3",
+        **source,
         "node_run_id": target_node.aggregate_id,
-        "candidate_digest": module_head,
-        "base_sha": source_candidate_digest,
-        "architecture_base_sha": str(target_node.payload.get("epoch_base_sha") or ""),
-        "previous_head_sha": source_candidate_digest,
-        "candidate_tree_sha": _git(
-            worktree, "rev-parse", f"{module_head}^{{tree}}"
-        ).strip(),
-        "changed_paths": changed_paths,
         "unit_contract_hash": str(target_contract_ref.get("sha256") or ""),
-        "carried_forward_from_candidate": str(
-            source_candidate_ref.get("sha256") or ""
-        ),
+        "carried_forward_from_candidate": str(source_candidate_ref["sha256"]),
     }
     return contracts.artifacts.put_json(
         payload,

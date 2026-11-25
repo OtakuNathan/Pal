@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.bunshin.input_binding import is_repo_relative_input_reference
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, PermanentEffectError
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT, software_contract_projection
 from pal.bunshin.contract_submission import architect_path
@@ -298,6 +299,8 @@ class ArchitectureAuthoring:
             references["edit_instruction"] = _ref_from_mapping(revision.payload["edit_instruction_ref"])
         for index, raw_reference in enumerate(list(request.get("references") or [])):
             reference = dict(raw_reference or {})
+            if is_repo_relative_input_reference(reference):
+                continue
             path = str(reference.get("path") or "").strip()
             if path and Path(path).expanduser().exists():
                 name = str(reference.get("name") or f"user_reference_{index + 1}").strip()

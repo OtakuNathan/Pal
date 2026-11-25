@@ -24,10 +24,17 @@ def suite_command(scope: Mapping[str, Any], files: list[str]) -> str:
     if runner in files:
         return shlex.join(["sh", runner])
     cases = [Path(name) for name in files]
-    discoverable = scope.get("kind") == "file" or any(
-        case.match("test_*.py") or case.match("*_test.py") for case in cases
-    )
-    if cases and discoverable and all(case.suffix == ".py" for case in cases):
+    discoverable = (any(case.suffix == ".py" for case in cases)
+                    if scope.get("kind") == "file" else
+                    any(case.match("test_*.py") or case.match("*_test.py") for case in cases))
+    # Data fixtures can use arbitrary suffixes. A non-Python source or script
+    # makes automatic pytest coverage ambiguous, regardless of its filename.
+    other_test_sources = {
+        ".c", ".cc", ".cpp", ".cxx", ".cs", ".go", ".java", ".js", ".jsx",
+        ".kt", ".rb", ".rs", ".sh", ".ts", ".tsx",
+    }
+    mixed = any(case.suffix.lower() in other_test_sources for case in cases)
+    if discoverable and not mixed:
         executable = str(Path(sys.executable).resolve(strict=True))
         return shlex.join([
             executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",

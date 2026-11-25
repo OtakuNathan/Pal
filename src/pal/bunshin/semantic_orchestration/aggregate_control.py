@@ -4,7 +4,7 @@ from pal.bunshin.semantic_orchestration.workspace_safety import _lease_is_live
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-from pal.bunshin.contracts import ActionEnvelope, AggregateType
+from pal.bunshin.contracts import ActionEnvelope, AggregateType, SubmissionInvariantError
 from pal.bunshin.sessions import architecture_reviewer_session_id, architect_session_id_for_revision
 from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.repository import BunshinRepository
@@ -51,18 +51,25 @@ class AggregateControl:
                 architecture_workspace,
                 "aggregate worker still holds the architecture worktree",
             )
-        self.repository.role_cancellation.cancel_role_assignments(
-            preserve_interactions=not cancel,
-            workflow_id=snapshot.workflow_id,
-            aggregate_type=snapshot.aggregate_type,
-            aggregate_id=snapshot.aggregate_id,
-            reason="aggregate cancelled" if cancel else "aggregate paused",
-        )
-        if confirm:
-            current = self.repository.snapshots.read_snapshot(snapshot.aggregate_type, snapshot.aggregate_id)
-            action_type = "CANCEL_CONFIRMED" if cancel else "PAUSE_CONFIRMED"
-            with self.repository.transaction() as connection:
-                (connection or self.repository).transitions.dispatch(
+        with self.repository.transaction() as connection:
+            current = connection.snapshots.read_snapshot(snapshot.aggregate_type, snapshot.aggregate_id)
+            if current is None:
+                raise SubmissionInvariantError("controlled aggregate disappeared before worker retirement")
+            cancel_requested = cancel or current.state == "CANCEL_REQUESTED"
+            connection.role_cancellation.cancel_role_assignments(
+                preserve_interactions=not cancel_requested,
+                workflow_id=snapshot.workflow_id,
+                aggregate_type=snapshot.aggregate_type,
+                aggregate_id=snapshot.aggregate_id,
+                reason="aggregate cancelled" if cancel_requested else "aggregate paused",
+            )
+            if confirm:
+                action_type = "CANCEL_CONFIRMED" if cancel_requested else "PAUSE_CONFIRMED"
+                if not cancel_requested:
+                    connection.role_attempts.reconcile_interrupted_interactions(
+                        snapshot.workflow_id, snapshot.aggregate_type.value, snapshot.aggregate_id, allow_unproven=True,
+                    )
+                connection.transitions.dispatch(
                     ActionEnvelope(
                         action_type=action_type,
                         workflow_id=snapshot.workflow_id,
@@ -76,7 +83,7 @@ class AggregateControl:
                 if snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
                     WorkflowCoordinator(self.repository).confirm_plan_control(
                         workflow_id=snapshot.workflow_id,
-                        cancel=cancel,
+                        cancel=cancel_requested,
                         unit_of_work=connection,
                     )
         fencing_token = int(snapshot.payload.get("fencing_token") or 0)
@@ -85,7 +92,7 @@ class AggregateControl:
                 self.repository.leases.release_lease(lease_resource, invocation_id, fencing_token)
             except Exception:
                 pass
-        if cancel and snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+        if confirm and cancel_requested and snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
             for session_id in (
                 architect_session_id_for_revision(
                     snapshot.workflow_id,
@@ -102,7 +109,7 @@ class AggregateControl:
                     session_id,
                     status="cancelled",
                 )
-        elif cancel and snapshot.aggregate_type == AggregateType.WORKFLOW:
+        elif confirm and cancel_requested and snapshot.aggregate_type == AggregateType.WORKFLOW:
             self.repository.role_maintenance.complete_workflow_role_sessions(
                 snapshot.workflow_id,
                 status="cancelled",

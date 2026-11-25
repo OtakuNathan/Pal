@@ -11,6 +11,22 @@ from pal.foundation import utc_now
 from pal.bunshin.storage.connection_contracts import DatabasePort
 
 
+_ACTIONABLE_DELIVERY = """
+    NOT EXISTS (
+        SELECT 1 FROM bunshin_interaction_waits AS w
+        JOIN bunshin_role_assignments AS a ON a.assignment_id = w.assignment_id
+        JOIN bunshin_aggregate_snapshots AS workflow
+          ON workflow.aggregate_type = 'workflow' AND workflow.aggregate_id = a.workflow_id
+        WHERE w.wait_id = CASE d.event_kind
+            WHEN 'approval_requested' THEN json_extract(d.payload_json, '$.payload.approval_id')
+            WHEN 'clarification_requested' THEN json_extract(d.payload_json, '$.payload.clarification_id')
+        END AND (w.state <> 'open' OR workflow.state IN (
+            'CANCEL_REQUESTED', 'CANCELLED', 'RESTARTING', 'COMPLETED', 'REJECTED'
+        ))
+    )
+"""
+
+
 @dataclass
 class DeliveriesStore:
     database: DatabasePort
@@ -85,11 +101,12 @@ class DeliveriesStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             rows = connection.execute(
-                """SELECT d.* FROM bunshin_delivery_outbox d
+                f"""SELECT d.* FROM bunshin_delivery_outbox d
                    JOIN bunshin_interaction_waits w ON d.dedup_key = 'role-interaction:' || w.wait_id
                    JOIN bunshin_role_assignments a ON w.assignment_id = a.assignment_id
                    WHERE d.task_id = ? AND w.state = 'open'
                      AND a.state IN ('queued','claimed','running','retry_queued')
+                     AND {_ACTIONABLE_DELIVERY}
                    ORDER BY d.created_at, d.delivery_id""", (task_id,),
             ).fetchall()
         return tuple(_delivery_outbox_row(row) for row in rows)
@@ -98,17 +115,30 @@ class DeliveriesStore:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT d.*, b.current_binding_json, b.binding_version
                 FROM bunshin_delivery_outbox AS d
                 JOIN bunshin_task_delivery_bindings AS b ON b.task_id = d.task_id
                 WHERE d.status = 'pending' AND d.next_attempt_at <= ?
+                  AND {_ACTIONABLE_DELIVERY}
                 ORDER BY d.created_at, d.delivery_id
                 LIMIT ?
                 """,
                 (utc_now(), max(1, min(int(limit), 500))),
             ).fetchall()
         return tuple(_delivery_outbox_row(row) for row in rows)
+
+    def may_send_interaction_delivery(self, event: Mapping[str, Any]) -> bool:
+        delivery_id = str(event.get("delivery_id") or "")
+        if not delivery_id or event.get("event_kind") not in {"approval_requested", "clarification_requested"}:
+            return True
+        self.database.ensure_schema()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                f"SELECT 1 FROM bunshin_delivery_outbox AS d WHERE d.delivery_id = ? "
+                f"AND d.status = 'pending' AND {_ACTIONABLE_DELIVERY}",
+                (delivery_id,),
+            ).fetchone() is not None
 
     def acknowledge_task_delivery(self, delivery_id: str) -> bool:
         self.database.ensure_schema()

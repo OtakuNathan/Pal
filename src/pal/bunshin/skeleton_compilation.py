@@ -7,12 +7,13 @@ from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateType
 from pal.bunshin.repository import BunshinRepository
+from pal.bunshin.workflow_runtime import InstalledGraph, WorkflowCoordinator
 from pal.bunshin.graph_protocol import EdgeKind
 from pal.bunshin.skeleton import SKELETON_MODULE_CONTRACT_ARTIFACT
 from pal.bunshin.workspace_paths import module_developer_test_path, module_verification_corpus_path
 from pal.bunshin.execution_models import ExecutionCompilation
 from pal.bunshin.execution_values import _action
-from pal.bunshin.graph_installation import _install_execution_graph
+from pal.bunshin.graph_installation import _read_execution_graph
 from pal.bunshin.module_identity_facts import _module_identity_delta
 from pal.bunshin.module_identity_facts import _module_role_session_generations
 from pal.bunshin.execution_values import _stable_json_hash
@@ -42,12 +43,7 @@ class SkeletonEpochCompiler:
             or self.contracts.artifacts.read_json(manifest_ref)
         )
         submission = dict(artifact.get("submission") or {})
-        installed_graph = _install_execution_graph(
-            artifact,
-            workflow_id=workflow_id,
-            repository=self.repository,
-        )
-        graph = installed_graph.execution.graph
+        graph = _read_execution_graph(artifact, workflow_id=workflow_id)
         modules = {str(name): dict(value or {}) for name, value in dict(submission.get("modules") or {}).items()}
         if not modules:
             raise ValueError("software ContractArtifact has no modules")
@@ -78,7 +74,8 @@ class SkeletonEpochCompiler:
         if not requirements and artifact.get("execution_mode") != "direct":
             raise ValueError("software ContractArtifact has no requirement mappings")
         topology_ref, module_refs = self.publish_module_contracts(manifest_ref, artifact, modules, scenarios, requirements, module_dependencies)
-        self.publish_epoch(actor, artifact, epoch_id, graph, manifest_ref, topology_ref, workflow_id)
+        installed_graph = self.publish_epoch(actor, artifact, epoch_id, graph, manifest_ref, topology_ref, workflow_id,
+                           source_epoch_id=source_epoch_id, initial_repair_bill_ref=initial_repair_bill_ref)
         workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         request = (
             self.contracts.artifacts.read_json(dict(workflow.payload.get("request_ref") or {}))
@@ -119,6 +116,7 @@ class SkeletonEpochCompiler:
             self.repository,
             workflow_id=workflow_id,
             source_epoch_id=source_epoch_id,
+            target_epoch_id=epoch_id,
             target_subjects=set(implementation_modules),
             replaced_subjects=set(module_identity_delta["replaced"]),
         )
@@ -141,21 +139,9 @@ class SkeletonEpochCompiler:
         node_ids = tuple(
             unit_node_ids[name] for name in sorted(unit_node_ids)
         )
-        self.repository.transitions.dispatch(
-            _action(
-                "NODES_COMPILED",
-                workflow_id,
-                AggregateType.EXECUTION_EPOCH,
-                epoch_id,
-                actor,
-                2,
-                {
-                    "node_ids": list(node_ids),
-                    "implementation_node_ids": list(unit_node_ids.values()),
-                    "sink_node_id": sink_node_id,
-                    "module_identity_delta": module_identity_delta,
-                },
-            )
+        WorkflowCoordinator(self.repository).activate_graph(
+            workflow_id=workflow_id, epoch_id=epoch_id, actor=actor,
+            module_identity_delta=module_identity_delta, source_epoch_id=source_epoch_id,
         )
         return ExecutionCompilation(
             epoch_id=epoch_id,
@@ -334,24 +320,11 @@ class SkeletonEpochCompiler:
         manifest_ref: ArtifactRef,
         topology_ref: ArtifactRef,
         workflow_id: str,
-    ) -> None:
-        self.repository.transitions.dispatch(
-            _action(
-                "CREATE_EXECUTION_EPOCH",
-                workflow_id,
-                AggregateType.EXECUTION_EPOCH,
-                epoch_id,
-                actor,
-                0,
-                {
-                    "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "topology_ref": topology_ref.to_dict(),
-                    "architecture_manifest_sha": manifest_ref.sha256,
-                    "skeleton_commit_sha": str(artifact.get("skeleton_commit_sha") or ""),
-                    "graph_generation": graph.generation,
-                },
-            )
-        )
-        self.repository.transitions.dispatch(
-            _action("START_EXECUTION", workflow_id, AggregateType.EXECUTION_EPOCH, epoch_id, actor, 1, {})
+        *, source_epoch_id: str = "", initial_repair_bill_ref: Mapping[str, Any] | None = None,
+    ) -> InstalledGraph:
+        return WorkflowCoordinator(self.repository).begin_graph_activation(
+            workflow_id=workflow_id, epoch_id=epoch_id, graph=graph, manifest_ref=manifest_ref,
+            topology_ref=topology_ref, actor=actor, source_epoch_id=source_epoch_id,
+            skeleton_commit_sha=str(artifact.get("skeleton_commit_sha") or ""),
+            initial_repair_bill_ref=initial_repair_bill_ref,
         )

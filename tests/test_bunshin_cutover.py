@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
 
 from pal.bunshin.config import BUNSHIN_DB_FILENAME
 from pal.bunshin.catalog import BunshinCatalogService
 from pal.bunshin.cutover import cutover_bunshin_runtime
 from pal.bunshin.ipc import bunshin_runtime_dir
+from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.schema import (
     BUNSHIN_SCHEMA_VERSION,
     ensure_bunshin_schema,
 )
+from pal.bunshin.service import BunshinWorkflowService
 
 
 class BunshinCurrentCutoverTests(unittest.TestCase):
@@ -142,6 +148,56 @@ class BunshinCurrentCutoverTests(unittest.TestCase):
                     "WHERE schema_key = 'schema_version'"
                 ).fetchone()[0]
             self.assertEqual(version, str(BUNSHIN_SCHEMA_VERSION))
+
+
+@pytest.mark.parametrize("phase", ["archive", "install"])
+def test_archive_cutover_resumes_after_process_exit(tmp_path, phase):
+    source = bunshin_runtime_dir(tmp_path)
+    source.mkdir(parents=True)
+    with sqlite3.connect(source / BUNSHIN_DB_FILENAME) as db:
+        db.execute("CREATE TABLE bunshin_schema_meta(schema_key TEXT PRIMARY KEY, schema_value TEXT)")
+        db.execute("INSERT INTO bunshin_schema_meta VALUES ('schema_version', '24')")
+    catalog = BunshinCatalogService(tmp_path)
+    catalog.bootstrap()
+    catalog.set_profile_override(profile="software_engineering.v2_coder", changes={"display_name": "Preserved"})
+    script = """
+import os
+import sys
+from pathlib import Path
+from pal.bunshin.cutover import cutover_bunshin_runtime
+from pal.bunshin.ipc import bunshin_runtime_dir
+
+root = Path(sys.argv[1])
+phase = sys.argv[2]
+source = bunshin_runtime_dir(root)
+replace = os.replace
+
+def interrupt(old, new):
+    replace(old, new)
+    if (phase == 'archive' and Path(old) == source) or (phase == 'install' and Path(new) == source):
+        os._exit(86)
+
+os.replace = interrupt
+cutover_bunshin_runtime(root)
+"""
+    process = subprocess.run([sys.executable, "-c", script, str(tmp_path), phase], capture_output=True, text=True, timeout=35)
+    assert process.returncode == 86, process.stderr
+    with pytest.raises(RuntimeError, match="archive cutover is pending"):
+        BunshinRepository(tmp_path).database.ensure_schema()
+    with pytest.raises(RuntimeError, match="archive cutover is pending"):
+        BunshinWorkflowService(tmp_path).submit_artifact({"artifact_type": "Test", "content": {}})
+    with pytest.raises(RuntimeError, match="archive cutover is pending"):
+        BunshinCatalogService(tmp_path).bootstrap()
+    if phase == "archive":
+        assert not source.exists()
+
+    result = cutover_bunshin_runtime(tmp_path)
+    assert result.status == "archived_and_initialized"
+    assert result.copied_profile_overrides == 1
+    assert (Path(result.archive_root) / BUNSHIN_DB_FILENAME).is_file()
+    override = source / "catalog/profile_overrides/software_engineering/v2_coder.json"
+    assert "Preserved" in override.read_text(encoding="utf-8")
+    assert cutover_bunshin_runtime(tmp_path).status == "already_current"
 
 
 if __name__ == "__main__":

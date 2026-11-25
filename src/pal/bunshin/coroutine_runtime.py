@@ -3,9 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-
-from pal.bunshin.workspace_resources import workspace_process_holders
+from pal.bunshin.workspace_resources import inherited_process_group_live
 
 
 @dataclass(frozen=True)
@@ -53,7 +51,7 @@ class CoroutineRunSemaphore:
     capacity: int
     retain_node: Callable[[NodeSlot], bool] | None = None
     predecessor_settled: Callable[[str], bool] | None = None
-    _inherited: dict[str, tuple[str, Path]] = field(default_factory=dict, init=False)
+    _inherited: dict[tuple[int, str], tuple[str, str]] = field(default_factory=dict, init=False)
     _reservations: dict[NodeSlot, str] = field(default_factory=dict, init=False)
     _active_nodes: dict[str, NodeSlot] = field(default_factory=dict, init=False)
     _active_run_ids: set[str] = field(default_factory=set, init=False)
@@ -82,20 +80,20 @@ class CoroutineRunSemaphore:
     def inherited_count(self) -> int:
         return len(self._inherited)
 
-    async def recover_occupancy(self, rows: tuple[tuple[str, str, str], ...]) -> None:
-        self._inherited = {run: (aggregate, Path(workspace)) for run, aggregate, workspace in rows}
+    async def recover_occupancy(self, rows: tuple[tuple[str, str, int, str], ...]) -> None:
+        self._inherited = {(group, birth): (run, aggregate) for run, aggregate, group, birth in rows}
         await self.recheck_occupancy()
 
     async def recheck_occupancy(self) -> None:
         if not self._inherited:
             return
-        candidates = dict(self._inherited)
+        candidates = tuple(self._inherited)
         clean = await asyncio.to_thread(
-            lambda: [run for run, (_, workspace) in candidates.items() if not workspace_process_holders(workspace)]
+            lambda: [(group, birth) for group, birth in candidates if not inherited_process_group_live(group, birth)]
         )
         async with self._condition:
-            for run in clean:
-                self._inherited.pop(run, None)
+            for identity in clean:
+                self._inherited.pop(identity, None)
             if clean:
                 self._condition.notify_all()
 
@@ -117,16 +115,17 @@ class CoroutineRunSemaphore:
                 self._condition.notify_all()
 
     def _available(self, run_id: str, node: NodeSlot | None) -> bool:
-        if run_id in self._inherited:
+        if any(run == run_id for run, _ in self._inherited.values()):
             return False
         if node is not None:
-            if any(aggregate == node.node_id for aggregate, _ in self._inherited.values()):
+            if any(aggregate == node.node_id for _, aggregate in self._inherited.values()):
                 return False
             if node in self._active_nodes.values():
                 return False
             if node in self._reservations:
                 previous = self._reservations[node]
-                return not previous or self.predecessor_settled is None or self.predecessor_settled(previous)
+                return (len(self._active_run_ids) + self.inherited_count < self.capacity
+                        and (not previous or self.predecessor_settled is None or self.predecessor_settled(previous)))
         return len(self._active_run_ids) + len(self._reservations) + self.inherited_count < self.capacity
 
     async def acquire(self, run_id: str, *, node: NodeSlot | None = None) -> CoroutineRunPermit:

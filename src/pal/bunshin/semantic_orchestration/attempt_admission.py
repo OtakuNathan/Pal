@@ -30,6 +30,7 @@ class AttemptAdmission:
                             int(snapshot.payload.get("graph_generation") or 0), snapshot.aggregate_id)
         permit = await self.supervisor.acquire_process_slot(run_id, node=node)
         permit.assignment_id = str(assignment["assignment_id"])
+        self.repository.role_maintenance.reconcile_retired_role_checkpoint(str(assignment["session_id"]))
         attempt = self.repository.role_assignments.claim_role_assignment(
             str(assignment["assignment_id"]),
             harness_id=harness_spec.harness_id,

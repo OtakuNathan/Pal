@@ -7,6 +7,7 @@ checks run TLC itself in a temporary directory, including a negative control.
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import re
 import shutil
@@ -25,12 +26,16 @@ def test_bunshin_tla_checker_covers_every_model():
     assert block is not None
     models = block.group(1).split()
     assert len(models) == len(set(models))
-    assert set(models) == {path.stem for path in SPEC_ROOT.glob("*.tla")}
+    inventory = json.loads((ROOT / "spec/tlc-suite.json").read_text())
+    support = {Path(item["module"]).stem for item in inventory["support_modules"]
+               if Path(item["module"]).parent == Path("spec/bunshin")}
+    assert set(models) == {path.stem for path in SPEC_ROOT.glob("*.tla")} - support
     assert all((SPEC_ROOT / f"{name}.cfg").is_file() for name in models)
     assert "StartupRecoveryLifecycleUnsafe.cfg" in script
     assert "Invariant FreshStartNeverForgetsInitialization is violated" in script
     assert "ProcessCapacityLifecycleReuseCheckpoint.cfg" in script
     assert "Invariant ReleaseRequiresReapAndCheckpoint is violated" in script
+    assert "ProduceCheckNodeCycle.cfg" in script
 
 
 def test_startup_recovery_config_checks_the_admission_contract():
@@ -42,7 +47,7 @@ def test_startup_recovery_config_checks_the_admission_contract():
         "AwaitingAckHasDurableInitialization",
         "RunningRequiresInitializedCheckpoint", "NeverCreatedIsNotSuspended",
         "CheckpointFailureIsVisibleAndPermanent", "FailureRemainsVisible",
-        "ExhaustedBudgetDoesNotRestart",
+        "ExhaustedBudgetDoesNotRestart", "LatestClosedSelectedBeforeReadmission",
     ):
         assert f"INVARIANT {name}\n" in config
     assert "PROPERTY AdmissionEventuallyResolves\n" in config

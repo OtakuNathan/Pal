@@ -23,6 +23,8 @@ from pal.bunshin.ipc import (
     open_manager_connection,
     python_subprocess_env,
 )
+from pal.bunshin.paths import BunshinRuntimeBusy, bunshin_runtime_ownership
+from pal.bunshin.repository import BunshinRepository
 
 from pal.bunshin.source import BunshinControlEventHandler, BunshinEventSource
 from pal.bunshin.workflow_capabilities import BunshinPublicProvider
@@ -76,6 +78,7 @@ class BunshinManagerProvider:
             self.runtime_db_path = Path(self.runtime_db_path)
         self.client = BunshinManagerClient(self.runtime_root)
         self._lifecycle_client = BunshinManagerClient(self.runtime_root, request_timeout_seconds=5.0)
+        self._event_repository = BunshinRepository(self.runtime_root)
 
     def _process_status(self) -> tuple[int, int | None] | None:
         process = self.process
@@ -238,6 +241,12 @@ class BunshinManagerProvider:
                 with contextlib.suppress(Exception):
                     self.event_notify()
             return False
+        self._discard_buffered_event(event)
+        return True
+
+    def _discard_buffered_event(self, event: dict[str, Any]) -> None:
+        key = self._buffered_event_key(event)
+        delivery_id = str(event.get("delivery_id") or "")
         with self._buffer_lock:
             self._buffered_events = [
                 item
@@ -248,7 +257,12 @@ class BunshinManagerProvider:
             self._seen_event_keys.discard(key)
             if delivery_id:
                 self._locally_delivered_parts.pop(delivery_id, None)
-        return True
+
+    def may_send_event(self, event: dict[str, Any]) -> bool:
+        if self._event_repository.deliveries.may_send_interaction_delivery(event):
+            return True
+        self._discard_buffered_event(event)
+        return False
 
     def validate_memory_proposal_source(self, source: dict[str, Any]) -> bool:
         result = self.client.request_sync("validate_memory_proposal_source", {"source": source})
@@ -293,8 +307,10 @@ class BunshinManagerProvider:
         delivery_id = str(item.get("delivery_id") or "")
         if not delivery_id:
             return item
+        if not self.may_send_event(item):
+            return None
         task_id = str(item.get("task_id") or "")
-        binding_row = BunshinWorkflowService(self.runtime_root).repository.delivery_bindings.read_task_delivery(task_id)
+        binding_row = self._event_repository.delivery_bindings.read_task_delivery(task_id)
         binding = dict((binding_row or {}).get("current") or {})
         route = self._live_route_for_binding(binding)
         if route is None:
@@ -623,10 +639,9 @@ class BunshinManagerProvider:
             time.sleep(0.05)
 
     def _cleanup_stale_endpoint(self) -> None:
-        for path in (self.client.socket_path, bunshin_port_path(self.runtime_root)):
-            if path.exists():
-                with contextlib.suppress(FileNotFoundError):
-                    path.unlink()
+        with contextlib.suppress(BunshinRuntimeBusy), bunshin_runtime_ownership(self.runtime_root):
+            for path in (self.client.socket_path, bunshin_port_path(self.runtime_root)):
+                path.unlink(missing_ok=True)
 
     def _start_event_subscription(self) -> None:
         if self._event_thread is not None and self._event_thread.is_alive():

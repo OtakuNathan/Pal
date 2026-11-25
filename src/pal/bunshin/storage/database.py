@@ -5,8 +5,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
-from pal.bunshin.config import bunshin_db_path
-from pal.bunshin.schema import ensure_bunshin_schema
+from pal.bunshin.config import bunshin_db_path, ensure_bunshin_runtime_settings_schema
+from pal.bunshin.paths import require_bunshin_archive_cutover_complete
+from pal.bunshin.schema import ensure_bunshin_schema, require_current_bunshin_schema
 from pal.shared.text_search import jieba_fts_text
 
 
@@ -21,14 +22,22 @@ class BunshinDatabase:
 
     def ensure_schema(self) -> None:
         if self._schema_ready:
+            require_bunshin_archive_cutover_complete(self.runtime_root)
             return
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path), timeout=30.0) as connection:
+        path = self.db_path
+        existing = path.is_file()
+        require_bunshin_archive_cutover_complete(self.runtime_root)
+        if not existing:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "rw" if existing else "rwc"
+        with sqlite3.connect(path.resolve().as_uri() + f"?mode={mode}", uri=True, timeout=30.0) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout=30000")
+            require_current_bunshin_schema(connection)
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA foreign_keys=ON")
             ensure_bunshin_schema(connection)
+            ensure_bunshin_runtime_settings_schema(connection)
             self.ensure_task_fts_index_locked(connection)
         self._schema_ready = True
 
@@ -91,7 +100,8 @@ class BunshinDatabase:
 
     @contextmanager
     def read_connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(str(self.db_path), timeout=30)
+        require_bunshin_archive_cutover_complete(self.runtime_root)
+        connection = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=rw", uri=True, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")
@@ -102,7 +112,10 @@ class BunshinDatabase:
 
     @contextmanager
     def write_connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(str(self.db_path), timeout=30, isolation_level=None)
+        require_bunshin_archive_cutover_complete(self.runtime_root)
+        connection = sqlite3.connect(
+            self.db_path.resolve().as_uri() + "?mode=rw", uri=True, timeout=30, isolation_level=None,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")

@@ -70,6 +70,12 @@ class ExecutionEpochState(StrEnum):
 
 
 class DagNodeRunState(StrEnum):
+    """Durable node effect/receipt phases and historical status labels.
+
+    NodeCycle owns semantic producer/checker progress; the scheduler consumes
+    its cursor, not these labels, to choose work or retain a node slot.
+    """
+
     BLOCKED_BY_DEPS = "BLOCKED_BY_DEPS"
     QUEUED = "QUEUED"
     PRODUCING = "PRODUCING"
@@ -89,6 +95,17 @@ class DagNodeRunState(StrEnum):
     CANCEL_REQUESTED = "CANCEL_REQUESTED"
     CANCELLED = "CANCELLED"
     TRIAGE_REQUIRED = "TRIAGE_REQUIRED"
+
+
+# A submitted business result owns its cursor until snapshot/verification
+# settlement. Pause waits at that boundary; cancellation may still retire it.
+ARCHITECT_RESULT_DRAIN_STATES = frozenset({
+    ArchitectureRevisionState.ARCHITECT_QUIESCING, ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING,
+})
+NODE_RESULT_DRAIN_STATES = frozenset({
+    DagNodeRunState.QUIESCING, DagNodeRunState.SNAPSHOTTING,
+    DagNodeRunState.REVIEW_QUIESCING, DagNodeRunState.REVIEW_SNAPSHOTTING,
+})
 
 
 class StandaloneReviewState(StrEnum):

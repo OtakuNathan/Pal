@@ -14,6 +14,9 @@ class _Provider:
         self.parts: set[str] = set()
         self.settlements: list[bool] = []
 
+    def may_send_event(self, event):
+        return True
+
     def delivered_event_parts(self, event):
         _ = event
         return set(self.parts)

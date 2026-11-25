@@ -9,6 +9,8 @@ from pal.bunshin.contracts import (
     AggregateType,
     ArchitectureRevisionState,
     DagNodeRunState,
+    ARCHITECT_RESULT_DRAIN_STATES,
+    NODE_RESULT_DRAIN_STATES,
     DomainEventDraft,
     EffectDraft,
     ExecutionEpochState,
@@ -61,6 +63,11 @@ def _dependency_repair_generation_guard(payload: Mapping[str, Any], action: Acti
     generation = action.payload.get("graph_generation", payload.get("graph_generation"))
     if type(generation) is not int or generation < 1:
         raise TransitionGuardError("dependency repair registration requires a graph generation")
+
+
+def _captured_verifier_pause_guard(payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
+    if not payload.get("dependency_repair_capture_ref"):
+        raise TransitionGuardError("submitted verifier result must drain before pause")
 
 
 def _all(*guards):
@@ -1070,8 +1077,6 @@ def _architecture_transitions() -> list[TransitionSpec]:
     pausable = {
         S.ARCHITECT_QUEUED,
         S.ARCHITECT_RUNNING,
-        S.ARCHITECT_QUIESCING,
-        S.ARCHITECT_SNAPSHOTTING,
         S.REVIEW_QUEUED,
         S.REVIEWING,
         S.HUMAN_REVIEW,
@@ -1099,10 +1104,10 @@ def _architecture_transitions() -> list[TransitionSpec]:
             effects=_effect("resume_semantic_state"),
         )
     )
-    cancellable = pausable | {S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
+    cancellable = pausable | ARCHITECT_RESULT_DRAIN_STATES | {S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
     for state in cancellable:
         transitions.append(_spec(kind, state, "REQUEST_CANCEL", S.CANCEL_REQUESTED, effects=_effect("cancel_role")))
-    triageable = pausable | {S.PAUSE_REQUESTED, S.CANCEL_REQUESTED}
+    triageable = pausable | ARCHITECT_RESULT_DRAIN_STATES | {S.PAUSE_REQUESTED, S.CANCEL_REQUESTED}
     for state in triageable:
         transitions.append(
             _spec(
@@ -1501,14 +1506,16 @@ def _node_transitions() -> list[TransitionSpec]:
         S.REVIEW_BLOCKED_BY_DEPS,
         S.REVIEW_QUEUED,
         S.REVIEWING,
-        S.REVIEW_QUIESCING,
-        S.REVIEW_SNAPSHOTTING,
         S.REPAIR_QUEUED,
         S.REPAIRING,
     }
-    resumable = frozenset(str(state) for state in pausable)
     for state in pausable:
         transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_role")))
+    # Once a dependency result is captured, its durable graph cohort owns
+    # the remaining settlement. Pausing that cohort must remain possible.
+    transitions.append(_spec(kind, S.REVIEW_SNAPSHOTTING, "REQUEST_PAUSE", S.PAUSE_REQUESTED,
+                             guard=_captured_verifier_pause_guard,
+                             reducer=_pause_reducer(str(S.REVIEW_SNAPSHOTTING)), effects=_effect("pause_role")))
     node_resume = {
         str(S.BLOCKED_BY_DEPS): str(S.BLOCKED_BY_DEPS),
         str(S.QUEUED): str(S.QUEUED),
@@ -1535,7 +1542,7 @@ def _node_transitions() -> list[TransitionSpec]:
             effects=_effects("resume_semantic_state", "schedule_ready_nodes"),
         )
     )
-    cancellable = pausable | {S.BLOCKED_BY_DEPS, S.QUIESCING, S.SNAPSHOTTING, S.REVIEW_QUIESCING, S.REVIEW_SNAPSHOTTING, S.STALE, S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
+    cancellable = pausable | NODE_RESULT_DRAIN_STATES | {S.STALE, S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
     for state in cancellable:
         transitions.append(
             _spec(
@@ -1572,11 +1579,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 effects=_effect("cancel_role"),
             )
         )
-    triageable = pausable | {
-        S.QUIESCING,
-        S.SNAPSHOTTING,
-        S.REVIEW_QUIESCING,
-        S.REVIEW_SNAPSHOTTING,
+    triageable = pausable | NODE_RESULT_DRAIN_STATES | {
         S.PAUSE_REQUESTED,
         S.CANCEL_REQUESTED,
     }

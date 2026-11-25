@@ -9,19 +9,24 @@ from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.bunshin.repository import BunshinRepository
-from pal.bunshin.workflow_runtime import WorkflowCoordinator
+from pal.bunshin.cycle_protocol import CycleSlot, NodeCycleState
+from pal.bunshin.graph_executor import GraphExecution
+from pal.bunshin.workflow_runtime import node_pause_must_drain
+from pal.bunshin.unit_of_work import BunshinUnitOfWork
 from pal.bunshin.execution_values import _action
-from pal.bunshin.execution_graph_facts import dependency_fingerprint
+from pal.bunshin.execution_graph_facts import accepted_node_receipt, dependency_fingerprint, graph_node_bindings
 from pal.bunshin.dependency_baselines import prepare_node_dependency_baseline
 from pal.bunshin.dependency_baselines import prepare_node_verification_baseline
 
 
 @dataclass
-class DagScheduler:
+class NodeScheduler:
+    """Materialize runnable NodeCycle work and manage its node resource slot."""
+
     repository: BunshinRepository
 
-    def control_nodes(self, intent: ControlIntent | None, epoch: AggregateSnapshot, effect_key: str) -> None:
-        snapshots = self.repository.queries.list_workflow_snapshots(epoch.workflow_id)
+    def control_nodes(self, intent: ControlIntent | None, epoch: AggregateSnapshot, *, unit_of_work: BunshinUnitOfWork) -> None:
+        snapshots = unit_of_work.queries.list_workflow_snapshots(epoch.workflow_id)
         nodes = [
             item
             for item in snapshots
@@ -29,22 +34,25 @@ class DagScheduler:
             and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
         ]
         node_machine = machine_spec_for(AggregateType.DAG_NODE_RUN)
+        execution = unit_of_work.cycles.read_graph_execution(workflow_id=epoch.workflow_id) if intent == ControlIntent.PAUSE else None
         for node in nodes:
             if intent is None:
                 action_type = "RESUME"
-                if action_type not in self.repository.transitions.legal_actions(
+                if action_type not in unit_of_work.transitions.legal_actions(
                     AggregateType.DAG_NODE_RUN,
                     node.state,
                 ):
                     continue
             else:
+                if intent == ControlIntent.PAUSE and node_pause_must_drain(node, execution, unit_of_work.queries):
+                    continue
                 if (
                     node_machine.control_disposition(intent, node.state)
                     != ControlDisposition.REQUEST
                 ):
                     continue
                 action_type = node_machine.control_policies[intent].request_action
-            self.repository.transitions.dispatch(
+            unit_of_work.transitions.dispatch(
                 ActionEnvelope(
                     action_type=action_type,
                     workflow_id=epoch.workflow_id,
@@ -52,7 +60,7 @@ class DagScheduler:
                     aggregate_id=node.aggregate_id,
                     actor="bunshin-control",
                     expected_version=node.version,
-                    idempotency_key=f"effect:{effect_key}:{node.aggregate_id}",
+                    idempotency_key=f"control:{epoch.aggregate_id}:{epoch.version}:{node.aggregate_id}:{node.version}:{action_type}",
                 )
             )
 
@@ -64,6 +72,9 @@ class DagScheduler:
         epoch = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, slot.epoch_id)
         if epoch is None or epoch.state != "RUNNING":
             return False
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, slot.workflow_id)
+        if workflow is not None and workflow.state not in {"CREATED", "ACTIVE"}:
+            return False
         node = self.repository.snapshots.read_snapshot(AggregateType.DAG_NODE_RUN, slot.node_id)
         if (node is None or node.workflow_id != slot.workflow_id
                 or node.payload.get("epoch_id") != slot.epoch_id):
@@ -74,64 +85,9 @@ class DagScheduler:
         name = str(node.payload.get("module_name") or node.payload.get("unit_id") or "")
         if self.repository.queries.node_effect_in_backoff(slot.node_id):
             return False
-        if name in graph.pending_scope:
+        if name not in graph.cycles:
             return False
-        if node.state == "REVIEW_BLOCKED_BY_DEPS":
-            return name in graph.runnable_nodes()
-        return node.state in {
-            "PRODUCING", "QUIESCING", "SNAPSHOTTING", "REVIEW_QUEUED", "REVIEWING",
-            "REVIEW_QUIESCING", "REVIEW_SNAPSHOTTING", "REPAIR_QUEUED", "REPAIRING",
-        }
-
-    def advance(self, *, workflow_id: str, epoch_id: str, generation: int) -> None:
-        """Use the same graph publication boundary for node wakes and recovery."""
-        if generation:
-            installed = self.repository.cycles.read_graph_execution(workflow_id=workflow_id)
-            if installed is None or installed.graph.generation != generation:
-                return
-        self.schedule_ready_nodes(workflow_id=workflow_id, epoch_id=epoch_id)
-        with self.repository.transaction() as work:
-            epoch = work.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
-            if epoch is None or epoch.state != "RUNNING":
-                return
-            workflow = work.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
-            if (workflow is None or workflow.state != "ACTIVE" or epoch.workflow_id != workflow_id
-                    or workflow.payload.get("execution_epoch_id", epoch_id) != epoch_id):
-                return
-            graph = work.cycles.read_graph_execution(workflow_id=workflow_id)
-            if graph is None or graph.state.value != "COMPLETED":
-                return
-            if generation and graph.graph.generation != generation:
-                return
-            nodes = [
-                node for node in work.queries.list_workflow_snapshots(workflow_id)
-                if node.aggregate_type == AggregateType.DAG_NODE_RUN
-                and node.payload.get("epoch_id") == epoch_id
-            ]
-            names = {node.payload.get("module_name") or node.payload.get("unit_id") for node in nodes}
-            if len(nodes) != len(names) or names != set(graph.graph.nodes):
-                return
-            sinks = [node for node in nodes if node.payload.get("graph_sink")]
-            if len(sinks) != 1 or any(node.state != "ACCEPTED" for node in nodes):
-                return
-            sink = sinks[0].payload
-            if (sink.get("module_name") or sink.get("unit_id")) != graph.graph.sink:
-                return
-            candidate = dict(sink.get("candidate_ref") or {})
-            if not graph.published_sink_ref or candidate.get("sha256") != graph.published_sink_ref:
-                return
-            work.transitions.dispatch(ActionEnvelope(
-                action_type="ALL_REQUIRED_NODES_ACCEPTED", workflow_id=workflow_id,
-                aggregate_type=AggregateType.EXECUTION_EPOCH, aggregate_id=epoch_id,
-                actor="bunshin-outbox", expected_version=epoch.version,
-                idempotency_key=f"graph-complete:{epoch_id}:{graph.graph.generation}:{graph.published_sink_ref}",
-                payload={
-                    "sink_candidate_ref": candidate,
-                    "accepted_candidate_refs": [dict(node.payload["candidate_ref"]) for node in nodes],
-                    "verification_artifact_refs": [dict(node.payload["verification_artifact_ref"])
-                                                   for node in nodes if node.payload.get("verification_artifact_ref")],
-                },
-            ))
+        return graph.schedule.retain_slot(name)
 
     def schedule_ready_nodes(
         self,
@@ -140,24 +96,27 @@ class DagScheduler:
         epoch_id: str,
         actor: str = "bunshin-scheduler",
     ) -> tuple[str, ...]:
-        snapshots = self.repository.queries.list_workflow_snapshots(workflow_id)
-        epoch = next(
-            (
-                item
-                for item in snapshots
-                if item.aggregate_type == AggregateType.EXECUTION_EPOCH and item.aggregate_id == epoch_id
-            ),
-            None,
-        )
-        if epoch is None or epoch.state != "RUNNING":
-            return ()
-        node_by_id = {
-            item.aggregate_id: item
-            for item in snapshots
-            if item.aggregate_type == AggregateType.DAG_NODE_RUN
-            and str(item.payload.get("epoch_id") or "") == epoch_id
-        }
-        accepted_ids, ready_checkers, ready_producers = self.ready_assignments(epoch, node_by_id, workflow_id)
+        # Read both sides of the atomic receipt commit in one database view.
+        # Do not keep the transaction open during Git/workspace preparation.
+        with self.repository.transaction() as view:
+            epoch = view.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+            if epoch is None or epoch.state != "RUNNING" or epoch.workflow_id != workflow_id:
+                return ()
+            workflow = view.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+            if workflow is not None and workflow.state not in {"CREATED", "ACTIVE"}:
+                return ()
+            execution = view.cycles.read_graph_execution(workflow_id=workflow_id)
+            if execution is None:
+                raise RuntimeError("workflow has no installed GraphExecution")
+            if int(epoch.payload.get("graph_generation") or execution.graph.generation) != execution.graph.generation:
+                return ()  # A historical epoch cannot dispatch the active graph.
+            node_by_id = {
+                item.aggregate_id: item
+                for item in view.queries.list_workflow_snapshots(workflow_id)
+                if item.aggregate_type == AggregateType.DAG_NODE_RUN
+                and str(item.payload.get("epoch_id") or "") == epoch_id
+            }
+            accepted_ids, ready_checkers, ready_producers = self.ready_assignments(execution, node_by_id)
         scheduled: list[str] = []
         # Queue durable work here. Role admission acquires or reuses the
         # node's slot when the assignment is ready to materialize.
@@ -259,87 +218,44 @@ class DagScheduler:
             scheduled.append(node.aggregate_id)
         return tuple(scheduled)
 
-    def ready_assignments(self, epoch: AggregateSnapshot, node_by_id: dict[str, AggregateSnapshot], workflow_id: str) -> tuple[set[str], list[AggregateSnapshot], list[AggregateSnapshot]]:
-        accepted_ids = {node_id for node_id, item in node_by_id.items() if item.state == "ACCEPTED"}
-        graph_execution = WorkflowCoordinator(self.repository).execution(
-            workflow_id=workflow_id,
-            generation=int(epoch.payload.get("graph_generation") or 0) or None,
-        )
-        runnable_assignments = WorkflowCoordinator(
-            self.repository
-        ).runnable_assignments(
-            workflow_id=workflow_id,
-            generation=graph_execution.graph.generation,
-        )
-        runnable_producers = {
-            assignment.node_name
-            for assignment in runnable_assignments
-            if assignment.slot.value == "producer"
+    def ready_assignments(self, execution: GraphExecution, node_by_id: dict[str, AggregateSnapshot]) -> tuple[set[str], list[AggregateSnapshot], list[AggregateSnapshot]]:
+        bindings = graph_node_bindings(execution.graph, node_by_id.values())
+        accepted_ids = {
+            bindings[name].aggregate_id for name, cycle in execution.cycles.items()
+            if cycle.state == NodeCycleState.ACCEPTED
         }
-        runnable_checkers = {
-            assignment.node_name
-            for assignment in runnable_assignments
-            if assignment.slot.value == "checker"
-        }
-        node_id_by_name = {
-            str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): node_id
-            for node_id, item in node_by_id.items()
-        }
+        # A dependency baseline consumes receipts, not the historical state
+        # label. Refuse a mismatched projection instead of scheduling from it.
+        for name, cycle in execution.cycles.items():
+            if cycle.state == NodeCycleState.ACCEPTED:
+                accepted_node_receipt(bindings[name], cycle)
         ready_producers: list[AggregateSnapshot] = []
         ready_checkers: list[AggregateSnapshot] = []
-        for node_id in sorted(node_by_id):
-            node = node_by_id[node_id]
-            module_name = str(
-                node.payload.get("module_name")
-                or node.payload.get("unit_id")
-                or ""
-            )
-            if (
-                node.state in {"BLOCKED_BY_DEPS", "STALE"}
-                and module_name in runnable_producers
-            ):
-                expected = {
-                    node_id_by_name[name]
-                    for name in graph_execution.graph.producer_predecessors(module_name)
-                }
-                projected = {
-                    str(item)
-                    for item in list(
-                        node.payload.get("producer_dependency_node_ids") or []
-                    )
-                }
-                if projected != expected:
-                    raise RuntimeError(
-                        "projected producer dependencies disagree with GraphIR: "
-                        f"{module_name}"
-                    )
-                if not expected <= accepted_ids:
-                    raise RuntimeError(
-                        "GraphExecution marked a producer runnable before its "
-                        f"dependencies were accepted: {module_name}"
-                    )
-                ready_producers.append(node)
-            if (
-                node.state == "REVIEW_BLOCKED_BY_DEPS"
-                and module_name in runnable_checkers
-            ):
-                expected = {
-                    node_id_by_name[name]
-                    for name in graph_execution.graph.checker_predecessors(module_name)
-                }
-                projected = {
-                    str(item)
-                    for item in list(node.payload.get("dependency_node_ids") or [])
-                }
-                if projected != expected:
-                    raise RuntimeError(
-                        "projected verification dependencies disagree with GraphIR: "
-                        f"{module_name}"
-                    )
-                if not expected <= accepted_ids:
-                    raise RuntimeError(
-                        "GraphExecution marked a checker runnable before its "
-                        f"dependencies were accepted: {module_name}"
-                    )
-                ready_checkers.append(node)
-        return accepted_ids, ready_checkers, ready_producers
+        for name in execution.runnable_nodes():
+            node = bindings[name]
+            work = execution.cycles[name].pending_work
+            assert work is not None
+            if work.slot == CycleSlot.PRODUCER and node.state in {"BLOCKED_BY_DEPS", "STALE"}:
+                predecessors = execution.graph.producer_predecessors(name)
+                key = "producer_dependency_node_ids"
+                ready = ready_producers
+            elif work.slot == CycleSlot.CHECKER and node.state == "REVIEW_BLOCKED_BY_DEPS":
+                predecessors = execution.graph.checker_predecessors(name)
+                key = "dependency_node_ids"
+                ready = ready_checkers
+            else:
+                # The cycle is runnable but its durable dispatch is already
+                # queued, or a process/receipt effect is still settling.
+                continue
+            expected = {bindings[dependency].aggregate_id for dependency in predecessors}
+            projected = {str(item) for item in node.payload.get(key, [])}
+            if projected != expected:
+                raise RuntimeError(f"projected {work.slot.value} dependencies disagree with GraphIR: {name}")
+            ready.append(node)
+        # Preserve previous stable dispatch ordering by node identity.
+        return accepted_ids, sorted(ready_checkers, key=lambda node: node.aggregate_id), sorted(ready_producers, key=lambda node: node.aggregate_id)
+
+
+# Historical import used by external callers and older tests. This is the
+# same scheduler, not a second scheduler or a second persisted state machine.
+DagScheduler = NodeScheduler

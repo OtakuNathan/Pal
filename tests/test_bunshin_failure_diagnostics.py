@@ -156,7 +156,8 @@ def test_background_role_failure_artifact_retains_diagnostics():
     artifacts = MagicMock()
     repository = MagicMock()
     assignment = {"assignment_id": "a", "role": "coder", "state": "settled",
-                  "submission_payload_hash": "hash"}
+                  "submission_payload_hash": "hash",
+                  "settlement_action": {"action_type": "SETTLE_ROLE_SUBMISSION"}}
     repository.role_assignments.read_role_assignment.return_value = assignment
     repository.role_attempts.list_role_attempts.return_value = []
     repository.transitions.legal_actions.return_value = []

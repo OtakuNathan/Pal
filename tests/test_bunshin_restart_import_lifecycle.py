@@ -7,17 +7,22 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 import yaml
 
 from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
-from pal.bunshin.workflow_capabilities import BunshinPublicProvider
+from pal.bunshin.workflow_capabilities import (
+    BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput,
+    BunshinPublicProvider,
+)
 from pal.bunshin.contract_submission import architect_path
-from pal.bunshin.contracts import AggregateType
+from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.cycle_protocol import AssignmentKind, CycleSlot, CycleTransitionError, PlanCycleState
 from pal.bunshin.graph_compiler import GraphCompiler
 from pal.bunshin.graph_protocol import EdgeKind, graph_ir_from_mapping
@@ -164,6 +169,73 @@ class BunshinRestartImportLifecycleTests(unittest.TestCase):
         workflow = self._snapshot(AggregateType.WORKFLOW, workflow_id)
         identity = str(workflow.payload.get("architecture_revision_id") or "")
         return self._snapshot(AggregateType.ARCHITECTURE_REVISION, identity) if identity else None
+
+    def test_public_restart_of_cancelled_plan_keeps_exact_architect_clarification(self):
+        effect = {
+            "aggregate_type": AggregateType.WORKFLOW.value,
+            "aggregate_id": self.source_id,
+            "workflow_id": self.source_id,
+            "effect_key": "cancelled-plan-recovery",
+        }
+        self.processor._reconcile_workflow(effect)
+        self.processor._route_workflow(effect)
+        revision = self._revision(self.source_id)
+        self.repository.transitions.dispatch(ActionEnvelope(
+            action_type="START_ARCHITECT", workflow_id=self.source_id,
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION, aggregate_id=revision.aggregate_id,
+            actor="bunshin-manager", expected_version=revision.version,
+            payload={"fencing_token": 1, "active_worker_id": "architect-worker"},
+        ))
+        answer = "Require a 32-bit length field.\n\n"
+        appended = self.service.append_architect_clarification({
+            "workflow_id": self.source_id, "architecture_revision_id": revision.aggregate_id,
+            "worker_id": "architect-worker", "clarification_id": "clarification-first",
+            "title": "Frame size", "question": "What length field is required?", "answer": answer,
+        })
+        self.assertIn("restart_cancelled_plan=true", self.service._unproven_interaction_recovery(self.source_id))
+
+        args = BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput(
+            task=self.task_title, restart_cancelled_plan=True,
+        ).model_dump()
+        call = CapabilityCall(
+            name="op_bunshin_start_workflow", args=args,
+            meta={"actor_id": "nathan", "channel_id": "socket:test"},
+        )
+        self.provider.manager_request = lambda method, params: self.service.start_workflow(params)
+        self.assertEqual(self.provider.start_workflow(call).status, RuntimeStatus.INVALID)
+
+        self.service.control_workflow(
+            workflow_id=self.source_id, command="cancel", actor="nathan", source_channel="test",
+        )
+        self._drive_until(
+            lambda: self._snapshot(AggregateType.WORKFLOW, self.source_id).state == "CANCELLED",
+            label="unapproved plan cancellation",
+        )
+        ready_to_publish = Barrier(2, timeout=20)
+        put_json = self.service.artifacts.put_json
+
+        def publish_together(payload, **kwargs):
+            if kwargs.get("artifact_type") == "WorkflowRequestArtifact":
+                ready_to_publish.wait()
+            return put_json(payload, **kwargs)
+
+        with patch.object(self.service.artifacts, "put_json", publish_together):
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                reopened = list(workers.map(lambda _: self.provider.start_workflow(call), range(2)))
+        self.assertCountEqual([result.status for result in reopened], [RuntimeStatus.OK, RuntimeStatus.INVALID])
+        invalid = next(result for result in reopened if result.status == RuntimeStatus.INVALID)
+        self.assertIn("Task already has an active workflow", invalid.llm_text)
+        active = self.repository.search.task_workflow_candidates(
+            actor_id="nathan", task_id="task_restart_import", include_terminal=False,
+        )
+        self.assertEqual(len(active), 1)
+        self.assertNotEqual(active[0]["workflow_id"], self.source_id)
+        replacement = self._snapshot(AggregateType.WORKFLOW, active[0]["workflow_id"])
+        replacement_request = self.service.artifacts.read_json(replacement.payload["request_ref"])
+        self.assertEqual(replacement_request["requirements_ref"], appended["requirements_ref"])
+        ledger = self.service.artifacts.read_json(replacement_request["requirements_ref"])
+        self.assertEqual(ledger["original"], self.service.artifacts.read_json(self.requirements_ref)["original"])
+        self.assertEqual(ledger["revisions"][0]["authority"]["answer"], answer)
 
     def _drive_until(self, predicate, *, label):
         for _ in range(60):
@@ -508,3 +580,191 @@ class BunshinRestartImportLifecycleTests(unittest.TestCase):
         self.assertEqual(cycle.state, PlanCycleState.PRODUCER_READY)
         self.assertFalse(cycle.product_ref)
         self.assertIsNone(cycle.active_assignment)
+
+
+def test_cancelled_plan_recovers_frozen_input_into_new_architecture_workspace(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from pal.bunshin.artifacts import ArtifactRef
+    from pal.bunshin.contract_protocol import software_contract_projection, validate_contract_payload
+    from pal.bunshin.sandbox import build_sandboxed_runner_invocation, with_bunshin_sandbox_metadata
+    from pal.bunshin.semantic_orchestration.attempt_inputs import AttemptInputs
+    from pal.bunshin.workflow_control import reconcile_control_requests
+    from pal.bunshin.workspace_git import _git
+    from pal.shared import BunshinInvocationPack
+
+    source = tmp_path / "source"
+    source.mkdir()
+    manager_cwd = tmp_path / "manager"
+    manager_cwd.mkdir()
+    (manager_cwd / "facts.txt").write_text("unrelated manager content\n", encoding="utf-8")
+    (manager_cwd / "notes.txt").write_text("unrelated manager notes\n", encoding="utf-8")
+    extra_reference = tmp_path / "extra.txt"
+    extra_reference.write_text("ordinary external reference\n", encoding="utf-8")
+    monkeypatch.chdir(manager_cwd)
+    _git(source, "init")
+    input_path = source / "facts.txt"
+    input_path.write_text("original evidence\n", encoding="utf-8")
+    (source / "notes.txt").write_text("original notes\n", encoding="utf-8")
+    previous_target = source / "inputs/facts/facts.txt"
+    previous_target.parent.mkdir(parents=True)
+    previous_target.write_text("tracked product content\n", encoding="utf-8")
+    (source / "include").mkdir()
+    for header in ("decoder.hpp", "application.hpp"):
+        (source / "include" / header).write_text("#pragma once\n", encoding="utf-8")
+    _git(source, "add", "-A")
+    _git(source, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "Baseline")
+    service = BunshinWorkflowService(tmp_path / "runtime ? inputs")
+    original = service.start_workflow({
+        "title": "Recover planned input", "actor": "nathan", "goal": "Use the declared facts",
+        "profile": "software_engineering.v2_coder",
+        "workspace": {"kind": "existing_repo", "repo_path": str(source)},
+        "task_spec": {"objective": "Use the declared facts"},
+        "references": [
+            {"name": "facts", "path": "facts.txt", "repo_relative": True},
+            {"name": "notes", "path": "notes.txt"},
+            {"name": "extra", "path": str(extra_reference)},
+        ],
+        "delivery_binding": {
+            "channel_id": "test", "channel_kind": "socket", "reply_target": {"session_id": "test"},
+        },
+    })
+    source_id = original["workflow_id"]
+    service.control_workflow(workflow_id=source_id, command="cancel", actor="nathan", source_channel="test")
+    reconcile_control_requests(service.repository, source_id)
+    input_path.unlink()
+    reopened = service.start_workflow({
+        "task_id": original["task_id"], "actor": "nathan", "restart_cancelled_plan": True,
+    })
+    workflow = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, reopened["workflow_id"])
+    request = service.artifacts.read_json(reopened["request_ref"])
+    prior = service.artifacts.read_json(original["request_ref"])
+    original_input = service.artifacts.read_json(prior["input_binding_ref"])
+    rebound_input = service.artifacts.read_json(request["input_binding_ref"])
+    assert rebound_input["workflow_id"] == workflow.workflow_id
+    assert rebound_input["inputs"] == original_input["inputs"]
+    assert request["requirements_ref"] == prior["requirements_ref"]
+
+    input_path.write_text("new working tree content\n", encoding="utf-8")
+    architecture = service.skeleton.provision_architecture_workspace(
+        workflow_id=workflow.workflow_id, revision_name="first", workspace=request["workspace"],
+        requirements_ref=ArtifactRef.from_mapping(request["requirements_ref"]),
+    )
+    revision = service.repository.transitions.dispatch(ActionEnvelope(
+        action_type="CREATE_ARCHITECTURE_REVISION", workflow_id=workflow.workflow_id,
+        aggregate_type=AggregateType.ARCHITECTURE_REVISION, aggregate_id="recovery-reference-review",
+        actor="test", expected_version=0, payload={"requirements_ref": request["requirements_ref"]},
+    )).snapshot
+    stage = SemanticOrchestrator(service).components.architecture_stage
+    _, data_refs = stage.architecture_stage_prompt("architect", revision)
+    assert "user_facts" not in data_refs
+    assert "user_notes" not in data_refs
+    assert data_refs["user_extra"].media_type == str(extra_reference)
+    author = stage.architecture_authoring
+    with patch.object(author.attempt_execution, "run_profile", AsyncMock(return_value=(None, None, None))) as run_profile:
+        asyncio.run(author.run_architect_with_bound_inputs(
+            architecture, None, {}, None, "test-run", SimpleNamespace(fencing_token=1), "test-lease",
+            request, ArtifactRef.from_mapping(request["requirements_ref"]), revision, None, None, None,
+        ))
+    git_refs = run_profile.call_args.kwargs["reference_refs"]
+    assert "user_facts" not in git_refs
+    assert "user_notes" not in git_refs
+    assert git_refs["user_extra"].media_type == str(extra_reference)
+    entries = AttemptInputs(service.artifacts).bind_role_attempt_inputs(
+        workflow=workflow, request=request, workspace={"repo_path": str(architecture.worktree)},
+        snapshot=workflow, workspace_source_root=str(source),
+    )
+    assert (Path(entries[0]["path"]) / "facts.txt").read_bytes() == b"original evidence\n"
+    assert (Path(entries[1]["path"]) / "notes.txt").read_bytes() == b"original notes\n"
+    assert _git(architecture.worktree, "status", "--porcelain") == ""
+    assert architecture.base_sha != architecture.original_head
+    assert _git(architecture.worktree, "cat-file", "-t", architecture.original_head).strip() == "commit"
+    assert (architecture.worktree / previous_target.relative_to(source)).read_bytes() == b"tracked product content\n"
+    assert (architecture.worktree / "facts.txt").read_bytes() == b"new working tree content\n"
+    pack = with_bunshin_sandbox_metadata(
+        service.runtime_root,
+        BunshinInvocationPack(invocation_id="recover-bound-input", workspace={
+            "repo_path": str(architecture.worktree), "reference_paths": entries,
+        }),
+        run_id="recover-bound-input",
+    )
+    assert pack.workspace["reference_paths"][0]["path"] == "/pal/references/frozen_input_1/facts.txt"
+    assert pack.metadata["sandbox"]["reference_binds"][0]["include"] == ["facts.txt"]
+
+    header = architecture.worktree / "include/decoder.hpp"
+    if shutil.which("bwrap"):
+        command = """
+set -eu
+test "$(cat /pal/references/frozen_input_1/facts.txt)" = 'original evidence'
+if (printf changed > /pal/references/frozen_input_1/facts.txt) 2>/dev/null; then exit 31; fi
+printf '#pragma once\nclass Decoder;\n' > include/decoder.hpp
+"""
+        argv, env = build_sandboxed_runner_invocation(
+            runtime_root=service.runtime_root, pack=pack, argv=["/bin/sh", "-c", command],
+            env={"PATH": "/usr/bin:/bin"}, role_runtime=False,
+        )
+        sandbox = subprocess.run(argv, env=env, cwd=architecture.worktree, capture_output=True, text=True, timeout=20)
+        assert sandbox.returncode == 0, sandbox.stderr
+    else:
+        header.write_text("#pragma once\nclass Decoder;\n", encoding="utf-8")
+    definition = ArchitectureTemplateCompiler().compile("software_engineering.v1")
+    document = validate_contract_payload(definition.example, definition=definition)
+    artifact = service.skeleton.snapshot_architect_result(
+        workflow_name="Recovery", revision_name="first", architecture_workspace=architecture,
+        submission=software_contract_projection(document.model_dump(mode="python")),
+        requirements_ref=ArtifactRef.from_mapping(request["requirements_ref"]),
+    )
+    skeleton_commit = service.artifacts.read_json(artifact)["skeleton_commit_sha"]
+    assert _git(architecture.worktree, "diff", "--name-only", architecture.base_sha, skeleton_commit).splitlines() == [
+        "include/decoder.hpp",
+    ]
+
+
+def test_planned_execution_restart_reuses_frozen_input_after_source_is_removed():
+    from pal.bunshin.workspace_git import _git
+
+    case = BunshinRestartImportLifecycleTests()
+    start_workflow = BunshinWorkflowService.start_workflow
+
+    def start_with_reference(service, request, **kwargs):
+        if request.get("workflow_id") == case.source_id:
+            _git(case.repo_path, "init")
+            (case.repo_path / "facts.txt").write_text("approved planning input", encoding="utf-8")
+            _git(case.repo_path, "add", "-A")
+            _git(case.repo_path, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "Baseline")
+            request = {**request, "references": [{"name": "facts", "path": "facts.txt"}]}
+        return start_workflow(service, request, **kwargs)
+
+    try:
+        with patch.object(BunshinWorkflowService, "start_workflow", start_with_reference):
+            case.setUp()
+        case._drive_until(lambda: case._human_ready(case.source_id), label="initial architecture")
+        accepted = case._public_decision("accept")
+        assert accepted.status == RuntimeStatus.OK
+        case._drive_until(
+            lambda: case.repository.cycles.read_graph_generation(graph_id=case.source_id) is not None,
+            label="source execution compilation",
+        )
+        source = case._snapshot(AggregateType.WORKFLOW, case.source_id)
+        original_inputs = case.service.artifacts.read_json(source.payload["input_binding_ref"])["inputs"]
+        (case.repo_path / "facts.txt").unlink()
+        restart = case.provider.restart_execution(CapabilityCall(
+            name="op_bunshin_restart_execution", meta={"actor_id": "nathan"},
+            args={"task": case.task_title, "reason": "Retry from the approved plan"},
+        ))
+        assert restart.status == RuntimeStatus.OK
+        case._drive_until(
+            lambda: bool(case._snapshot(AggregateType.WORKFLOW, case.source_id).payload.get("replacement_workflow_id")),
+            label="replacement creation without host input",
+        )
+        source = case._snapshot(AggregateType.WORKFLOW, case.source_id)
+        replacement = case._snapshot(AggregateType.WORKFLOW, source.payload["replacement_workflow_id"])
+        adopted = case.service.artifacts.read_json(replacement.payload["input_binding_ref"])
+        assert adopted["workflow_id"] == replacement.workflow_id
+        assert adopted["inputs"] == original_inputs
+        assert case.service.artifacts.read_bytes(adopted["inputs"][0]["content_ref"]) == b"approved planning input"
+    finally:
+        case.doCleanups()

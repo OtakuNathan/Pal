@@ -31,13 +31,16 @@ VARIABLES
     recoveryScans,
     lastScanObserved,
     lastScanOwner,
-    legacyDuplicate
+    legacyDuplicate,
+    failureReceipts,
+    settlementKind,
+    control
 
 vars == <<
     managerUp, assignmentState, assignmentLease, attemptNumber, failureCount,
     effectAssignment, workerAssignment, inputRevision, promptRevision,
     receipts, terminalAssignment, settledAssignment, recoveryScans,
-    lastScanObserved, lastScanOwner, legacyDuplicate
+    lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind, control
 >>
 
 Init ==
@@ -59,8 +62,12 @@ Init ==
     /\ lastScanObserved = NoAssignment
     /\ lastScanOwner = NoAssignment
     /\ legacyDuplicate = FALSE
+    /\ failureReceipts = {}
+    /\ settlementKind = "None"
+    /\ control = "Run"
 
 ClaimAssignment(a) ==
+    /\ control = "Run"
     /\ managerUp
     /\ workerAssignment = NoAssignment
     /\ a = effectAssignment
@@ -75,9 +82,10 @@ ClaimAssignment(a) ==
     /\ workerAssignment' = a
     /\ UNCHANGED <<managerUp, failureCount, effectAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
-        lastScanObserved, lastScanOwner, legacyDuplicate>>
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind, control>>
 
 StartAssignment(a) ==
+    /\ control = "Run"
     /\ managerUp
     /\ workerAssignment = a
     /\ effectAssignment = a
@@ -87,7 +95,7 @@ StartAssignment(a) ==
     /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber, failureCount,
         effectAssignment, workerAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
-        lastScanObserved, lastScanOwner, legacyDuplicate>>
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind, control>>
 
 ExpireWorkerLease ==
     /\ workerAssignment \in Assignments
@@ -100,9 +108,10 @@ ExpireWorkerLease ==
     /\ UNCHANGED <<managerUp, assignmentState, attemptNumber, failureCount,
         effectAssignment, inputRevision, promptRevision, receipts,
         terminalAssignment, settledAssignment, recoveryScans,
-        lastScanObserved, lastScanOwner, legacyDuplicate>>
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind, control>>
 
 RecompileInputs ==
+    /\ control = "Run"
     /\ inputRevision < MaxInputRevision
     /\ inputRevision' = inputRevision + 1
     \* Recompiling attempt-local workspace inputs or republishing a
@@ -111,7 +120,7 @@ RecompileInputs ==
     /\ UNCHANGED <<managerUp, assignmentState, assignmentLease,
         attemptNumber, failureCount, effectAssignment, workerAssignment, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
-        lastScanObserved, lastScanOwner, legacyDuplicate>>
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind, control>>
 
 RecoverExpiredAssignment ==
     /\ managerUp
@@ -125,7 +134,7 @@ RecoverExpiredAssignment ==
     /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber, failureCount,
         effectAssignment, workerAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
-        lastScanObserved, lastScanOwner, legacyDuplicate>>
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind, control>>
 
 RecoveryScan(observed) ==
     /\ managerUp
@@ -140,9 +149,10 @@ RecoveryScan(observed) ==
     /\ UNCHANGED <<managerUp, assignmentState, assignmentLease,
         attemptNumber, failureCount, effectAssignment, workerAssignment, inputRevision,
         promptRevision, receipts, terminalAssignment, settledAssignment,
-        legacyDuplicate>>
+        legacyDuplicate, failureReceipts, settlementKind, control>>
 
-RecordResult(a) ==
+RecordResult(a, kind) ==
+    /\ control \in {"Run", "PauseRequested"}
     /\ managerUp
     /\ workerAssignment = a
     /\ effectAssignment = a
@@ -152,23 +162,32 @@ RecordResult(a) ==
     /\ assignmentLease' = [assignmentLease EXCEPT ![a] = FALSE]
     /\ workerAssignment' = NoAssignment
     /\ receipts' = receipts \cup {a}
+    /\ failureReceipts' = IF kind = "Failure" THEN failureReceipts \cup {a} ELSE failureReceipts
     /\ terminalAssignment' = a
     /\ UNCHANGED <<managerUp, attemptNumber, failureCount, effectAssignment,
         inputRevision, promptRevision, settledAssignment, recoveryScans,
-        lastScanObserved, lastScanOwner, legacyDuplicate>>
+        lastScanObserved, lastScanOwner, legacyDuplicate, settlementKind, control>>
 
-SettleTerminalResult ==
+SettleReceipt(kind) ==
+    /\ control \in {"Run", "PauseRequested"}
+    \* A durable failure may only discharge ROLE_FAILED; all other
+    \* semantic settlement consumes a successful role submission.
+    /\ (kind = "Failure") = (terminalAssignment \in failureReceipts)
     /\ managerUp
     /\ terminalAssignment \in receipts
     /\ assignmentState[terminalAssignment] = "ResultRecorded"
     /\ assignmentState' =
         [assignmentState EXCEPT ![terminalAssignment] = "Settled"]
     /\ settledAssignment' = terminalAssignment
+    /\ settlementKind' = kind
     \* Settlement follows the immutable terminal identity, not a mutable scan.
     /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber, failureCount,
         effectAssignment, workerAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, recoveryScans, lastScanObserved,
-        lastScanOwner, legacyDuplicate>>
+        lastScanOwner, legacyDuplicate, failureReceipts, control>>
+
+SettleTerminalResult ==
+    \E kind \in {"Success", "Failure"} : SettleReceipt(kind)
 
 CrashManager ==
     /\ managerUp
@@ -181,7 +200,7 @@ CrashManager ==
     /\ UNCHANGED <<assignmentState, attemptNumber, failureCount, effectAssignment,
         inputRevision, promptRevision, receipts, terminalAssignment,
         settledAssignment, recoveryScans, lastScanObserved, lastScanOwner,
-        legacyDuplicate>>
+        legacyDuplicate, failureReceipts, settlementKind, control>>
 
 RestartManager ==
     /\ ~managerUp
@@ -189,9 +208,10 @@ RestartManager ==
     /\ UNCHANGED <<assignmentState, assignmentLease, attemptNumber, failureCount,
         effectAssignment, workerAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
-        lastScanObserved, lastScanOwner, legacyDuplicate>>
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind, control>>
 
 InjectLegacyDuplicate ==
+    /\ control = "Run"
     \* This fault state represents a database produced by the old bug. The
     \* fixed recovery scan must contain it without stealing the active owner.
     /\ ~legacyDuplicate
@@ -213,7 +233,7 @@ InjectLegacyDuplicate ==
         [promptRevision EXCEPT ![NewAssignment] = inputRevision]
     /\ legacyDuplicate' = TRUE
     /\ UNCHANGED <<managerUp, failureCount, inputRevision, receipts, terminalAssignment,
-        settledAssignment, recoveryScans, lastScanObserved, lastScanOwner>>
+        settledAssignment, recoveryScans, lastScanObserved, lastScanOwner, failureReceipts, settlementKind, control>>
 
 FailWorker ==
     /\ managerUp
@@ -230,7 +250,55 @@ FailWorker ==
     /\ workerAssignment' = NoAssignment
     /\ UNCHANGED <<managerUp, attemptNumber, effectAssignment, inputRevision,
         promptRevision, receipts, terminalAssignment, settledAssignment,
-        recoveryScans, lastScanObserved, lastScanOwner, legacyDuplicate>>
+        recoveryScans, lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind, control>>
+
+RequestPause ==
+    /\ control = "Run"
+    /\ control' = "PauseRequested"
+    /\ UNCHANGED <<managerUp, assignmentState, assignmentLease, attemptNumber,
+        failureCount, effectAssignment, workerAssignment, inputRevision, promptRevision,
+        receipts, terminalAssignment, settledAssignment, recoveryScans,
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind>>
+
+PauseAtBoundary ==
+    /\ managerUp
+    /\ control = "PauseRequested"
+    /\ \A a \in Assignments : assignmentState[a] # "ResultRecorded"
+    /\ control' = "Paused"
+    \* Physical retirement of a pre-receipt attempt does not charge the logical
+    \* failure budget. A durable result must go through SettleReceipt instead.
+    /\ assignmentState' = [a \in Assignments |->
+        IF assignmentState[a] \in ActiveStates THEN "RetryQueued" ELSE assignmentState[a]]
+    /\ assignmentLease' = [a \in Assignments |-> FALSE]
+    /\ workerAssignment' = NoAssignment
+    /\ UNCHANGED <<managerUp, attemptNumber, failureCount, effectAssignment,
+        inputRevision, promptRevision, receipts, terminalAssignment, settledAssignment,
+        recoveryScans, lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind>>
+
+ResumeControl ==
+    /\ control = "Paused"
+    /\ control' = "Run"
+    /\ UNCHANGED <<managerUp, assignmentState, assignmentLease, attemptNumber,
+        failureCount, effectAssignment, workerAssignment, inputRevision, promptRevision,
+        receipts, terminalAssignment, settledAssignment, recoveryScans,
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts, settlementKind>>
+
+CancelControl ==
+    /\ managerUp
+    /\ control # "Cancelled"
+    /\ control' = "Cancelled"
+    /\ assignmentState' = [a \in Assignments |->
+        IF assignmentState[a] = "ResultRecorded" THEN "Settled"
+        ELSE IF assignmentState[a] \in RecoverableStates THEN "Cancelled"
+        ELSE assignmentState[a]]
+    /\ assignmentLease' = [a \in Assignments |-> FALSE]
+    /\ workerAssignment' = NoAssignment
+    /\ settledAssignment' = IF terminalAssignment \in receipts THEN terminalAssignment ELSE settledAssignment
+    /\ settlementKind' = IF terminalAssignment \in receipts /\ settledAssignment = NoAssignment
+                       THEN "Retired" ELSE settlementKind
+    /\ UNCHANGED <<managerUp, attemptNumber, failureCount, effectAssignment,
+        inputRevision, promptRevision, receipts, terminalAssignment, recoveryScans,
+        lastScanObserved, lastScanOwner, legacyDuplicate, failureReceipts>>
 
 ClaimSomeAssignment ==
     \E a \in Assignments : ClaimAssignment(a)
@@ -242,7 +310,7 @@ ScanSomeAssignment ==
     \E a \in Assignments : RecoveryScan(a)
 
 RecordSomeResult ==
-    \E a \in Assignments : RecordResult(a)
+    \E a \in Assignments, kind \in {"Success", "Failure"} : RecordResult(a, kind)
 
 Next ==
     \/ ClaimSomeAssignment
@@ -257,6 +325,10 @@ Next ==
     \/ CrashManager
     \/ RestartManager
     \/ InjectLegacyDuplicate
+    \/ RequestPause
+    \/ PauseAtBoundary
+    \/ ResumeControl
+    \/ CancelControl
 
 Spec ==
     /\ Init
@@ -276,6 +348,9 @@ TypeOK ==
     /\ inputRevision \in 0..MaxInputRevision
     /\ promptRevision \in [Assignments -> 0..MaxInputRevision]
     /\ receipts \subseteq Assignments
+    /\ failureReceipts \subseteq receipts
+    /\ settlementKind \in {"None", "Success", "Failure", "Retired"}
+    /\ control \in {"Run", "PauseRequested", "Paused", "Cancelled"}
     /\ terminalAssignment \in AssignmentIds
     /\ settledAssignment \in AssignmentIds
     /\ recoveryScans \in 0..MaxScans
@@ -330,6 +405,16 @@ SettlementUsesTerminalIdentity ==
         /\ settledAssignment = terminalAssignment
         /\ settledAssignment \in receipts
         /\ assignmentState[settledAssignment] = "Settled"
+
+SettlementMatchesReceipt ==
+    settledAssignment \in Assignments =>
+        IF settlementKind = "Retired" THEN control = "Cancelled"
+        ELSE (settlementKind = "Failure") = (settledAssignment \in failureReceipts)
+
+PauseDrainsRecordedResult ==
+    control = "Paused" =>
+        /\ workerAssignment = NoAssignment
+        /\ \A a \in Assignments : assignmentState[a] # "ResultRecorded"
 
 FailureBudgetCountsLogicalFailures ==
     \A a \in Assignments : failureCount[a] <= attemptNumber[a]

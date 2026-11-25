@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.storage.role_assignments import semantic_business_lease
 from typing import Any
-from pal.bunshin.contracts import AggregateSnapshot, DeferredEffectError
+from pal.bunshin.contracts import AggregateSnapshot, DeferredEffectError, SubmissionInvariantError
+from pal.bunshin.role_protocol import RoleAssignmentState
+from pal.bunshin.semantic_orchestration.role_environment import _role_submission_kind
+from pal.bunshin.harnesses import PAL_HARNESS_ID
+from pal.shared import BunshinInvocationPack
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import RoleActivation
 from typing import Mapping
@@ -55,6 +59,40 @@ class AttemptExecution:
     role_leases: RoleLeases
     supervisor: RoleSupervisor
     background: BackgroundAssignments | None = None
+
+    def existing_assignment(self, effect: Mapping[str, Any], snapshot: AggregateSnapshot,
+                            activation: RoleActivation) -> dict[str, Any] | None:
+        retries = self.assignment_reuse.assignment_retries
+        assignment = retries.retry_assignment_for_effect(
+            effect, snapshot=snapshot, role=activation.role.value, mode=activation.mode.value,
+            submission_kind=_role_submission_kind(activation, contract_authoring=False),
+        )
+        if assignment is not None and retries.role_assignment_attempt_is_live(assignment):
+            raise DeferredEffectError("role assignment already has a live process attempt")
+        if assignment is not None:
+            self.repository.role_maintenance.reconcile_retired_role_checkpoint(
+                str(assignment["session_id"]),
+            )
+            self.assignment_replay.role_checkpoints.require_success_receipt(assignment)
+        return assignment
+
+    def retained_role_prompt(self, effect: Mapping[str, Any], snapshot: AggregateSnapshot,
+                             activation: RoleActivation) -> BunshinInvocationPack | None:
+        """Expose an existing role's binding to wrappers before they provision resources."""
+        assignment = self.existing_assignment(effect, snapshot, activation)
+        if assignment is None:
+            return None
+        session_id = str(snapshot.payload.get("active_worker_id") or "")
+        if session_id and assignment.get("session_id") != session_id:
+            raise SubmissionInvariantError("retained role assignment belongs to a different session")
+        checkpoints = self.assignment_replay.role_checkpoints
+        if assignment["state"] in {RoleAssignmentState.RESULT_RECORDED.value, RoleAssignmentState.SETTLED.value}:
+            ref = checkpoints.durable_assignment_prompt_ref(assignment)
+            if ref is None:
+                raise SubmissionInvariantError("durable role receipt lost its original prompt binding")
+        else:
+            ref = checkpoints.retry_assignment_prompt_ref(assignment, harness_id=PAL_HARNESS_ID)
+        return BunshinInvocationPack.from_dict(dict(checkpoints.artifacts.read_json(ref))) if ref is not None else None
 
     async def run_profile(
         self,
@@ -174,6 +212,13 @@ class AttemptExecution:
                 aggregate_id=snapshot.aggregate_id, business_lease=business_lease,
                 require_running=False,
             )
+        assignment = self.existing_assignment(effect, snapshot, activation)
+        if assignment is not None and assignment["state"] in {
+            RoleAssignmentState.RESULT_RECORDED.value, RoleAssignmentState.SETTLED.value,
+        }:
+            if assignment.get("session_id") != invocation_id:
+                raise SubmissionInvariantError("durable role receipt belongs to a different session")
+            return self.assignment_replay.recorded_result(command, assignment).result
         stage_workspace_preparation = await self.workspace_preparation.execute(command)
         stage_verifier_context = await self.verifier_context.execute(command, stage_workspace_preparation)
         stage_reference_binding = await self.reference_binding.execute(command, stage_workspace_preparation)

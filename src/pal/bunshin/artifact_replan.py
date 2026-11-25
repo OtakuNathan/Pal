@@ -3,6 +3,7 @@ from pal.bunshin.contract_runtime import ContractArtifactAccess
 from pal.bunshin.contracts import AggregateType
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.graph_executor import GraphDiff, NodeReuseKind
+from pal.bunshin.cycle_protocol import NodeCycleState
 from pal.bunshin.graph_protocol import GraphIR
 from pal.bunshin.execution_values import _action
 from pal.bunshin.replan_workspaces import _retire_removed_module_resources
@@ -46,6 +47,11 @@ def _reconcile_data_contract_module_identities(
         ]
         for name in target_nodes
     }
+    if set(target_nodes) != set(target_graph.nodes):
+        raise RuntimeError("replan requires the complete target node set")
+    staged = repository.cycles.read_graph_execution(workflow_id=workflow_id, generation=target_graph.generation)
+    if staged is None:
+        raise RuntimeError("replan has no staged graph")
     carried: list[str] = []
     for name in _topological_module_order(target_dependencies):
         source = source_nodes.get(name)
@@ -60,12 +66,15 @@ def _reconcile_data_contract_module_identities(
             raise RuntimeError(
                 f"GraphDiff is missing reuse decision for projected node {name}"
             )
-        if decision.kind != NodeReuseKind.REUSE_ACCEPTED:
+        if (decision.kind != NodeReuseKind.REUSE_ACCEPTED
+                or staged.cycles[name].state != NodeCycleState.ACCEPTED
+                or staged.cycles[name].accepted_product_ref != dict(source.payload.get("candidate_ref") or {}).get("sha256")):
             continue
         if (
             source.state != "ACCEPTED"
             or target.state != "BLOCKED_BY_DEPS"
             or not _same_module_identity(source, target)
+            or source.payload.get("environment_fingerprint") != target.payload.get("environment_fingerprint")
         ):
             continue
         accepted_dependencies = [

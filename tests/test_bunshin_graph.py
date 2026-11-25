@@ -12,7 +12,8 @@ import yaml
 
 from pal.bunshin.architecture_compilation import ArchitectureTemplateCompiler
 from pal.bunshin.contract_protocol import validate_contract_payload
-from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, SubmissionInvariantError
 from pal.bunshin.coroutine_runtime import CoroutineRunSemaphore
 from pal.bunshin.cycle_protocol import (
     AssignmentKind,
@@ -712,6 +713,7 @@ class GraphExecutionTests(unittest.TestCase):
         definition = ArchitectureTemplateCompiler().compile(
             "software_engineering.v1"
         )
+
         return GraphCompiler().compile(
             validate_contract_payload(definition.example, definition=definition),
             graph_id="framepipe",
@@ -722,6 +724,132 @@ class GraphExecutionTests(unittest.TestCase):
             workspace_authority_rules=definition.workspace_authority_rules,
         )
 
+    def test_scheduler_keeps_slot_only_for_running_or_runnable_cycle(self) -> None:
+        graph = self._graph()
+        execution = GraphExecution.start(graph)
+        sink = graph.sink
+        cycle = execution.cycles[sink]
+        cycle = cycle.transition(CycleAction.START_PRODUCER, assignment=CycleAssignment(
+            CycleSlot.PRODUCER, AssignmentKind.INITIAL, graph.generation, "coder-input",
+        ))
+        execution = execution.with_cycle(cycle)
+        self.assertTrue(execution.schedule.retain_slot(sink))
+        cycle = cycle.transition(CycleAction.PRODUCER_SUBMITTED, product_ref="sink-candidate")
+        execution = execution.with_cycle(cycle)
+        self.assertEqual(cycle.pending_work.slot, CycleSlot.CHECKER)
+        self.assertFalse(execution.schedule.retain_slot(sink))
+        self.assertNotIn(sink, execution.runnable_nodes())
+        for provider in graph.checker_predecessors(sink):
+            accepted = replace(execution.cycles[provider], state=NodeCycleState.ACCEPTED,
+                               product_ref=f"{provider}-candidate", accepted_product_ref=f"{provider}-candidate")
+            execution = execution.with_cycle(accepted)
+        self.assertTrue(execution.schedule.retain_slot(sink))
+        self.assertIn(sink, execution.runnable_nodes())
+        cycle = cycle.transition(CycleAction.START_CHECKER, assignment=CycleAssignment(
+            CycleSlot.CHECKER, AssignmentKind.INITIAL, graph.generation, "checker-input",
+        ))
+        execution = execution.with_cycle(cycle)
+        self.assertTrue(execution.schedule.retain_slot(sink))
+        cycle = cycle.transition(CycleAction.CHECKER_ACCEPTED, verdict=CycleVerdict(True, graph.generation))
+        execution = execution.with_cycle(cycle)
+        self.assertEqual(execution.state, GraphExecutionState.COMPLETED)
+        self.assertFalse(execution.schedule.retain_slot(sink))
+
+    def test_interrupted_repair_keeps_its_role_kind(self) -> None:
+        cycle = NodeCycle("cycle", "module", state=NodeCycleState.REPAIR_READY)
+        cycle = cycle.transition(CycleAction.START_PRODUCER, assignment=CycleAssignment(
+            CycleSlot.PRODUCER, AssignmentKind.REPAIR, 1, "repair-input",
+        ))
+        for actions in (
+            (CycleAction.REQUEST_PAUSE, CycleAction.PAUSED, CycleAction.RESUME),
+            (CycleAction.REQUIRE_TRIAGE, CycleAction.RESOLVE_TRIAGE),
+            (CycleAction.WAIT_EXTERNAL, CycleAction.EXTERNAL_RESUMED),
+        ):
+            with self.subTest(actions=actions):
+                resumed = cycle
+                for action in actions:
+                    resumed = resumed.transition(action)
+                self.assertEqual(resumed.state, NodeCycleState.REPAIR_READY)
+                self.assertEqual(resumed.pending_work.kind, AssignmentKind.REPAIR)
+
+    def test_historical_node_control_ack_cannot_retire_current_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            coordinator = WorkflowCoordinator(BunshinRepository(Path(root)))
+            graph = self._graph()
+            coordinator.install_graph(workflow_id=graph.graph_id, graph=graph)
+            coordinator.install_graph(workflow_id=graph.graph_id, graph=replace(graph, generation=2))
+            coordinator.start_assignment(workflow_id=graph.graph_id, node_name="decoder", slot=CycleSlot.PRODUCER,
+                                         kind=AssignmentKind.INITIAL, input_fingerprint="new-generation")
+            coordinator.request_workflow_pause(workflow_id=graph.graph_id)
+            coordinator.confirm_node_control(workflow_id=graph.graph_id, node_name="decoder", generation=1, cancel=False)
+            self.assertEqual(coordinator.execution(workflow_id=graph.graph_id).cycles["decoder"].state, NodeCycleState.PAUSE_REQUESTED)
+            coordinator.confirm_node_control(workflow_id=graph.graph_id, node_name="decoder", generation=2, cancel=False)
+            self.assertEqual(coordinator.execution(workflow_id=graph.graph_id).cycles["decoder"].state, NodeCycleState.PAUSED)
+
+    def test_legacy_interrupted_repair_recovers_only_from_its_resume_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            repository = BunshinRepository(Path(root))
+            coordinator = WorkflowCoordinator(repository)
+            graph = self._graph()
+            coordinator.install_graph(workflow_id=graph.graph_id, graph=graph)
+            snapshot = AggregateSnapshot(
+                aggregate_type=AggregateType.DAG_NODE_RUN, aggregate_id="old-node", workflow_id=graph.graph_id,
+                state="REPAIR_QUEUED", version=1,
+                payload={"unit_id": graph.sink, "graph_generation": graph.generation, "resume_state": "PRODUCING"},
+                created_at="2026-08-02T00:00:00+00:00", updated_at="2026-08-02T00:00:00+00:00",
+            )
+            with repository.database.write_connection() as connection:
+                repository.snapshots.write_snapshot_locked(connection, None, snapshot)
+            with self.assertRaisesRegex(SubmissionInvariantError, "legacy repair resume receipt"):
+                coordinator.recover_legacy_repair_cursor(snapshot)
+            repaired_snapshot = replace(snapshot, version=2, payload={**snapshot.payload, "resume_state": "REPAIRING"})
+            with repository.database.write_connection() as connection:
+                repository.snapshots.write_snapshot_locked(connection, snapshot, repaired_snapshot)
+            cycle = coordinator.recover_legacy_repair_cursor(repaired_snapshot)
+            self.assertEqual(cycle.state, NodeCycleState.REPAIR_READY)
+            self.assertEqual(coordinator.execution(workflow_id=graph.graph_id).cycles[graph.sink], cycle)
+
+    def test_activation_does_not_recover_a_partial_graph_as_running(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            repository = BunshinRepository(Path(root))
+            artifacts = ContentAddressedArtifactStore(repository.runtime_root, repository.artifacts)
+            ref = artifacts.put_json({"contract": "fixture"}, artifact_type="ContractArtifact").to_dict()
+            graph = self._graph()
+            coordinator = WorkflowCoordinator(repository)
+            coordinator.install_graph(workflow_id=graph.graph_id, graph=graph)
+            epoch_id = "epoch"
+
+            def dispatch(kind, identity, action, version, payload):
+                repository.transitions.dispatch(ActionEnvelope(
+                    action_type=action, workflow_id=graph.graph_id, aggregate_type=kind,
+                    aggregate_id=identity, actor="test", expected_version=version,
+                    idempotency_key=f"{identity}:{action}", payload=payload,
+                ))
+
+            dispatch(AggregateType.WORKFLOW, graph.graph_id, "CREATE_WORKFLOW", 0, {})
+            dispatch(AggregateType.WORKFLOW, graph.graph_id, "START_WORKFLOW", 1, {})
+            dispatch(AggregateType.EXECUTION_EPOCH, epoch_id, "CREATE_EXECUTION_EPOCH", 0,
+                     {"architecture_manifest_ref": ref, "topology_ref": ref, "graph_generation": graph.generation})
+            dispatch(AggregateType.EXECUTION_EPOCH, epoch_id, "START_EXECUTION", 1, {})
+
+            def create_node(name):
+                dispatch(AggregateType.DAG_NODE_RUN, f"node:{name}", "CREATE_NODE_RUN", 0,
+                         {"epoch_id": epoch_id, "unit_contract_ref": ref, "unit_id": name,
+                          "graph_generation": graph.generation, "graph_sink": name == graph.sink,
+                          "graph_contract_hash": graph.nodes[name].contract_hash})
+
+            create_node(graph.sink)
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                coordinator.activate_graph(workflow_id=graph.graph_id, epoch_id=epoch_id, actor="recovery")
+            self.assertEqual(repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id).state, "STARTING")
+            for name in graph.nodes:
+                if name != graph.sink:
+                    create_node(name)
+            self.assertTrue(coordinator.activate_graph(workflow_id=graph.graph_id, epoch_id=epoch_id, actor="recovery"))
+            self.assertFalse(coordinator.activate_graph(workflow_id=graph.graph_id, epoch_id=epoch_id, actor="recovery"))
+            epoch = repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+            self.assertEqual(epoch.state, "RUNNING")
+            self.assertEqual(set(epoch.payload["node_ids"]), {f"node:{name}" for name in graph.nodes})
     def _provider_chain_graph(self, *, legacy_contract_edges: bool = False):
         definition = ArchitectureTemplateCompiler().compile(
             "software_engineering.v1"

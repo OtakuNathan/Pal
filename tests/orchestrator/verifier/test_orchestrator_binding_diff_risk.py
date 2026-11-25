@@ -19,10 +19,15 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
+from pal.bunshin.input_binding import BoundInputError
 from pal.bunshin.semantic_orchestration.orchestrator import SemanticOrchestrator
-from pal.bunshin.semantic_orchestration.role_environment import _refresh_ephemeral_role_reference_binds
+from pal.bunshin.sandbox import with_bunshin_sandbox_metadata
+from pal.bunshin.semantic_orchestration.role_environment import (
+    _reconcile_declared_input_reference_binds, _refresh_ephemeral_role_reference_binds,
+)
 from pal.bunshin.service import BunshinWorkflowService
 from pal.shared.messages import BunshinInvocationPack
 
@@ -108,6 +113,12 @@ class NoDeclaredInputsKeepsLegacyBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(entries, [])
         self.assertFalse((workspace / "inputs").exists())
+        with self.assertRaisesRegex(BoundInputError, "without a frozen input-binding manifest"):
+            self.orchestrator.components.attempt_inputs.bind_role_attempt_inputs(
+                workflow=workflow, request={"references": [{"name": "facts", "path": "facts.txt"}]},
+                workspace={"repo_path": str(workspace)}, snapshot=node,
+                workspace_source_root=str(WORKSPACE_REPO),
+            )
 
 
 class EphemeralBindRefreshIgnoresBoundInputsTests(unittest.TestCase):
@@ -168,6 +179,65 @@ class EphemeralBindRefreshIgnoresBoundInputsTests(unittest.TestCase):
         )
         binds_control = refreshed_control.metadata["sandbox"]["reference_binds"]
         self.assertEqual(binds_control[0]["source_path"], "/fresh/attempt-2")
+
+
+class LegacyInputReferenceRecoveryTests(unittest.TestCase):
+    def test_old_prompt_alias_is_removed_or_rebound_to_the_authorized_absolute_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            frozen = repo / "facts.txt"
+            frozen.write_text("frozen facts", encoding="utf-8")
+            stale = root / "manager-facts.txt"
+            stale.write_text("unrelated facts", encoding="utf-8")
+            external = root / "external-facts.txt"
+            external.write_text("approved reference", encoding="utf-8")
+            extra = root / "extra.txt"
+            extra.write_text("other reference", encoding="utf-8")
+            bound = {"name": "facts", "path": str(frozen), "include": ["facts.txt"], "bound_input": True}
+            other = {"name": "user_extra", "path": str(extra)}
+            legacy_alias = {"name": "user_facts", "path": str(stale)}
+            legacy = BunshinInvocationPack(invocation_id="old", workspace={"repo_path": str(repo), "reference_paths": [
+                legacy_alias, bound, other,
+            ]}, metadata={"requirements_brief": {"acceptance_criteria": ["Original requirement"],
+                                                   "references": [legacy_alias, other]}})
+            with patch("pal.bunshin.sandbox.sandbox_supported_backend", return_value="bwrap"):
+                projected = with_bunshin_sandbox_metadata(root, legacy, run_id="old")
+                for keep_alias in (False, True):
+                    with self.subTest(keep_alias=keep_alias):
+                        request = {"references": [{"name": "facts", "path": "facts.txt"}]}
+                        current_refs = [bound, other]
+                        if keep_alias:
+                            request["references"].append({"name": "facts", "path": str(external)})
+                            current_refs.append({"name": "user_facts", "path": str(external)})
+                        current = BunshinInvocationPack(invocation_id="current", workspace={
+                            "repo_path": str(repo), "reference_paths": current_refs,
+                        }, metadata={"requirements_brief": {"references": [item for item in current_refs
+                                                                              if not item.get("bound_input")]}})
+                        refreshed = _reconcile_declared_input_reference_binds(projected, current, request=request)
+                        retry = with_bunshin_sandbox_metadata(root, refreshed, run_id="retry")
+                        references = {item["name"]: item for item in retry.workspace["reference_paths"]}
+                        binds = {item["name"]: item for item in retry.metadata["sandbox"]["reference_binds"]}
+                        brief_refs = {item["name"]: item for item in retry.metadata["requirements_brief"]["references"]}
+                        # Frozen in-workspace inputs are files, not external
+                        # mount roots. The retry must retain their exact names.
+                        self.assertEqual(references["facts"]["path"], str(frozen))
+                        self.assertNotIn("facts", binds)
+                        from pal.bunshin.prompt_adapter import render_bunshin_task_prompt
+                        self.assertIn(f"path={frozen}", render_bunshin_task_prompt(retry))
+                        self.assertEqual(references["user_extra"]["path"], "/pal/references/user_extra/extra.txt")
+                        if keep_alias:
+                            self.assertEqual(binds["user_facts"]["include"], ["external-facts.txt"])
+                            self.assertEqual(references["user_facts"]["path"], "/pal/references/user_facts/external-facts.txt")
+                            self.assertEqual(brief_refs["user_facts"]["path"], str(external))
+                        else:
+                            self.assertNotIn("user_facts", references)
+                            self.assertNotIn("user_facts", binds)
+                            self.assertNotIn("user_facts", brief_refs)
+                        correction = retry.metadata["requirements_brief"]["acceptance_criteria"][-1]
+                        self.assertIn("recheck any work", correction)
+                        self.assertEqual(_reconcile_declared_input_reference_binds(retry, current, request=request), retry)
 
 
 if __name__ == "__main__":

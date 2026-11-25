@@ -9,6 +9,7 @@ from pal.bunshin.role_protocol import RoleAssignmentAction, RoleAssignmentState,
 from pal.bunshin.storage.artifacts import ArtifactsStore
 from pal.bunshin.storage.connection_contracts import DatabasePort
 from pal.bunshin.storage.role_attempts import RoleAttemptsStore
+from pal.bunshin.storage.role_assignments import assert_role_result_pause_open_locked
 from pal.bunshin.storage.role_sessions import RoleSessionsStore
 
 
@@ -131,6 +132,7 @@ class RoleRetriesStore:
                 str(assignment["state"]),
                 RoleAssignmentAction.RECORD_RESULT,
             )
+            assert_role_result_pause_open_locked(connection, assignment)
             self.artifacts.assert_artifact_refs_durable(connection, failure_artifact_ref)
             now = utc_now()
             connection.execute(
@@ -172,13 +174,22 @@ class RoleRetriesStore:
             lease_resource = str(attempt["lease_resource_key"] or "")
             fencing_token = int(attempt["fencing_token"] or 0)
             if lease_resource and fencing_token:
-                connection.execute(
-                    """
-                    DELETE FROM bunshin_leases
-                    WHERE resource_key = ? AND owner_id = ? AND fencing_token = ?
-                    """,
-                    (lease_resource, str(attempt_id_value), fencing_token),
-                )
+                unresolved = connection.execute(
+                    "SELECT 1 FROM bunshin_interaction_waits WHERE resume_attempt_id=? AND state='resuming'",
+                    (str(attempt_id_value),),
+                ).fetchone()
+                if unresolved:
+                    connection.execute(
+                        """UPDATE bunshin_leases SET owner_id='', renewed_at=?, expires_at=?
+                           WHERE resource_key=? AND owner_id=? AND fencing_token=?""",
+                        (now, now, lease_resource, str(attempt_id_value), fencing_token),
+                    )
+                else:
+                    connection.execute(
+                        """DELETE FROM bunshin_leases
+                           WHERE resource_key=? AND owner_id=? AND fencing_token=?""",
+                        (lease_resource, str(attempt_id_value), fencing_token),
+                    )
             self.role_sessions.transition_role_session_locked(
                 connection,
                 str(assignment["session_id"]),

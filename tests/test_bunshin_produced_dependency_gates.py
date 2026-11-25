@@ -127,6 +127,13 @@ class ProducedDependencyGateTests(unittest.TestCase):
         self.workflow_id = self.graph.graph_id
         self.epoch_id = "epoch-gates"
         self.node_ids = {name: f"{self.epoch_id}:{name}" for name in self.graph.nodes}
+        self.repository.transitions.dispatch(ActionEnvelope(
+            action_type="CREATE_WORKFLOW", workflow_id=self.workflow_id,
+            aggregate_type=AggregateType.WORKFLOW, aggregate_id=self.workflow_id,
+            actor="test", expected_version=0,
+            idempotency_key=f"{self.workflow_id}:create", payload={},
+        ))
+        self._dispatch(AggregateType.WORKFLOW, self.workflow_id, "START_WORKFLOW", {})
         self.coordinator.install_graph(workflow_id=self.workflow_id, graph=self.graph)
         source = self.root / "source"
         source.mkdir()
@@ -239,7 +246,10 @@ class ProducedDependencyGateTests(unittest.TestCase):
             ("REVIEW_PASSED", {"verification_artifact_ref": report.to_dict()}),
         ):
             self._node_action(name, action, payload)
-        self.coordinator.checker_verdict(workflow_id=self.workflow_id, node_name=name, accepted=True)
+        self.coordinator.checker_verdict(
+            workflow_id=self.workflow_id, node_name=name, accepted=True,
+            accepted_product_ref=self._node(name).payload["candidate_ref"]["sha256"],
+        )
         return self._node(name)
 
     def _probe(self, name, expected):

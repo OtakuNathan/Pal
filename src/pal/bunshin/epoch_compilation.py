@@ -6,6 +6,8 @@ from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, SOFTWARE_GIT_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contract_protocol import CONTRACT_ARTIFACT, software_contract_projection
 from pal.bunshin.direct_contract import DIRECT_EXECUTION_ARTIFACT
+from pal.bunshin.contracts import AggregateType, SubmissionInvariantError
+from pal.bunshin.execution_graph_facts import graph_node_bindings
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.execution_models import ExecutionCompilation
 from pal.bunshin.graph_installation import _workflow_execution_adapter
@@ -36,6 +38,22 @@ class ExecutionCompiler:
         source_epoch_id: str = "",
         initial_repair_bill_ref: Mapping[str, Any] | None = None,
     ) -> ExecutionCompilation:
+        existing = self.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+        if existing is not None and existing.state not in {"NOT_STARTED", "STARTING"}:
+            if (existing.workflow_id != workflow_id
+                    or existing.payload.get("architecture_manifest_ref") != manifest_ref.to_dict()
+                    or existing.payload.get("source_execution_epoch_id", source_epoch_id) != source_epoch_id):
+                raise SubmissionInvariantError("compiled epoch belongs to another request")
+            generation = int(existing.payload["graph_generation"])
+            graph = self.repository.cycles.read_graph_generation(graph_id=workflow_id, generation=generation)
+            if graph is None:
+                raise SubmissionInvariantError("compiled epoch lost its graph")
+            bindings = graph_node_bindings(graph, (
+                node for node in self.repository.queries.list_workflow_snapshots(workflow_id)
+                if node.aggregate_type == AggregateType.DAG_NODE_RUN and node.payload.get("epoch_id") == epoch_id
+            ))
+            ids = {name: bindings[name].aggregate_id for name in sorted(bindings)}
+            return ExecutionCompilation(epoch_id, tuple(ids.values()), ids, ids[graph.sink])
         record = self.repository.artifacts.read_artifact_record(manifest_ref.sha256)
         if record and record.get("artifact_type") == DIRECT_EXECUTION_ARTIFACT:
             artifact = dict(self.contracts.artifacts.read_json(manifest_ref))

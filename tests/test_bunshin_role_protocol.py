@@ -920,6 +920,16 @@ class BunshinRoleProtocolTests(unittest.TestCase):
             self.request(key="router-after-stale")
         )
         self.assertEqual(resumed["session_id"], "session-router")
+        # A delayed acknowledgement/replay of the old stale notification
+        # must not cancel the replacement's role assignment.
+        result = asyncio.run(BunshinOutboxProcessor(
+            BunshinWorkflowService(self.runtime_root)
+        )._execute_mechanical(stale_effect))
+        self.assertEqual(result, {"status": "superseded"})
+        self.assertEqual(
+            self.repository.role_assignments.read_role_assignment(resumed["assignment_id"])["state"],
+            "queued",
+        )
 
     def test_attempt_access_token_is_scoped_and_fenced(self) -> None:
         assignment = self.repository.role_assignments.create_role_assignment(self.request())

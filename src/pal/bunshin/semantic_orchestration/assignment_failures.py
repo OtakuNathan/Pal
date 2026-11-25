@@ -109,58 +109,17 @@ class AssignmentFailures:
         self,
         effect: Mapping[str, Any],
         assignment: Mapping[str, Any],
-        error: Exception,
+        error: Exception | None = None,
         *,
-        exhausted: bool,
+        exhausted: bool = False,
     ) -> Mapping[str, Any]:
         assignment_id = str(assignment["assignment_id"])
-        attempts = self.repository.role_attempts.list_role_attempts(assignment_id)
-        charged_failures = max(1, _charged_role_failure_attempt_count(attempts))
-        error_text = exception_report(error)
-        failure_payload = {
-            "kind": "role_assignment_failed",
-            "role": str(assignment.get("role") or ""),
-            "attempt_count": charged_failures,
-            "exhausted": bool(exhausted),
-            "error_kind": (
-                "attempt_budget_exhausted"
-                if exhausted
-                else "permanent_role_failure"
-            ),
-            "error": error_text,
-            "effect_type": str(effect.get("effect_type") or ""),
-        }
-        failure_ref = self.artifacts.put_json(
-            failure_payload,
-            artifact_type="RoleAssignmentFailureArtifact",
+        current_assignment, failure_ref, failure_payload = self.failure_fact(
+            effect, assignment, error, exhausted=exhausted,
         )
-        current_assignment = self.repository.role_assignments.read_role_assignment(assignment_id)
-        if current_assignment is None:
-            raise SubmissionInvariantError("role assignment disappeared before failure settlement")
-        if current_assignment["state"] not in {
-            RoleAssignmentState.RESULT_RECORDED.value,
-            RoleAssignmentState.SETTLED.value,
-        }:
-            if not attempts:
-                raise SubmissionInvariantError(
-                    "role assignment failed before an attempt was durably claimed"
-                )
-            self.repository.role_retries.record_role_failure_result(
-                assignment_id=assignment_id,
-                attempt_id_value=str(attempts[-1]["attempt_id"]),
-                error_kind=str(failure_payload["error_kind"]),
-                error_text=error_text,
-                failure_artifact_ref=failure_ref.to_dict(),
-                payload_hash=stable_hash(failure_payload),
-                settlement_action={
-                    "action_type": "ROLE_FAILED",
-                    "aggregate_type": str(current_assignment["aggregate_type"]),
-                    "aggregate_id": str(current_assignment["aggregate_id"]),
-                },
-            )
-            current_assignment = self.repository.role_assignments.read_role_assignment(assignment_id)
-        if current_assignment is None:
-            raise SubmissionInvariantError("role failure receipt was not durable")
+        recorded_failure = dict(current_assignment["settlement_action"]).get("action_type") == "ROLE_FAILED"
+        error_text = str(failure_payload["error"])
+        charged_failures = int(failure_payload["attempt_count"])
         for _attempt in range(3):
             snapshot = self.effect_reads.effect_snapshot(effect)
             legal = self.repository.transitions.legal_actions(
@@ -210,7 +169,7 @@ class AssignmentFailures:
                                 f"generation-{failure_generation}"
                             ),
                             payload={
-                                "failure_artifact_ref": failure_ref.to_dict(),
+                                "failure_artifact_ref": failure_ref,
                                 "blocker": {
                                     "kind": "role_failure",
                                     "summary": error_text,
@@ -219,11 +178,23 @@ class AssignmentFailures:
                                 },
                             },
                         ),
-                        role_assignment_id=assignment_id,
-                        role_submission_payload_hash=str(
-                            current_assignment["submission_payload_hash"]
-                        ),
+                        **({
+                            "role_assignment_id": assignment_id,
+                            "role_submission_payload_hash": str(current_assignment["submission_payload_hash"]),
+                        } if recorded_failure else {}),
                     )
+                    if not recorded_failure:
+                        # A valid result that could not be applied is reconciliation
+                        # debt, not a failed model result. Retire it without using
+                        # it as evidence for ROLE_FAILED; its receipt remains reusable.
+                        connection.role_cancellation.cancel_role_assignments(
+                            workflow_id=snapshot.workflow_id,
+                            aggregate_type=snapshot.aggregate_type,
+                            aggregate_id=snapshot.aggregate_id,
+                            assignment_ids=(assignment_id,),
+                            reason="submission requires business reconciliation",
+                            preserve_interactions=True,
+                        )
                     self.require_cycle_triage(
                         snapshot,
                         unit_of_work=connection,
@@ -235,6 +206,49 @@ class AssignmentFailures:
             except AggregateVersionConflict:
                 continue
         raise DeferredEffectError("role failure receipt settlement lost repeated CAS races")
+
+    def failure_fact(
+        self, effect: Mapping[str, Any], assignment: Mapping[str, Any],
+        error: Exception | None, *, exhausted: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        assignment_id = str(assignment["assignment_id"])
+        current = self.repository.role_assignments.read_role_assignment(assignment_id)
+        if current is None:
+            raise SubmissionInvariantError("role assignment disappeared before failure settlement")
+        if dict(current.get("settlement_action") or {}).get("action_type") == "ROLE_FAILED":
+            ref = dict(current["submission_artifact_ref"])
+            payload = dict(self.artifacts.read_json(ref))
+            if stable_hash(payload) != current["submission_payload_hash"]:
+                raise SubmissionInvariantError("role failure receipt does not match its artifact")
+            return current, ref, payload
+
+        if error is None:
+            raise SubmissionInvariantError("role failure replay requires a recorded failure receipt")
+        attempts = self.repository.role_attempts.list_role_attempts(assignment_id)
+        payload = {
+            "kind": "role_assignment_failed",
+            "role": str(assignment.get("role") or ""),
+            "attempt_count": max(1, _charged_role_failure_attempt_count(attempts)),
+            "exhausted": bool(exhausted),
+            "error_kind": "attempt_budget_exhausted" if exhausted else "permanent_role_failure",
+            "error": exception_report(error),
+            "effect_type": str(effect.get("effect_type") or ""),
+        }
+        ref = self.artifacts.put_json(payload, artifact_type="RoleAssignmentFailureArtifact").to_dict()
+        if current["state"] not in {RoleAssignmentState.RESULT_RECORDED.value, RoleAssignmentState.SETTLED.value}:
+            if not attempts:
+                raise SubmissionInvariantError("role assignment failed before an attempt was durably claimed")
+            self.repository.role_retries.record_role_failure_result(
+                assignment_id=assignment_id, attempt_id_value=str(attempts[-1]["attempt_id"]),
+                error_kind=str(payload["error_kind"]), error_text=str(payload["error"]),
+                failure_artifact_ref=ref, payload_hash=stable_hash(payload),
+                settlement_action={"action_type": "ROLE_FAILED", "aggregate_type": str(current["aggregate_type"]),
+                                   "aggregate_id": str(current["aggregate_id"])},
+            )
+            current = self.repository.role_assignments.read_role_assignment(assignment_id)
+        if current is None:
+            raise SubmissionInvariantError("role failure receipt was not durable")
+        return current, ref, payload
 
     def require_cycle_triage(
         self,

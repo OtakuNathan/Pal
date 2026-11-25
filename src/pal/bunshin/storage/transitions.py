@@ -80,12 +80,14 @@ class TransitionsStore:
                         workflow_id=action.workflow_id,
                         aggregate_type=action.aggregate_type.value,
                         aggregate_id=action.aggregate_id,
+                        action_type=action.action_type,
                     )
                 return _decode_dispatch_result(json.loads(str(duplicate["result_json"])), duplicate=True)
 
+            current = self.snapshots.read_snapshot_locked(connection, action.aggregate_type, action.aggregate_id)
+            self.role_submissions.assert_action_receipt_boundary_locked(connection, action, current, settlement)
             self.human_decisions.consume_human_decision_locked(connection, action)
             self.artifacts.assert_artifact_refs_durable(connection, action.payload)
-            current = self.snapshots.read_snapshot_locked(connection, action.aggregate_type, action.aggregate_id)
             outcome = self.engine.transition(current, action)
             self.snapshots.write_snapshot_locked(connection, current, outcome.snapshot)
 
@@ -172,6 +174,7 @@ class TransitionsStore:
                     workflow_id=action.workflow_id,
                     aggregate_type=action.aggregate_type.value,
                     aggregate_id=action.aggregate_id,
+                    action_type=action.action_type,
                 )
             self.projections.update_task_projection_locked(connection, outcome.snapshot)
             self.projections.update_node_projection_locked(connection, outcome.snapshot)

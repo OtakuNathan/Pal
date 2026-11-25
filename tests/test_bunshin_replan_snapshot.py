@@ -23,6 +23,7 @@ def test_concurrent_projection_change_cannot_skip_module_replacement(monkeypatch
     repository = SimpleNamespace(
         queries=SimpleNamespace(list_workflow_snapshots=Mock(side_effect=[[source, target], []])),
         snapshots=SimpleNamespace(read_snapshot=Mock(return_value=target)),
+        cycles=SimpleNamespace(read_graph_execution=Mock(return_value=SimpleNamespace())),
     )
     recreated = Mock()
     monkeypatch.setattr(git_replan, '_recreate_replaced_module_worktree', recreated)
@@ -32,7 +33,7 @@ def test_concurrent_projection_change_cannot_skip_module_replacement(monkeypatch
         contracts=SimpleNamespace(artifacts=SimpleNamespace(read_json=lambda ref: {})),
         workflow_id='workflow', source_epoch_id='old', target_epoch_id='new',
         source_manifest_ref=None, target_manifest_ref=None,
-        target_graph=SimpleNamespace(nodes={'module': object()}, execution_predecessors=lambda name: ()),
+        target_graph=SimpleNamespace(generation=2, nodes={'module': object()}, execution_predecessors=lambda name: ()),
         graph_diff=GraphDiff(1, 2, {'module': NodeReuseDecision(
             'module', NodeReuseKind.CREATE, False, False, 'responsibility changed',
         )}),

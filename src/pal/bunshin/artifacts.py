@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
-from pal.bunshin.paths import artifact_store_root
+from pal.bunshin.paths import artifact_store_root, require_bunshin_archive_cutover_complete
 
 
 @dataclass(frozen=True)
@@ -105,6 +105,7 @@ class ContentAddressedArtifactStore:
     ) -> ArtifactRef:
         if not artifact_type.strip():
             raise ValueError("artifact_type is required")
+        require_bunshin_archive_cutover_complete(self.runtime_root)
         normalized_type = artifact_type.strip()
         normalized_schema = str(schema_version or "1")
         normalized_media = str(media_type or "application/octet-stream")

@@ -67,6 +67,7 @@ def build_attempt_execution(
         workspace_preparation=WorkspacePreparation(
             artifacts=artifacts, attempt_inputs=attempt_inputs,
             repository=repository, requests=requests, runtime_root=runtime_root,
+            assignment_retries=assignment_retries, role_checkpoints=role_checkpoints,
         ),
         verifier_context=VerifierContext(artifacts=artifacts),
         reference_binding=ReferenceBinding(repository=repository, task_ledger=task_ledger, workflow_facts=workflow_facts),

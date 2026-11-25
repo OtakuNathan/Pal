@@ -184,6 +184,8 @@ RequestWorkflowPause ==
     /\ UNCHANGED <<nodeState, defectSource, generation, managerUp>>
 
 PauseNode(n) ==
+    \* Persisted pause effects can be delivered after recovery or resume.
+    \* This action is enabled by the current control episode, not its old key.
     /\ managerUp
     /\ workflowState = "PauseRequested"
     /\ epochState = "PauseRequested"
@@ -389,6 +391,10 @@ SinkAcceptsAfterAllModules ==
 
 PauseControlAlignment ==
     workflowState = "Paused" => epochState = "Paused" /\ desiredControl = "Pause"
+
+RunningControlHasNoPausedNodes ==
+    (workflowState = "Active" /\ epochState \in {"Starting", "Running", "Finalizing"}
+        /\ desiredControl = "Run") => \A n \in Nodes : nodeState[n] # "Paused"
 
 CancelControlAlignment ==
     workflowState = "Cancelled" => epochState = "Cancelled" /\ desiredControl = "Cancel"

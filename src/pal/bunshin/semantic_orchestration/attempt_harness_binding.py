@@ -6,7 +6,11 @@ from pal.shared import BunshinInvocationPack
 from pal.bunshin.semantic_orchestration.role_checkpoints import RoleCheckpoints
 from pal.bunshin.role_protocol import RoleAssignmentState
 from pal.bunshin.semantic_orchestration.assignment_rules import _assignment_input_fingerprint
-from pal.bunshin.semantic_orchestration.role_environment import _refresh_ephemeral_role_reference_binds
+from pal.bunshin.semantic_orchestration.role_environment import (
+    _reconcile_declared_input_reference_binds, _refresh_ephemeral_role_reference_binds,
+    _refresh_verified_workspace_inputs,
+)
+from pal.bunshin.sandbox import _workspace_path_from_pack
 from pal.bunshin.harnesses import PAL_HARNESS_ID, pal_harness_spec
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.semantic_orchestration.attempt_models import AssignmentReuse, BoundRoleHarness, PreparedRoleSession, PreparedRoleWorkspace, RoleAttemptRequest
@@ -66,20 +70,25 @@ class HarnessBinding:
             RoleAssignmentState.QUEUED.value,
             RoleAssignmentState.RETRY_QUEUED.value,
         }:
-            original_prompt_ref = self.role_checkpoints.durable_assignment_prompt_ref(assignment)
-            prior_attempt = self.repository.role_attempts.read_role_attempt(
-                str(assignment.get("active_attempt_id") or "")
+            original_prompt_ref = self.role_checkpoints.retry_assignment_prompt_ref(
+                assignment, harness_id=harness_spec.harness_id,
             )
-            same_harness = (
-                prior_attempt is None
-                or str(prior_attempt.get("harness_id") or PAL_HARNESS_ID)
-                == harness_spec.harness_id
-            )
-            if original_prompt_ref is not None and same_harness:
+            if original_prompt_ref != stage_workspace_preparation.retry_prompt_ref:
+                raise SubmissionInvariantError("role retry prompt changed after workspace preparation")
+            if original_prompt_ref is not None:
                 durable_pack = BunshinInvocationPack.from_dict(
                     dict(self.artifacts.read_json(original_prompt_ref))
                 )
-                pack = _refresh_ephemeral_role_reference_binds(durable_pack, pack)
+                if _workspace_path_from_pack(durable_pack) != _workspace_path_from_pack(pack):
+                    raise SubmissionInvariantError("role retry selected a workspace that was not prepared")
+                durable_pack = _reconcile_declared_input_reference_binds(
+                    durable_pack, pack, request=stage_workspace_preparation.request,
+                )
+                durable_pack = _refresh_ephemeral_role_reference_binds(durable_pack, pack)
+                pack = _refresh_verified_workspace_inputs(
+                    durable_pack, pack, bound_entries=stage_workspace_preparation.bound_input_entries,
+                    manager_input_names=tuple((assignment.get("input_refs") or {}).keys()),
+                )
                 durable_prompt_reused = True
         return BoundRoleHarness(
             durable_prompt_reused=durable_prompt_reused, effective_harness_generation=effective_harness_generation,

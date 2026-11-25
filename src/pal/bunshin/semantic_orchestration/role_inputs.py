@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.input_binding import BoundInputError
@@ -8,6 +8,7 @@ from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.sessions import architecture_cycle_id, coder_session_id, module_name_from_payload, module_verifier_session_id, node_role_generation
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation
 from pal.bunshin.semantic_orchestration.review_results import _ref_from_mapping
+from pal.bunshin.workspace_tools import _safe_reference_name
 
 
 from pal.bunshin.role_input_identity import (
@@ -202,6 +203,31 @@ def _role_workspace_input_binding_roots(
             "role workspace has no root for bound-input materialization"
         )
     return None, Path(resolved_root or fallback_root)
+
+
+def _allocate_declared_input_references(
+    reserved_names: Iterable[str], entries: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Allocate stable, distinct reference names without changing input identity.
+
+    Manager references retain their protocol names. A colliding declaration
+    gets a separate alias; the original declaration name remains explicit.
+    """
+    used = {_safe_reference_name(name) for name in reserved_names}
+    result = []
+    for entry in entries:
+        original = str(entry.get("declared_input_name") or entry.get("name") or "")
+        name = _safe_reference_name(original) or "declared_input"
+        if name in used:
+            stem = f"declared_{name}"[:72]
+            name = stem
+            index = 2
+            while name in used:
+                name = f"{stem}_{index}"
+                index += 1
+        used.add(name)
+        result.append({**entry, "name": name, "declared_input_name": original})
+    return result
 
 
 def _attach_bound_input_read_only_overlays(

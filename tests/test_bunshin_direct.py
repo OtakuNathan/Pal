@@ -46,6 +46,7 @@ def test_direct_compiles_one_repository_node_without_architecture(tmp_path):
     assert nodes[0].payload["module_name"] == "repository"
     assert Path(nodes[0].payload["workspace_path"], "app.py").read_text() == "print('hello')\n"
     assert service.repository.cycles.read_plan_cycle(workflow_id=workflow_id) is None
+    assert "restart_bunshin_execution" in service._unproven_interaction_recovery(workflow_id)
 
 
 def node_for(service, workflow_id):
@@ -226,10 +227,11 @@ def test_rename_to_report_retains_code_verification_and_patch(tmp_path, detect_r
     assert service.artifacts.read_bytes(receipt.files[0].artifact_ref) == b"print('hello')\n"
 
 
-def test_direct_final_delivery_pins_accepted_candidate_when_head_moves(tmp_path):
+@pytest.mark.parametrize("mode", ["direct", "planned"])
+def test_final_delivery_pins_accepted_candidate_when_head_moves(tmp_path, mode):
     from dataclasses import replace
     from types import SimpleNamespace
-    from pal.bunshin.delivery import DirectDeliveryReceipt
+    from pal.bunshin.delivery import DeliveryReceipt, DirectDeliveryReceipt
     from pal.bunshin.semantic_orchestration.final_delivery import FinalDelivery
     from pal.bunshin.workspace_git import _git
 
@@ -246,15 +248,25 @@ def test_direct_final_delivery_pins_accepted_candidate_when_head_moves(tmp_path)
     _git(repo, "add", "report.md")
     _git(repo, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "Later edit")
     epoch = service.repository.snapshots.read_snapshot(AggregateType.EXECUTION_EPOCH, node.payload["epoch_id"])
+    if mode == "planned":
+        manifest = service.artifacts.read_json(epoch.payload["architecture_manifest_ref"])
+        planned = service.artifacts.put_json({**manifest, "execution_mode": "planned"}, artifact_type="ContractArtifact")
+        epoch = replace(epoch, payload={**epoch.payload, "architecture_manifest_ref": planned.to_dict()})
     verification = service.artifacts.put_json({"status": "pass"}, artifact_type="VerificationArtifact")
     publisher = FinalDelivery(effect_reads=None, workflow_facts=None, artifacts=service.artifacts,
         repository=service.repository, requests=SimpleNamespace(read=lambda _: {"goal": "Investigate"}),
         runtime_root=service.runtime_root)
     ref = publisher.publish_verified_git_delivery(epoch=epoch, delivery_node=accepted,
         repository=repo, verification_ref=verification)
-    receipt = DirectDeliveryReceipt.model_validate(service.artifacts.read_json(ref))
+    receipt_type = DirectDeliveryReceipt if mode == "direct" else DeliveryReceipt
+    receipt = receipt_type.model_validate(service.artifacts.read_json(ref))
     assert receipt.commit_sha == accepted_commit
-    assert service.artifacts.read_bytes(receipt.files[0].artifact_ref) == b"Verified evidence\n"
+    assert receipt.verification_ref == verification.to_dict()
+    if isinstance(receipt, DirectDeliveryReceipt):
+        assert service.artifacts.read_bytes(receipt.files[0].artifact_ref) == b"Verified evidence\n"
+    else:
+        patch = service.artifacts.read_bytes(receipt.patch_ref)
+        assert b"+Verified evidence" in patch and b"Later unverified" not in patch
     with pytest.raises(ValueError, match="accepted Candidate commit"):
         publisher.publish_verified_git_delivery(epoch=epoch, delivery_node=node,
             repository=repo, verification_ref=verification)
@@ -443,6 +455,56 @@ def test_direct_restart_rebinds_captured_inputs_without_recapturing_changed_sour
     rebound = service.artifacts.read_json(workflow.payload["input_binding_ref"])
     assert rebound["workflow_id"] == workflow.workflow_id
     assert rebound["inputs"] == original["inputs"]
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["replace", "cancel"])
+def test_pending_execution_restart_reserves_task_until_replacement(tmp_path, cancel):
+    import asyncio
+
+    from pal.bunshin.workflow_control import reconcile_control_requests
+
+    service, processor, workflow_id = direct_workflow(tmp_path)
+    repository = service.repository
+    service.restart_execution_from_architecture(
+        workflow_id=workflow_id, actor="pal", source_channel="test", reason="retry the same plan",
+    )
+    reconcile_control_requests(repository, workflow_id)
+    node = node_for(service, workflow_id)
+    repository.transitions.dispatch(ActionEnvelope(
+        action_type="CANCEL_CONFIRMED", workflow_id=workflow_id, aggregate_type=node.aggregate_type,
+        aggregate_id=node.aggregate_id, actor="test-worker-cleanup", expected_version=node.version,
+    ))
+    reconcile_control_requests(repository, workflow_id)
+    source = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+    assert source.state == "RESTARTING"
+    with pytest.raises(ValueError, match="active workflow or execution restart"):
+        service.start_workflow({
+            "task_id": source.payload["task_id"], "goal": "Independent work",
+            "task_spec": {"objective": "Independent work"},
+        })
+
+    if cancel:
+        from pal.bunshin.workflow_capabilities import BunshinPublicProvider
+        from pal.execution.contracts import CapabilityCall
+        from pal.shared import RuntimeStatus
+
+        provider = BunshinPublicProvider(runtime_root=service.runtime_root, wake_manager=lambda: None)
+        cancelled = provider.control_workflow(CapabilityCall(
+            name="op_bunshin_control_workflow", meta={"actor_id": "pal"},
+            args={"task": "Investigate", "operation": "cancel"},
+        ))
+        assert cancelled.status == RuntimeStatus.OK, cancelled.llm_text
+
+    effects = repository.outbox_claims.claim_outbox(processor.dispatcher.worker_id, limit=100)
+    replacement = next(item for item in effects if item["effect_type"] == "start_replacement_workflow_from_architecture")
+    assert asyncio.run(processor.dispatcher._process_effect(replacement)) == "completed"
+    source = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+    assert source.state == "CANCELLED"
+    _, current = service.resolve_task_workflow_selector(selector="Investigate", actor="pal", include_terminal=False)
+    if cancel:
+        assert not current and not source.payload.get("replacement_workflow_id")
+    else:
+        assert current == source.payload["replacement_workflow_id"]
 
 
 def test_source_attachment_does_not_waive_code_checks():

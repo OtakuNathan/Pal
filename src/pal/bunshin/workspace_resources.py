@@ -4,11 +4,78 @@ import json
 import os
 import re
 import subprocess
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, IO, Iterator
 from pal.bunshin.workspace_git import _git
+
+
+def process_group_birth(group_id: int) -> str:
+    """Fingerprint the process-group leader rather than trusting a reused PID."""
+    if group_id <= 0:
+        return ""
+    try:
+        if Path("/proc").is_dir():
+            stat = (Path("/proc") / str(group_id) / "stat").read_text().rsplit(")", 1)[1].split()
+            if int(stat[2]) != group_id or stat[0] in {"Z", "X"}:
+                return ""
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            return f"{boot}:{stat[19]}"
+        result = subprocess.run(["ps", "-p", str(group_id), "-o", "pgid=,stat=,lstart="],
+                                capture_output=True, text=True, timeout=2)
+        fields = result.stdout.strip().split(maxsplit=2)
+        if len(fields) == 3 and int(fields[0]) == group_id and not fields[1].startswith(("Z", "X")):
+            return fields[2]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def inherited_process_group_live(group_id: int, recorded_birth: str) -> bool:
+    if group_id <= 0 or not recorded_birth:
+        return False
+    current = process_group_birth(group_id)
+    if current:
+        return current == recorded_birth
+    if sys.platform.startswith("linux"):
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if recorded_birth.partition(":")[0] != boot:
+            return False
+    # The group ID remains allocated while any member still exists.
+    if not process_group_live(group_id):
+        return False
+    # A new leader may have acquired the numeric ID while we were scanning.
+    current = process_group_birth(group_id)
+    return not current or current == recorded_birth
+
+
+def process_group_live(pgid: int) -> bool:
+    """Observe live group members; zombies have closed their file descriptors."""
+    proc = Path("/proc")
+    if sys.platform.startswith("linux"):
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                # comm may contain spaces and parentheses; split after its
+                # closing delimiter to locate state, ppid, and pgrp reliably.
+                fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if int(fields[2]) == pgid and fields[0] not in {"Z", "X"}:
+                return True
+        return False
+    listing = subprocess.run(
+        ["ps", "-axo", "pgid=,stat="], capture_output=True, text=True,
+        check=True, timeout=2,
+    )
+    return any(
+        int(fields[0]) == pgid and not fields[1].startswith(("Z", "X"))
+        for line in listing.stdout.splitlines()
+        if len(fields := line.split()) == 2
+    )
 
 
 @dataclass(frozen=True)

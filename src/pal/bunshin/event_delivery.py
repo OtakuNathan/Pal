@@ -14,6 +14,7 @@ class BunshinEventDelivery:
     queue: list[dict[str, Any]] = field(default_factory=list)
     subscribers: list[asyncio.StreamWriter] = field(default_factory=list)
     load_backlog: Callable[[], list[dict[str, Any]]] | None = None
+    may_send: Callable[[dict[str, Any]], bool] | None = None
 
     async def handle_subscription(
         self,
@@ -29,6 +30,8 @@ class BunshinEventDelivery:
         )]
         deduplicated: dict[str, dict[str, Any]] = {}
         for event in backlog:
+            if self.may_send is not None and not self.may_send(event):
+                continue
             key = str(event.get("delivery_id") or "") or repr(event)
             deduplicated[key] = event
         backlog = list(deduplicated.values())
@@ -88,6 +91,8 @@ class BunshinEventDelivery:
     async def _push_event_to_subscribers(self, event: dict[str, Any]) -> None:
         delivered = False
         for writer in list(self.subscribers):
+            if self.may_send is not None and not self.may_send(event):
+                return
             try:
                 writer.write(pack_sidecar_message({"type": "event", "event": event}))
                 await writer.drain()

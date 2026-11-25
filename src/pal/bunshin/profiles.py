@@ -580,6 +580,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "v2_candidate_builder": (
         UPDATE_CHECKLIST_CAPABILITY,
+        ASK_QUESTION_CAPABILITY,
         *CANDIDATE_BUILDER_CAPABILITIES,
     ),
     "v2_verification_builder": VERIFICATION_BUILDER_CAPABILITIES,

@@ -260,6 +260,36 @@ def case():
         value.close()
 
 
+@pytest.mark.parametrize("phase", ["REVIEW_QUIESCING", "REVIEW_SNAPSHOTTING"])
+@pytest.mark.parametrize("outcome", ["pass", "module_repair"])
+def test_pause_drains_submitted_verifier(case, phase, outcome):
+    from pal.bunshin.cycle_protocol import NodeCycleState
+
+    async def run():
+        name = "archive_verify"
+        await case.start_checker(name)
+        role = case.submit(name, dependency=False, settle=True, outcome=outcome)
+        if phase == "REVIEW_SNAPSHOTTING":
+            await case.process(name, "quiesce_verifier_role")
+        case.service.control_workflow(workflow_id=case.workflow_id, command="pause", actor="test", source_channel="test")
+        assert case.node(name).state == phase
+        assert case.graph().cycles[name].state == NodeCycleState.CHECKING
+        if phase == "REVIEW_QUIESCING":
+            await case.process(name, "quiesce_verifier_role")
+        await case.process(name, "snapshot_verifier_result")
+        cycle = case.graph().cycles[name]
+        if outcome == "pass":
+            assert cycle.state == NodeCycleState.ACCEPTED
+            assert case.node(name).state == "ACCEPTED"
+        else:
+            assert cycle.state == NodeCycleState.PAUSED
+            assert cycle.resume_state == NodeCycleState.REPAIR_READY
+        assert case.node(name).payload["verification_artifact_ref"]
+        assert role["pending_ref"].sha256
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("peer_state", ["running", "result_recorded", "pass"])
 def test_claimed_public_cohort_preserves_peer_and_replays_exact_source(case, peer_state):
     async def run():

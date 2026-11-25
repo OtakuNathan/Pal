@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from pal.bunshin.background_assignments import BackgroundAssignments
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_protocol import RoleAssignmentState
+from pal.bunshin.contracts import AggregateType
 from pal.bunshin.semantic_orchestration.assignment_execution import AssignmentExecution
 from pal.bunshin.semantic_orchestration.assignment_identity import AssignmentIdentity
 from pal.bunshin.semantic_orchestration.assignment_retries import AssignmentRetries
@@ -65,18 +66,26 @@ class AssignmentRecovery:
                 # especially important for reconcile effects, which may run a
                 # semantic worker inline rather than through _background_workers.
                 # Recovery may take over only after the durable attempt lease
-                # expires; otherwise two supervisors can race at submission.
+                # expires and the recorded worker group exits; otherwise two
+                # supervisors can race at submission or workspace preparation.
                 continue
             disposition = self.assignment_identity.role_assignment_disposition(effect, assignment)
             if disposition == "suspended" and self.repository.interaction_waits.is_parked(assignment["assignment_id"]):
                 continue
             if disposition:
-                self.repository.role_cancellation.cancel_role_assignments(
-                    workflow_id=str(assignment["workflow_id"]),
-                    aggregate_type=str(assignment["aggregate_type"]),
-                    aggregate_id=str(assignment["aggregate_id"]),
-                    reason=f"assignment recovery suppressed: {disposition}",
-                )
+                with self.repository.transaction() as work:
+                    snapshot = work.snapshots.read_snapshot(
+                        AggregateType(str(assignment["aggregate_type"])), str(assignment["aggregate_id"]),
+                    )
+                    work.role_cancellation.cancel_role_assignments(
+                        workflow_id=str(assignment["workflow_id"]),
+                        aggregate_type=str(assignment["aggregate_type"]),
+                        aggregate_id=str(assignment["aggregate_id"]),
+                        reason=f"assignment recovery suppressed: {disposition}",
+                        preserve_interactions=snapshot is not None and snapshot.state in {
+                            "PAUSE_REQUESTED", "PAUSED", "TRIAGE_REQUIRED",
+                        },
+                    )
                 continue
             if self.repository.interaction_waits.pending(assignment_id=str(assignment["assignment_id"])):
                 continue

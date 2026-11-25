@@ -20,6 +20,7 @@ from pal.bunshin.catalog_store import (
     remove_override,
 )
 from pal.bunshin.families import BunshinFamilyManifest, BunshinFamilyRegistry
+from pal.bunshin.paths import require_bunshin_archive_cutover_complete
 from pal.bunshin.profiles import (
     CAPABILITY_GROUPS,
     BunshinProfile,
@@ -81,6 +82,7 @@ class BunshinCatalogService:
 
     def bootstrap(self) -> dict[str, Any]:
         with self._lock:
+            require_bunshin_archive_cutover_complete(self.runtime_root)
             root = bunshin_catalog_root(self.runtime_root)
             profile_override_root(self.runtime_root).mkdir(parents=True, exist_ok=True)
             family_override_root(self.runtime_root).mkdir(parents=True, exist_ok=True)
@@ -307,6 +309,7 @@ class BunshinCatalogService:
             }
 
     def _snapshot(self, *, include_definitions: bool) -> dict[str, Any]:
+        require_bunshin_archive_cutover_complete(self.runtime_root)
         profile_overrides = {
             (str(payload.get("profile_group") or "general").replace("/", "."), str(payload.get("profile_id") or "")): payload
             for _path, payload in load_json_objects(profile_override_root(self.runtime_root))

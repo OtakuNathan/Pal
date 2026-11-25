@@ -181,7 +181,8 @@ Cycle == INSTANCE ProduceCheckCycle WITH
     MaxGeneration <- 2, CycleKind <- "Plan",
     state <- s.plan, generation <- s.generation, activeSlot <- s.slot,
     productGeneration <- s.productGeneration,
-    verdictGeneration <- s.verdictGeneration, resumeState <- "ProducerReady"
+    verdictGeneration <- s.verdictGeneration, resumeState <- "ProducerReady",
+    resultPending <- FALSE, pauseRequested <- FALSE
 
 RefinesProduceCheckCycle == Cycle!Spec
 

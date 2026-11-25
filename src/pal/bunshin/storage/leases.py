@@ -12,6 +12,28 @@ from pal.bunshin.contracts import LeaseConflict, LeaseGrant, StaleFencingToken
 from pal.bunshin.storage.connection_contracts import DatabasePort
 
 
+def recorded_role_process_groups(
+    connection: sqlite3.Connection, *, legacy: bool = False, include_released: bool = False,
+) -> tuple[tuple[str, str, int, str], ...]:
+    table = "bunshin_v2_leases" if legacy else "bunshin_leases"
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?", (table,),
+    ).fetchone():
+        return ()
+    rows = connection.execute(
+        f"""SELECT DISTINCT json_extract(metadata_json, '$.run_id'),
+                   json_extract(metadata_json, '$.aggregate_id'),
+                   json_extract(metadata_json, '$.process_group_id'),
+                   json_extract(metadata_json, '$.process_group_birth')
+            FROM {table} WHERE (? OR owner_id != '')
+              AND coalesce(json_extract(metadata_json, '$.run_id'), '') != ''
+              AND coalesce(json_extract(metadata_json, '$.process_group_birth'), '') != ''
+              AND json_type(metadata_json, '$.process_group_id') = 'integer'""",
+        (include_released,),
+    ).fetchall()
+    return tuple((str(run), str(aggregate), int(group), str(birth)) for run, aggregate, group, birth in rows)
+
+
 @dataclass
 class LeasesStore:
     database: DatabasePort
@@ -108,18 +130,11 @@ class LeasesStore:
                 (utc_now(), utc_now(), resource_key),
             )
 
-    def inherited_role_workspaces(self) -> tuple[tuple[str, str, str], ...]:
+    def inherited_role_process_groups(self) -> tuple[tuple[str, str, int, str], ...]:
         """One row per potentially materialized role at Manager startup."""
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
-            rows = connection.execute(
-                """SELECT DISTINCT json_extract(metadata_json, '$.run_id'),
-                       json_extract(metadata_json, '$.aggregate_id'), json_extract(metadata_json, '$.workspace_path')
-                   FROM bunshin_leases WHERE owner_id != ''
-                     AND coalesce(json_extract(metadata_json, '$.run_id'), '') != ''
-                     AND coalesce(json_extract(metadata_json, '$.workspace_path'), '') != ''"""
-            ).fetchall()
-        return tuple((str(run), str(aggregate), str(workspace)) for run, aggregate, workspace in rows)
+            return recorded_role_process_groups(connection)
 
     def expired_leases(self) -> tuple[dict[str, Any], ...]:
         self.database.ensure_schema()

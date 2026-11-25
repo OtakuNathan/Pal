@@ -196,7 +196,8 @@ class ImplementationSnapshot:
                         },
                     ),
                 )
-                WorkflowCoordinator(self.repository).producer_submitted(
+                coordinator = WorkflowCoordinator(self.repository)
+                coordinator.producer_submitted(
                     workflow_id=node.workflow_id,
                     node_name=str(
                         node.payload.get("module_name")
@@ -206,6 +207,7 @@ class ImplementationSnapshot:
                     product_ref=candidate_ref.sha256,
                     unit_of_work=connection,
                 )
+                coordinator.pause_after_node_settlement(workflow_id=node.workflow_id, unit_of_work=connection)
         finally:
             try:
                 self.repository.leases.release_lease(

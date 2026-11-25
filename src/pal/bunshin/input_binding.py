@@ -404,6 +404,18 @@ class InputBindingManifest:
         raise BoundInputError(f"no bound input named {name!r} in manifest of {self.workflow_id!r}")
 
 
+def is_repo_relative_input_reference(entry: Mapping[str, Any]) -> bool:
+    """Use the same participation rule for capture and ordinary reference binding."""
+    marker = entry.get("repo_relative", False)
+    if marker is not True and marker is not False:
+        raise BoundInputError(
+            f"reference entry repo_relative flag must be a boolean, got {marker!r}"
+        )
+    raw_path = entry.get("path")
+    path_text = str(raw_path).strip() if raw_path is not None else ""
+    return marker is True or (bool(path_text) and not _is_absolute_path_text(path_text))
+
+
 def declared_inputs_from_references(
     references: Sequence[Any],
 ) -> tuple[DeclaredInput, ...]:
@@ -465,23 +477,10 @@ def declared_inputs_from_references(
             # Without a path or an explicit repo_relative marker an entry
             # cannot participate in binding; it keeps its existing handling.
             continue
-        marker = entry.get("repo_relative", False)
-        if marker is not True and marker is not False:
-            raise BoundInputError(
-                f"reference entry repo_relative flag must be a boolean, got {marker!r}"
-            )
-        raw_path = entry.get("path")
-        if raw_path is None:
-            path_text = ""
-        elif isinstance(raw_path, str):
-            path_text = raw_path.strip()
-        else:
-            path_text = str(raw_path).strip()
-        participates = marker is True or (
-            bool(path_text) and not _is_absolute_path_text(path_text)
-        )
-        if not participates:
+        if not is_repo_relative_input_reference(entry):
             continue
+        raw_path = entry.get("path")
+        path_text = str(raw_path).strip() if raw_path is not None else ""
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
             raise BoundInputError(

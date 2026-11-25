@@ -7,9 +7,10 @@ from pal.bunshin.adapters import ARTIFACT_BUNDLE_ADAPTER, provision_artifact_wor
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateType
 from pal.bunshin.repository import BunshinRepository
+from pal.bunshin.workflow_runtime import WorkflowCoordinator
 from pal.bunshin.execution_models import ExecutionCompilation
 from pal.bunshin.execution_values import _action
-from pal.bunshin.graph_installation import _install_execution_graph
+from pal.bunshin.graph_installation import _read_execution_graph
 from pal.bunshin.module_identity_facts import _module_identity_delta
 from pal.bunshin.module_identity_facts import _module_role_session_generations
 from pal.bunshin.execution_values import _stable_json_hash
@@ -33,12 +34,7 @@ class ArtifactEpochCompiler:
     ) -> ExecutionCompilation:
         artifact = dict(self.contracts.artifacts.read_json(manifest_ref))
         contract = dict(artifact.get("contract") or {})
-        installed_graph = _install_execution_graph(
-            artifact,
-            workflow_id=workflow_id,
-            repository=self.repository,
-        )
-        graph = installed_graph.execution.graph
+        graph = _read_execution_graph(artifact, workflow_id=workflow_id)
         modules = {
             str(name): dict(value or {})
             for name, value in dict(contract.get("modules") or {}).items()
@@ -65,32 +61,9 @@ class ArtifactEpochCompiler:
             for name, value in dict(contract.get("scenarios") or {}).items()
         }
         topology_ref, module_refs = self.publish_module_contracts(manifest_ref, modules, scenarios, requirements, dependencies, context)
-        self.repository.transitions.dispatch(
-            _action(
-                "CREATE_EXECUTION_EPOCH",
-                workflow_id,
-                AggregateType.EXECUTION_EPOCH,
-                epoch_id,
-                actor,
-                0,
-                {
-                    "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "topology_ref": topology_ref.to_dict(),
-                    "architecture_manifest_sha": manifest_ref.sha256,
-                    "graph_generation": graph.generation,
-                },
-            )
-        )
-        self.repository.transitions.dispatch(
-            _action(
-                "START_EXECUTION",
-                workflow_id,
-                AggregateType.EXECUTION_EPOCH,
-                epoch_id,
-                actor,
-                1,
-                {},
-            )
+        installed_graph = WorkflowCoordinator(self.repository).begin_graph_activation(
+            workflow_id=workflow_id, epoch_id=epoch_id, graph=graph, manifest_ref=manifest_ref,
+            topology_ref=topology_ref, actor=actor, source_epoch_id=source_epoch_id,
         )
         workspaces = provision_artifact_workspaces(
             self.repository.runtime_root,
@@ -117,6 +90,7 @@ class ArtifactEpochCompiler:
             self.repository,
             workflow_id=workflow_id,
             source_epoch_id=source_epoch_id,
+            target_epoch_id=epoch_id,
             target_subjects=set(modules),
             replaced_subjects=set(module_identity_delta["replaced"]),
         )
@@ -148,20 +122,9 @@ class ArtifactEpochCompiler:
             unit_node_ids[name] for name in sorted(unit_node_ids)
         )
         sink_node_id = unit_node_ids[graph.sink]
-        self.repository.transitions.dispatch(
-            _action(
-                "NODES_COMPILED",
-                workflow_id,
-                AggregateType.EXECUTION_EPOCH,
-                epoch_id,
-                actor,
-                2,
-                {
-                    "node_ids": list(node_ids),
-                    "sink_node_id": sink_node_id,
-                    "module_identity_delta": module_identity_delta,
-                },
-            )
+        WorkflowCoordinator(self.repository).activate_graph(
+            workflow_id=workflow_id, epoch_id=epoch_id, actor=actor,
+            module_identity_delta=module_identity_delta, source_epoch_id=source_epoch_id,
         )
         return ExecutionCompilation(
             epoch_id=epoch_id,

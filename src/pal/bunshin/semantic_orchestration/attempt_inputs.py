@@ -1,13 +1,15 @@
 from __future__ import annotations
 from pal.bunshin.semantic_orchestration.role_inputs import _role_workspace_input_binding_roots
 from dataclasses import dataclass
+from glob import escape
 from typing import Any, Mapping
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.input_binding import (
-    INPUT_BINDING_MANIFEST_ARTIFACT, BoundInputError, InputBindingManifest, bound_input_reference_entries,
-    materialize_bound_inputs, verify_bound_inputs, verify_repo_bound_inputs,
+    BOUND_INPUTS_ROOT, INPUT_BINDING_MANIFEST_ARTIFACT, BoundInputError, InputBindingManifest, bound_input_reference_entries,
+    declared_inputs_from_references, materialize_bound_inputs, verify_bound_inputs, verify_repo_bound_inputs,
 )
 from pal.bunshin.contracts import AggregateSnapshot
+from pal.bunshin.paths import workflow_runtime_root
 
 
 @dataclass
@@ -47,6 +49,8 @@ class AttemptInputs:
             "input_binding_ref"
         )
         if not ref_value:
+            if declared_inputs_from_references(request.get("references") or []):
+                raise BoundInputError("workflow declares repo-relative inputs without a frozen input-binding manifest")
             return []
         if not isinstance(ref_value, Mapping) or not str(
             ref_value.get("sha256") or ""
@@ -78,22 +82,46 @@ class AttemptInputs:
             snapshot=snapshot,
             workspace_source_root=workspace_source_root,
         )
-        if repo_root is not None:
+        if repo_root is not None and not request.get("recovered_from_workflow_id"):
             verify_repo_bound_inputs(manifest=manifest, repo_root=repo_root)
             return bound_input_reference_entries(
                 manifest=manifest,
                 repo_root=repo_root,
             )
+        if repo_root is not None:
+            # Keep frozen references outside the Git worktree and stable for
+            # resumed role prompts that retain their sandbox bindings.
+            destination = (
+                workflow_runtime_root(self.artifacts.runtime_root, workflow.workflow_id)
+                / "frozen-references" / str(ref_value["sha256"])
+            )
+        else:
+            destination = workspace_root
+        assert destination is not None  # The workspace resolver supplies exactly one root.
         materialize_bound_inputs(
             manifest=manifest,
             artifacts=self.artifacts,
-            destination_root=workspace_root,
+            destination_root=destination,
         )
         verify_bound_inputs(
             manifest=manifest,
-            destination_root=workspace_root,
+            destination_root=destination,
         )
+        if repo_root is not None:
+            return [
+                {
+                    "name": f"frozen_input_{index}",
+                    "description": f"Frozen task input {record.name} from {record.repo_path}",
+                    "path": str(destination / BOUND_INPUTS_ROOT / record.name),
+                    "include": [escape(record.repo_path)],
+                    "mode": "read_only",
+                    "truth_source": True,
+                    "required": True,
+                    "bound_input": False,
+                }
+                for index, record in enumerate(manifest.inputs, start=1)
+            ]
         return bound_input_reference_entries(
             manifest=manifest,
-            workspace_root=workspace_root,
+            workspace_root=destination,
         )

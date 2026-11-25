@@ -6,6 +6,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping, Callable
 from pal.foundation import utc_now
+from pal.bunshin.contracts import ActionEnvelope, AggregateSnapshot, DeferredEffectError
+from pal.bunshin.storage.role_assignments import assert_role_result_pause_open_locked, pending_role_receipt_locked
 from pal.bunshin.role_protocol import RoleAssignmentAction, RoleAssignmentState, RoleAttemptState, RoleSessionAction, RoleSubmissionReceipt, RoleSettlement, role_assignment_target
 from pal.bunshin.storage.artifacts import ArtifactsStore
 from pal.bunshin.storage.connection_contracts import DatabasePort
@@ -70,6 +72,7 @@ class RoleSubmissionsStore:
                 return existing
             if str(assignment["state"]) != RoleAssignmentState.RUNNING.value:
                 raise ValueError("role assignment is not accepting a submission")
+            assert_role_result_pause_open_locked(connection, assignment)
             target_state = role_assignment_target(
                 str(assignment["state"]),
                 RoleAssignmentAction.RECORD_RESULT,
@@ -144,7 +147,20 @@ class RoleSubmissionsStore:
             ).fetchone()
             return _decode_role_assignment(row)
 
-    def settle_role_assignment_locked(
+    def assert_action_receipt_boundary_locked(
+        self, connection: sqlite3.Connection, action: ActionEnvelope,
+        current: AggregateSnapshot | None, settlement: RoleSettlement | None,
+    ) -> None:
+        if settlement is not None:
+            self.assert_role_assignment_settlement_locked(
+                connection, settlement=settlement, workflow_id=action.workflow_id,
+                aggregate_type=action.aggregate_type.value, aggregate_id=action.aggregate_id,
+                action_type=action.action_type,
+            )
+        if action.action_type == "REQUEST_PAUSE" and current is not None and pending_role_receipt_locked(connection, current):
+            raise DeferredEffectError("pause must drain the durable role receipt first")
+
+    def assert_role_assignment_settlement_locked(
         self,
         connection: sqlite3.Connection,
         *,
@@ -152,7 +168,8 @@ class RoleSubmissionsStore:
         workflow_id: str = "",
         aggregate_type: str = "",
         aggregate_id: str = "",
-    ) -> None:
+        action_type: str = "",
+    ) -> tuple[sqlite3.Row, bool]:
         assignment_id = settlement["role_assignment_id"]
         submission_payload_hash = settlement["role_submission_payload_hash"]
         assignment = connection.execute(
@@ -172,10 +189,30 @@ class RoleSubmissionsStore:
             str(assignment["aggregate_id"]),
         ):
             raise ValueError("role assignment settlement targets a different aggregate")
+        recorded_failure = json.loads(str(assignment["settlement_action_json"] or "{}")).get("action_type") == "ROLE_FAILED"
+        if action_type and recorded_failure != (action_type == "ROLE_FAILED"):
+            raise ValueError("role assignment settlement action does not match the recorded outcome")
+        if str(assignment["state"]) not in {RoleAssignmentState.RESULT_RECORDED.value, RoleAssignmentState.SETTLED.value}:
+            raise ValueError("role assignment has no recorded submission")
+        return assignment, recorded_failure
+
+    def settle_role_assignment_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        settlement: RoleSettlement,
+        workflow_id: str = "",
+        aggregate_type: str = "",
+        aggregate_id: str = "",
+        action_type: str = "",
+    ) -> None:
+        assignment, recorded_failure = self.assert_role_assignment_settlement_locked(
+            connection, settlement=settlement, workflow_id=workflow_id,
+            aggregate_type=aggregate_type, aggregate_id=aggregate_id, action_type=action_type,
+        )
         if str(assignment["state"]) == RoleAssignmentState.SETTLED.value:
             return
-        if str(assignment["state"]) != RoleAssignmentState.RESULT_RECORDED.value:
-            raise ValueError("role assignment has no recorded submission")
+        assignment_id = settlement["role_assignment_id"]
         target_state = role_assignment_target(
             str(assignment["state"]),
             RoleAssignmentAction.SETTLE,
@@ -227,7 +264,7 @@ class RoleSubmissionsStore:
             str(assignment["session_id"]),
             (
                 RoleSessionAction.PARK
-                if json.loads(str(assignment["settlement_action_json"] or "{}")).get("action_type") == "ROLE_FAILED"
+                if recorded_failure
                 else RoleSessionAction.SUSPEND
             ),
             now=now,

@@ -9,6 +9,7 @@ from pal.foundation import utc_now
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.role_protocol import RoleAssignmentState
 from pal.bunshin.storage.connection_contracts import DatabasePort
+from pal.bunshin.storage.role_assignments import pending_role_receipt_locked
 from pal.bunshin.storage.projections import ProjectionsStore
 
 
@@ -29,6 +30,10 @@ class QueriesStore:
                 (str(workflow_id),),
             ).fetchall()
             return tuple(_snapshot_from_row(row) for row in rows)
+
+    def has_pending_role_receipt(self, snapshot: AggregateSnapshot) -> bool:
+        with self.database.read_connection() as connection:
+            return pending_role_receipt_locked(connection, snapshot)
 
     def control_reconciliation_needed(self, workflow_id: str) -> bool:
         with self.database.read_connection() as connection:
@@ -365,7 +370,9 @@ class QueriesStore:
                       f"dag_node_run.{action_type.lower()}", str(repair_sha256)),
             ).fetchone() is not None
 
-    def has_nonterminal_workflows_for_task(self, task_id: str) -> bool:
+    def has_nonterminal_workflows_for_task(
+        self, task_id: str, *, workflow_id: str = "", replacing_workflow_id: str = "",
+    ) -> bool:
         self.database.ensure_schema()
         with self.database.read_connection() as connection:
             row = connection.execute(
@@ -374,9 +381,10 @@ class QueriesStore:
                 WHERE aggregate_type = ?
                   AND json_extract(payload_json, '$.task_id') = ?
                   AND state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')
+                  AND aggregate_id NOT IN (?, ?)
                 LIMIT 1
                 """,
-                (AggregateType.WORKFLOW.value, str(task_id)),
+                (AggregateType.WORKFLOW.value, str(task_id), workflow_id, replacing_workflow_id),
             ).fetchone()
             return row is not None
 

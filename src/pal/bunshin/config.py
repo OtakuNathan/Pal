@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +34,8 @@ def read_bunshin_runtime_config(runtime_root: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        with sqlite3.connect(str(path)) as db:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
             db.row_factory = sqlite3.Row
-            ensure_bunshin_runtime_settings_schema(db)
             rows = db.execute("SELECT setting_key, setting_value FROM bunshin_runtime_settings").fetchall()
             return {str(row["setting_key"]): _decode_setting_value(str(row["setting_value"])) for row in rows}
     except sqlite3.Error:

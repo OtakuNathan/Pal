@@ -10,6 +10,7 @@ from pal.foundation.service_logging import configure_process_logging
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.bunshin.ipc import BUNSHIN_RUNTIME_DB_PATH_ENV
 from pal.bunshin.manager import BunshinManager
+from pal.bunshin.paths import bunshin_runtime_ownership, require_bunshin_archive_cutover_complete
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,17 +34,19 @@ async def amain(
     max_parallel_modules: int | None = None,
 ) -> int:
     configure_logging(runtime_root)
-    database = _open_runtime_database(runtime_root, runtime_db_path)
-    try:
-        manager = BunshinManager(
-            runtime_root=runtime_root,
-            runtime_db_path=runtime_db_path,
-            max_parallel_modules=max_parallel_modules,
-        )
-        await manager.run()
-    finally:
-        if database is not None:
-            database.close()
+    with bunshin_runtime_ownership(runtime_root):
+        require_bunshin_archive_cutover_complete(runtime_root)
+        database = _open_runtime_database(runtime_root, runtime_db_path)
+        try:
+            manager = BunshinManager(
+                runtime_root=runtime_root,
+                runtime_db_path=runtime_db_path,
+                max_parallel_modules=max_parallel_modules,
+            )
+            await manager.run()
+        finally:
+            if database is not None:
+                database.close()
     return 0
 
 

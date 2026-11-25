@@ -4,7 +4,7 @@ from typing import Any
 from pal.bunshin.repository import BunshinRepository
 from pal.bunshin.role_contracts import OrchestrationRole
 from pal.bunshin.role_contracts import RoleActivation, RoleMode
-from pal.bunshin.semantic_orchestration.role_inputs import _attach_bound_input_read_only_overlays
+from pal.bunshin.semantic_orchestration.role_inputs import _allocate_declared_input_references, _attach_bound_input_read_only_overlays
 from pal.bunshin.adapters import SOFTWARE_GIT_ADAPTER
 from pal.bunshin.task_ledger import TASK_LEDGER_ARTIFACT
 from pal.bunshin.role_protocol import canonical_role_profile_parts
@@ -66,8 +66,13 @@ class ReferenceBinding:
                     **({"include": includes} if includes else {}),
                 }
             )
-        workspace["reference_paths"] = [*references, *bound_input_entries]
-        _attach_bound_input_read_only_overlays(workspace, bound_input_entries)
+        declared_references = _allocate_declared_input_references(
+            (item["name"] for item in references), bound_input_entries,
+        )
+        workspace["reference_paths"] = [*references, *declared_references]
+        _attach_bound_input_read_only_overlays(
+            workspace, [entry for entry in bound_input_entries if entry.get("bound_input")],
+        )
         profile_group, profile_name = canonical_role_profile_parts(profile)
         if contract_authoring and activation.role == OrchestrationRole.ARCHITECT:
             invocation_acceptance = [
@@ -152,5 +157,5 @@ class ReferenceBinding:
             evaluation_generation = int(snapshot.payload.get("verifier_evaluation_generation") or 0)
         return BoundRoleReferences(
             evaluation_generation=evaluation_generation, invocation_acceptance=invocation_acceptance,
-            profile_group=profile_group, profile_name=profile_name, references=references,
+            profile_group=profile_group, profile_name=profile_name, references=[*references, *declared_references],
         )

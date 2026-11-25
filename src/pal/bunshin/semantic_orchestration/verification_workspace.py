@@ -1,10 +1,11 @@
 from __future__ import annotations
 from pal.bunshin.workspace_paths import path_scope_matches
 import os
-import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
+from pal.shared.messages import normalize_bunshin_pack_fields
 from pal.bunshin.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.bunshin.contracts import SubmissionInvariantError
 from pal.bunshin.workspace_git import git_changed_paths
@@ -70,7 +71,7 @@ def _verification_workspace_from_prompt_pack(
     which ownership model was selected.
     """
 
-    prompt_pack = artifacts.read_json(prompt_ref)
+    prompt_pack = normalize_bunshin_pack_fields(dict(artifacts.read_json(prompt_ref)))
     workspace = dict(prompt_pack.get("workspace") or {})
     binding = str(workspace.get("workspace_binding") or "").strip().lower()
     if binding != "canonical" and not bool(workspace.get("role_workspace_prepared")):
@@ -176,14 +177,19 @@ def _prepare_standalone_review_workspace(
     review_id: str,
     source: Path,
 ) -> tuple[Path, Path, str]:
-    source = source.expanduser().resolve()
-    if not source.is_dir():
-        raise ValueError(f"standalone review source does not exist: {source}")
     root = standalone_review_root(runtime_root) / _safe_component(review_id)
     review_repo = root / "worktree"
     scratch = root / "scratch"
-    shutil.rmtree(root, ignore_errors=True)
-    root.mkdir(parents=True, exist_ok=True)
+    # The first successfully provisioned checkout is the review target. A
+    # retry may not replace it with the current source HEAD or erase evidence.
+    if root.exists():
+        if not (review_repo / ".git").exists():
+            raise SubmissionInvariantError("retained standalone review checkout is unavailable")
+        scratch.mkdir(parents=True, exist_ok=True)
+        return review_repo, scratch, _git_output(review_repo, "rev-parse", "HEAD")
+    source = source.expanduser().resolve()
+    if not source.is_dir():
+        raise ValueError(f"standalone review source does not exist: {source}")
     git_probe = subprocess.run(
         ["git", "-C", str(source), "rev-parse", "HEAD"],
         stdout=subprocess.PIPE,
@@ -194,15 +200,17 @@ def _prepare_standalone_review_workspace(
     if git_probe.returncode != 0:
         raise ValueError("standalone software review requires a Git repository")
     base_sha = git_probe.stdout.strip()
-    clone = subprocess.run(
-        ["git", "clone", "--no-hardlinks", "--quiet", str(source), str(review_repo)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if clone.returncode != 0:
-        raise RuntimeError(clone.stderr or clone.stdout or "failed to clone standalone review workspace")
-    subprocess.run(["git", "-C", str(review_repo), "checkout", "--detach", "--quiet", base_sha], check=True)
-    scratch.mkdir(parents=True, exist_ok=True)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".review-", dir=root.parent) as temporary:
+        staged = Path(temporary) / "review"
+        staged.mkdir()
+        clone = subprocess.run(
+            ["git", "clone", "--no-hardlinks", "--quiet", str(source), str(staged / "worktree")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+        )
+        if clone.returncode != 0:
+            raise RuntimeError(clone.stderr or clone.stdout or "failed to clone standalone review workspace")
+        subprocess.run(["git", "-C", str(staged / "worktree"), "checkout", "--detach", "--quiet", base_sha], check=True)
+        (staged / "scratch").mkdir()
+        staged.rename(root)
     return review_repo, scratch, base_sha

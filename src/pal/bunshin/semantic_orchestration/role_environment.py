@@ -4,14 +4,16 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 from pal.bunshin.skill_context import normalized_skill_injection
-from pal.bunshin.sandbox import with_bunshin_sandbox_metadata
+from pal.bunshin.sandbox import _project_sandbox_references, with_bunshin_sandbox_metadata
 from pal.bunshin.adapters import prepare_role_workspace
 from pal.bunshin.contracts import PermanentEffectError, SubmissionInvariantError
+from pal.bunshin.input_binding import declared_inputs_from_references
 from pal.bunshin.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.bunshin.workspace_tools import _safe_reference_name
 from pal.shared import BunshinInvocationPack
 from pal.bunshin.semantic_orchestration.role_inputs import EPHEMERAL_ROLE_INPUT_NAMES
 from pal.bunshin.semantic_orchestration.callbacks import SkillInjector
-from pal.bunshin.semantic_orchestration.role_inputs import _role_uses_bound_durable_workspace
+from pal.bunshin.semantic_orchestration.role_inputs import _allocate_declared_input_references, _attach_bound_input_read_only_overlays, _role_uses_bound_durable_workspace
 
 
 def _workflow_skill_injections(
@@ -122,6 +124,7 @@ def _refresh_ephemeral_role_reference_binds(
         if isinstance(item, Mapping)
         and str(item.get("name") or "") in EPHEMERAL_ROLE_INPUT_NAMES
         and not bool(item.get("bound_input"))
+        and not item.get("declared_input_name")
     }
     if not current_references:
         return durable_pack
@@ -156,7 +159,143 @@ def _refresh_ephemeral_role_reference_binds(
         )
     sandbox["reference_binds"] = binds
     metadata["sandbox"] = sandbox
+    brief = dict(metadata.get("requirements_brief") or {})
+    current_brief = dict(current_pack.metadata.get("requirements_brief") or {})
+    latest = {str(item.get("name") or ""): item for item in current_brief.get("references") or []
+              if isinstance(item, Mapping) and item.get("name") in refreshed and not item.get("declared_input_name")}
+    if "references" in brief:
+        brief["references"] = [latest.get(str(item.get("name") or ""), item)
+                               for item in brief.get("references") or [] if isinstance(item, Mapping)]
+        metadata["requirements_brief"] = brief
     return BunshinInvocationPack.from_dict({**value, "metadata": metadata})
+
+
+def _refresh_verified_workspace_inputs(
+    durable_pack: BunshinInvocationPack, current_pack: BunshinInvocationPack, *,
+    bound_entries: list[dict[str, Any]], manager_input_names: tuple[str, ...] = (),
+) -> BunshinInvocationPack:
+    """Keep durable semantic policy, but use the verified input projections."""
+    value = durable_pack.to_dict()
+    workspace = dict(value.get("workspace") or {})
+    metadata = dict(value.get("metadata") or {})
+    sandbox = dict(metadata.get("sandbox") or {})
+    old_refs = [dict(item) for item in workspace.get("reference_paths") or [] if isinstance(item, Mapping)]
+    old_binds = [dict(item) for item in sandbox.get("reference_binds") or [] if isinstance(item, Mapping)]
+    brief = dict(metadata.get("requirements_brief") or {})
+    brief_refs = [dict(item) for item in brief.get("references") or [] if isinstance(item, Mapping)]
+    manager_names = {_safe_reference_name(name) for name in manager_input_names}
+    declared_names = {str(item.get("name") or "") for item in [*old_refs, *brief_refs]
+                      if item.get("bound_input") or item.get("declared_input_name")}
+    # Pre-marker recovered inputs used an ordinary external bind. Recognize
+    # that legacy projection by its actual frozen source, never by name alone.
+    _, raw_binds = _project_sandbox_references({"reference_paths": bound_entries})
+    for bind in old_binds:
+        name = str(bind.get("name") or "")
+        if name not in manager_names and any(
+            item["name"] == name and item["source_path"] == bind.get("source_path")
+            and item["include"] == bind.get("include") for item in raw_binds
+        ):
+            declared_names.add(name)
+    if declared_names & manager_names:
+        # An older broken projection may already have overwritten a pinned
+        # semantic input. Do not silently fabricate it from new role inputs.
+        raise SubmissionInvariantError("durable role prompt has a conflicting Manager input identity")
+    semantic_refs = [item for item in old_refs if item.get("name") not in declared_names]
+    semantic_binds = [item for item in old_binds if item.get("name") not in declared_names]
+    semantic_brief = [item for item in brief_refs if item.get("name") not in declared_names]
+    reserved = manager_names | {str(item.get("name") or "") for item in [*semantic_refs, *semantic_binds, *semantic_brief]}
+    allocated = _allocate_declared_input_references(reserved, bound_entries)
+    projected, binds = _project_sandbox_references({"reference_paths": allocated})
+    workspace["reference_paths"] = semantic_refs + projected["reference_paths"]
+    sandbox["reference_binds"] = semantic_binds + binds
+    if "sandbox" in metadata:
+        metadata["sandbox"] = sandbox
+    if "references" in brief or allocated:
+        brief["references"] = semantic_brief + allocated
+        metadata["requirements_brief"] = brief
+    _attach_bound_input_read_only_overlays(workspace, [item for item in bound_entries if item.get("bound_input")])
+    # These fields describe this preparation, not the original semantic task.
+    for key in ("languages", "primary_language", "prepared_environment_fingerprint",
+                "lsp_environment_fingerprint"):
+        if key in current_pack.workspace:
+            workspace[key] = current_pack.workspace[key]
+        else:
+            workspace.pop(key, None)
+    return BunshinInvocationPack.from_dict({**value, "workspace": workspace, "metadata": metadata})
+
+
+def _reconcile_declared_input_reference_binds(
+    durable_pack: BunshinInvocationPack, current_pack: BunshinInvocationPack, *, request: Mapping[str, Any],
+) -> BunshinInvocationPack:
+    """Remove legacy host aliases that competed with declared frozen inputs."""
+    aliases = {
+        _safe_reference_name(f"user_{item.name}")
+        for item in declared_inputs_from_references(request.get("references") or [])
+    }
+    if not aliases:
+        return durable_pack
+    value = durable_pack.to_dict()
+    workspace = dict(value.get("workspace") or {})
+    metadata = dict(value.get("metadata") or {})
+    sandbox = dict(metadata.get("sandbox") or {})
+    references = [dict(item) for item in workspace.get("reference_paths") or [] if isinstance(item, Mapping)]
+    binds = [dict(item) for item in sandbox.get("reference_binds") or [] if isinstance(item, Mapping)]
+    brief = dict(metadata.get("requirements_brief") or {})
+    brief_refs = [dict(item) for item in brief.get("references") or [] if isinstance(item, Mapping)]
+    previous_brief = {_safe_reference_name(str(item.get("name") or "")): item for item in brief_refs}
+    old_aliases = {
+        str(item.get("name") or "") for item in references if not item.get("bound_input")
+    } | {str(item.get("name") or "") for item in binds} | set(previous_brief)
+    aliases &= old_aliases
+    if not aliases:
+        return durable_pack
+
+    # A real absolute reference can share the normalized alias. In that case
+    # keep the currently authorized host binding instead of the old one.
+    current_workspace, current_binds = _project_sandbox_references(dict(current_pack.workspace or {}))
+    current_by_name = {str(item["name"]): item for item in current_binds}
+    previous_by_name = {str(item.get("name") or ""): item for item in binds}
+    current_brief = dict(current_pack.metadata.get("requirements_brief") or {})
+    current_brief_by_name = {_safe_reference_name(str(item.get("name") or "")): dict(item)
+                             for item in current_brief.get("references") or [] if isinstance(item, Mapping)}
+    changed = {
+        name for name in aliases if name not in current_by_name
+        or previous_by_name.get(name) != current_by_name[name]
+        or (name in previous_brief and previous_brief[name] != current_brief_by_name.get(name))
+    }
+    if not changed:
+        return durable_pack
+    kept_references = [item for item in references if item.get("bound_input") or item.get("name") not in changed]
+    kept_names = {item.get("name") for item in kept_references}
+    workspace["reference_paths"] = kept_references + [
+        item for item in current_workspace["reference_paths"]
+        if item.get("name") in changed and item.get("name") not in kept_names
+    ]
+    sandbox["reference_binds"] = [item for item in binds if item.get("name") not in changed] + [
+        item for item in current_binds if item.get("name") in changed
+    ]
+    metadata["sandbox"] = sandbox
+    correction = (
+        "Legacy input reference bindings changed on recovery: " + ", ".join(sorted(changed)) + ". "
+        "Use the current immutable input bindings, discard earlier observations from the old aliases, "
+        "and recheck any work or decisions based on those observations."
+    )
+    acceptance = list(value.get("acceptance_criteria") or [])
+    if correction not in acceptance:
+        acceptance.append(correction)
+    if "references" in brief:
+        brief["references"] = [
+            item for item in brief_refs if _safe_reference_name(str(item.get("name") or "")) not in changed
+        ] + [item for name, item in current_brief_by_name.items() if name in changed and name in current_by_name]
+    if brief.get("acceptance_criteria"):
+        brief_acceptance = list(brief["acceptance_criteria"])
+        if correction not in brief_acceptance:
+            brief_acceptance.append(correction)
+        brief["acceptance_criteria"] = brief_acceptance
+    if brief:
+        metadata["requirements_brief"] = brief
+    return BunshinInvocationPack.from_dict({**value, "workspace": workspace, "metadata": metadata,
+                                            "acceptance_criteria": acceptance})
 
 
 def _workspace_tooling_from_work_view(

@@ -38,7 +38,7 @@ from pal.bunshin.harnesses import builtin_harness_generation
 from pal.bunshin.web_broker import web_result_to_payload
 from pal.bunshin.contracts import AggregateType
 from pal.bunshin.coroutine_runtime import CoroutineRunSemaphore
-from pal.bunshin.dag_scheduling import DagScheduler
+from pal.bunshin.dag_scheduling import NodeScheduler
 from pal.bunshin.effect_dispatcher import WorkflowEffectDispatcher
 from pal.bunshin.orchestration import WorkflowEffects
 from pal.bunshin.recovery import BunshinRecovery
@@ -116,11 +116,12 @@ class BunshinManager:
             self.logger.exception("bunshin terminal runtime reconciliation failed")
         self.events = BunshinEventDelivery(
             load_backlog=self._pending_task_delivery_events,
+            may_send=self.workflow_service.repository.deliveries.may_send_interaction_delivery,
         )
         self.role_gateway = RoleAssignmentGateway(self.workflow_service)
-        dag = DagScheduler(self.workflow_service.repository)
+        node_scheduler = NodeScheduler(self.workflow_service.repository)
         self.capacity_pool = CoroutineRunSemaphore(
-            self.max_parallel_modules, dag.retain_node_slot, dag.predecessor_settled,
+            self.max_parallel_modules, node_scheduler.retain_node_slot, node_scheduler.predecessor_settled,
         )
         self.semantic_orchestrator = SemanticOrchestrator(
             self.workflow_service,
@@ -156,7 +157,7 @@ class BunshinManager:
         await run_worker(lambda: prepare_workflow_memory_references(self.runtime_root))
         recovery = await asyncio.to_thread(BunshinRecovery(self.workflow_service).recover)
         await run_worker(lambda: reconcile_workflow_memory_references(self.runtime_root))
-        workspaces = await asyncio.to_thread(self.workflow_service.repository.leases.inherited_role_workspaces)
+        workspaces = await asyncio.to_thread(self.workflow_service.repository.leases.inherited_role_process_groups)
         await self.capacity_pool.recover_occupancy(workspaces)
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
         self.role_server, self.role_endpoint_info = await start_role_gateway_server(
