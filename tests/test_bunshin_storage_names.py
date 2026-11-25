@@ -61,13 +61,14 @@ def test_pinned_old_pack_is_read_without_rewriting_the_input():
 
 
 def test_v29_cutover_treats_manager_timeout_as_unknown(tmp_path, monkeypatch):
-    from pal.bunshin.ipc import BunshinManagerClient
+    from pal.bunshin.ipc import BunshinManagerClient, bunshin_port_path
 
     path = bunshin_db_path(tmp_path)
     path.parent.mkdir(parents=True)
     with sqlite3.connect(path) as db:
         db.execute("CREATE TABLE bunshin_v2_schema_meta(schema_key TEXT PRIMARY KEY, schema_value TEXT)")
         db.execute("INSERT INTO bunshin_v2_schema_meta VALUES ('schema_version', '29')")
+    bunshin_port_path(tmp_path).write_text("12345", encoding="utf-8")
 
     def unavailable(_):
         raise TimeoutError("Manager did not answer")
@@ -77,6 +78,17 @@ def test_v29_cutover_treats_manager_timeout_as_unknown(tmp_path, monkeypatch):
         cutover_bunshin_runtime(tmp_path)
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT schema_value FROM bunshin_v2_schema_meta").fetchone() == ("29",)
+
+
+def test_cutover_with_absent_endpoints_and_long_runtime_path(tmp_path):
+    root = tmp_path / ("runtime-" + "x" * 120)
+    path = bunshin_db_path(root)
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE bunshin_v2_schema_meta(schema_key TEXT PRIMARY KEY, schema_value TEXT)")
+        db.execute("INSERT INTO bunshin_v2_schema_meta VALUES ('schema_version', '29')")
+
+    assert cutover_bunshin_runtime(root).status == "migrated_in_place"
 
 
 @pytest.mark.parametrize("root_name", ["Pal #work", "Pal ?work", "Pal %20work"])

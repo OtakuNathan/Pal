@@ -16,7 +16,7 @@ from pal.bunshin.config import (
     BUNSHIN_DB_FILENAME,
     ensure_bunshin_runtime_settings_schema,
 )
-from pal.bunshin.ipc import BunshinManagerClient, bunshin_runtime_dir
+from pal.bunshin.ipc import BunshinManagerClient, bunshin_port_path, bunshin_runtime_dir, bunshin_socket_path
 from pal.bunshin.paths import bunshin_archive_cutover_marker, bunshin_runtime_ownership
 from pal.bunshin.schema import (
     BUNSHIN_IN_PLACE_VERSIONS,
@@ -214,19 +214,36 @@ def _bunshin_schema_version(db_path: Path) -> int:
 
 def require_bunshin_runtime_stopped(runtime_root: Path) -> None:
     try:
-        BunshinManagerClient(
-            runtime_root,
-            request_timeout_seconds=0.5,
-        ).health_sync()
+        endpoint_present = _manager_endpoint_present(runtime_root)
+        if endpoint_present:
+            BunshinManagerClient(
+                runtime_root,
+                request_timeout_seconds=0.5,
+            ).health_sync()
     except (FileNotFoundError, ConnectionRefusedError):
-        _require_recorded_worker_groups_stopped(runtime_root)
-        return
+        pass
     except Exception as exc:
         raise RuntimeError("Could not verify that the Bunshin Manager has stopped") from exc
-    raise RuntimeError(
-        "Bunshin runtime cutover requires the Bunshin sidecar to be detached "
-        "and all worker processes to be stopped"
-    )
+    else:
+        if endpoint_present:
+            raise RuntimeError(
+                "Bunshin runtime cutover requires the Bunshin sidecar to be detached "
+                "and all worker processes to be stopped"
+            )
+    _require_recorded_worker_groups_stopped(runtime_root)
+
+
+def _manager_endpoint_present(runtime_root: Path) -> bool:
+    # An absent Unix endpoint can exceed the platform's socket address limit.
+    # Check both published transports before attempting a connection. lstat
+    # preserves permission and other observation errors for the caller.
+    for path in (bunshin_socket_path(runtime_root), bunshin_port_path(runtime_root)):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        return True
+    return False
 
 
 def _require_recorded_worker_groups_stopped(runtime_root: Path) -> None:

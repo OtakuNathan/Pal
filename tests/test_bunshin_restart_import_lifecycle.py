@@ -583,14 +583,17 @@ class BunshinRestartImportLifecycleTests(unittest.TestCase):
 
 
 def test_cancelled_plan_recovers_frozen_input_into_new_architecture_workspace(tmp_path, monkeypatch):
-    import shutil
     import subprocess
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     from pal.bunshin.artifacts import ArtifactRef
     from pal.bunshin.contract_protocol import software_contract_projection, validate_contract_payload
-    from pal.bunshin.sandbox import build_sandboxed_runner_invocation, with_bunshin_sandbox_metadata
+    from pal.bunshin.sandbox import (
+        build_sandboxed_runner_invocation,
+        sandbox_supported_backend,
+        with_bunshin_sandbox_metadata,
+    )
     from pal.bunshin.semantic_orchestration.attempt_inputs import AttemptInputs
     from pal.bunshin.workflow_control import reconcile_control_requests
     from pal.bunshin.workspace_git import _git
@@ -684,18 +687,21 @@ def test_cancelled_plan_recovers_frozen_input_into_new_architecture_workspace(tm
     assert _git(architecture.worktree, "cat-file", "-t", architecture.original_head).strip() == "commit"
     assert (architecture.worktree / previous_target.relative_to(source)).read_bytes() == b"tracked product content\n"
     assert (architecture.worktree / "facts.txt").read_bytes() == b"new working tree content\n"
-    pack = with_bunshin_sandbox_metadata(
-        service.runtime_root,
-        BunshinInvocationPack(invocation_id="recover-bound-input", workspace={
-            "repo_path": str(architecture.worktree), "reference_paths": entries,
-        }),
-        run_id="recover-bound-input",
-    )
+    # Reference projection is platform independent. Actual execution requires
+    # the Linux backend and is exercised below only when it is present.
+    with patch("pal.bunshin.sandbox.sandbox_supported_backend", return_value="bwrap"):
+        pack = with_bunshin_sandbox_metadata(
+            service.runtime_root,
+            BunshinInvocationPack(invocation_id="recover-bound-input", workspace={
+                "repo_path": str(architecture.worktree), "reference_paths": entries,
+            }),
+            run_id="recover-bound-input",
+        )
     assert pack.workspace["reference_paths"][0]["path"] == "/pal/references/frozen_input_1/facts.txt"
     assert pack.metadata["sandbox"]["reference_binds"][0]["include"] == ["facts.txt"]
 
     header = architecture.worktree / "include/decoder.hpp"
-    if shutil.which("bwrap"):
+    if sandbox_supported_backend():
         command = """
 set -eu
 test "$(cat /pal/references/frozen_input_1/facts.txt)" = 'original evidence'

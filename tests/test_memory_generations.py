@@ -294,8 +294,12 @@ class MemoryGenerationTests(unittest.TestCase):
             migrate.assert_not_called()
 
     def test_setup_upgrade_also_refuses_a_surviving_bunshin_manager(self):
+        from pal.bunshin.ipc import bunshin_port_path
         from pal.wizard.cli import run_setup_upgrade
         (self.root / "pal.sqlite3").touch()
+        endpoint = bunshin_port_path(self.root)
+        endpoint.parent.mkdir(parents=True, exist_ok=True)
+        endpoint.write_text("12345", encoding="utf-8")
         with patch("pal.bunshin.ipc.BunshinManagerClient.health_sync", return_value={"ok": True}), \
              patch("pal.llm.schema.migrate_llm_endpoint_schema") as migrate:
             with self.assertRaisesRegex(RuntimeError, "sidecar"):
