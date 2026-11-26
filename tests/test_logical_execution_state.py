@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from pal.core.runtime import PalCore
 from pal.core.turn_executor import TurnExecutor
-from pal.core.turns import ToolCallEffect
+from pal.core.turns import ToolCallEffect, TurnContinuation
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import ToolCallBudget
 from pal.execution.file_edit import FileEditTool
@@ -858,12 +858,9 @@ class LogicalExecutionStateTests(unittest.TestCase):
 
         original = core.turn_executor._execute_tool_async
         core.turn_executor._execute_tool_async = time_out
-        continuation = SimpleNamespace(
-            turn_id=turn_id,
-            interrupted=False,
-            interrupt_reason="",
-            waiting_effect_id=None,
-            finalization_only=False,
+        continuation = TurnContinuation(
+            turn_id=turn_id, program=iter(()), correlation_id=turn_id,
+            accepted_tool_batch_open=True,
             pending_tool_call_batch=[call],
             pending_tool_results=[],
             pending_assistant_tool_text="",
@@ -933,12 +930,9 @@ class LogicalExecutionStateTests(unittest.TestCase):
 
         original = core.turn_executor._execute_tool_async
         core.turn_executor._execute_tool_async = execute
-        continuation = SimpleNamespace(
-            turn_id=turn_id,
-            interrupted=False,
-            interrupt_reason="",
-            waiting_effect_id=None,
-            finalization_only=False,
+        continuation = TurnContinuation(
+            turn_id=turn_id, program=iter(()), correlation_id=turn_id,
+            accepted_tool_batch_open=True,
             pending_tool_call_batch=list(calls),
             pending_tool_results=[],
             pending_assistant_tool_text="",

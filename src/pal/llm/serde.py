@@ -5,6 +5,7 @@ from pal.shared.result_snapshot import ResultSnapshotRef
 from typing import Any, Mapping
 
 from pal.llm.ir import (
+    InstructionScopeIR,
     ArtifactRefPartIR,
     ImagePartIR,
     LLMFinishReason,
@@ -85,6 +86,7 @@ def message_to_payload(message: LLMMessageIR) -> dict[str, Any]:
             else None
         ),
         "metadata": thaw_json(message.metadata),
+        **({"instruction_scope": message.instruction_scope.value} if message.instruction_scope != InstructionScopeIR.PERSISTENT else {}),
     }
 
 
@@ -110,6 +112,7 @@ def message_from_payload(payload: Mapping[str, Any]) -> LLMMessageIR:
         ),
         replay=replay,
         metadata=dict(payload.get("metadata") or {}),
+        instruction_scope=InstructionScopeIR(payload.get("instruction_scope") or "persistent"),
     )
 
 

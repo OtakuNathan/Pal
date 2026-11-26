@@ -365,6 +365,7 @@ class EndpointProjectionSession:
             wire_shape=self.binding.wire_shape,
             endpoint_id=self.binding.endpoint_id,
             model_id=self.binding.model_id,
+            base_url=self.binding.base_url, provider_id=self.binding.provider_id,
             capabilities=self._capabilities,
             has_conversation_prefix=has_conversation_prefix,
         )
@@ -1168,8 +1169,14 @@ class EndpointProjectionSession:
             else:
                 break
         preamble_only = shell_messages[:head_end]
+        gemini_instruction = shell.request_instructions if self.binding.wire_shape == WireShape.GEMINI_INTERACTIONS else ""
+        if gemini_instruction:
+            from pal.llm.cache_capabilities import supports_interaction_instructions
+            if not supports_interaction_instructions(context.wire_shape, context.model_id, context.base_url, context.capabilities):
+                raise ProjectionSessionError("Gemini interaction-scoped instructions require explicit endpoint opt-in")
+        wire_shell = replace(shell, request_instructions="") if gemini_instruction else shell
         encoded_shell = codec.encode(
-            replace(shell, messages=preamble_only), context
+            replace(wire_shell, messages=preamble_only), context
         )
         shell_payload = dict(encoded_shell.payload)
         shell_fields = {
@@ -1207,7 +1214,7 @@ class EndpointProjectionSession:
                     self._prefix_items or self._pending_wire_tail
                 ),
             )
-            encoded_tail = codec.encode(replace(shell, messages=view.messages), tail_context)
+            encoded_tail = codec.encode(replace(wire_shell, messages=view.messages), tail_context)
             tail_payload = dict(encoded_tail.payload)
             tail_items = [
                 dict(item)
@@ -1385,9 +1392,9 @@ class EndpointProjectionSession:
               for part in entry.parts),
             *tail_system_parts,
         ]
-        if merged_system and self.binding.wire_shape == WireShape.GEMINI_INTERACTIONS:
+        if (merged_system or gemini_instruction) and self.binding.wire_shape == WireShape.GEMINI_INTERACTIONS:
             payload["system_instruction"] = "\n\n".join(filter(None, (
-                shell_fields.get("system_instruction"), *(part["text"] for part in merged_system),
+                shell_fields.get("system_instruction"), *(part["text"] for part in merged_system), gemini_instruction,
             )))
         elif merged_system:
             shell_system = shell_fields.get("system")

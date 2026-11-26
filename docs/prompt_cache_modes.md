@@ -1,170 +1,131 @@
 # Prompt cache modes
 
-Pal selects cache behavior independently of the endpoint's wire encoding.
-Provider responses report usage; they do not grant permission to move a tail
-checkpoint. The former OpenAI economic/estimated-ACK controller has been removed.
+Pal separates provider cache policy from canonical L1 history and usage receipts.
 
 | Mode | Local behavior |
 | --- | --- |
-| `implicit` | No local markers or automatic-cache opt-in. The provider decides whether and how to cache. Stable routing/accounting keys are retained where applicable. |
-| `hybrid` | Explicit structural S/T markers plus OpenAI automatic caching. No local tail history. |
-| `explicit` | OpenAI explicit-only requests carry S/T and at most two tail positions, previous P and current C. Every new legal stable tail is eligible immediately. |
+| `implicit` | No explicit markers. Provider automatic caching decides reuse; routing keys remain stable. |
+| `hybrid` | The stable preamble and current turn's input anchor are marked, with automatic caching enabled. |
+| `explicit` | OpenAI session chase-tail: two fixed anchors and the most recent eligible closed-prefix boundaries. |
 
-S ends at the stable system/developer prefix. T is the existing U boundary:
-the current real user input, or the compact continuity block for the first turn
-using that compact generation. Runtime context presented as user content is not
-an independent user anchor. Identical positions are deduplicated.
+## Session chase-tail
 
-Hybrid wire encoding differs by provider: direct OpenAI requests send
-`prompt_cache_options: {"mode": "implicit", "ttl": "30m"}`. OpenRouter requests
-omit that object and send only the S/T block markers and routing keys; automatic
-caching remains enabled. OpenRouter's [published schema](https://openrouter.ai/openapi.json)
-only accepts `explicit` as the request-level mode (checked 2026-09-23).
-Explicit mode still sends `{"mode": "explicit", "ttl": "30m"}` on both providers.
+For verified direct OpenAI and OpenRouter Responses routes, the lookup window is
+52 markers: S (last stable system/developer block), T (first conversation boundary
+or exact compact continuity block), and the latest 50 other legal boundaries.
+Unverified compatible routes and Chat Completions use a conservative four slots.
+A missing/identical anchor is omitted/deduplicated. After native compaction, the
+opaque seed is never marked; the first legal block after it becomes T. Provider
+lookups are not the same thing as cache writes: OpenAI saves at most the last
+four marked checkpoints, and may evict or miss any checkpoint. Pal does not
+predict or claim cache residency from planned markers.
 
-The OpenAI implementation keeps the last two distinct submitted tail positions.
-The next request carries the most recent still-valid position before its current
-C. Rebuilding a request or retrying the same C does not consume the previous
-position. Only transport admission changes history: preparing/auditing a request does
-not. The admission callback (or the first response frame for compatibility
-transports) commits the frozen tail once, even if decoding subsequently fails.
-Pre-admission rejection cannot consume or evict a submitted position; late
-callbacks after invalidation cannot revive one. Provider usage, errors and late
-receipts do not move history. Turn completion clears it, and prefix changes invalidate affected positions.
-There is no R accumulator, profitability gate, estimated ACK, attempt budget or
-cooldown in this strategy.
+Every request derives positions from its actual wire projection, including
+complete tool batches. There is no remembered P/C, mutable tail accumulator,
+profitability gate, estimated ACK, or turn-end reset of markers. Preparation,
+retries, transport failure, restart, and late receipts cannot move the selection.
+Only actual content changes (including compaction, model/tool changes and new
+input) change the eligible prefix. Marker metadata is removed before content
+fingerprinting. OpenAI and OpenRouter share the selector; OpenRouter also sends
+`session_id` equal to the stable `prompt_cache_key`. Side questions share that
+routing key but cannot replace resident warm/reminder evidence.
 
-## Configure
+Hybrid sends `prompt_cache_options: {"mode": "implicit", "ttl": "30m"}` directly;
+OpenRouter omits the options object while retaining its S/T markers. Explicit
+sends `{"mode": "explicit", "ttl": "30m"}` on both routes. Anthropic continues
+using its independent explicit cache-control policy. ChatGPT OAuth can use the
+same selector when configured but remains implicit by default, preserving its
+Responses WebSocket continuation path.
 
-With the updated package installed:
+The UTC context date is the last stable developer block, pinned in existing L1
+prompt context metadata for the current history incarnation and left generation.
+Successful compact installs allow a fresh date on the next request; a failed
+or cancelled compact leaves the old pin intact. An idle new turn may refresh a
+cross-day pin if the matching endpoint's existing local lifetime estimate has
+elapsed. Missing evidence and DeepSeek's early reminder alone do not authorize
+that refresh. Otherwise a changed UTC date is appended once as an L1 fact.
+There is no midnight timer or date-driven compact.
+
+On GPT-6.2 Astra/Sol Responses, exceptional request-scoped runtime reminders use top-level
+`instructions`, rendered after `input` and billed as uncached input. They are
+counted in budgets but excluded from reusable prefix fingerprints. Standing
+system/developer instructions stay in `input`. Older models and unsupported
+routes keep chronological runtime context records. Existing active legacy turns
+are not rewritten when the new delivery policy becomes available. Normal rounds
+need no temporary instructions. Checklist progress is delivered by actual tool
+history, a short new-turn reminder, or an unfinished-only recovery record when
+the relevant history has been lost.
+
+Native compaction sends the actual compact schema (model/input and selected cache
+controls), not ordinary generation tools or temporary suffix instructions. Its
+read/write usage is separate from generation; cache reuse across operations is
+not guaranteed. The new generation replans its anchors from the new window.
+See [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+and [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+
+## Configuration and activation
 
 ```sh
-pal llm add ENDPOINT --replace --cache-mode hybrid --runtime-root /path/to/runtime
+pal llm add ENDPOINT --replace --cache-mode explicit --runtime-root /path/to/runtime
 pal llm list --all --json --runtime-root /path/to/runtime
 ```
 
-`--cache-mode` also accepts `implicit` and `explicit`. It updates
-`capabilities_blob.prompt_cache.mode` and enables local policy selection while
-preserving unrelated endpoint fields. Unsupported combinations fail before the
-endpoint update is committed. The JSON list shows persisted capabilities; it is
-not evidence that a running process has reloaded them.
+`--cache-mode` also accepts `implicit` and `hybrid`. It updates the endpoint's
+`capabilities_blob.prompt_cache.mode` without changing other fields. Unsupported
+combinations fail before committing. The recognized models include GPT-5.6,
+GPT-6 Astra/Sol/Luna, GPT-6.1 Sol/Terra, and GPT-6.2 Astra/Sol. Legacy OpenAI
+profiles remain aliases, not alternate algorithms. Selection priority is
+`enabled: false`, endpoint mode, legacy profile/dialect, model-hook profile,
+then implicit. Existing in-flight turns retain their endpoint policy snapshot.
+A configuration refresh alone cannot load changed Python implementation; a
+host restart is necessary to activate new resident code.
 
-Policy selection order is: `enabled: false`, endpoint `mode`, legacy endpoint
-profile/dialect, model-hook profile, then `implicit`. Explicit endpoint selection
-overrides a model-hook default. Configuration refresh affects the next turn;
-in-flight turns retain their policy snapshot. Changing the endpoint identity
-under a snapshot is rejected.
+## Evidence and checks
 
-The three modes are available for the recognized OpenAI GPT-5.6 and GPT-6 Astra
-families, plus `gpt-6.2-astra` and `gpt-6.2-sol`, on Responses and Chat
-Completions, directly or through OpenRouter (using the `openai/` model prefix).
-On GPT-6.2 Responses, top-level `instructions` follow `input` and are billed
-as uncached input on every request. Pal already encodes standing system and
-developer messages as content blocks in `input`, where the existing cache
-planner can mark the stable prefix. [OpenAI prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+Transport admission remains once-only per attempted request and is recorded
+independently of planning. The final merged payload is audited against selected
+marker paths and exact content identity. `prompt_cache_usage` logs numeric usage
+(with missing values unknown); the optional `prompt_cache_tail` diagnostic
+includes marker paths and hashes. Neither log implies a provider guarantee.
 
-Unknown compatible endpoints/models get only `implicit`; schema resemblance
-does not establish support. Anthropic Messages retains its existing explicit
-strategy behind the shared selector, with `implicit` also available. Anthropic
-hybrid and migration to the new tail strategy are deferred.
+`tests/test_cache_tail.py` exercises large lookup windows, fixed session anchors,
+retries, failures, and independently simulated provider reuse. `SessionChaseTail`
+models the stateless bounded selection; `CooperativeToolBatch` models the normal
+interrupt latch. Each has a negative mutant in the TLC inventory. The former
+admission-owned PromptCacheTail and PromptCacheAdmission models are retained as
+historical models rather than active obligations.
 
-Legacy OpenAI explicit profiles, including `openai_explicit_economic_v1`, now
-select eager explicit behavior. `openrouter_astra_provider_implicit` selects
-implicit; `openrouter_astra_hybrid_anchor` now sends both S/T. Old names remain
-configuration aliases, not parallel copies of the old algorithm. Alias cache-key
-generation remains compatible. New mode values do not enter the upstream key;
-mode and configuration generations isolate local history instead.
+### Isolated Luna provider probe (2026-11-26)
 
-## Guarantees and limits
+Direct OpenAI and OpenRouter Responses both accepted 52 explicit markers.
+Each cold request reported 1,867 cache-write tokens out of 1,870 input tokens;
+the append-only successor reported 1,867 read tokens out of 1,888 (98.89%) on
+both providers. The tiny synthetic history was independent of resident L1.
+A direct native compact probe also accepted the markers and reported 1,856
+write tokens. In a separate generation-to-compact probe using the same routing
+key and source history, compact reported zero reads: reuse between the two
+operations is not established by this test. These observations do not establish
+long-run production Sol hit rates.
 
-The client checks legal exact marker positions, content fingerprints and the
-final marker set. It does not claim a marker was stored or a prefix remains
-resident. There are at most four explicit markers; hybrid uses two plus the
-provider's automatic slot. Protocol references: [OpenAI](https://developers.openai.com/api/docs/guides/prompt-caching)
-and [OpenRouter](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+Historical validation of the retired four-marker strategy (2026-09-17):
+Linux/Python 3.13 completed core-a 875, core-b 961, bunshin-a 466 and
+bunshin-b 478 passing tests (2,780 total, 7 skipped). Its TLC model checked
+84,825 distinct states. These are prior-strategy results, not verification of
+session chase-tail; macOS/Python 3.12 were not run in that exercise.
 
-If C1 writes successfully but C2 fails, the next request containing C2/C3 may
-lose the opportunity to read C1 and fall back to T. This is accepted best-effort
-behavior. Neither hybrid nor eager explicit is claimed to fix the reported
-upstream tool-output caching issue or guarantee lower spend.
+### Session chase-tail verification (Linux / Python 3.13, 2026-11-26)
 
-The ideal linear-cost argument and its assumptions are recorded in the
-[design plan](archive/prompt_cache/prompt_cache_strategy_modes_plan.md). The runtime does not estimate
-continuation probability or switch modes based on cache-hit percentages.
+The four repository batches ran serially, with 7,636 initial passing tests and
+78 skips. Four initial failures (one unclassified safe-mode selection regression
+and three outdated request/continuation fixtures) were corrected during the
+checks; all four were retested successfully on the final source. Both Bunshin
+batches completed without failures. These were iterative validation runs, not a
+single clean full-suite run of the final checkout. Final focused regressions,
+67-file contract type checking, 21 architecture boundary checks, the formal
+inventory, and both new TLC models with their expected-failure mutants passed.
 
-Diagnostics remain in local logs. With prompt logging enabled, `prompt_cache_tail`
-records exact marker paths, content/audit hashes, mode, submission history and
-reported usage. Missing counters remain unknown. Shared usage-ledger deduplication
-and billing remain active; removing ACK does not remove request accounting.
-
-## Validation and activation
-
-`tests/test_cache_tail.py` covers all mode/provider/shape combinations, repeated
-builds and retries, late responses, invalidation, and an independent simulated
-provider including the failed-C2 counterexample. Existing wire tests retain exact
-compact-block positioning, fingerprint and role/protocol checks.
-
-`spec/llm/PromptCacheTail.tla` checks bounded ordered history, marker capacity,
-fixed anchors and submission-only updates across content/mode generations.
-Preparation and pre-admission rejection are explicit transitions, and every
-retained position must have been transport-admitted in its current generation.
-`PromptCacheTailPrepareCommit.cfg` is an expected-failure regression mutant
-that commits during preparation; TLC must reject its admitted-history invariant.
-The old Handoff, FixedAnchors and Settlement models are historical; the normal
-LLM model-checking script now runs PromptCacheTail instead.
-
-This change replaces core LLM implementation modules. An already running host
-needs to load the updated package through a host restart; configuration refresh
-alone does not replace loaded Python code. After code activation, later endpoint
-mode changes can use the existing `/refresh_llm_endpoint` path and take effect on
-the next turn. No paid requests are needed for the offline checks.
-
-### Verified implementation (2026-09-17)
-
-On Linux / Python 3.13, all four repository batches completed successfully:
-
-| Batch | Passed | Skipped |
-| --- | ---: | ---: |
-| core-a | 875 | 0 |
-| core-b | 961 | 7 |
-| bunshin-a | 466 | 0 |
-| bunshin-b | 478 | 0 |
-
-Total: 2,780 passed, 7 skipped (subtests reported separately). The initial parallel
-run was interrupted to reduce memory pressure; these counts are from the final
-completed batches. A legacy safe-mode test was updated to explicitly request
-explicit caching instead of relying on the former default.
-
-TLC checked 84,825 distinct states for PromptCacheTail with no errors. The tests
-include the documented loss of C1 reuse when C2 fails; this remains an accepted
-strategy tradeoff. No paid cache canary or live host activation was performed.
-macOS / Python 3.12 were not executed in this environment.
-
-### Transport admission boundary
-
-`prepare_attempt` freezes provider-hook output, audits it, and records a
-`prepared` diagnostic. It does not consume a tail position. The invoker's
-`observe_submission` commits through `submit_attempt` on transport admission;
-its first-frame fallback shares the same once-only guard. A subsequent decode
-error or cancellation still leaves the admitted position in history.
-Preparation failures and transport rejection before admission do not.
-
-A plan captures both the exact scope incarnation and its content generation.
-The incarnation is never reused when the bounded scope cache evicts and recreates
-an entry, so a delayed old admission cannot consume the replacement entry's
-sequence. `PromptCacheTail`'s epoch abstracts both identities; `Invalidate`
-includes eviction/recreation as well as content/turn invalidation.
-
-Offline regressions in `test_cache_tail_admission.py` cover preparation-only,
-pre-admission rejection, rejection without evicting earlier admitted positions,
-post-admission failure, duplicate callback/first-frame notifications, turn close,
-recreated-scope callbacks, and terminal diagnostic settlement. Coordinator-only
-fixtures explicitly signal admission before simulating provider receipts.
-
-Overlapping preparations in the same scope have distinct planning sequences
-and separate once-only admission tokens. Preparing either consumes no submitted
-sequence; admitting both consumes two, even when their callbacks arrive in
-reverse order. Repeated callbacks consume neither again. Tail positions still
-advance monotonically, so a delayed shorter prefix cannot rewind the frontier.
-`PromptCacheAdmission` and the overlapping-preparation regression cover this
-boundary separately from `PromptCacheTail`'s single-pending-payload abstraction.
+Claude turn-scoped reminders are orthogonal to the Anthropic cache-control
+strategy: keep the immutable record, let the provider clear its semantic effect,
+and mark only ordinary cacheable content. Gemini's root interaction-scoped
+option is deliberately opt-in because changing it caused a complete read miss in
+an isolated Hydrogen probe. See [prompt context lifecycle](prompt_context_lifecycle.md).

@@ -11,6 +11,12 @@ from pal.llm.shapes.base import EncodedRequest, finalize_cache_spans
 from pal.shared.json_values import thaw_json
 
 CONTROL_FIELDS = ("prompt_cache_breakpoint", "cache_control")
+MARKER_BLOCK_TYPES = frozenset({"input_text", "output_text", "text", "input_image", "image_url",
+                                "input_audio", "file", "input_file", "refusal"})
+
+
+def marker_target_supported(target: Any) -> bool:
+    return isinstance(target, Mapping) and target.get("type") in MARKER_BLOCK_TYPES
 
 
 def digest(value: Any) -> str:
@@ -84,14 +90,13 @@ def inject_exact(encoded: EncodedRequest, points: tuple, cache_key: str,
     applied = []
     for point in points:
         span = spans.get(point.message_id)
-        if not span or not span.cache_targets:
+        if not span or not (span.cache_targets or span.continuity_target):
+            continue
+        if point.path and point.path not in (*span.cache_targets, span.continuity_target):
             continue
         target = at(payload, point.path or span.cache_targets[-1])
         # Only supported content blocks; never fallback to an earlier block.
-        if isinstance(target, dict) and target.get("type") in {
-            "input_text", "output_text", "text", "input_image", "image_url",
-            "input_audio", "file", "input_file", "refusal",
-        }:
+        if isinstance(target, dict) and marker_target_supported(target):
             target["prompt_cache_breakpoint"] = {"mode": "explicit"}
             applied.append(point.message_id)
     extra = {"prompt_cache_key": cache_key}
@@ -106,7 +111,7 @@ def inject_exact(encoded: EncodedRequest, points: tuple, cache_key: str,
 
 
 def audit(encoded: EncodedRequest, expected: tuple[tuple, ...], *, mode: str = "explicit",
-          gateway: bool = False) -> tuple[bool, str]:
+          gateway: bool = False, lookup_limit: int = 52) -> tuple[bool, str]:
     payload = thaw_json(encoded.payload)
     payload.update(thaw_json(encoded.extra_body))
     found = []
@@ -119,8 +124,8 @@ def audit(encoded: EncodedRequest, expected: tuple[tuple, ...], *, mode: str = "
             valid = False
         if "prompt_cache_breakpoint" in node:
             found.append(path)
-            valid &= node["prompt_cache_breakpoint"] == {"mode": "explicit"}
-    valid &= len(found) <= (4 if mode == "explicit" else 3) and set(found) == set(expected) and len(found) == len(set(found))
+            valid &= marker_target_supported(node) and node["prompt_cache_breakpoint"] == {"mode": "explicit"}
+    valid &= len(found) <= (lookup_limit if mode == "explicit" else 3) and set(found) == set(expected) and len(found) == len(set(found))
     return bool(valid), digest({"paths": found, "options": payload.get("prompt_cache_options"),
                                "key": payload.get("prompt_cache_key"),
                                "session": payload.get("session_id")})
@@ -134,10 +139,10 @@ class Boundary:
     coordinate: int
 
 
-def boundary_at(encoded: EncodedRequest, message_id: str, path: tuple) -> Boundary | None:
+def boundary_at(encoded: EncodedRequest, message_id: str, path: tuple, *, payload: dict | None = None) -> Boundary | None:
     """Describe a selected block, including an interior continuity block."""
     from pal.llm.shapes.base import _provider_prefix
-    prefix = _provider_prefix(thaw_json(encoded.payload), path)
+    prefix = _provider_prefix(payload if payload is not None else thaw_json(encoded.payload), path)
     if prefix is None or not isinstance(at(encoded.payload, path), Mapping):
         return None
     serialized = json.dumps(prefix, ensure_ascii=False, separators=(",", ":"))

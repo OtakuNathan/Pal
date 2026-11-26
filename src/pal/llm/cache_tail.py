@@ -1,60 +1,13 @@
-"""Bounded history of submitted positions; provider responses cannot move it."""
-from dataclasses import dataclass, field
+"""Pure chronological selection; cache markers are opportunities, not receipts."""
+from collections.abc import Iterable
 
-from pal.llm.cache_wire import Boundary
+POLICY = "openai_session_chase_tail_v2"
+MarkerPath = tuple[str | int, ...]
 
-POLICY = "openai_eager_tail_v1"
 
-
-@dataclass
-class TailHistory:
-    incarnation: object = field(default_factory=object, repr=False, compare=False)
-    turn: str = ""
-    epoch: tuple = ()
-    generation: int = 0
-    sequence: int = 0
-    planned_sequence: int = 0
-    tails: tuple[Boundary, ...] = ()
-    continuity_id: str = ""
-    continuity_turn: str = ""
-    last_access: float = 0
-    closed: bool = False
-
-    def refresh(self, turn: str, epoch: tuple, valid: dict, now: float) -> None:
-        if turn != self.turn or epoch != self.epoch:
-            self.turn, self.epoch = turn, epoch
-            self.generation += 1
-            self.tails = ()
-            self.closed = False
-        retained = tuple(b for b in self.tails if valid.get(b.path) == b)
-        if retained != self.tails:
-            self.generation += 1
-        self.tails = retained
-        self.last_access = now
-
-    def previous(self, current: Boundary | None) -> Boundary | None:
-        if current is None or self.closed:
-            return None
-        return next((b for b in reversed(self.tails) if b.path < current.path), None)
-
-    def submit(self, current: Boundary | None, generation: int) -> None:
-        # The coordinator deduplicates by attempt identity. Preparation order
-        # cannot identify admissions when multiple plans are outstanding.
-        if self.closed or generation != self.generation:
-            return
-        self.sequence += 1
-        if current is not None and current not in self.tails:
-            if not self.tails or current.path > self.tails[-1].path:
-                self.tails = (*self.tails, current)[-2:]
-
-    def end_turn(self, turn: str) -> None:
-        if turn == self.turn:
-            self.tails = ()
-            self.closed = True
-            self.generation += 1
-
-    def snapshot(self) -> dict:
-        return {"turn_id": self.turn, "generation": self.generation,
-                "submitted_sequence": self.sequence, "closed": self.closed,
-                "tails": [{"message_id": b.message_id, "path": b.path,
-                           "fingerprint": b.fingerprint} for b in self.tails]}
+def choose_paths(stable: MarkerPath | None, anchor: MarkerPath | None,
+                 candidates: Iterable[MarkerPath], limit: int) -> tuple[MarkerPath, ...]:
+    fixed = tuple(dict.fromkeys(p for p in (stable, anchor) if p is not None))
+    recent = sorted(set(candidates) - set(fixed))
+    remaining = max(0, limit - len(fixed))
+    return tuple(sorted((*fixed, *(recent[-remaining:] if remaining else ()))))

@@ -516,3 +516,25 @@ def test_subscription_invoker_continues_the_accepted_message_via_previous_id():
         assert second.usage.cached_input_tokens == 2800
     finally:
         invoker.close()
+
+
+def test_gpt62_suffix_changes_preserve_subscription_response_chaining():
+    socket = _Socket([[_completed()], [_completed(2800)]])
+    invoker = ShapeEndpointInvoker(transport=DirectSDKTransport(
+        lambda _: "test-token", websocket_transport=ResponsesWebSocketTransport(_Connector(socket)),
+    ))
+    ep = endpoint()
+    ep.model_id = "gpt-6.2-sol"
+    ep.base_url = "https://api.openai.com/v1"
+    req = replace(request(), logical_scope_id="resident", request_instructions="Temporary reminder one")
+    try:
+        first, _ = invoker.invoke(ep, req)
+        second_request = replace(req, messages=(*req.messages, first.message, req.messages[-1]), request_instructions="Temporary reminder two")
+        invoker.invoke(ep, second_request)
+        assert socket.sent[0]["instructions"] == "Temporary reminder one"
+        assert socket.sent[1]["instructions"] == "Temporary reminder two"
+        assert socket.sent[1]["previous_response_id"] == "response-test"
+        assert len(socket.sent[1]["input"]) == 1
+        assert "prompt_cache_options" not in socket.sent[1]
+    finally:
+        invoker.close()

@@ -189,7 +189,11 @@ class PromptCompiler:
                 "system_sections": [block.block_id for block in prompt_ir.system_blocks],
                 "developer_sections": [block.block_id for block in prompt_ir.developer_blocks],
                 "user_context_blocks": [block.block_id for block in prompt_ir.user_context_blocks],
-                "reminder_sections": [block.block_id for block in prompt_ir.runtime_reminder_blocks],
+                "reminder_sections": [block.block_id for block in prompt_ir.runtime_reminder_blocks
+                                      if "history_state" not in block.metadata],
+                "history_states": {block.block_id: block.metadata["history_state"]
+                                   for block in prompt_ir.runtime_reminder_blocks
+                                   if "history_state" in block.metadata},
                 "prompt_ir": self._prompt_ir_debug_dict(prompt_ir),
                 "context_candidates": self._context_candidates(prompt_ir),
                 "runtime_reminder_text": self._render_final_runtime_reminder(
@@ -342,6 +346,7 @@ class PromptCompiler:
             "mutation_policy",
         }
         developer_sections = {
+            "current_date",
             "persona",
             "operating_guidance",
             "tool_routing",
@@ -461,6 +466,7 @@ class PromptCompiler:
         }
         lowered = aliases.get(lowered, lowered)
         if lowered in {
+            "current_date",
             "identity",
             "persona",
             "memory",
@@ -614,6 +620,7 @@ class PromptCompiler:
             "task_acceptance": 140,
             "task_acceptance_policy": 150,
             "output_contract": 160,
+            "current_date": 10000,
         }
         return sorted(
             blocks,
@@ -671,6 +678,8 @@ class PromptCompiler:
                                "role": "user", "title": block.title, "parts": self._resolve_artifact_images([
                                    {"role": "user", "content": self._render_user_context_parts(block)}])[0]["content"]})
         for index, block in enumerate(prompt_ir.runtime_reminder_blocks):
+            if "history_state" in block.metadata:
+                continue
             candidates.append({"key": f"runtime:{block.metadata.get('source_provider', '')}:{block.block_id}:{block.title}",
                                "role": "developer", "title": block.title, "content": self._project_llm_text(block.content),
                                "coverage_kind": block.metadata.get("coverage_kind", ""),
@@ -689,6 +698,8 @@ class PromptCompiler:
             return ""
         rendered_sections: list[str] = []
         for block in blocks:
+            if "history_state" in block.metadata:
+                continue
             content = self._project_llm_text(block.content.strip())
             if content:
                 rendered_sections.append(render_xml_block(self._runtime_reminder_block_tag(block), content))
@@ -820,6 +831,12 @@ class PromptCompiler:
         current_tag: str | None = None
         current_parts: list[str] = []
         for block in blocks:
+            if block.block_id == "current_date":
+                if current_tag is not None and current_parts:
+                    rendered_sections.append(self._render_system_section(current_tag, current_parts))
+                current_tag, current_parts = None, []
+                rendered_sections.append(self._project_llm_text(block.content.strip()))
+                continue
             tag = self._system_block_tag(block)
             if current_tag != tag:
                 if current_tag is not None and current_parts:

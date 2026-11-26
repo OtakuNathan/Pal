@@ -54,6 +54,8 @@ class OpenAIResponseCodec(ShapeCodecBase):
         input_items: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
         for message in request.messages:
+            replaced_prefix = []
+            replaced_spans = []
             if is_native_window(message):
                 validate_native_window(message.replay)
                 if not accepts_replay(message.replay, capabilities=context.capabilities,
@@ -61,6 +63,8 @@ class OpenAIResponseCodec(ShapeCodecBase):
                     raise ShapeDecodeError("native compact history needs a handoff on its source endpoint")
                 prefix = thaw_json(message.replay.payload[NATIVE_WINDOW_KEY].get("covered_prefix", ()))
                 if prefix and input_items[-len(prefix):] == prefix:
+                    replaced_prefix = prefix
+                    replaced_spans = list(spans)
                     del input_items[-len(prefix):]
                     spans = [EncodedMessageSpan(span.message_id) for span in spans]
             wire_start = len(input_items)
@@ -79,6 +83,8 @@ class OpenAIResponseCodec(ShapeCodecBase):
                     output = message.replay.payload.get("output")
                     if isinstance(output, (list, tuple)):
                         input_items.extend(thaw_json(item) for item in output if isinstance(item, Mapping))
+                        if replaced_prefix and input_items[wire_start:wire_start + len(replaced_prefix)] == replaced_prefix:
+                            spans = replaced_spans
                         spans.append(EncodedMessageSpan(message.message_id))
                         continue
                 if message.role in {MessageRole.SYSTEM, MessageRole.DEVELOPER}:
@@ -153,6 +159,11 @@ class OpenAIResponseCodec(ShapeCodecBase):
             "input": input_items,
             "max_output_tokens": policy.max_output_tokens,
         }
+        if request.request_instructions:
+            from pal.llm.cache_capabilities import supports_suffix_instructions
+            if not supports_suffix_instructions(context.wire_shape, context.model_id, context.base_url):
+                raise ShapeDecodeError("unsupported request-scoped suffix instructions")
+            payload["instructions"] = request.request_instructions
         # L1 owns the conversation. Request portable reasoning instead of
         # relying on provider-side response storage. The explicit include
         # also supports endpoints predating automatic stateless encryption.

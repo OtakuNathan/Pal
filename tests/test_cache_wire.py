@@ -70,7 +70,7 @@ def test_provider_diagnostics_remain_serializable_auxiliary_data():
 
 @pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
 @pytest.mark.parametrize("provider", ["openai", "openrouter"])
-def test_compact_anchor_is_exact_interior_block_then_advances_next_turn(shape, provider):
+def test_compact_anchor_is_exact_interior_block_and_remains_next_turn(shape, provider):
     from pal.memory.continuity import Continuity
     from pal.llm.cache_wire import boundary_at
     context = ShapeContext(shape, "endpoint", "openai/gpt-6-astra" if provider == "openrouter" else "gpt-6-astra", provider_id=provider, capabilities={"prompt_cache": {"mode": "explicit"}})
@@ -98,10 +98,11 @@ def test_compact_anchor_is_exact_interior_block_then_advances_next_turn(shape, p
     next_user = replace(user, message_id="next")
     request = replace(request, messages=(*[replace(m, prompt_region=PromptRegionIR.SETTLED_HISTORY) if m.role == MessageRole.USER else m for m in request.messages], next_user), metadata={**request.metadata, "turn_id": "two"})
     plan = coordinator.plan(request, context)
-    assert plan.breakpoints[1].message_id == "next"
+    assert plan.breakpoints[1].message_id == "u"
+    assert plan.breakpoints[-1].message_id == "next"
     from pal.llm.cache_wire import at
-    assert at(coordinator.inject(codec.encode(request, context), plan).payload, plan.breakpoints[1].path)["text"] == "another input block"
-    assert coordinator.snapshot()["tail"]["tails"] == []
+    assert at(coordinator.inject(codec.encode(request, context), plan).payload, plan.breakpoints[-1].path)["text"] == "another input block"
+    assert coordinator.snapshot()["tail"] is None
 
 def test_compiler_anchors_last_real_user_interjection_not_runtime_user_context():
     from pal.core.runtime import PalCore
@@ -130,4 +131,5 @@ def test_compiler_anchors_last_real_user_interjection_not_runtime_user_context()
     active = [m.message_id for m in request.messages if m.prompt_region == PromptRegionIR.ACTIVE_INPUT]
     assert active[-1] == "interjection" and "context" not in active
     plan = PromptCacheCoordinator().plan(request, ShapeContext(WireShape.OPENAI_RESPONSE, "openai", "gpt-6-astra", provider_id="openai", capabilities={"prompt_cache": {"mode": "explicit"}}))
-    assert next(b for b in plan.breakpoints if b.label == "anchor_fixed").message_id == "interjection"
+    assert next(b for b in plan.breakpoints if b.label == "anchor_fixed").message_id == active[0]
+    assert "interjection" in {b.message_id for b in plan.breakpoints}

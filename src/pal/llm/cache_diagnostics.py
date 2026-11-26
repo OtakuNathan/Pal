@@ -138,7 +138,11 @@ def describe_request(request, raw_encoded, encoded) -> dict[str, Any]:
             parent = at_path(encoded.payload, path[:2])
             markers.append({"path": [*path, marker], "message_id": span.message_id,
                             "parent_item_type": parent.get("type", parent.get("role", "unknown"))})
-    parameters = {k: v for k, v in payload.items() if k not in {"input", "messages", "system", "tools", "max_tokens", "max_output_tokens", "temperature"}}
+    suffix = str(payload.get("model", "")).removeprefix("openai/") in {"gpt-6.2-astra", "gpt-6.2-sol"} and container_key == "input"
+    if suffix and payload.get("instructions"):
+        groups["dynamic"].append(payload["instructions"])
+        components["dynamic"] = dict(zip(("hash", "bytes"), fingerprint(groups["dynamic"])))
+    parameters = {k: v for k, v in payload.items() if k not in {"input", "messages", "system", "tools", "max_tokens", "max_output_tokens", "temperature"} and not (suffix and k == "instructions")}
     return {"components": components, "_items": items, "parameters_hash": fingerprint(parameters)[0],
             "wire_hash": fingerprint({"payload": encoded.payload, "extra_body": encoded.extra_body})[0],
             "applied_marker_paths": markers}

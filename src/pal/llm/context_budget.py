@@ -78,7 +78,7 @@ def standard_input_limit(endpoint: LLMEndpointSpec) -> int | None:
 def message_fingerprint(message: LLMMessageIR) -> bytes:
     replay = message.replay
     content = (replay.wire_shape, replay.endpoint_id, replay.model_id, replay.payload) if replay else message.parts
-    return hashlib.sha256(repr((message.role, message.prompt_region == "active_dynamic", content)).encode()).digest()
+    return hashlib.sha256(repr((message.role, message.prompt_region == "active_dynamic", message.instruction_scope, content)).encode()).digest()
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,7 @@ class UsageBoundary:
     tools: tuple[ToolDefinitionIR, ...]
     reasoning_context: str | None
     tokens: int
+    request_instructions: str = ""
 
     def tail(self, request: LLMRequestIR) -> tuple[LLMMessageIR, ...] | None:
         size = len(self.prefix)
@@ -109,7 +110,7 @@ def count_payload(shape: WireShape | None, wire: Mapping[str, Any]) -> dict[str,
     if shape == WireShape.ANTHROPIC_MESSAGES:
         return {key: value for key, value in payload.items()
                 if key in {"model", "messages", "system", "tools", "tool_choice", "thinking", "output_config",
-                           "output_format", "cache_control"}}
+                           "output_format", "cache_control", "extra_headers"}}
     if shape != WireShape.GEMINI_INTERACTIONS:
         return None
     contents = []

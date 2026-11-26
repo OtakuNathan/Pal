@@ -146,8 +146,36 @@ class ShapeEndpointInvoker:
         })
         return apply_provider_request_hooks(binding.codec.encode(request, context), context)
 
+    def encode_compact_request(self, endpoint: LLMEndpointModel, request: LLMRequestIR,
+                               encoded: EncodedRequest) -> EncodedRequest:
+        binding = self._binding(endpoint)
+        context = replace(binding.context, capabilities={**binding.context.capabilities,
+            "prompt_cache": request.metadata.get("cache_policy_selection", binding.context.capabilities.get("prompt_cache", {}))})
+        from pal.llm.cache_policy import resolve_mode
+        from pal.llm.ir import PromptRegionIR
+        raw = replace(encoded, payload=binding.adapter.compact_payload(encoded.payload), extra_body={})
+        if resolve_mode(context) != "explicit":
+            return raw
+        # Actual compact schema has no tools or ephemeral instructions. Its
+        # cache opportunity must not replace resident warm/reminder evidence.
+        messages = []
+        preamble = True
+        for message in request.messages:
+            preamble = preamble and message.role.value in {"system", "developer"}
+            messages.append(replace(message, prompt_region=PromptRegionIR.STABLE_SYSTEM if preamble else PromptRegionIR.SETTLED_HISTORY))
+        source = replace(request, logical_scope_id=request.logical_scope_id or str(request.metadata.get("prompt_cache_scope_id") or "pal:resident"),
+                         messages=tuple(messages),
+                         metadata={**request.metadata, "transient_history": True, "turn_id": "compact:" + uuid4().hex})
+        plan = self.prompt_cache.plan(source, context, raw)
+        result = self.prompt_cache.inject(raw, plan)
+        from pal.llm.cache_wire import audit
+        if not audit(result, tuple(p.path for p in plan.breakpoints), lookup_limit=plan.lookup_limit)[0]:
+            raise ValueError("invalid native compact cache markers")
+        return result
+
     def invoke_operation(
         self, endpoint: LLMEndpointModel, payload: dict[str, Any], *, operation: str,
+        extra_body: dict[str, Any] | None = None,
         timeout_seconds: float = 180.0, stream_control: LLMStreamControl | None = None,
     ) -> dict[str, Any]:
         from pal.llm.usage_normalization import usage_from_mapping
@@ -162,7 +190,7 @@ class ShapeEndpointInvoker:
         request_id = f"llm_{operation}_{uuid4().hex}"
         request = EncodedTransportRequest(
             request_id=request_id, wire_shape=binding.context.wire_shape,
-            timeout_seconds=timeout_seconds, payload=payload, stream=False,
+            timeout_seconds=timeout_seconds, payload=payload, extra_body=extra_body or {}, stream=False,
             operation=operation, stream_control=stream_control,
         )
         started = time.monotonic()
@@ -182,6 +210,15 @@ class ShapeEndpointInvoker:
             error_type = type(exc).__name__
             raise
         finally:
+            if operation == "compact":
+                usage = usage_from_mapping(result.get("usage") or None, input_accounting="inclusive_cache", final=True)
+                from pal.llm.cache_wire import protocol_nodes
+                marker_count = sum("prompt_cache_breakpoint" in node for _, node in protocol_nodes(payload))
+                logger.info("prompt_cache_usage operation=compact endpoint=%s status=%s markers=%d input=%s read=%s write=%s elapsed=%.3f",
+                            binding.spec.endpoint_id, status, marker_count, usage.input_tokens if usage.has("input_tokens") else None,
+                            usage.cached_input_tokens if usage.has("cached_input_tokens") else None,
+                            usage.cache_write_input_tokens if usage.has("cache_write_input_tokens") else None,
+                            time.monotonic() - started)
             if self.attempt_sink is not None and operation == "compact":
                 raw = result.get("usage") or {}
                 self.attempt_sink(LLMAttemptResult(

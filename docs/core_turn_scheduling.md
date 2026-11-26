@@ -150,3 +150,15 @@ watchdog, and the preceding journal ends while Ollama loads approximately
 1.1 GiB of model tensors. No OOM-killer entry was found, so the reboot cause is
 not established. Pal restarted automatically with the host; verification of
 the resulting loaded code and live behavior remains outstanding.
+
+## Cooperative normal interruption
+
+A user interrupt before a model contribution is accepted cancels that generation.
+After acceptance, the complete tool-call batch has execution authority: a normal
+interrupt latches stop-after-batch, including for repeated interrupts. All its
+calls run, real results and sidecar context are committed, and the round is
+checkpointed before interruption closes the turn. No next model request is
+admitted. Shell calls that return an execution-session handle are already closed
+calls; they do not wait for the external process to exit. Hard reset and host
+shutdown retain their cancellation paths. The cooperative rule does not make
+arbitrary tool failures or process death transactional.

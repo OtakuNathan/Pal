@@ -10,7 +10,8 @@ from threading import RLock
 from typing import Any, Callable, Mapping
 
 from pal.llm import cache_wire as wire
-from pal.llm.cache_tail import TailHistory, POLICY
+from pal.llm.cache_tail import choose_paths, POLICY
+from pal.llm.cache_capabilities import explicit_lookup_limit
 from pal.llm.cache_policy import (
     CacheProfile, CacheProfileError, CACHE_PROFILES, PromptCacheDialect,
     resolve_profile as _resolve_profile, resolve_dialect as _resolve_dialect,
@@ -86,9 +87,9 @@ class PromptCachePlan:
     profile_generation: str = ""
     allow_stable_anchor_marker: bool = False
     prepared_encoded: EncodedRequest | None = field(default=None, repr=False, compare=False)
-    tail_incarnation: object | None = field(default=None, repr=False, compare=False)
-    tail_generation: int = 0
-    tail_current: wire.Boundary | None = None
+    lookup_limit: int = 4
+    turn_id: str = ""
+    scope_identity: object | None = field(default=None, repr=False, compare=False)
     admission: _CacheAdmission = field(default_factory=_CacheAdmission, repr=False, compare=False)
     mode: str = "implicit"
     reminder: CacheReminderBasis | None = field(default=None, repr=False, compare=False)
@@ -201,6 +202,7 @@ class _AnchorReadEvidence:
 
 @dataclass
 class _ScopeStats:
+    identity: object = field(default_factory=object, repr=False)
     observations: deque[tuple[float, int, int]] = field(
         default_factory=lambda: deque(maxlen=8)
     )
@@ -220,6 +222,7 @@ class _ScopeStats:
     observed_sequence: int = -1
     actual_provider: str = ""
     wire_description: dict[str, Any] | None = None
+    last_turn_id: str = ""
     last_round_index: int = -1
     round_attempt_count: int = 0
     stall_suspected: bool = False
@@ -251,7 +254,7 @@ class PromptCacheCoordinator:
     observation_ttl_seconds: float = 30.0 * 60.0
     max_scope_count: int = 256
     max_attempt_records: int = 128
-    _tails: dict[str, TailHistory] = field(default_factory=dict, init=False, repr=False)
+    _closed_turns: dict[str, None] = field(default_factory=dict, init=False, repr=False)
     _stats: dict[str, _ScopeStats] = field(default_factory=dict, init=False, repr=False)
     _anchor_evidence: dict[str, _AnchorReadEvidence] = field(
         default_factory=dict, init=False, repr=False
@@ -497,74 +500,98 @@ class PromptCacheCoordinator:
         return plan
 
     def _plan_tail(self, request, context, encoded, dialect, profile_fields, mode):
-        clean = wire.clean_request(encoded)
+        clean = wire.clean_request(encoded, finalize=False)
+        payload = thaw_json(clean.payload)
         spans = {s.message_id: s for s in clean.message_spans}
-        def boundary(span):
-            if span is None or not span.cache_targets:
-                return None
-            return wire.Boundary(span.message_id, span.cache_targets[-1],
-                                   span.cache_prefix_fingerprint, span.estimated_cache_prefix_tokens)
-        stable = boundary(_last_cacheable_span(request, spans, regions={PromptRegionIR.STABLE_SYSTEM}))
-        anchor = boundary(_last_cacheable_span(request, spans, regions={PromptRegionIR.ACTIVE_INPUT}))
+        owners = {}
+        stable = anchor = continuity_anchor = frontier = None
+        continuity_is_active = False
+        candidates = []
         from pal.shared.tool_protocol import ToolResultIR
+        from pal.llm.compaction import is_native_window
         pending_calls = set()
-        frontier = None
         for message in request.messages:
+            if message.state != MessageState.COMPLETE or message.prompt_region == PromptRegionIR.ACTIVE_DYNAMIC:
+                break
+            if is_native_window(message):
+                candidates.clear()
+                anchor = continuity_anchor = frontier = None
+                continuity_is_active = False
             pending_calls.update(call.call_id for call in message.tool_calls)
             pending_calls.difference_update(part.call_id for part in message.parts if isinstance(part, ToolResultIR))
-            if (not pending_calls and message.state == MessageState.COMPLETE
-                    and message.prompt_region == PromptRegionIR.ACTIVE_HISTORY):
-                frontier = boundary(spans.get(message.message_id)) or frontier
-        key_request = replace(request, metadata={**request.metadata, "turn_id": "", "artifact_turn_id": ""})
-        scope = _scope_key(key_request, context, dialect) + "|" + wire.digest(
-            {"strategy": POLICY, "mode": mode, "binding": _prompt_cache_capabilities(context.capabilities)})
+            span = spans.get(message.message_id)
+            if pending_calls or span is None or message.prompt_region == PromptRegionIR.UNSPECIFIED:
+                continue
+            if span.continuity_target and wire.marker_target_supported(wire.at(payload, span.continuity_target)):
+                continuity_anchor = span.continuity_target
+                owners[continuity_anchor] = message.message_id
+                continuity_is_active = message.prompt_region == PromptRegionIR.ACTIVE_INPUT
+            if not span.cache_targets:
+                continue
+            path = span.cache_targets[-1]
+            if not wire.marker_target_supported(wire.at(payload, path)):
+                continue
+            owners[path] = message.message_id
+            if message.prompt_region == PromptRegionIR.STABLE_SYSTEM:
+                stable = path
+            else:
+                candidates.append(path)
+                if message.prompt_region == PromptRegionIR.ACTIVE_INPUT:
+                    anchor = path
+                elif message.prompt_region == PromptRegionIR.ACTIVE_HISTORY:
+                    frontier = path
+        candidates = sorted(set(candidates))
+        if mode == "explicit":
+            anchor = continuity_anchor or (candidates[0] if candidates else None)
+            limit = explicit_lookup_limit(context)
+            paths = choose_paths(stable, anchor, candidates, limit)
+        else:
+            anchor = continuity_anchor if continuity_is_active or anchor is None else anchor
+            limit = 2
+            paths = choose_paths(stable, anchor, (), limit)
+        points = []
+        for path in paths:
+            b = wire.boundary_at(clean, owners[path], path, payload=payload)
+            if b is None:
+                continue
+            label = ("stable" if path == stable else "anchor_fixed" if path == anchor else
+                     "tail_current" if path == paths[-1] else "tail_previous")
+            points.append(PromptCacheBreakpoint(label, b.message_id, "30m", b.coordinate, b.path))
+        estimated_prefix = max((b.prefix_tokens for b in points), default=0)
+        if mode == "hybrid" and frontier:
+            boundary = wire.boundary_at(clean, owners[frontier], frontier, payload=payload)
+            if boundary is not None:
+                estimated_prefix = max(estimated_prefix, boundary.coordinate)
+        turn = str(request.metadata.get("turn_id") or request.metadata.get("artifact_turn_id") or "")
+        # Diagnostics and warm evidence have a bounded session owner. Side
+        # questions retain their own local owner despite sharing the upstream key.
+        scope_request = request if request.metadata.get("transient_history") else replace(
+            request, metadata={**request.metadata, "turn_id": "", "artifact_turn_id": ""})
+        scope = _scope_key(scope_request, context, dialect) + "|" + wire.digest({"strategy": POLICY, "mode": mode,
+            "binding": _prompt_cache_capabilities(context.capabilities)})
+        if request.metadata.get("transient_history"):
+            scope += "|transient:" + _short_hash(str(request.metadata.get("projection_scope_id") or turn))
         with self._lock:
-            state = self._tails.setdefault(scope, TailHistory())
-            now = time.monotonic()
-            turn = str(request.metadata.get("turn_id") or request.metadata.get("artifact_turn_id") or "")
-            continuity = str(request.metadata.get("continuity_id") or "")
-            if continuity != state.continuity_id:
-                state.continuity_id, state.continuity_turn = continuity, turn
-            if continuity:
-                for message in request.messages:
-                    span = spans.get(message.message_id)
-                    if span and span.continuity_target and message.metadata.get("continuity_id") == continuity:
-                        compact = wire.boundary_at(clean, message.message_id, span.continuity_target)
-                        if compact and (state.continuity_turn == turn or anchor is None):
-                            anchor = compact
-                        break
-            valid = {b.path: wire.boundary_at(clean, b.message_id, b.path)
-                     for b in state.tails if b.message_id in spans
-                     and b.path in spans[b.message_id].cache_targets}
-            epoch = (stable.fingerprint if stable else "", anchor.fingerprint if anchor else "")
-            state.refresh(turn, epoch, valid, now)
-            estimated_prefix = max((b.coordinate for b in (anchor, frontier) if b), default=0)
-            if (mode != "explicit" or state.closed or frontier is None
-                    or anchor is not None and frontier.path <= anchor.path):
-                frontier = None
-            previous = state.previous(frontier)
-            points = []
-            for label, b in (("stable", stable), ("anchor_fixed", anchor),
-                             ("tail_previous", previous), ("tail_current", frontier)):
-                if b is not None and b.path not in {p.path for p in points}:
-                    points.append(PromptCacheBreakpoint(label, b.message_id, "30m", b.coordinate, b.path))
-            state.planned_sequence += 1
+            stats = self._stats.setdefault(scope, _ScopeStats())
+            stats.next_plan_sequence += 1
+            stats.last_access_at = time.monotonic()
             plan = PromptCachePlan(scope_key=scope, cache_key=_cache_key(request, context),
                 dialect=dialect, breakpoints=tuple(points), mode=mode,
-                decision="eager_tail" if mode == "explicit" else "hybrid_fixed_anchors",
-                plan_sequence=state.planned_sequence,
+                decision="session_chase_tail" if mode == "explicit" else "hybrid_fixed_anchors",
+                plan_sequence=stats.next_plan_sequence,
                 estimated_prefix_tokens=estimated_prefix,
-                prepared_encoded=clean, tail_incarnation=state.incarnation,
-                tail_generation=state.generation, tail_current=frontier,
+                prepared_encoded=clean, lookup_limit=limit, turn_id=turn, scope_identity=stats.identity,
                 **dict(profile_fields, strategy=POLICY if mode == "explicit" else "fixed_anchors"))
-            self._prune_scopes_locked(now=now, keep=scope)
-            plan = self._remember(plan, request=request, context=context, encoded=clean)
-            return plan
+            self._prune_scopes_locked(now=stats.last_access_at, keep=scope)
+            return self._remember(plan, request=request, context=context, encoded=clean)
 
     def end_turn(self, turn_id: str) -> None:
+        if not turn_id:
+            return
         with self._lock:
-            for state in self._tails.values():
-                state.end_turn(turn_id)
+            self._closed_turns[turn_id] = None
+            while len(self._closed_turns) > self.max_scope_count:
+                self._closed_turns.pop(next(iter(self._closed_turns)))
 
     def inject(self, encoded: EncodedRequest, plan: PromptCachePlan) -> EncodedRequest:
         if plan.prepared_encoded is not None:
@@ -607,13 +634,13 @@ class PromptCacheCoordinator:
         )
 
     def discard_accounted_attempt(self, plan: PromptCachePlan, request_id: str) -> None:
-        """Usage ledger owns receipt deduplication; tail history has no pending ACK."""
+        """Usage ledger owns receipt deduplication; marker planning has no pending ACK."""
         return
 
     def prepare_attempt(self, request: LLMRequestIR, context: ShapeContext,
                         raw_encoded: EncodedRequest, request_id: str, *,
                         finalize_request: Callable[[EncodedRequest], EncodedRequest] | None = None):
-        # Freeze and audit before transport admission; do not consume tail history.
+        # Freeze and audit before transport admission; selection is already stateless.
         with self._lock:
             plan = self.plan(request, context, raw_encoded)
             encoded = self.inject(raw_encoded, plan)
@@ -628,22 +655,25 @@ class PromptCacheCoordinator:
                       raw_encoded: EncodedRequest, request_id: str) -> dict[str, Any]:
         if plan.prepared_encoded is not None:
             with self._lock:
-                state = self._tails.get(plan.scope_key)
                 expected = tuple(b.path for b in plan.breakpoints)
                 audited, wire_hash = wire.audit(encoded, expected, mode=plan.mode,
-                    gateway=plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT)
+                    gateway=plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT, lookup_limit=plan.lookup_limit)
                 actual_clean = wire.clean_request(encoded, finalize=False)
-                audited &= all(wire.boundary_at(actual_clean, b.message_id, b.path)
-                               == wire.boundary_at(plan.prepared_encoded, b.message_id, b.path)
-                               for b in plan.breakpoints)
+                # The last exact boundary authenticates every earlier byte in
+                # the same chronological wire prefix; no need to rehash 52
+                # overlapping long prefixes twice before every submission.
+                if plan.breakpoints:
+                    b = plan.breakpoints[-1]
+                    audited &= (wire.boundary_at(actual_clean, b.message_id, b.path)
+                                == wire.boundary_at(plan.prepared_encoded, b.message_id, b.path))
                 audited &= encoded.extra_body.get("prompt_cache_key") == plan.cache_key
                 if plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT:
                     audited &= encoded.extra_body.get("session_id") == plan.cache_key
-                audited &= (state is not None and state.incarnation is plan.tail_incarnation
-                            and state.generation == plan.tail_generation and not state.closed)
+                stats = self._stats.get(plan.scope_key)
+                audited &= plan.turn_id not in self._closed_turns and stats is not None and stats.identity is plan.scope_identity
                 if not audited:
                     raise CacheProfileError("cache marker payload or content generation changed before submission")
-                tail_snapshot = state.snapshot()
+                tail_snapshot = {"marker_count": len(plan.breakpoints), "strategy": plan.strategy}
         description = describe_request(request, raw_encoded, encoded)
         now = time.monotonic()
         with self._lock:
@@ -651,8 +681,10 @@ class PromptCacheCoordinator:
             changes = compare_requests(stats.wire_description, description)
             gap = now - stats.last_request_at if stats.last_request_at else None
             round_index = int(request.metadata.get("llm_round_index") or 0)
-            stats.round_attempt_count = stats.round_attempt_count + 1 if stats.last_round_index == round_index else 1
+            turn_id = str(request.metadata.get("turn_id") or request.metadata.get("artifact_turn_id") or "")
+            stats.round_attempt_count = stats.round_attempt_count + 1 if stats.last_round_index == round_index and stats.last_turn_id == turn_id else 1
             stats.last_round_index = round_index
+            stats.last_turn_id = turn_id
             stats.wire_description = description
             stats.last_request_at = now
             stats.last_access_at = now
@@ -671,6 +703,7 @@ class PromptCacheCoordinator:
                 "retry_recovery_cause": str(request.metadata.get("max_output_recovery_stage") or request.metadata.get("retry_cause") or ""),
                 "session_key_hash": _short_hash(str(encoded.extra_body.get("session_id") or "")),
                 "prompt_log_enabled": bool(request.metadata.get("prompt_log_enabled")),
+                "operation": "semantic_compact" if request.metadata.get("compaction_policy") else "btw" if request.metadata.get("transient_history") else "generate",
             }
         if plan.prepared_encoded is not None:
             diagnostics.update(cache_tail=tail_snapshot, wire_audit_fingerprint=wire_hash)
@@ -689,11 +722,6 @@ class PromptCacheCoordinator:
             if plan.admission.observed:
                 return
             plan.admission.observed = True
-            if plan.prepared_encoded is not None:
-                state = self._tails.get(plan.scope_key)
-                if state is not None and state.incarnation is plan.tail_incarnation:
-                    state.submit(plan.tail_current, plan.tail_generation)
-                    diagnostics["cache_tail"] = state.snapshot()
         self.record_attempt(plan, status="submitted", request_id=request_id, **diagnostics)
 
     def record_attempt(
@@ -740,6 +768,7 @@ class PromptCacheCoordinator:
             "attempt_id": str(request_id or ""),
             "provider_generation_id": str(provider_generation_id or ""),
             "status": str(status or "unknown"),
+            "transport_admitted": plan.admission.observed,
             "scope_key_hash": _short_hash(plan.scope_key),
             "cache_key_hash": _short_hash(plan.cache_key),
             "dialect": plan.dialect.value,
@@ -829,7 +858,8 @@ class PromptCacheCoordinator:
                 self._attempt_records.append(record)
             if status in {"failed", "cancelled"}:
                 stats = self._stats.get(plan.scope_key)
-                if stats is not None and plan.plan_sequence >= stats.observed_sequence:
+                if (stats is not None and (plan.prepared_encoded is None or stats.identity is plan.scope_identity)
+                        and plan.plan_sequence >= stats.observed_sequence):
                     stats.observed_sequence = plan.plan_sequence
                     stats.stall_suspected = False
                     stats.stall_rounds = 0
@@ -843,6 +873,13 @@ class PromptCacheCoordinator:
             if previous is not None:
                 previous["prompt_log_enabled"] = log_enabled
             log_record = dict(previous if previous is not None else record) if log_enabled else {}
+        if status not in {"prepared", "submitted"} and plan.mode in {"explicit", "implicit"}:
+            logger.info("prompt_cache_usage operation=%s endpoint=%s status=%s markers=%d input=%s read=%s write=%s elapsed=%.3f",
+                        diagnostics.get("operation", "generate"), endpoint_id, status, len(plan.breakpoints),
+                        usage.input_tokens if usage and usage.has("input_tokens") else None,
+                        usage.cached_input_tokens if usage and usage.has("cached_input_tokens") else None,
+                        usage.cache_write_input_tokens if usage and usage.has("cache_write_input_tokens") else None,
+                        elapsed_seconds)
         if log_enabled and plan.prepared_encoded is not None:
             event = {key: log_record.get(key) for key in (
                 "attempt_id", "status", "turn_id", "round_index", "cache_mode", "strategy", "planned_markers",
@@ -901,11 +938,15 @@ class PromptCacheCoordinator:
         applied_breakpoint_ids = frozenset(applied_cache_breakpoint_message_ids)
         with self._lock:
             self._reminders.record_success(plan.reminder, usage, maximum=self.max_scope_count)
-            stats = self._stats.setdefault(plan.scope_key, _ScopeStats())
+            stats = (self._stats.get(plan.scope_key) if plan.prepared_encoded is not None
+                     else self._stats.setdefault(plan.scope_key, _ScopeStats()))
             now = time.monotonic()
-            stats.last_access_at = now
-            self._prune_scopes_locked(now=now, keep=self._last_plan.scope_key if self._last_plan else plan.scope_key)
-            if plan.plan_sequence == stats.next_plan_sequence and plan.plan_sequence > stats.observed_sequence:
+            current = (stats is not None and (plan.prepared_encoded is None or
+                       (stats.identity is plan.scope_identity and plan.admission.observed and plan.turn_id not in self._closed_turns)))
+            if current:
+                stats.last_access_at = now
+                self._prune_scopes_locked(now=now, keep=self._last_plan.scope_key if self._last_plan else plan.scope_key)
+            if current and plan.plan_sequence == stats.next_plan_sequence and plan.plan_sequence > stats.observed_sequence:
                 if usage.has("cached_input_tokens"):
                     stats.observations.append(
                         (
@@ -986,7 +1027,7 @@ class PromptCacheCoordinator:
                 else None
             )
             return {
-                "tail": self._tails[plan.scope_key].snapshot() if plan and plan.scope_key in self._tails else None,
+                "tail": None,
                 "dialect": plan.dialect.value if plan is not None else "none",
                 "mode": plan.mode if plan is not None else "implicit",
                 "decision": plan.decision if plan is not None else "not_planned",
@@ -1035,7 +1076,7 @@ class PromptCacheCoordinator:
                 ),
                 "observed_request_count": observed,
                 "request_hit_rate": hit_requests / observed if observed else 0.0,
-                "scope_count": len(set(self._stats) | set(self._tails)),
+                "scope_count": len(self._stats),
                 "last_scope_key": plan.scope_key if plan is not None else "",
                 "attempt_record_count": len(self._attempt_records),
                 "recent_attempts": [
@@ -1092,7 +1133,7 @@ class PromptCacheCoordinator:
         wanted_scope = str(logical_scope_id or "pal:resident").strip()
         with self._lock:
             now = time.monotonic()
-            for scope_key, evidence in list(self._anchor_evidence.items()):
+            for scope_key, evidence in sorted(self._anchor_evidence.items(), key=lambda item: item[1].submitted_at, reverse=True):
                 if str(
                     getattr(evidence.request, "logical_scope_id", "") or ""
                 ) != wanted_scope:
@@ -1130,7 +1171,7 @@ class PromptCacheCoordinator:
         wanted_scope = str(logical_scope_id or "pal:resident").strip()
         with self._lock:
             now = time.monotonic()
-            for scope_key, evidence in list(self._anchor_evidence.items()):
+            for scope_key, evidence in sorted(self._anchor_evidence.items(), key=lambda item: item[1].submitted_at, reverse=True):
                 if str(
                     getattr(evidence.request, "logical_scope_id", "") or ""
                 ) != wanted_scope:
@@ -1196,7 +1237,7 @@ class PromptCacheCoordinator:
         prefix_tokens = plan.anchor.submitted_prefix_tokens
         ttl = plan.anchor.ttl
         position = -1
-        # Eager S/T/tail plans no longer populate the old economic anchor
+        # Session S/T/tail plans no longer populate the old economic anchor
         # track. Derive replay material from their actual encoded boundaries,
         # without inventing an ACK or changing any cache-write decisions.
         if plan.prepared_encoded is not None:
@@ -1231,10 +1272,7 @@ class PromptCacheCoordinator:
             return
         # The anchor identifies the end of this exact prefix, not a complete
         # request which may also contain later dynamic messages or R content.
-        prefix_request = (
-            request if position == len(request.messages) - 1
-            else replace(request, messages=request.messages[:position + 1])
-        )
+        prefix_request = replace(request, messages=request.messages[:position + 1], request_instructions="")
         self._anchor_evidence[plan.scope_key] = _AnchorReadEvidence(
             request=prefix_request,
             anchor_message_id=message_id,
@@ -1251,15 +1289,13 @@ class PromptCacheCoordinator:
     def _prune_scopes_locked(self, *, now: float, keep: str = "") -> None:
         for stats in self._stats.values():
             stats.prune(now=now, ttl_seconds=self.observation_ttl_seconds)
-        scopes = set(self._stats) | set(self._tails)
+        scopes = set(self._stats)
         def accessed(key):
-            return max(self._stats[key].last_access_at if key in self._stats else 0,
-                       self._tails[key].last_access if key in self._tails else 0)
+            return self._stats[key].last_access_at
         maximum = max(1, int(self.max_scope_count))
         for key in sorted(scopes, key=accessed):
             if key != keep and (now - accessed(key) > self.observation_ttl_seconds or len(scopes) > maximum):
                 self._stats.pop(key, None)
-                self._tails.pop(key, None)
                 self._anchor_evidence.pop(key, None)
                 scopes.remove(key)
 

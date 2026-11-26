@@ -18,8 +18,10 @@ from pal.llm.conversions import tool_definition_ir_from_dict
 from pal.llm.ir import LLMRequestIR, PromptRegionIR
 from pal.llm.contracts import LLM_RUNTIME, collect_generation
 from pal.shared.proactive_protocol import SILENT_ONCE_SCHEDULER
+from pal.shared.tool_protocol import ToolExecutionResult
 from pal.core.core_events import TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_TOOL_CALL_FAILED
 from pal.memory.context_view import projected_messages
+from pal.memory.prompt_context import prompt_date_pin
 from pal.memory.contracts import MEMORY, MemoryCompactResult
 from pal.shared import PromptAssemblyContext, TurnDeliveryBinding
 
@@ -28,7 +30,7 @@ if TYPE_CHECKING:
     from pal.core.runtime import PalCore
     from pal.core.turns import TurnContinuation, TurnOutcome
     from pal.llm.contracts import LLMGenerationResult
-    from pal.shared.tool_protocol import ToolCallIR, ToolExecutionResult
+    from pal.shared.tool_protocol import ToolCallIR
     from pal.llm.compaction_engine import CompactionRunResult
 
 T = TypeVar("T")
@@ -137,11 +139,32 @@ class CoreControlRuntime:
         self._core.turn_manager.cleanup_interrupted(turn_id, reason=reason)
 
     async def generate(self, request: LLMRequestIR) -> LLMGenerationResult:
+        parent = self._core.state.active_turns.get(str(request.metadata.get("parent_turn_id") or ""))
+        if parent is not None and parent.stop_after_tool_batch:
+            raise RuntimeError("Recovery generation stopped by resident interrupt")
         self._core._debug_log_prompt(request)
-        return await collect_generation(self._core.context.require_port(LLM_RUNTIME).generate(request))
+        generation = collect_generation(self._core.context.require_port(LLM_RUNTIME).generate(request))
+        if parent is None or not parent.accepted_tool_batch_open:
+            return await generation
+        task = asyncio.create_task(generation)
+        parent.recovery_generation_task = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            running = asyncio.current_task()
+            if parent.stop_after_tool_batch and not parent.interrupted and (running is None or not running.cancelling()):
+                raise RuntimeError("Recovery generation stopped by resident interrupt") from None
+            raise
+        finally:
+            if parent.recovery_generation_task is task:
+                parent.recovery_generation_task = None
 
     async def execute_local_tool(self, call: ToolCallIR, *, scope_id: str, phase: str,
                                  turn_id: str = "") -> ToolExecutionResult:
+        parent = self._core.state.active_turns.get(turn_id)
+        if phase == "safe_mode" and parent is not None and parent.stop_after_tool_batch:
+            return ToolExecutionResult(name=call.name, ok=False, call_id=call.call_id,
+                                       llm_text="Optional recovery stopped by resident interrupt")
         event = {"subsystem": "execution", "component": call.args.get("name", call.name)
                  if call.name == "call_tool" else call.name, "tool_name": call.name,
                  "call_id": call.call_id, "scope_id": scope_id, "phase": phase}
@@ -204,8 +227,10 @@ class CoreControlRuntime:
     def capture_prompt(self) -> LLMRequestIR:
         core = self._core
         memory = core.context.require_port(MEMORY)
+        pin = prompt_date_pin(memory)
         prompt = core.prompt_compiler.build_canonical_prompt(
-            PromptAssemblyContext(metadata={"typed_l1_projection": True}),
+            PromptAssemblyContext(metadata={"typed_l1_projection": True,
+                                            **({"prompt_utc_date": pin["date"]} if pin else {})}),
             max_output_tokens=core.config.fallback_max_output_tokens)
         history = memory.project_continuity([
             message for turn in memory.history.turns for message in projected_messages(turn, settled=True)])

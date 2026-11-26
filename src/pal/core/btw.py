@@ -20,6 +20,8 @@ from pal.foundation.diagnostics import exception_reason
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
+from pal.memory.prompt_context import prompt_date_pin
+from pal.shared.prompt_dates import today_for_timezone
 from pal.shared import EventKind, LLMFinishReason, LLMPreflightStatus, RuntimeStatus
 from pal.shared.ports import PortRegistry
 
@@ -145,6 +147,8 @@ class BtwTurn:
                 handle_llm_provider_errors=False, executor_type=BtwTurnExecutor,
             )
             self.runtime.executor._scope_id = self.turn_id
+            pin = prompt_date_pin(source)
+            self.runtime.executor.borrowed_prompt_date = pin["date"] if pin else today_for_timezone("UTC")
             self.continuation = TurnContinuation(
                 turn_id=self.turn_id, opening_event=event,
                 delivery_binding=envelope.opening_delivery_binding,

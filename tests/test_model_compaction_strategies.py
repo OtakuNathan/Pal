@@ -141,6 +141,31 @@ def test_native_output_is_canonical_not_executable_and_counted_exactly():
         rt._compile_request(rt.endpoint_resolver.endpoints[1], request(seed))
 
 
+def test_native_compact_uses_chase_tail_on_its_own_schema():
+    from pal.llm.cache_wire import protocol_nodes
+    from pal.llm.ir import PromptRegionIR
+    rt, ep, transport = runtime(model="gpt-6.2-sol", capabilities_blob={"prompt_cache": {"mode": "explicit"}})
+    system = LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("Stable instructions"),), prompt_region=PromptRegionIR.STABLE_SYSTEM)
+    source = replace(request(system, *(user(f"record {i}", prompt_region=PromptRegionIR.SETTLED_HISTORY) for i in range(60))),
+                     logical_scope_id="pal:resident", request_instructions="Temporary reminder")
+    rt_meta = rt.metadata()
+    assert rt_meta.supports_suffix_instructions
+    asyncio.run(rt.acompact_native(source))
+    compact, = [r for r in transport.requests if r.operation == "compact"]
+    assert set(compact.payload) == {"model", "input"}
+    assert len([path for path, node in protocol_nodes(thaw_json(compact.payload)) if "prompt_cache_breakpoint" in node]) == 52
+    assert compact.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+    prepared = rt._compile_request(ep, source, count_native=False)
+    invoker = rt.endpoint_invoker
+    raw = invoker.encode_request(ep, prepared.request)
+    from pal.llm.shapes.base import ShapeContext
+    ctx = ShapeContext(WireShape.OPENAI_RESPONSE, ep.endpoint_id, ep.model_id, provider_id=ep.provider, base_url=ep.base_url, capabilities=ep.capabilities_blob)
+    normal = invoker.prompt_cache.plan(prepared.request, ctx, raw)
+    assert normal.cache_key == compact.extra_body["prompt_cache_key"]
+    assert all(p.path[0] == "input" for p in normal.breakpoints)
+    assert raw.payload["instructions"] == "Temporary reminder"
+
+
 def test_canonical_prefix_is_not_duplicated_on_replay_or_recompact():
     rt, ep, transport = runtime()
     preamble = LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("stable system"),))
@@ -558,6 +583,34 @@ def test_usage_baseline_covers_matching_prefix_and_estimates_only_new_messages()
         assert rt._budget_request(ep, changed, verify=True).budget_details["budget_source"] == "local"
     rt.release_context("resident")
     assert rt._budget_request(ep, prompt, verify=True).budget_details["baseline_tokens"] == 0
+
+
+def test_native_compact_source_keeps_semantic_seed_and_omits_expired_controls():
+    from tests.test_control_plane import PalControlFlowTests
+    from pal.memory.contracts import L1MessageKind
+
+    async def scenario():
+        fixture = PalControlFlowTests()
+        await fixture.asyncSetUp()
+        rt, _, transport = runtime()
+        fixture.core.context.port_registry["llm:llm"] = rt
+        memory = fixture.memory_service
+        memory.begin_l1_turn("old", user_text="old request")
+        memory.append_l1_user("old", LLMMessageIR(MessageRole.USER, (TextPartIR("SEMANTIC_SEED_FACT"),),
+            semantic_kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY))
+        memory.prepare_l1_prompt_context("old", [], [{"key": "runtime:temporary", "role": "developer", "content": "EXPIRED_CONTROL"}], boundary="test")
+        memory.upsert_l1_assistant("old", assistant())
+        memory.settle_l1_turn("old")
+        memory.history_root.promote()
+        result = await fixture.core.turn_executor.compaction.run(memory,
+            target_input_budget=8192, reserved_output_tokens=512, max_attempts=1)
+        assert result.success, result.failures
+        compact, = [r for r in transport.requests if r.operation == "compact"]
+        assert "SEMANTIC_SEED_FACT" in str(compact.payload)
+        assert "EXPIRED_CONTROL" not in str(compact.payload)
+        fixture.core.close()
+
+    asyncio.run(scenario())
 
 
 def test_native_compact_preserves_completed_right_tail_when_only_the_tail_crosses_price():

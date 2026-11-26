@@ -116,7 +116,11 @@ class AnchorReadConfirmationTests(unittest.TestCase):
             anchor_write.anchor.submitted_message_id)
         self.assertEqual(confirmed["dialect"], "anthropic_explicit")
         self.assertEqual(confirmed["wire_shape"], "anthropic_messages")
-        self.assertIs(confirmed["request"], request)
+        captured = confirmed["request"]
+        end = next(i for i, message in enumerate(request.messages)
+                   if message.message_id == confirmed["anchor_message_id"])
+        self.assertEqual(captured, replace(request, messages=request.messages[:end + 1],
+                                           request_instructions=""))
 
     def test_short_read_does_not_confirm(self):
         context = _anthropic_context()
@@ -199,7 +203,11 @@ class AnchorReadConfirmationTests(unittest.TestCase):
             ),
         )
         confirmed = coordinator.confirmed_anchor_request(logical_scope_id="bunshin:x")
-        self.assertIs(confirmed["request"], request)
+        captured = confirmed["request"]
+        end = next(i for i, message in enumerate(request.messages)
+                   if message.message_id == confirmed["anchor_message_id"])
+        self.assertEqual(captured, replace(request, messages=request.messages[:end + 1],
+                                           request_instructions=""))
         for other_scope in ("pal:resident", "bunshin:y"):
             self.assertEqual(
                 coordinator.confirmed_anchor_request(logical_scope_id=other_scope), {},

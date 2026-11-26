@@ -2021,7 +2021,13 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         continuation.emitted_reply_texts.append("I found a runtime clue before interruption.")
 
-        interrupted = await self.core.turn_manager.interrupt_active_turn()
+        handle = _BlockingInterruptHandle()
+        self.core.context.execution_runtime.register_interrupt_handle("turn-1", handle)
+        try:
+            interrupted = await asyncio.wait_for(self.core.turn_manager.interrupt_active_turn(), timeout=2)
+            self.assertEqual(handle.calls, 0)
+        finally:
+            self.core.context.execution_runtime.release_interrupt_handle("turn-1", handle)
 
         self.assertTrue(interrupted)
         self.assertTrue(continuation.interrupted)
@@ -2047,6 +2053,174 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("orphan tool result", committed_text)
         with self.assertRaises(asyncio.CancelledError):
             await task
+
+    async def test_claude_scoped_reminders_are_committed_once_after_each_closed_round(self) -> None:
+        from pal.llm.ir import InstructionScopeIR, WireShape
+        from pal.llm.shapes.base import ShapeContext
+        from pal.llm.shapes.anthropic_messages import AnthropicMessagesCodec
+        from pal.shared import PromptAssemblyContext
+        original = self.llm_runtime._endpoint_facts
+        self.llm_runtime._endpoint_facts = lambda **kw: {**original(**kw), "supports_turn_scoped_instructions": True}
+        envelope = self._make_channel_envelope(turn_id="claude-scope", request_id="req")
+        continuation = TurnContinuation("claude-scope", iter(()), "req", opening_event=envelope.event)
+        self.memory_service.begin_l1_turn("claude-scope", user_text="first question")
+        assembly = PromptAssemblyContext(event=envelope.event, core_mode="default")
+        continuation.finalization_only = True
+        continuation.finalization_reason = "First scoped reminder."
+        preflight = self.core.turn_executor.build_turn_prompt(continuation, assembly, max_output_tokens=128)
+        self.assertTrue(any(m.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE for m in preflight.messages))
+        self.assertFalse(any(m.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE for m in self.memory_service.active_l1_turn("claude-scope").messages))
+        continuation.llm_round_index = 1
+        first = self.core.turn_executor.build_turn_prompt(continuation, assembly, max_output_tokens=128, commit_scoped_instruction=True)
+        initial = next(m for m in first.messages if m.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE)
+        continuation.finalization_reason = "Do not rewrite the submitted reminder."
+        repeated = self.core.turn_executor.build_turn_prompt(continuation, assembly, max_output_tokens=128, commit_scoped_instruction=True)
+        self.assertEqual(initial, next(m for m in repeated.messages if m.message_id == initial.message_id))
+        call = new_tool_call(call_id="probe", name="probe", args={})
+        self.memory_service.upsert_l1_assistant("claude-scope", LLMMessageIR(MessageRole.ASSISTANT, (call,)))
+        self.memory_service.append_l1_tool_result("claude-scope", ToolResultIR(call_id=call.call_id, name=call.name, content="real result"))
+        continuation.llm_round_index = 2
+        continuation.finalization_reason = "Second scoped reminder."
+        second = self.core.turn_executor.build_turn_prompt(continuation, assembly, max_output_tokens=128, commit_scoped_instruction=True)
+        ctx = ShapeContext(WireShape.ANTHROPIC_MESSAGES, "claude", "claude-opus-5-5", "anthropic", "https://api.anthropic.com")
+        codec = AnthropicMessagesCodec()
+        a, b = codec.encode(first, ctx), codec.encode(second, ctx)
+        self.assertEqual(a.payload["messages"], b.payload["messages"][:len(a.payload["messages"])])
+        self.assertEqual([m["role"] for m in b.payload["messages"][-3:]], ["assistant", "user", "system"])
+        self.memory_service.upsert_l1_assistant("claude-scope", LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR("answer"),)))
+        self.memory_service.settle_l1_turn("claude-scope")
+        self.memory_service.begin_l1_turn("claude-next", user_text="next question")
+        successor = TurnContinuation("claude-next", iter(()), "next")
+        prompt = self.core.turn_executor.build_turn_prompt(successor, assembly, max_output_tokens=128)
+        self.assertEqual(2, len([m for m in prompt.messages if m.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE]))
+        self.llm_runtime._endpoint_facts = original
+        switched = self.core.turn_executor.build_turn_prompt(successor, assembly, max_output_tokens=128)
+        self.assertFalse(any(m.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE for m in switched.messages))
+
+    async def test_suffix_reminder_does_not_create_l1_control_records(self) -> None:
+        from pal.llm.shapes.base import ShapeContext
+        from pal.llm.shapes.openai_response import OpenAIResponseCodec
+        from pal.llm.ir import WireShape
+        from pal.shared import PromptAssemblyContext
+        from pal.llm.cache_wire import boundary_at
+        from pal.llm.prompt_cache import PromptCacheCoordinator
+        original = self.llm_runtime._endpoint_facts
+        self.llm_runtime._endpoint_facts = lambda **kw: {**original(**kw), "supports_suffix_instructions": True}
+        envelope = self._make_channel_envelope(turn_id="suffix", request_id="suffix-req")
+        continuation = TurnContinuation(turn_id="suffix", opening_event=envelope.event, program=iter(()), correlation_id="suffix-req")
+        self.memory_service.begin_l1_turn("suffix", user_text="request")
+        assembly = PromptAssemblyContext(event=envelope.event, core_mode="default")
+        continuation.finalization_only = True
+        continuation.finalization_reason = "First temporary instruction."
+        first = self.core.turn_executor.build_turn_prompt(continuation, assembly, max_output_tokens=128)
+        self.assertIn("First temporary instruction.", first.request_instructions)
+        self.assertFalse(any(str(k).startswith("runtime:") for k in self.memory_service.active_l1_turn("suffix").metadata["prompt_context_state"]["sources"]))
+        continuation.finalization_only = True
+        continuation.finalization_reason = "Finish from existing evidence only."
+        second = self.core.turn_executor.build_turn_prompt(continuation, assembly, max_output_tokens=128)
+        self.assertNotEqual(first.request_instructions, second.request_instructions)
+        self.assertIn("Finish from existing evidence only.", second.request_instructions)
+        ctx = ShapeContext(WireShape.OPENAI_RESPONSE, "endpoint", "gpt-6.2-sol", provider_id="openai", base_url="https://api.openai.com/v1", capabilities={"prompt_cache": {"mode": "explicit"}})
+        codec = OpenAIResponseCodec()
+        a, b = codec.encode(first, ctx), codec.encode(second, ctx)
+        self.assertEqual(a.payload["input"], b.payload["input"])
+        co = PromptCacheCoordinator()
+        plan_a, plan_b = co.plan(first, ctx, a), co.plan(second, ctx, b)
+        self.assertEqual(plan_a.breakpoints, plan_b.breakpoints)
+        point = plan_a.breakpoints[-1]
+        self.assertEqual(boundary_at(a, point.message_id, point.path), boundary_at(b, point.message_id, point.path))
+        self.memory_service.upsert_l1_assistant("suffix", LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR("first answer"),)))
+        self.memory_service.settle_l1_turn("suffix")
+        self.memory_service.begin_l1_turn("suffix-next", user_text="next request")
+        next_turn = TurnContinuation("suffix-next", iter(()), "next-req", opening_event=envelope.event)
+        next_turn.finalization_only = True
+        next_turn.finalization_reason = "A fresh suffix for another turn."
+        successor = self.core.turn_executor.build_turn_prompt(next_turn, assembly, max_output_tokens=128)
+        wire = codec.encode(successor, ctx)
+        self.assertEqual(a.payload["input"], wire.payload["input"][:len(a.payload["input"])])
+        self.assertIn("first answer", str(wire.payload["input"]))
+        self.assertIn("next request", str(wire.payload["input"]))
+
+    async def test_stop_after_batch_cancels_only_optional_recovery_generation(self) -> None:
+        from pal.llm.ir import LLMRequestIR, GenerationPolicyIR
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        async def generate(request, **options):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+            yield  # async generator
+        self.llm_runtime.generate = generate
+        parent = TurnContinuation("parent-recovery", iter(()), "req")
+        parent.accepted_tool_batch_open = True
+        self.core.state.active_turns[parent.turn_id] = parent
+        self.core.state.active_turn_id = parent.turn_id
+        request = LLMRequestIR(messages=(), tools=(), policy=GenerationPolicyIR(max_output_tokens=16), metadata={"parent_turn_id": parent.turn_id})
+        task = asyncio.create_task(self.core.control_runtime.generate(request))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            self.assertTrue(await self.core.turn_manager.interrupt_active_turn())
+            with self.assertRaisesRegex(RuntimeError, "Recovery generation stopped"):
+                await asyncio.wait_for(task, timeout=5)
+            self.assertTrue(cancelled.is_set())
+            self.assertTrue(parent.accepted_tool_batch_open)
+            self.assertFalse(parent.interrupted)
+        finally:
+            if not task.done():
+                task.cancel()
+            self.core.state.active_turns.pop(parent.turn_id, None)
+            self.core.state.active_turn_id = None
+
+    async def test_interrupt_drains_entire_accepted_tool_batch_without_next_llm(self) -> None:
+        from pal.llm.contracts import LLMGenerationResult
+        from pal.llm.ir import LLMResponseIR
+        from pal.shared import LLMFinishReason
+        from pal.shared.tool_protocol import ToolExecutionResult
+
+        envelope = self._make_channel_envelope(turn_id="drain-batch", request_id="drain-req")
+        calls = tuple(new_tool_call(call_id=f"batch-{i}", name="probe", args={}) for i in range(2))
+        entered, release = asyncio.Event(), asyncio.Event()
+        generations, executed = [], []
+
+        def generate(request, **options):
+            generations.append(request)
+            assert len(generations) == 1, "interrupt must suppress the next LLM request"
+            return LLMGenerationResult(response=LLMResponseIR(
+                LLMMessageIR(MessageRole.ASSISTANT, calls), LLMFinishReason.TOOL_CALLS))
+
+        async def execute(call, **options):
+            executed.append(call.call_id)
+            if call.call_id == "batch-0":
+                entered.set()
+                await release.wait()
+            return ToolExecutionResult(name=call.name, ok=True, llm_text=f"real result {call.call_id}", call_id=call.call_id)
+
+        self.llm_runtime._generate_response = generate
+        self.core.turn_executor._execute_tool_async = execute
+        continuation = TurnContinuation(
+            turn_id="drain-batch", opening_event=envelope.event,
+            delivery_binding=TurnDeliveryBinding.from_envelope(envelope, control_scope_key=self.route.control_scope_key),
+            program=channel_turn_program(envelope.event, core_mode="default", max_output_tokens=64),
+            correlation_id="drain-req", control_scope_key=self.route.control_scope_key)
+        task = asyncio.create_task(self.core.run_turn_continuation_async(continuation))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            self.assertTrue(continuation.accepted_tool_batch_open)
+            self.assertTrue(await self.core.turn_manager.interrupt_active_turn())
+            self.assertTrue(await self.core.turn_manager.interrupt_active_turn())
+            self.assertFalse(task.done())
+            self.assertFalse(continuation.interrupted)
+        finally:
+            release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(executed, ["batch-0", "batch-1"])
+        self.assertEqual(len(generations), 1)
+        closed = self.memory_service.l1_store.turns.get("drain-batch")
+        self.assertEqual(closed.state, L1TurnState.INTERRUPTED)
+        self.assertEqual([c.call_id for m in closed.messages for c in m.tool_calls], executed)
+        self.assertEqual([part.call_id for m in closed.messages for part in m.parts if isinstance(part, ToolResultIR)], executed)
 
     async def test_unhandled_turn_exception_commits_aborted_checkpoint(self) -> None:
         envelope = self._make_channel_envelope(
@@ -2081,7 +2255,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn.metadata["settlement_reason"], "RuntimeError: boom")
         self.assertEqual(turn.messages[0].semantic_kind, L1MessageKind.USER_REQUEST)
 
-    async def test_interrupt_by_scope_deduplicates_concurrent_interrupts(self) -> None:
+    async def test_hard_interrupt_deduplicates_concurrent_execution_cancellation(self) -> None:
         response_handle = ResponseHandle(
             endpoint_id="socket_main",
             reply_target={"session_id": "sess-1", "request_id": "req-1"},
@@ -2115,9 +2289,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         handle = _BlockingInterruptHandle()
         self.core.context.execution_runtime.register_interrupt_handle("turn-2", handle)
 
-        first = asyncio.create_task(self.core.turn_manager.interrupt_active_turn())
+        first = asyncio.create_task(self.core.turn_manager.interrupt_active_turn(reason="reset"))
         await handle.started.wait()
-        second = asyncio.create_task(self.core.turn_manager.interrupt_active_turn())
+        second = asyncio.create_task(self.core.turn_manager.interrupt_active_turn(reason="reset"))
         await asyncio.sleep(0)
 
         self.assertEqual(handle.calls, 1)

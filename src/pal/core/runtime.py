@@ -190,6 +190,13 @@ class TurnManager:
         current_task = asyncio.current_task()
         try:
             continuation = self.state.active_turns.get(turn_id)
+            if (reason == "interrupted" and isinstance(continuation, TurnContinuation)
+                    and (continuation.accepted_tool_batch_open or continuation.stop_after_tool_batch)):
+                continuation.stop_after_tool_batch = True
+                recovery = continuation.recovery_generation_task
+                if recovery is not None and not recovery.done():
+                    recovery.cancel()
+                return True
             lease = self.state.scheduler.state.owner
             if lease is not None and lease.turn_id == turn_id:
                 self.state.scheduler.transition(SchedulingEvent.CANCEL, lease=lease)
@@ -216,7 +223,11 @@ class TurnManager:
                         "error": f"{exc.__class__.__name__}: {exc}",
                     })
             try:
-                await self.context.execution_runtime.interrupt_turn(turn_id)
+                # Ordinary interrupts revoke model continuation only. Even a
+                # detached tool/session handle is left alone; reset/shutdown
+                # retain the explicit execution-cancellation path.
+                if reason != "interrupted":
+                    await self.context.execution_runtime.interrupt_turn(turn_id)
             finally:
                 task = self.state.turn_tasks.get(turn_id)
                 if task is not None and not task.done():
@@ -1458,8 +1469,11 @@ class PalCore(MemoryMaintenanceMixin):
         if route is None:
             return
         active_turn_id = self.turn_manager.latest_active_turn_id()
+        continuation = self.state.active_turns.get(active_turn_id)
         interrupted = await self.turn_manager.interrupt_active_turn(reason="interrupted")
         message = "Interrupted the current turn." if interrupted else "No active turn to interrupt."
+        if interrupted and continuation is not None and continuation.stop_after_tool_batch and continuation.accepted_tool_batch_open:
+            message = "Stop requested; finishing the accepted tool batch before ending this turn."
         if self.turn_manager.pending_closures:
             message = ("The turn stopped, but its conversation state could not be finalized. "
                        "New turns will wait for memory recovery; see diagnostics for the cause.")
@@ -2017,6 +2031,13 @@ class PalCore(MemoryMaintenanceMixin):
                 ),
             )
             while True:
+                if continuation.stop_after_tool_batch and not continuation.accepted_tool_batch_open:
+                    continuation.interrupted = True
+                    continuation.interrupt_reason = "interrupted"
+                    lease = self.state.scheduler.state.owner
+                    if lease is not None and lease.turn_id == continuation.turn_id:
+                        self.state.scheduler.transition(SchedulingEvent.CANCEL, lease=lease)
+                    await self.turn_manager._close_l1_turn_async(continuation, state="interrupted", reason="interrupted")
                 if continuation.interrupted:
                     raise asyncio.CancelledError(continuation.interrupt_reason or "interrupted")
                 yielded = self.turn_manager.resume(continuation, current)

@@ -148,8 +148,7 @@ def test_explicit_keeps_previous_tail_and_turn_anchor_across_projected_rounds(sh
         assert points['anchor_fixed'].message_id == 'task'
         assert points['tail_current'].message_id == f'r{round_index}'
         if previous is not None:
-            assert points['tail_previous'].message_id == previous.message_id
-            assert points['tail_previous'].path == previous.path
+            assert any(p.message_id == previous.message_id and p.path == previous.path for p in plan.breakpoints)
         previous = points['tail_current']
         session.observe_commit(_receipt(attempt, session.frontier, _cursor(round_index + 1, 'c' * 64)),
                                span_message_ids=tuple(m.message_id for m in tail))

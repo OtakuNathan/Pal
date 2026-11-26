@@ -128,10 +128,12 @@ def _provider_prefix(
     # Output budget and sampling settings do not change the rendered input
     # prefix. Cache policy/routing fields are injected after this description.
     prefix = {
-        key: thaw_json(value)
+        key: (None if key == root else thaw_json(value))
         for key, value in payload.items()
         if key not in {"max_tokens", "max_output_tokens", "temperature"}
     }
+    if root == "input" and str(payload.get("model", "")).removeprefix("openai/") in {"gpt-6.2-astra", "gpt-6.2-sol"}:
+        prefix.pop("instructions", None)
     prefix_sequence = thaw_json(sequence[: root_index + 1])
     if len(path) >= 4 and path[2] in {"content", "output"}:
         try:

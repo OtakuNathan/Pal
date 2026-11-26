@@ -230,8 +230,8 @@ def test_wire_snapshots_for_legacy_implicit_and_hybrid_profiles() -> None:
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
-    assert len(_marked_blocks(payload)) == 2
-    assert [point.label for point in plan.breakpoints] == ["stable", "anchor_fixed"]
+    assert len(_marked_blocks(payload)) == 3
+    assert [point.label for point in plan.breakpoints] == ["stable", "anchor_fixed", "tail_current"]
 
     # Group B: provider implicit; both stable keys, no options, no markers.
     context_b = _astra_context(
@@ -384,7 +384,7 @@ def test_frontier_marker_submitted_without_observed_read() -> None:
         ),
     )
     snapshot = coordinator.snapshot()
-    assert len(snapshot["tail"]["tails"]) == 1
+    assert snapshot["recent_attempts"][-1]["transport_admitted"]
     assert snapshot["observation"]["state"] == "reported_zero"
     assert snapshot["observation"]["last_observed_read_at"] == 0.0
     record = snapshot["recent_attempts"][-1]

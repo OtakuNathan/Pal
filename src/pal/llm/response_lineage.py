@@ -23,7 +23,7 @@ def _prefix_digests(payload: Mapping, items: Iterable, lengths: set[int]) -> dic
     # all later references in a single pass. JSON strings escape newlines.
     state = sha256(_canonical([
         payload.get("system_instruction"),
-        payload.get("instructions"),
+        None if str(payload.get("model", "")).removeprefix("openai/") in {"gpt-6.2-astra", "gpt-6.2-sol"} else payload.get("instructions"),
         payload.get("tools"),
     ]))
     digests = {}

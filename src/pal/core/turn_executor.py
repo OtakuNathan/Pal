@@ -47,6 +47,7 @@ from pal.llm.serde import message_to_payload
 from pal.llm.ir import (
     ArtifactRefPartIR,
     ImagePartIR,
+    InstructionScopeIR,
     LLMFinishReason,
     LLMMessageIR,
     LLMRequestIR,
@@ -59,6 +60,9 @@ from pal.llm.ir import (
 )
 from pal.memory.compact import memory_candidates_from_compact_result, compact_normalization_diagnostics
 from pal.memory.contracts import L1MessageKind, MemoryPackRequest
+from pal.memory.prompt_context import prompt_date_pin, select_prompt_date_pin
+from pal.llm.cache_reminder import prefix_refresh_likely_cold
+from pal.shared.prompt_dates import today_for_timezone
 from pal.shared import (
     GuardAction,
     LLMPreflightStatus,
@@ -98,6 +102,7 @@ def _artifact_unavailable_summary(refs: list[ArtifactRefPartIR]) -> str:
     return "\n".join(lines)
 
 class TurnExecutor:
+    borrowed_prompt_date: str | None = None
     include_live_execution_context = True
 
     def __init__(
@@ -456,6 +461,7 @@ class TurnExecutor:
             effect.assembly_context,
             max_output_tokens=effect.max_output_tokens,
             tools=tools,
+            commit_scoped_instruction=True,
         )
         request = replace(
             prompt,
@@ -501,6 +507,15 @@ class TurnExecutor:
             # tool-call/empty answer and replace it with fallback text; the
             # projection may only freeze what canonical L1 actually keeps.
             outcome = await self._finalize_accepted_contribution(continuation, outcome)
+            # Publish the final assistant contribution and its batch together.
+            # Until here streaming tool calls are drafts, including a terminal
+            # frame still awaiting iterator/channel teardown.
+            if outcome.tool_calls:
+                self._upsert_l1_assistant(continuation, outcome.response.message)
+                continuation.accepted_tool_batch_open = True
+                continuation.pending_assistant_tool_text = str(outcome.text or "")
+                continuation.pending_tool_call_batch = list(outcome.tool_calls)
+                continuation.pending_tool_results = []
             # F2: observe only what the transport receipt authorizes.
             self.projection.accept(projection_pack, continuation, outcome)
         finally:
@@ -519,13 +534,7 @@ class TurnExecutor:
             outcome,
             used_tools=bool(continuation.tool_observations),
         )
-        if outcome.tool_calls:
-            continuation.pending_assistant_tool_text = str(outcome.text or "")
-            continuation.pending_tool_call_batch = [
-                tool_call for tool_call in outcome.tool_calls
-            ]
-            continuation.pending_tool_results = []
-        else:
+        if not outcome.tool_calls:
             await self._checkpoint_resident_async(continuation.turn_id, "round", continuation)
         if (
             self._handle_llm_provider_errors
@@ -654,18 +663,18 @@ class TurnExecutor:
             if self._execute_tool_async is not None:
                 tool_result = await self._execute_tool_async(
                     execution_call,
-                    allow_tools=not continuation.finalization_only,
+                    allow_tools=continuation.accepted_tool_batch_open or not continuation.finalization_only,
                     budget=tool_budget,
                     turn_id=continuation.turn_id,
                 )
             else:
-                tool_result = await self.context.execution_runtime.execute_tool_async(execution_call, allow_tools=not continuation.finalization_only, budget=tool_budget, turn_id=continuation.turn_id)
+                tool_result = await self.context.execution_runtime.execute_tool_async(execution_call, allow_tools=continuation.accepted_tool_batch_open or not continuation.finalization_only, budget=tool_budget, turn_id=continuation.turn_id)
         except Exception as exc:
             self._log_tool_call_exception(continuation, execution_call, exc)
             tool_result = self.context.execution_runtime.tool_call_failed_result(execution_call, exc)
         if not tool_result.ok:
             self.context.core_event_bus.emit(TURN_TOOL_CALL_FAILED, {**tool_event, "ok": False})
-        if self._should_enter_failure_flow_for_tool_result(tool_result):
+        if not continuation.stop_after_tool_batch and self._should_enter_failure_flow_for_tool_result(tool_result):
             try:
                 failure_result = await self._handle_failure_async(
                     FailureSignal(
@@ -693,23 +702,24 @@ class TurnExecutor:
                 diagnostic = exception_reason(exc)
                 feedback_text = "Failure recovery also failed:\n" + diagnostic
                 failure_metadata = {"failure_recovery_error": diagnostic}
-            tool_result = ToolExecutionResult(
-                name=execution_call.name,
-                ok=False,
-                text=f"{tool_result.text}\n\n{feedback_text}",
-                structured={
-                    **dict(tool_result.structured or {}),
-                    **failure_metadata,
-                },
-                call_id=execution_call.call_id,
-                llm_text=f"{tool_result.llm_text or tool_result.text}\n\n{feedback_text}",
-                snapshot_refs=tool_result.snapshot_refs,
-                replay_result_ref=tool_result.replay_result_ref,
-                status=tool_result.status,
-                invocation_result=tool_result.invocation_result,
-                context_delivery=tool_result.context_delivery,
-                context_messages=tool_result.context_messages,
-            )
+            if not continuation.stop_after_tool_batch:
+                tool_result = ToolExecutionResult(
+                    name=execution_call.name,
+                    ok=False,
+                    text=f"{tool_result.text}\n\n{feedback_text}",
+                    structured={
+                        **dict(tool_result.structured or {}),
+                        **failure_metadata,
+                    },
+                    call_id=execution_call.call_id,
+                    llm_text=f"{tool_result.llm_text or tool_result.text}\n\n{feedback_text}",
+                    snapshot_refs=tool_result.snapshot_refs,
+                    replay_result_ref=tool_result.replay_result_ref,
+                    status=tool_result.status,
+                    invocation_result=tool_result.invocation_result,
+                    context_delivery=tool_result.context_delivery,
+                    context_messages=tool_result.context_messages,
+                )
         self._log_tool_call_result(continuation, execution_call, tool_result)
         await self._maybe_echo_tool_result_async(continuation, execution_call, tool_result)
         continuation.tool_observations.append(
@@ -769,6 +779,7 @@ class TurnExecutor:
                 await self._checkpoint_resident_async(continuation.turn_id, "round", continuation)
                 if self.include_live_execution_context:
                     self.context.execution_runtime.model_response_received(continuation)
+                continuation.accepted_tool_batch_open = False
         return EffectResult(
             status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
             payload=tool_result,
@@ -1107,7 +1118,10 @@ class TurnExecutor:
                 update.response.message.message_id,
             )
         else:
-            self._upsert_l1_assistant(continuation, update.response.message)
+            message = update.response.message
+            if message.tool_calls:
+                message = replace(message, state=MessageState.IN_PROGRESS)
+            self._upsert_l1_assistant(continuation, message)
         channel_update: ChannelStreamUpdate | None = None
         if update.delta_kind == LLMResponseDeltaKind.TEXT and update.text_delta:
             channel_update = ChannelStreamUpdate(
@@ -1196,6 +1210,7 @@ class TurnExecutor:
         *,
         max_output_tokens: int,
         tools: list[dict[str, Any]] | None = None,
+        commit_scoped_instruction: bool = False,
     ) -> LLMRequestIR:
         from pal.shared import PromptAssemblyContext
 
@@ -1271,6 +1286,27 @@ class TurnExecutor:
                         "memory_pack": exception_summary(exc),
                     }
         metadata["typed_l1_projection"] = True
+        today = today_for_timezone("UTC")
+        date_pin = None
+        if (memory_service is not None and active_turn is not None
+                and logical_scope_id == "pal:resident" and assembly_context.core_mode != "bunshin"):
+            previous = prompt_date_pin(memory_service)
+            cold = False
+            if (previous and previous["date"] != today and self.borrowed_prompt_date is None
+                    and not active_turn.metadata.get("prompt_context_state", {}).get("initialized")):
+                llm = self.llm.optional
+                if llm is not None:
+                    try:
+                        snapshot = llm.prompt_cache_reminder_snapshot()
+                        route = metadata["llm_capabilities"]
+                        cold = prefix_refresh_likely_cold(snapshot,
+                            endpoint_id=str(route.get("endpoint_id") or ""),
+                            model_id=str(route.get("model_id") or ""))
+                    except Exception:
+                        LOGGER.debug("Date refresh cache estimate unavailable", exc_info=True)
+            date_pin = select_prompt_date_pin(memory_service, active_turn, today,
+                cold=cold, borrowed_date=self.borrowed_prompt_date)
+            metadata["prompt_utc_date"] = date_pin["date"]
         if continuation.finalization_only:
             metadata["finalization_directive"] = (
                 continuation.finalization_reason
@@ -1305,11 +1341,28 @@ class TurnExecutor:
                 prompt_region=PromptRegionIR.ACTIVE_INPUT,
             )
         context_committed = False
+        facts = metadata.get("llm_capabilities", {})
+        request_instructions = bool(facts.get("supports_suffix_instructions") or facts.get("supports_interaction_instructions"))
+        turn_scoped = bool(facts.get("supports_turn_scoped_instructions"))
+        reminder_text = str(prompt.metadata.get("runtime_reminder_text") or "").strip()
+        # A restored active legacy turn keeps its original delivery policy.
         if active_turn is not None:
+            sources = active_turn.metadata.get("prompt_context_state", {}).get("sources", {})
+            if any(str(key).startswith("runtime:") for key in sources):
+                request_instructions = turn_scoped = False
+        candidates = list(prompt.metadata["context_candidates"])
+        if request_instructions or turn_scoped:
+            candidates = [c for c in candidates if not str(c.get("key", "")).startswith("runtime:")]
+        if active_turn is not None:
+            selected_turns = tuple(metadata["memory_pack"].l1_turns) if metadata.get("memory_pack") is not None else ()
             frozen, active_turn = memory_service.prepare_l1_prompt_context(
-                continuation.turn_id, stable_messages, list(prompt.metadata["context_candidates"]),
+                continuation.turn_id, stable_messages, candidates,
                 boundary=json.dumps([(metadata["memory_pack"].metadata if metadata.get("memory_pack") is not None else {}).get("continuity_id", ""),
-                                     continuation.preferred_llm_endpoint_id, continuation.preferred_llm_model_id]))
+                                     continuation.preferred_llm_endpoint_id, continuation.preferred_llm_model_id]),
+                date_pin=date_pin if "current_date" in prompt.metadata.get("developer_sections", ()) else None,
+                today=today,
+                checklist=thaw_json(prompt.metadata.get("history_states", {}).get("checklist_state")),
+                settled_turns=selected_turns)
             stable_messages = list(frozen)
             contextual_messages = []
             context_committed = True
@@ -1324,6 +1377,30 @@ class TurnExecutor:
                 context_view=context_view, include_live=self.include_live_execution_context)
             active_turn = memory_service.active_l1_turn(continuation.turn_id)
             context_view = view_builder(continuation.turn_id, selected_turns)
+        scoped_message = None
+        scoped_message_id = ""
+        if turn_scoped and reminder_text:
+            # Append AFTER live tool/user context has been materialized. A
+            # following user/tool_result would otherwise clear the reminder
+            # before the provider ever sees it. Preflight only estimates it.
+            previous = active_turn.messages if active_turn is not None else tuple(contextual_messages)
+            legal = bool(previous and previous[-1].role in {MessageRole.USER, MessageRole.TOOL, MessageRole.DEVELOPER})
+            round_index = continuation.llm_round_index if commit_scoped_instruction else continuation.llm_round_index + 1
+            scoped_message_id = f"turn-instruction:{continuation.turn_id}:{round_index}"
+            scoped_message = LLMMessageIR(MessageRole.DEVELOPER, (TextPartIR(reminder_text),),
+                message_id=scoped_message_id, semantic_kind="pal_prompt_context",
+                prompt_region=PromptRegionIR.ACTIVE_DYNAMIC,
+                instruction_scope=InstructionScopeIR.NEXT_USER_MESSAGE if legal else InstructionScopeIR.PERSISTENT,
+                metadata={"pal_authored": True, "scope_turn_id": continuation.turn_id,
+                          "context_key": "runtime:round-instruction"})
+            if active_turn is not None and commit_scoped_instruction:
+                existing = next((m for m in active_turn.messages if m.message_id == scoped_message_id), None)
+                if existing is None:
+                    active_turn = memory_service.append_l1_prompt_contexts(continuation.turn_id, (scoped_message,),
+                        thaw_json(active_turn.metadata.get("prompt_context_state", {})), expected_revision=active_turn.revision)
+                scoped_message = None
+                if context_view is not None:
+                    context_view = memory_service.l1_context_view(continuation.turn_id, selected_turns)
         for settled_turn in (memory_pack.l1_turns if memory_pack is not None else ()):
             from pal.memory.context_view import projected_messages
             if context_view is not None:
@@ -1355,6 +1432,7 @@ class TurnExecutor:
                 replace(
                     message,
                     prompt_region=(
+                        PromptRegionIR.ACTIVE_DYNAMIC if message.message_id == scoped_message_id else
                         PromptRegionIR.ACTIVE_INPUT
                         if message.role == MessageRole.USER and
                         (index == 0 or message.semantic_kind in {"user_request", "user_interjection"})
@@ -1363,7 +1441,7 @@ class TurnExecutor:
                 )
                 for index, message in enumerate(active_messages)
             ]
-        runtime_reminder = "" if context_committed else str(prompt.metadata.get("runtime_reminder_text") or "").strip()
+        runtime_reminder = "" if context_committed or request_instructions or turn_scoped else reminder_text
         tail_messages = (
             [
                 LLMMessageIR(
@@ -1385,6 +1463,7 @@ class TurnExecutor:
             *active_messages,
             *contextual_messages,
             *tail_messages,
+            *((scoped_message,) if scoped_message is not None else ()),
         ]
         continuity_id = memory_pack.metadata.get("continuity_id", "") if memory_pack is not None else ""
         if memory_service is not None and continuity_id:
@@ -1414,6 +1493,7 @@ class TurnExecutor:
             tools=tuple(tool_definition_ir_from_dict(tool) for tool in tools) if tools is not None else prompt.tools,
             logical_scope_id=logical_scope_id,
             metadata=metadata,
+            request_instructions=reminder_text if request_instructions else "",
         )
         return prompt
 
@@ -1477,6 +1557,8 @@ class TurnExecutor:
                 capabilities=capabilities or {},
             )
             for message in messages
+            if message.instruction_scope != InstructionScopeIR.NEXT_USER_MESSAGE
+            or (capabilities or {}).get("supports_turn_scoped_instructions")
         ]
 
     def _project_artifact_refs(

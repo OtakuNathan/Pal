@@ -229,6 +229,7 @@ class FailureRecovery:
                     effect,
                     logical_scope_id=safe_mode_scope_id,
                 )
+                request = replace(request, metadata={**request.metadata, "parent_turn_id": draft.related_ids.get("turn_id", "")})
                 try:
                     outcome = await self.host.current.generate(request)
                 except Exception as exc:

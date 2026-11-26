@@ -305,23 +305,18 @@ def test_b03_boundary_equality_fits_one_token_over_rejects():
     # Cached discounts never enter the capacity math: the estimate is a
     # pure character count and prompt_region (cache locality) cannot
     # shrink it.
-    active = SimpleNamespace(
+    from pal.llm.ir import LLMRequestIR, GenerationPolicyIR
+    active = LLMRequestIR(
         messages=(LLMMessageIR(
             role=MessageRole.USER,
             parts=(TextPartIR("x" * 400),),
             prompt_region=PromptRegionIR.ACTIVE_INPUT,
         ),),
-        tools=(),
+        tools=(), policy=GenerationPolicyIR(max_output_tokens=128),
     )
-    settled = SimpleNamespace(
-        messages=(LLMMessageIR(
-            role=MessageRole.USER,
-            parts=(TextPartIR("x" * 400),),
-            prompt_region=PromptRegionIR.SETTLED_HISTORY,
-        ),),
-        tools=(),
-    )
+    settled = replace(active, messages=(replace(active.messages[0], prompt_region=PromptRegionIR.SETTLED_HISTORY),))
     assert _estimate_request_tokens(active) == _estimate_request_tokens(settled)
+    assert _estimate_request_tokens(replace(active, request_instructions="y" * 400)) > _estimate_request_tokens(active)
 
 
 def test_b04_output_reservation_counts_against_total_window():

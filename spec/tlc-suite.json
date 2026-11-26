@@ -617,13 +617,14 @@
     {
       "config": "spec/llm/PromptCacheAdmission.cfg",
       "module": "spec/llm/PromptCacheAdmission.tla",
-      "kind": "positive"
+      "kind": "retired",
+      "reason": "Historical admission-owned marker history; superseded by stateless SessionChaseTail."
     },
     {
       "config": "spec/llm/PromptCacheAdmissionSharedSequence.cfg",
       "module": "spec/llm/PromptCacheAdmission.tla",
-      "kind": "negative",
-      "invariant": "SubmittedCountExact"
+      "kind": "retired",
+      "reason": "Historical admission-owned marker history; superseded by stateless SessionChaseTail."
     },
     {
       "config": "spec/llm/PromptCacheFixedAnchors.cfg",
@@ -646,13 +647,14 @@
     {
       "config": "spec/llm/PromptCacheTail.cfg",
       "module": "spec/llm/PromptCacheTail.tla",
-      "kind": "positive"
+      "kind": "retired",
+      "reason": "Historical admission-owned marker history; superseded by stateless SessionChaseTail."
     },
     {
       "config": "spec/llm/PromptCacheTailPrepareCommit.cfg",
       "module": "spec/llm/PromptCacheTail.tla",
-      "kind": "negative",
-      "invariant": "AdmittedHistory"
+      "kind": "retired",
+      "reason": "Historical admission-owned marker history; superseded by stateless SessionChaseTail."
     },
     {
       "config": "spec/llm/RoundSubmission.cfg",
@@ -901,6 +903,28 @@
       "module": "spec/memory/MemoryMaintenanceLifecycle.tla",
       "kind": "negative",
       "invariant": "BoundBeforeWake"
+    },
+    {
+      "config": "spec/llm/SessionChaseTail.cfg",
+      "module": "spec/llm/SessionChaseTail.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/llm/SessionChaseTailDropAnchors.cfg",
+      "module": "spec/llm/SessionChaseTail.tla",
+      "kind": "negative",
+      "invariant": "FixedAnchors"
+    },
+    {
+      "config": "spec/core/CooperativeToolBatch.cfg",
+      "module": "spec/core/CooperativeToolBatch.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/core/CooperativeToolBatchEarlyClose.cfg",
+      "module": "spec/core/CooperativeToolBatch.tla",
+      "kind": "negative",
+      "invariant": "NoPartialClose"
     }
   ],
   "support_modules": [

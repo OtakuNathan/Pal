@@ -344,8 +344,9 @@ class LLMRuntime:
             if above_tier and request.metadata.get("compact_includes_right_tail"):
                 raise LLMRequestPreparationError("Native compact tail exceeds the standard input tier")
             premium_submitted = above_tier
-            result = invoker.invoke_operation(endpoint, adapter.compact_payload(encoded.payload),
-                operation="compact", timeout_seconds=timeout_seconds, stream_control=control)
+            compact_encoded = invoker.encode_compact_request(endpoint, prepared.request, encoded)
+            result = invoker.invoke_operation(endpoint, thaw_json(compact_encoded.payload),
+                operation="compact", extra_body=thaw_json(compact_encoded.extra_body), timeout_seconds=timeout_seconds, stream_control=control)
             output = result.get("output")
             prefix = []
             for item in encoded.payload.get("input", ()):
@@ -639,6 +640,7 @@ class LLMRuntime:
             continuation_policy_version=policy_version,
             config_fingerprint=f"fingerprint-{fingerprint}",
             endpoint_config_digest=self._endpoint_config_digest(endpoint),
+            base_url=str(endpoint.base_url), provider_id=str(endpoint.provider),
         )
 
     def _binding_is_current(
@@ -940,7 +942,11 @@ class LLMRuntime:
                 "thinking_levels": [],
                 "default_thinking_level": None,
             }
+        from pal.llm.cache_capabilities import supports_suffix_instructions, supports_turn_scoped_instructions, supports_interaction_instructions
         return {
+            "supports_suffix_instructions": endpoint.capabilities_blob.get("request_instruction_mode") != "chronological" and supports_suffix_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url),
+            "supports_turn_scoped_instructions": supports_turn_scoped_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob),
+            "supports_interaction_instructions": supports_interaction_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob),
             "endpoint_id": endpoint.endpoint_id,
             "model_id": endpoint.model_id,
             "wire_shape": endpoint.wire_shape,
@@ -1768,6 +1774,11 @@ class LLMRuntime:
             capabilities={"prompt_cache": policy},
         ))
         hooked = replace(hooked, metadata={**dict(hooked.metadata), "cache_policy_selection": policy})
+        if hooked.request_instructions:
+            from pal.llm.cache_capabilities import supports_suffix_instructions, supports_interaction_instructions
+            if not (supports_suffix_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url)
+                    or supports_interaction_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob)):
+                raise LLMRequestPreparationError("Endpoint does not support request-scoped instructions")
         level = hooked.policy.thinking_level
         levels = self._thinking_levels(endpoint)
         budget = hooked.policy.thinking_budget_tokens
@@ -1856,7 +1867,7 @@ class LLMRuntime:
         if len(self._usage_boundaries) >= 256 and key not in self._usage_boundaries:
             self._usage_boundaries.pop(next(iter(self._usage_boundaries), None), None)
         self._usage_boundaries[key] = UsageBoundary(prefix, request.tools, request.policy.reasoning_context,
-                                                     usage.input_tokens + usage.output_tokens)
+                                                     usage.input_tokens + usage.output_tokens, request.request_instructions)
 
     def _budget_request(self, endpoint, request, *, verify, control=None):
         physical = self._physical_input_budget(endpoint, request.policy.max_output_tokens)
@@ -1864,8 +1875,9 @@ class LLMRuntime:
         target = min((cap for cap in (physical, price, endpoint.context_window) if cap), default=0)
         boundary = self._usage_boundaries.get(self._boundary_key(endpoint, request))
         tail = boundary.tail(request) if boundary else None
-        delta = replace(request, messages=tail, tools=()) if tail is not None else request
-        growth = _estimate_request_tokens(delta) if delta.messages or delta.tools else 0
+        delta = replace(request, messages=tail, tools=(),
+                        request_instructions="" if request.request_instructions == boundary.request_instructions else request.request_instructions) if tail is not None else request
+        growth = _estimate_request_tokens(delta) if delta.messages or delta.tools or delta.request_instructions else 0
         estimate = growth + (boundary.tokens if tail is not None else 0)
         details = {"local_input_tokens": estimate, "increment_tokens": growth,
                    "baseline_tokens": boundary.tokens if tail is not None else 0,
@@ -2381,9 +2393,14 @@ def _public_failure_text(exc: Exception | None) -> str:
 
 
 def _estimate_request_tokens(request: LLMRequestIR) -> int:
-    chars = 0
+    chars = len(request.request_instructions.encode())
     native_tokens = 0
-    for message in request.messages:
+    from pal.llm.ir import InstructionScopeIR
+    last_user = max((i for i, message in enumerate(request.messages)
+                     if message.role in {MessageRole.USER, MessageRole.TOOL}), default=-1)
+    for index, message in enumerate(request.messages):
+        if index < last_user and message.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE:
+            continue  # Provider preserves the record but no longer tokenizes it.
         if is_native_window(message):
             # Advice can use a provider-counted upper bound. Actual sends count
             # the complete effective input; ciphertext length is never a proxy.

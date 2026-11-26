@@ -295,8 +295,9 @@ class TestChecklistPrompt:
 
         fragments = provider.build_prompt_fragments(PromptAssemblyContext())
 
-        assert len(fragments) == 2
-        operating_rule, task_flow = fragments
+        assert len(fragments) == 3
+        assert fragments[2].metadata["history_state"] == {"active": False, "remaining": []}
+        operating_rule, task_flow = fragments[:2]
         assert operating_rule.section == "operating_guidance"
         assert operating_rule.metadata["prompt_target"] == "developer"
         assert "multiple independent" in operating_rule.content
@@ -312,7 +313,7 @@ class TestChecklistPrompt:
         assert "Simple answers" in task_flow.content
         assert "not truth, evidence, or permission" in task_flow.content
 
-    def test_active_checklist_is_projected_only_in_runtime_reminder_tail(self):
+    def test_active_checklist_exports_state_without_a_repeated_prompt(self):
         service = ChecklistService()
         service.upsert(
             [
@@ -328,13 +329,8 @@ class TestChecklistPrompt:
         reminder = fragments[2]
         assert reminder.metadata["prompt_target"] == "runtime_reminder"
         assert reminder.metadata["block_id"] == "checklist_state"
-        assert "Checklist progress 1/2" in reminder.content
-        assert "✅ inspect the current state" in reminder.content
-        assert "⬜ apply &lt;the change&gt;" in reminder.content
-        assert "⬜ apply <the change>" not in reminder.content
-        assert 'authority="execution_cursor"' in reminder.content
-        assert 'trusted_as_evidence="false"' in reminder.content
-        assert "execution cursor" in reminder.content
+        assert reminder.content == "Checklist: 1 unfinished steps."
+        assert reminder.metadata["history_state"] == {"active": True, "remaining": ["apply <the change>"]}
         assert "close_checklist" not in reminder.content
 
     def test_clear_retires_checklist_from_next_prompt_tail(self):
@@ -349,8 +345,9 @@ class TestChecklistPrompt:
         assert handle.prompt_fragment_providers
         assert active_prompt.messages[1].role.value == "developer"
         assert "<task_flow>" in str(active_prompt.messages[1].text)
-        assert active_prompt.metadata["reminder_sections"] == ("checklist_state",)
-        assert "Checklist progress 0/1" in active_prompt.metadata["runtime_reminder_text"]
+        assert active_prompt.metadata["reminder_sections"] == ()
+        assert active_prompt.metadata["runtime_reminder_text"] == ""
+        assert active_prompt.metadata["history_states"]["checklist_state"]["remaining"] == ("do the work",)
 
         service.clear()
         retired_prompt = core.build_canonical_prompt(PromptAssemblyContext())
@@ -361,6 +358,7 @@ class TestChecklistPrompt:
         assert "before the first mutation" in active_prompt.messages[1].text
         assert retired_prompt.metadata["reminder_sections"] == ()
         assert retired_prompt.metadata["runtime_reminder_text"] == ""
+        assert retired_prompt.metadata["history_states"]["checklist_state"]["active"] is False
 
     def test_progress_and_retirement_tools_are_direct_but_show_stays_indirect(self):
         core = build_core()

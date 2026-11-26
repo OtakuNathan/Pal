@@ -357,6 +357,10 @@ class LLMMetadata:
     thinking_levels: list[str] = field(default_factory=list)
     default_thinking_level: str | None = None
 
+    supports_suffix_instructions: bool = False
+    supports_turn_scoped_instructions: bool = False
+    supports_interaction_instructions: bool = False
+
     def to_payload(self) -> dict[str, Any]:
         from dataclasses import asdict
         return asdict(self)

@@ -243,7 +243,7 @@ class ChecklistIntrospectionProvider:
             search_terms=('show', 'get', 'inspect', 'check', 'plan', 'progress', 'step', 'steps'),
             purpose="Read Pal's active checklist and exact step text.",
             use_when='Exact step text or current progress is needed. No active checklist is a valid inactive state; it does not prove the user task is complete.',
-            do_not_use_when="The runtime reminder already provides enough checklist state.",
+            do_not_use_when="Visible checklist history already provides enough state.",
             failure_next_steps="If inactive, no checklist is open.",
             next_tool_hints=(
                 NextToolHint(

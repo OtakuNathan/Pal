@@ -127,6 +127,12 @@ class LLMEndpointSpec:
                 "capabilities_blob.sampling_policy requires an OpenAI wire shape and "
                 "supported, unsupported or requires_no_reasoning"
             )
+        instruction_mode = capabilities.get("request_instruction_mode", "auto")
+        from pal.llm.cache_capabilities import supports_turn_scoped_instructions, supports_interaction_instructions
+        if (instruction_mode not in {"auto", "chronological", "turn_scoped", "interaction"}
+                or instruction_mode == "turn_scoped" and not supports_turn_scoped_instructions(wire_shape, model_id, base_url, capabilities)
+                or instruction_mode == "interaction" and not supports_interaction_instructions(wire_shape, model_id, base_url, capabilities)):
+            raise LLMEndpointSpecError("request_instruction_mode is not supported by this endpoint")
         access_profile = capabilities.get("access_profile")
         if access_profile is not None:
             from pal.llm.chatgpt import API_URL, PROFILE

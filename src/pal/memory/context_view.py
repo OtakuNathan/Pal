@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, TYPE_CHECKING
 
-from pal.llm.ir import LLMMessageIR, MessageRole
+from pal.llm.ir import LLMMessageIR, MessageRole, InstructionScopeIR
 from pal.memory.continuity import is_summary_projection
 
 if TYPE_CHECKING:
@@ -17,6 +17,7 @@ def projected_messages(turn: "L1TurnIR", *, settled: bool = False) -> tuple[LLMM
     return tuple(m for m in turn.messages if not is_summary_projection(m) and m.message_id not in excluded and not (
         settled and m.semantic_kind == "pal_prompt_context"
         and m.metadata.get("pal_authored") and m.role == MessageRole.DEVELOPER
+        and m.instruction_scope != InstructionScopeIR.NEXT_USER_MESSAGE
     ))
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR
 
+import asyncio
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -140,6 +141,9 @@ class TurnContinuation:
     finalization_attempted: bool = False
     finalization_reason: str = ""
     interrupted: bool = False
+    stop_after_tool_batch: bool = False
+    accepted_tool_batch_open: bool = False
+    recovery_generation_task: asyncio.Task[LLMGenerationResult] | None = None
     interrupt_reason: str = ""
     tool_batch_count: int = 0
     llm_round_index: int = 0

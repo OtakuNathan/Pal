@@ -188,7 +188,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
 
     assert plan.dialect == PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT
     assert [item.label for item in plan.breakpoints] == [
-        "stable", "anchor_fixed",
+        "stable", "anchor_fixed", "tail_current",
     ]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
     assert encoded.extra_body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
@@ -198,7 +198,7 @@ def test_openai_responses_explicit_cache_is_injected_centrally() -> None:
         for block in item.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 2
+    assert len(marked) == 3
     assert set(encoded.applied_cache_breakpoint_message_ids) == {
         item.message_id for item in plan.breakpoints
     }
@@ -230,9 +230,9 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
     payload = thaw_json(encoded.payload)
 
     assert plan.dialect == PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT
-    assert plan.decision == "eager_tail"
+    assert plan.decision == "session_chase_tail"
     assert [item.label for item in plan.breakpoints] == [
-        "stable", "anchor_fixed",
+        "stable", "anchor_fixed", "tail_current",
     ]
     assert encoded.extra_body["session_id"] == encoded.extra_body["prompt_cache_key"]
     assert encoded.extra_body["prompt_cache_key"].startswith("pal-")
@@ -243,7 +243,7 @@ def test_openrouter_gpt56_uses_explicit_cache_and_sticky_session() -> None:
         for block in item.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 2
+    assert len(marked) == 3
 
 
 def test_gpt6_astra_uses_explicit_cache_for_openai_and_openrouter() -> None:
@@ -294,7 +294,7 @@ def test_gpt6_astra_uses_explicit_cache_for_openai_and_openrouter() -> None:
             for item in payload["input"]
             for block in item.get("content", [])
             if isinstance(block, dict)
-        ) == 2
+        ) == 3
         if provider_id == "OpenRouter":
             assert (
                 encoded.extra_body["session_id"]
@@ -353,7 +353,7 @@ def test_openrouter_gpt56_chat_uses_explicit_cache_and_sticky_session() -> None:
         for block in message.get("content", [])
         if isinstance(block, dict) and "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 2
+    assert len(marked) == 3
     user_blocks = next(
         message["content"]
         for message in payload["messages"]
@@ -478,7 +478,7 @@ def test_openai_chat_uses_supported_text_block_breakpoints() -> None:
         for block in message.get("content", [])
         if "prompt_cache_breakpoint" in block
     ]
-    assert len(marked) == 2
+    assert len(marked) == 3
 
 
 def test_anthropic_cache_control_uses_long_stable_and_short_rolling_ttl() -> None:
@@ -683,7 +683,7 @@ def test_warm_deadline_requires_boundary_evidence_not_submission_or_aggregate_re
     for usage in (LLMUsageIR(reported=True), LLMUsageIR(reported=True, cached_input_tokens=8000)):
         plan = coordinator.plan(request, context)
         _record_success(coordinator, plan, usage)
-        assert coordinator.snapshot()["tail"]["tails"] == []
+        assert coordinator.snapshot()["tail"] is None
         assert not coordinator.snapshot()["confirmed_checkpoint"]
         assert not coordinator.warm_deadline_snapshot()["eligible"]
         assert coordinator.confirmed_anchor_request() == {}

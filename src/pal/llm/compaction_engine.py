@@ -184,7 +184,7 @@ def _scope_safe_snapshot(snapshot: CompactionSnapshot) -> CompactionSnapshot:
         and message.payload.get("pal_authored")
     )) for transcript in snapshot.memory_items)
     replay = snapshot.replay_request
-    if replay is not None and len(applicable_context(replay.messages, active_turn_id="")) != len(replay.messages):
+    if replay is not None and len(applicable_context(replay.messages, active_turn_id="", preserve_turn_scoped=snapshot.replay_wire_shape == "anthropic_messages")) != len(replay.messages):
         replay = None  # Do not preserve a checkpoint at the cost of an expired instruction.
     return replace(snapshot, memory_items=items, replay_request=replay,
                    replay_dialect=snapshot.replay_dialect if replay else "",
@@ -631,7 +631,12 @@ class CompactionEngine:
             max(1, int(self.max_output_tokens)),
             visible_limit + max(2048, (visible_limit + 3) // 4),
         )
+        compact_scope = "compact:" + str(snapshot.metadata.get("compaction_op_id") or snapshot.source_stamp or uuid4().hex)
         metadata = {
+            "transient_history": True,
+            "turn_id": compact_scope,
+            "artifact_turn_id": "",
+            "projection_scope_id": compact_scope,
             "preferred_endpoint_id": snapshot.metadata.get(
                 "preferred_endpoint_id"
             ),
@@ -701,6 +706,7 @@ class CompactionEngine:
             return replace(
                 replay,
                 messages=(*replay.messages, tail),
+                request_instructions="",
                 policy=replace(
                     replay.policy,
                     max_output_tokens=max_output,

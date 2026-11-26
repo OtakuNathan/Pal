@@ -416,7 +416,7 @@ def test_old_response_cannot_update_live_epoch_observations():
             actual_provider="fixture", prefix_preserved=True)
     assert coordinator.snapshot()["frontier"]["submitted_prefix_tokens"] == new.frontier.target_prefix_tokens
     # Neither receipt belongs to an actually submitted attempt.
-    assert coordinator.snapshot()["tail"]["tails"] == []
+    assert coordinator.snapshot()["tail"] is None
     assert coordinator.snapshot()["observation"]["last_observed_sequence"] == -1
 
 

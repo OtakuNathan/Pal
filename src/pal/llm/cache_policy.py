@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 from pal.llm.cache_capabilities import CacheProfileError, PromptCacheDialect
+from pal.llm.cache_tail import POLICY
 from pal.llm.shapes.base import ShapeContext
 
 @dataclass(frozen=True)
@@ -30,11 +31,11 @@ class CacheProfile:
 # Legacy configuration aliases. Protocol binding comes from the endpoint,
 # independently of the historical provider-specific profile name.
 CACHE_PROFILES: Mapping[str, CacheProfile] = MappingProxyType({
-    "openai_explicit_economic_v1": CacheProfile("openai_explicit_economic_v1", "eager_tail",
+    "openai_explicit_economic_v1": CacheProfile("openai_explicit_economic_v1", POLICY,
         PromptCacheDialect.OPENAI_RESPONSES_EXPLICIT, version="3"),
     "openrouter_astra_legacy_explicit": CacheProfile(
         profile_id="openrouter_astra_legacy_explicit",
-        strategy="eager_tail",
+        strategy=POLICY,
         dialect=PromptCacheDialect.OPENROUTER_OPENAI_EXPLICIT,
     ),
     "openrouter_astra_provider_implicit": CacheProfile(

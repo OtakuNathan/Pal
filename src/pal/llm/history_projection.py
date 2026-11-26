@@ -481,10 +481,14 @@ class HistoryProjection:
 
         seed_messages: tuple = tuple(root.left_messages())
         seed_coverage_ids: tuple[str, ...] = ()
+        from pal.llm.ir import InstructionScopeIR
+        preserve_scoped = bool(self.capabilities(session.binding.endpoint_id).get("supports_turn_scoped_instructions"))
         if memory_service is not None:
             seed_messages, seed_coverage_ids = self.left_view(
-                memory_service, root
+                memory_service, root, preserve_turn_scoped=preserve_scoped
             )
+        elif not preserve_scoped:
+            seed_messages = tuple(m for m in seed_messages if m.instruction_scope != InstructionScopeIR.NEXT_USER_MESSAGE)
         # F4 (review): the keeper is the session's ACTUAL frozen right
         # side — unfrozen right messages stay in the open tail and must
         # not claim chunk survival; a session with no committed chunks
@@ -518,7 +522,7 @@ class HistoryProjection:
         )
 
     def left_view(
-        self, memory_service: Any, root: Any
+        self, memory_service: Any, root: Any, *, preserve_turn_scoped: bool = False
     ) -> tuple[tuple, tuple[str, ...]]:
         """R3/B1: the reseed as the MODEL view of L, with its full coverage.
 
@@ -550,6 +554,7 @@ class HistoryProjection:
 
         from pal.memory.context_view import projected_messages
         from pal.memory.turn_ir import L1TurnState
+        from pal.llm.ir import InstructionScopeIR
 
         # Bootstrap uses the same visibility rules as ordinary compilation.
         # Raw L1 still retains expired instructions and excluded revisions.
@@ -559,7 +564,8 @@ class HistoryProjection:
                 turn, settled=turn.state != L1TurnState.ACTIVE)}
             selected.extend(
                 message for message in turn.messages
-                if message.semantic_kind != "pal_prompt_context" or message.message_id in visible
+                if (message.semantic_kind != "pal_prompt_context" or message.message_id in visible)
+                and (preserve_turn_scoped or message.instruction_scope != InstructionScopeIR.NEXT_USER_MESSAGE)
             )
         messages = tuple(selected)
         turns = (memory_service.history if memory_service is not None else None)
@@ -670,7 +676,18 @@ class HistoryProjection:
                 messages, tail, projected_ids = [], [], []
                 turns = memory_service.history_root.all_turns() if native_window else left_snapshot.turns
                 for turn in turns:
-                    projected = self.project_messages(list(turn.messages), turn_id=turn.turn_id,
+                    # Only native compaction needs the exact currently visible
+                    # prefix. Canonical lineage checks its original source IDs.
+                    from pal.memory.continuity import is_summary_projection
+                    from pal.memory.prompt_context import applicable_context
+                    if native_window:
+                        excluded = set(turn.metadata.get("prompt_context_state", {}).get("excluded", ()))
+                        visible = applicable_context([m for m in turn.messages
+                            if m.message_id not in excluded and (not is_summary_projection(m)
+                                or m.semantic_kind == "runtime_context_summary")], active_turn_id="")
+                    else:
+                        visible = list(turn.messages)
+                    projected = self.project_messages(visible, turn_id=turn.turn_id,
                         artifact_scope_key=logical_scope_id, capabilities=capabilities)
                     for message in projected:
                         if message.message_id in source_id_set:
@@ -692,11 +709,12 @@ class HistoryProjection:
                 if reference_binding:
                     from pal.memory.prompt_context import applicable_context
                     history = applicable_context((*source_stable, *messages), active_turn_id="")
-                    replay = replace(shell, messages=tuple(history), logical_scope_id=logical_scope_id)
+                    replay = replace(shell, messages=tuple(history), logical_scope_id=logical_scope_id, request_instructions="")
                     dialect, wire_shape = "canonical_lineage", reference_binding[0]
                 else:
-                    if replay is None or native_source:
-                        replay = replace(shell, messages=(*source_stable, *messages))
+                    # Always use the captured visible source for native compact;
+                    # a warm generation anchor can still contain expired controls.
+                    replay = replace(shell, messages=(*source_stable, *messages), logical_scope_id=logical_scope_id, request_instructions="")
                     next_request = replace(shell, messages=(*stable, *tail))
                     wire_shape, dialect = "openai_response", "canonical_history"
             except Exception as exc:

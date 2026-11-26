@@ -16,7 +16,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 if TYPE_CHECKING:
     from pal.llm.compaction_engine import CompactionSnapshot, CompactionClockKind, CompactionCommitHooks
@@ -70,6 +70,7 @@ from pal.memory.turn_ir import (
 )
 from pal.llm.ir import (
     ArtifactRefPartIR,
+    InstructionScopeIR,
     LLMMessageIR,
     LLMRequestIR,
     MessageRole,
@@ -690,12 +691,19 @@ class MemoryService:
             "reconstructed": "post_commit_packaging_fault"})
 
     def prepare_l1_prompt_context(self, turn_id: str, stable: list[LLMMessageIR],
-        candidates: list[dict[str, Any]], *, boundary: str) -> tuple[tuple[LLMMessageIR, ...], L1TurnIR]:
+        candidates: list[dict[str, Any]], *, boundary: str,
+        date_pin: dict[str, Any] | None = None, today: str = "",
+        checklist: dict[str, Any] | None = None,
+        settled_turns: Sequence[L1TurnIR] = ()) -> tuple[tuple[LLMMessageIR, ...], L1TurnIR]:
         from pal.memory.prompt_context import prepare_context
+        from pal.memory.context_view import projected_messages
         active = self.active_l1_turn(turn_id)
         if active is None:
             raise L1TurnProtocolError(f"L1 turn is not active: {turn_id}")
-        frozen, additions, state = prepare_context(active, stable, candidates, boundary=boundary)
+        frozen, additions, state = prepare_context(active, stable, candidates, boundary=boundary,
+            date_pin=date_pin, today=today, checklist=checklist,
+            settled_history=tuple(m for turn in settled_turns
+                                  for m in projected_messages(turn, settled=True)))
         updated = self.append_l1_prompt_contexts(turn_id, additions, state, expected_revision=active.revision)
         return frozen, updated
 
@@ -1371,6 +1379,7 @@ def _turn_from_transcript(turn_id: str, transcript: list[L1TranscriptMessage]) -
                 role=role,
                 parts=tuple(parts),
                 semantic_kind=str(item.kind or ""),
+                instruction_scope=InstructionScopeIR(metadata.pop("_pal_instruction_scope", "persistent")),
                 metadata=metadata,
             )
         )
@@ -1384,6 +1393,8 @@ def _transcript_from_turn(turn: L1TurnIR) -> list[L1TranscriptMessage]:
     transcript: list[L1TranscriptMessage] = []
     for message in turn.messages:
         payload: dict[str, Any] = _mutable_mapping(message.metadata)
+        if message.instruction_scope != InstructionScopeIR.PERSISTENT:
+            payload["_pal_instruction_scope"] = message.instruction_scope.value
         tool_calls = None
         if message.tool_calls:
             tool_calls = [

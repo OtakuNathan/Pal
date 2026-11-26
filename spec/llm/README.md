@@ -79,27 +79,18 @@ provider item-to-turn transfer.
 
 ## Cache model generations
 
-`PromptCacheTail` is current. Runtime/model change `00309d6` (2026-09-17) replaced
-the older economic/ACK policy with bounded eager tail positions; the subsequent
-admission fix separates request preparation from actual transport admission and
-fences delayed callbacks with scope incarnation identity.
+`SessionChaseTail` is current. It models fixed session anchors, a bounded
+recent lookup window and marker selection independent of transport admission,
+turn changes and receipts. The `DropAnchors` mutant must violate `FixedAnchors`.
+The old PromptCacheTail/PromptCacheAdmission models and their mutants are
+historical (they described transport-owned marker history, which no longer
+exists). Once-only transport accounting remains tested at the implementation
+boundary independently of marker selection.
 
-`PromptCacheHandoff`, `PromptCacheFixedAnchors`, and `PromptCacheSettlement` are
-explicitly retired historical models. They must not be used to infer current
-runtime ACK, economic-threshold, or settlement-clearing behavior.
-
-`PromptCacheTail` retains a single pending payload and checks marker placement,
-bounded history and epoch invalidation. It does not check multiple outstanding
-preparations. `PromptCacheAdmission` adds that obligation: each plan has its own
-once-only admission identity, valid submissions increment the admitted count,
-and late/duplicate callbacks cannot advance it. The shared-sequence mutant must
-violate `SubmittedCountExact`. Production regressions prepare two different
-tails before admitting either, exercise both callback orders, then repeat the
-callbacks. A late shorter tail does not rewind the increasing tail history.
-
-Preparation sequence numbers are diagnostic ordering only. They must not be
-used to deduplicate distinct transport admissions. These two models remain
-separate abstractions, not a machine-checked composition theorem.
+`CooperativeToolBatch` checks that a normal interrupt stops further model
+requests while allowing the accepted batch to finish. Its early-close mutant
+must violate `NoPartialClose`. These are isolated abstractions, not a proof of
+composition across the runtime or external tool execution.
 
 ## Check
 

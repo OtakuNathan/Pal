@@ -178,3 +178,9 @@ This uses isolated synthetic history and in-memory model selection. It does not
 change the resident endpoint or conversation. The checkout changes affect resident
 LLM/Core/Memory code and require an external host restart for activation; plugin
 reload alone is insufficient. Never restart Pal's host from its own active turn.
+
+Native OpenAI compaction uses the visible closed input prefix and the same
+explicit chase-tail selector as ordinary generation when configured. The compact
+transport includes cache controls and the routing key via its own schema; it
+never adds generation tools or ephemeral suffix instructions. Cache telemetry
+for this operation is separate, and cross-operation cache reuse is not assumed.

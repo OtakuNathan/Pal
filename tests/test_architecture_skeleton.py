@@ -1714,7 +1714,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 sections,
                 [
                     "identity",
-                    "runtime",
+                    "current_date",
                     "persona",
                     "memory_guide",
                     "system_map",
@@ -1767,6 +1767,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "tool_efficiency",
                     "memory_guide",
                     "knowledge_storage_boundary",
+                    "current_date",
                 ),
             )
             self.assertEqual(
@@ -1791,9 +1792,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "tool_efficiency",
                     "memory_guide",
                     "knowledge_storage_boundary",
+                    "current_date",
                 ),
             )
-            self.assertEqual(prompt.metadata["reminder_sections"], ("current_date",))
+            self.assertEqual(prompt.metadata["reminder_sections"], ())
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
                 ("l1_recent_context_0", "l1_recent_context_1"),
@@ -1820,7 +1822,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("<tool_routing>", developer_text)
             self.assertIn("<tool_efficiency>", developer_text)
             self.assertNotIn("Today's date is", system_text)
-            self.assertIn("Today's date is", prompt.metadata["runtime_reminder_text"])
+            self.assertRegex(developer_text, r"UTC context date: \d{4}-\d{2}-\d{2}$")
+            self.assertEqual(prompt.metadata["runtime_reminder_text"], "")
             self.assertIn("<mutation_policy>", system_text)
             self.assertIn("<memory_guide>", developer_text)
             self.assertIn("<knowledge_storage_boundary>", developer_text)
@@ -2113,8 +2116,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Timezone: Asia/Shanghai", persona_fragment.content)
         self.assertEqual(persona_fragment.metadata["prompt_target"], "developer")
         self.assertNotIn("Today's date is", identity_fragment.content)
-        self.assertEqual(date_fragment.metadata["prompt_target"], "runtime_reminder")
-        self.assertRegex(date_fragment.content, r"Today's date is \d{4}-\d{2}-\d{2}\.")
+        self.assertEqual(date_fragment.metadata["prompt_target"], "developer")
+        self.assertRegex(date_fragment.content, r"UTC context date: \d{4}-\d{2}-\d{2}")
 
     def test_identity_prompt_uses_startup_projection_until_explicit_refresh(self) -> None:
         runtime_root, database = self._create_database()

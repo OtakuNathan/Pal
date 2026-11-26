@@ -30,6 +30,24 @@ PROVIDER_TTL_SECONDS: Mapping[str, int] = MappingProxyType({
 MODEL_TTL_SECONDS: Mapping[tuple[str, str], int] = MappingProxyType({})
 _REQUEST_TTL_SECONDS = {"5m": 300, "30m": 1800, "1h": 3600}
 
+def prefix_refresh_likely_cold(snapshot: Mapping[str, Any], *, endpoint_id: str,
+                               model_id: str) -> bool:
+    """An idle date refresh may use the existing local lifetime estimate.
+
+    Missing observations and early DeepSeek reminders are not expiry evidence.
+    This is an economic heuristic, never a provider-confirmed cache miss.
+    """
+    if (snapshot.get("endpoint_id") != endpoint_id or snapshot.get("model_id") != model_id
+            or snapshot.get("reason") != "estimated_lifetime_elapsed"
+            or snapshot.get("anchor_remaining_ttl_seconds") != 0):
+        return False
+    source = snapshot.get("ttl_source")
+    if source in {"request_cache_ttl", "endpoint_policy", "model_policy"}:
+        return True
+    return (source == "provider_policy"
+            and snapshot.get("provider_id") in {"openai", "openrouter", "anthropic"}
+            and "deepseek" not in model_id.lower())
+
 
 def reminder_ttl(
     provider: str, model: str, *, requested_ttls: tuple[str, ...] = (),

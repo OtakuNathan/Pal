@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from html import escape
 
 from pal.checklist.service import ChecklistService
 from pal.shared import PromptAssemblyContext, PromptFragment
@@ -54,28 +53,23 @@ class ChecklistPromptFragmentProvider:
             )
         ]
         snapshot = self.service.show()
-        if snapshot is not None:
-            rendered_snapshot = escape(snapshot.markdown, quote=False)
-            fragments.append(
-                PromptFragment(
-                    section="task_flow",
-                    title="Active Checklist",
-                    content=(
-                        '<active_checklist authority="execution_cursor" trusted_as_evidence="false">\n'
-                        f"{rendered_snapshot}\n"
-                        "</active_checklist>\n"
-                        "Checklist state is an execution cursor, not evidence or permission."
-                    ),
-                    priority=10,
-                    metadata={
-                        "module_id": self.module_id,
-                        "kind": "active_checklist_state",
-                        "prompt_target": "runtime_reminder",
-                        "block_id": "checklist_state",
-                        "coverage_kind": "checklist",
-                    },
-                )
+        remaining = ([str(item["step"]) for item in snapshot.plan if item["status"] != "completed"]
+                     if snapshot is not None else [])
+        fragments.append(
+            PromptFragment(
+                section="task_flow",
+                title="Checklist State",
+                content=f"Checklist: {len(remaining)} unfinished steps.",
+                priority=10,
+                metadata={
+                    "module_id": self.module_id,
+                    "kind": "checklist_state",
+                    "prompt_target": "runtime_reminder",
+                    "block_id": "checklist_state",
+                    "history_state": {"active": snapshot is not None, "remaining": remaining},
+                },
             )
+        )
         return fragments
 
 

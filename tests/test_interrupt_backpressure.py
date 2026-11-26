@@ -65,7 +65,8 @@ def test_channel_cleans_shared_buffers_even_when_endpoint_abort_fails():
 
 
 @pytest.mark.parametrize("async_abort", [False, True])
-def test_interrupt_cancels_execution_despite_sync_or_async_output_failure(async_abort):
+@pytest.mark.parametrize("reason", ["interrupted", "reset"])
+def test_interrupt_ends_turn_despite_sync_or_async_output_failure(async_abort, reason):
     async def run():
         endpoint, _, handle = endpoint_and_handle()
         failure = ChannelDeliveryError("blocked", reason="transport_backpressure")
@@ -80,8 +81,11 @@ def test_interrupt_cancels_execution_despite_sync_or_async_output_failure(async_
         state.turn_tasks["turn"] = task
         manager = TurnManager(context=context, state=state)
         try:
-            assert await manager.interrupt_active_turn()
-            execution.interrupt_turn.assert_awaited_once_with("turn")
+            assert await manager.interrupt_active_turn(reason=reason)
+            if reason == "interrupted":
+                execution.interrupt_turn.assert_not_awaited()
+            else:
+                execution.interrupt_turn.assert_awaited_once_with("turn")
             assert task.cancelling()
             assert continuation.interrupted
             assert state.resident_interrupt_task is None

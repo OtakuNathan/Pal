@@ -25,7 +25,6 @@ class IdentityPromptFragmentProvider(PromptFragmentProvider):
         self._system_identity_content = "\n".join(lines)
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
-        _ = context
         persona = self.service.get_persona()
         preferences = self.service.get_preferences()
         persona_lines: list[str] = []
@@ -63,12 +62,12 @@ class IdentityPromptFragmentProvider(PromptFragmentProvider):
                 metadata={"prompt_target": "developer"},
             ))
         fragments.append(PromptFragment(
-            section="runtime",
+            section="current_date",
             title="Current Date",
-            content=f"Today's date is {today_for_timezone(preferences.timezone if preferences is not None else None)}.",
+            content=f"UTC context date: {context.metadata.get('prompt_utc_date') or today_for_timezone('UTC')}",
             priority=10,
             metadata={
-                "prompt_target": "runtime_reminder",
+                "prompt_target": "developer",
                 "block_id": "current_date",
             },
         ))

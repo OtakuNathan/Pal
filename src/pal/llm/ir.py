@@ -48,6 +48,11 @@ class MessageState(StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class InstructionScopeIR(StrEnum):
+    PERSISTENT = "persistent"
+    NEXT_USER_MESSAGE = "next_user_message"
+
+
 class PromptRegionIR(StrEnum):
     """Provider-neutral cache locality carried with prompt messages."""
 
@@ -156,11 +161,17 @@ class LLMMessageIR:
     prompt_region: PromptRegionIR = PromptRegionIR.UNSPECIFIED
     replay: ReplayEnvelope | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    instruction_scope: InstructionScopeIR = InstructionScopeIR.PERSISTENT
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", MessageRole(self.role))
         object.__setattr__(self, "state", MessageState(self.state))
         object.__setattr__(self, "prompt_region", PromptRegionIR(self.prompt_region))
+        object.__setattr__(self, "instruction_scope", InstructionScopeIR(self.instruction_scope))
+        if self.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE and (
+                self.role not in {MessageRole.SYSTEM, MessageRole.DEVELOPER} or not self.parts
+                or any(not isinstance(part, TextPartIR) for part in self.parts)):
+            raise ValueError("turn-scoped instructions must be nonempty system/developer text")
         if not str(self.message_id or "").strip():
             raise ValueError("message_id must be non-empty")
         object.__setattr__(self, "parts", tuple(self.parts))
@@ -233,6 +244,7 @@ class LLMRequestIR:
     model_hint: str | None = None
     logical_scope_id: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    request_instructions: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))

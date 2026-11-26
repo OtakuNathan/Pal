@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from pal.llm.replay_compatibility import accepts_replay
 from pal.llm.ir import (
     ImagePartIR,
+    InstructionScopeIR,
     LLMFinishReason,
     LLMRequestIR,
     LLMResponseDeltaKind,
@@ -44,10 +45,23 @@ class AnthropicMessagesCodec(ShapeCodecBase):
         system_parts: list[dict[str, Any]] = []
         messages: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
+        from pal.llm.cache_capabilities import supports_turn_scoped_instructions, canonical_claude_model
+        scoped_supported = supports_turn_scoped_instructions(context.wire_shape, context.model_id, context.base_url, context.capabilities)
+        opus55 = canonical_claude_model(context.model_id) == "claude-opus-5-5"
         for message in request.messages:
             wire_start = len(messages)
             system_start = len(system_parts)
             try:
+                if message.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE:
+                    if not scoped_supported:
+                        raise ShapeDecodeError("endpoint does not support turn-scoped system messages")
+                    if (not messages and not context.has_conversation_prefix) or (
+                            messages and messages[-1].get("role") not in {"user", "system"}):
+                        raise ShapeDecodeError("turn-scoped system message must follow a user or tool result")
+                    messages.append({"role": "system", "clear_at": "next_user_message", "content": [
+                        {"type": "text", "text": part.text} for part in message.parts]})
+                    spans.append(EncodedMessageSpan(message.message_id))
+                    continue
                 # Boundary-aware hoisting (review G2): system/developer content
                 # joins the top-level ``system`` ONLY at the request head — no
                 # chronological message emitted yet AND no conversation prefix
@@ -79,8 +93,8 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                         spans.append(EncodedMessageSpan(message.message_id))
                     continue
                 if message.role in (MessageRole.SYSTEM, MessageRole.DEVELOPER):
-                    # Anthropic Messages has no generally available developer
-                    # role and no mid-conversation system role. Preserve
+                    # Legacy/compatible endpoints lack the scoped system
+                    # contract. Preserve
                     # chronological placement by degrading runtime developer
                     # guidance (and mid-stream system content) to a distinct
                     # user content block. Keeping it distinct lets a cache
@@ -190,7 +204,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
             payload["system"] = system_parts
         thinking_active = policy.thinking_level not in {None, ThinkingLevel.OFF}
         if (
-            policy.temperature is not None
+            policy.temperature is not None and not opus55
             and (not thinking_active or context.capabilities.get("supports_temperature") is True)
             and request_parameter_supported(context, "temperature", thinking_level=policy.thinking_level)
         ):
@@ -211,7 +225,12 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                 "manual thinking requires a non-off level and "
                 "1024 <= thinking_budget_tokens < max_output_tokens"
             )
-        if policy.thinking_level == ThinkingLevel.OFF:
+        if opus55:
+            if policy.thinking_level == ThinkingLevel.OFF or policy.thinking_budget_tokens is not None:
+                raise ShapeDecodeError("Claude Opus 5.5 uses always-adaptive thinking; select an effort")
+            if policy.thinking_level is not None:
+                payload["output_config"] = {"effort": policy.thinking_level.value}
+        elif policy.thinking_level == ThinkingLevel.OFF:
             payload["thinking"] = {"type": "disabled"}
         elif policy.thinking_level is not None:
             payload["output_config"] = {"effort": policy.thinking_level.value}
@@ -525,6 +544,8 @@ def _last_message_cache_targets(
     messages: list[dict[str, Any]],
 ) -> tuple[tuple[str | int, ...], ...]:
     message_index = len(messages) - 1
+    if messages[message_index].get("clear_at") == "next_user_message":
+        return ()
     content = messages[message_index].get("content")
     if isinstance(content, str):
         return (("messages", message_index),) if content else ()

@@ -10,17 +10,169 @@ from typing import Any, Mapping, Sequence, TYPE_CHECKING
 if TYPE_CHECKING:
     from pal.memory.turn_ir import L1TurnIR
 
-from pal.llm.ir import LLMMessageIR, MessageRole, PromptRegionIR, TextPartIR
+from pal.llm.ir import LLMMessageIR, MessageRole, PromptRegionIR, TextPartIR, InstructionScopeIR
 from pal.llm.serde import message_from_payload, message_to_payload
 from pal.shared.json_values import thaw_json
 
 STATE_KEY = "prompt_context_state"
 CONTEXT_KIND = "pal_prompt_context"
+_CHECKLIST_TOOLS = frozenset({
+    "upsert_checklist", "op_checklist_upsert", "complete_checklist_step",
+    "op_checklist_check", "read_checklist", "op_checklist_show",
+    "close_checklist", "op_checklist_clear",
+})
+
+def prompt_date_pin(memory: Any) -> dict[str, Any] | None:
+    """Find the latest durable date pin in the current compact generation."""
+    root = memory.history_root
+    epoch = (root.incarnation, root.left_generation)
+    for turn in reversed(memory.history.turns):
+        pin = turn.metadata.get(STATE_KEY, {}).get("date_pin", {})
+        if tuple(pin.get("epoch", ())) == epoch and pin.get("date"):
+            return thaw_json(pin)
+    return None
+
+
+def select_prompt_date_pin(memory: Any, turn: "L1TurnIR", today: str, *,
+                           cold: bool = False, borrowed_date: str | None = None) -> dict[str, Any]:
+    root = memory.history_root
+    epoch = [root.incarnation, root.left_generation]
+    state = turn.metadata.get(STATE_KEY, {})
+    own = state.get("date_pin", {})
+    if tuple(own.get("epoch", ())) == tuple(epoch) and "date" in own:
+        return thaw_json(own)
+    previous = prompt_date_pin(memory)
+    date = borrowed_date or (previous["date"] if previous and not cold else today)
+    return {"epoch": epoch, "date": date}
+
+
+def _remaining(plan: Any) -> tuple[str, ...] | None:
+    if not isinstance(plan, (list, tuple)):
+        return None
+    result = []
+    for item in plan:
+        if not isinstance(item, Mapping) or not isinstance(item.get("step"), str):
+            return None
+        if item.get("status", "pending") != "completed":
+            result.append(item["step"].strip())
+    return tuple(result)
+
+
+def _checklist_view(messages: Sequence[LLMMessageIR]) -> tuple[tuple[str, ...] | None, bool | None]:
+    """Reconstruct only state actually delivered in the visible conversation."""
+    from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+    calls: dict[str, ToolCallIR] = {}
+    remaining: tuple[str, ...] | None = None
+    active: bool | None = None
+    for message in messages:
+        if message.metadata.get("history_fact") == "checklist":
+            active = bool(message.metadata.get("checklist_active"))
+            if "remaining" in message.metadata:
+                remaining = tuple(message.metadata["remaining"])
+            elif not active:
+                remaining = ()
+            elif remaining is not None and len(remaining) != message.metadata.get("remaining_count"):
+                remaining = None
+        for part in message.parts:
+            if isinstance(part, ToolCallIR):
+                if part.name in _CHECKLIST_TOOLS:
+                    calls[part.call_id] = part
+                continue
+            if not isinstance(part, ToolResultIR) or not part.ok:
+                continue
+            name = part.name
+            if name not in _CHECKLIST_TOOLS:
+                continue
+            try:
+                data, _ = json.JSONDecoder().raw_decode(part.content[part.content.index("{"):])
+            except (ValueError, TypeError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            call = calls.get(part.call_id)
+            if name in {"close_checklist", "op_checklist_clear"}:
+                if "cleared" in data:
+                    remaining, active = (), False
+                else:
+                    remaining, active = None, None
+            elif name in {"read_checklist", "op_checklist_show"}:
+                if data.get("active") is False or part.content == "No active checklist.":
+                    remaining, active = (), False
+                else:
+                    remaining = _remaining(data.get("plan"))
+                    active = bool(remaining) if remaining is not None else None
+            elif name in {"upsert_checklist", "op_checklist_upsert"}:
+                remaining = _remaining(call.arguments.get("plan")) if call is not None and "active" in data else None
+                active = bool(data["active"]) if "active" in data else None
+                if active is False:
+                    remaining = ()
+                elif remaining is not None and (type(data.get("total")) is not int
+                        or type(data.get("done")) is not int
+                        or len(remaining) != data["total"] - data["done"]):
+                    remaining = None
+            else:
+                if data.get("cleared") is True:
+                    remaining, active = (), False
+                elif ("step" in data and type(data.get("done")) is int
+                      and type(data.get("total")) is int):
+                    active = True
+                    if remaining is not None:
+                        remaining = tuple(step for step in remaining if step != data["step"])
+                        if len(remaining) != data["total"] - data["done"]:
+                            remaining = None
+                else:
+                    remaining, active = None, None
+    return remaining, active
+
+
+def _append_history_facts(turn: "L1TurnIR", state: dict[str, Any],
+                          messages: Sequence[LLMMessageIR], additions: list[LLMMessageIR],
+                          *, date_pin: Mapping[str, Any] | None, today: str,
+                          checklist: Mapping[str, Any] | None) -> None:
+    def fact(kind: str, text: str, **metadata: Any) -> None:
+        sequence = int(state.get("delivery_sequence", 0)) + 1
+        state["delivery_sequence"] = sequence
+        additions.append(LLMMessageIR(
+            role=MessageRole.USER, parts=(TextPartIR("Pal runtime: " + text),),
+            message_id=f"prompt-context:{turn.turn_id}:{sequence}", semantic_kind=CONTEXT_KIND,
+            prompt_region=PromptRegionIR.ACTIVE_HISTORY,
+            metadata={"pal_authored": True, "history_fact": kind, "scope_turn_id": turn.turn_id,
+                      "context_kind": "fact", **metadata},
+        ))
+
+    if date_pin is not None:
+        state["date_pin"] = thaw_json(date_pin)
+        last_date = next((m.metadata.get("utc_date") for m in reversed(messages)
+                          if m.metadata.get("history_fact") == "date"), None)
+        if today and today != date_pin["date"] and last_date != today:
+            fact("date", f"UTC date update: {today}", utc_date=today)
+    if checklist is None:
+        return
+    remaining = tuple(checklist.get("remaining", ()))
+    known, was_active = _checklist_view(messages)
+    active = bool(checklist.get("active"))
+    if not active:
+        if was_active:
+            fact("checklist", "Checklist closed.", checklist_active=False, remaining=[])
+        return
+    reminder_seen = any(m.metadata.get("history_fact") == "checklist"
+                        and m.metadata.get("scope_turn_id") == turn.turn_id
+                        for m in messages)
+    if known != remaining:
+        fact("checklist", f"Checklist: {len(remaining)} unfinished steps.\n" +
+             "\n".join(f"- {step}" for step in remaining),
+             checklist_active=True, remaining=list(remaining), remaining_count=len(remaining))
+    elif not reminder_seen and not state.get("initialized"):
+        fact("checklist", f"Checklist: {len(remaining)} unfinished steps.",
+             checklist_active=True, remaining_count=len(remaining))
 
 
 def prepare_context(
     turn: "L1TurnIR", stable_messages: Sequence[LLMMessageIR],
     candidates: Sequence[Mapping[str, Any]], *, boundary: str = "",
+    date_pin: Mapping[str, Any] | None = None, today: str = "",
+    checklist: Mapping[str, Any] | None = None,
+    settled_history: Sequence[LLMMessageIR] = (),
 ) -> tuple[tuple[LLMMessageIR, ...], tuple[LLMMessageIR, ...], dict[str, Any]]:
     """Return frozen instructions, records to append, and their atomic coverage state.
 
@@ -33,7 +185,10 @@ def prepare_context(
                  "sources": {}, "events": {}}
     if state.get("version") != 1:
         raise ValueError("unsupported prompt context state version")
-    rebuild = state.get("boundary", boundary) != boundary
+    previous_pin = state.get("date_pin")
+    rebuild = (state.get("boundary", boundary) != boundary
+               or (date_pin is not None and previous_pin is not None
+                   and tuple(previous_pin["epoch"]) != tuple(date_pin["epoch"])))
     state["boundary"] = boundary
     if rebuild:
         state["stable"] = [message_to_payload(m) for m in stable_messages]
@@ -155,17 +310,29 @@ def prepare_context(
         retained.update(m.message_id for m in additions if m.metadata["context_kind"] == "event")
         state["excluded"] = sorted(set(state.get("excluded", ())) | {
             m.message_id for m in (*turn.messages, *additions)
-            if m.semantic_kind == CONTEXT_KIND and m.message_id not in retained})
+            if m.semantic_kind == CONTEXT_KIND and m.message_id not in retained
+            and not m.metadata.get("history_fact")
+            and m.instruction_scope != InstructionScopeIR.NEXT_USER_MESSAGE})
+    if date_pin is not None or checklist is not None:
+        if (date_pin is not None and state.get("initialized") and not rebuild
+                and "date_pin" not in state):
+            # A live legacy snapshot never acquires an invented preamble.
+            date_pin = {**date_pin, "date": ""}
+        _append_history_facts(turn, state, (*settled_history, *(
+            m for m in projected_context(turn) if m.message_id not in state.get("excluded", ())
+        )), additions, date_pin=date_pin, today=today, checklist=checklist)
     state["initialized"] = True
     return frozen, tuple(additions), state
 
 
-def applicable_context(messages: Sequence[LLMMessageIR], *, active_turn_id: str) -> list[LLMMessageIR]:
+def applicable_context(messages: Sequence[LLMMessageIR], *, active_turn_id: str,
+                       preserve_turn_scoped: bool = False) -> list[LLMMessageIR]:
     """Old control records never become active instructions in another turn."""
     return [m for m in messages if not (
         m.semantic_kind == CONTEXT_KIND and m.metadata.get("pal_authored")
         and m.role == MessageRole.DEVELOPER
         and m.metadata.get("scope_turn_id") != active_turn_id
+        and not (preserve_turn_scoped and m.instruction_scope == InstructionScopeIR.NEXT_USER_MESSAGE)
     )]
 
 

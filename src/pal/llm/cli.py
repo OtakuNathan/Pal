@@ -101,6 +101,8 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
                             help="Allow requests above the verified standard input price tier")
     add_parser.add_argument("--compaction-strategy", choices=("auto", "semantic_checkpoint", "openai_responses"), default=None)
     add_parser.add_argument("--continuation-mode", choices=("auto", "full"), default=None)
+    add_parser.add_argument("--instruction-mode", choices=("auto", "chronological", "turn_scoped", "interaction"), default=None,
+                            help="Scoped instructions: automatic, legacy chronological, verified Claude turn scope, or Gemini root interaction scope (may miss cache)")
     add_parser.add_argument("--cache-mode", choices=("implicit", "hybrid", "explicit"), default=None,
                             help="Cache policy: automatic, fixed anchors plus automatic, or rolling explicit anchors")
     add_parser.add_argument("--cache-protocol", choices=("general", *(item.value for item in PromptCacheDialect)),
@@ -279,6 +281,8 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
     )
     if args.continuation_mode is not None:
         capabilities["continuation_mode"] = args.continuation_mode
+    if args.instruction_mode is not None:
+        capabilities["request_instruction_mode"] = args.instruction_mode
     if args.physical_context_window is not None:
         capabilities["physical_context_window"] = args.physical_context_window
     if args.allow_long_context_pricing is not None:

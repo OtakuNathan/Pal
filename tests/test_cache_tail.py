@@ -28,7 +28,7 @@ def send(coordinator, request, ctx, identity):
 
 
 @pytest.mark.parametrize("model", [
-    "openai/gpt-6-luna", "openai/gpt-6-sol", "openai/gpt-6.2-terra",
+    "openai/gpt-6.2-terra",
     "openai/gpt-6x2-astra", "openai/gpt-6.2-solar", "other/gpt-6.2-astra",
 ])
 def test_unverified_openrouter_models_do_not_enable_explicit_controls(model):
@@ -42,7 +42,7 @@ def test_unverified_openrouter_models_do_not_enable_explicit_controls(model):
 @pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
 @pytest.mark.parametrize("provider", ["openai", "openrouter"])
 @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.2-astra", "gpt-6.2-sol"])
-@pytest.mark.parametrize("mode,count", [("implicit", 0), ("hybrid", 2), ("explicit", 3)])
+@pytest.mark.parametrize("mode,count", [("implicit", 0), ("hybrid", 2), ("explicit", 4)])
 def test_modes_final_payload(shape, provider, model, mode, count):
     model_id = f"openai/{model}" if provider == "openrouter" else model
     ctx = replace(context(mode, shape, provider), model_id=model_id)
@@ -104,7 +104,7 @@ def test_openrouter_hybrid_sdk_body_and_reject_incompatible_options(shape):
 
 
 @pytest.mark.parametrize("shape", [WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION])
-def test_eager_progresses_without_any_usage_and_retries_keep_previous(shape):
+def test_chase_tail_progresses_without_any_usage_and_retries_keep_previous(shape):
     co, ctx = PromptCacheCoordinator(rolling_net_threshold_tokens=10**12), context(shape=shape)
     request = _active_tool_request(_request())
     previous = None
@@ -116,14 +116,13 @@ def test_eager_progresses_without_any_usage_and_retries_keep_previous(shape):
             assert plan.breakpoints[-2].message_id == previous.message_id
             assert len(plan.breakpoints) == 4
         # Planning repeatedly and retrying the same boundary cannot consume P.
-        snapshot = co.snapshot()["tail"]
         for _ in range(3):
             built = co.plan(request, ctx)
-            assert co.snapshot()["tail"] == snapshot
+            assert built.breakpoints == plan.breakpoints
         retry, _, _ = send(co, request, ctx, f"retry-{round_}")
         assert retry.breakpoints == plan.breakpoints
         co.record_attempt(plan, status="failed", request_id=str(round_))
-        assert co.snapshot()["tail"]["tails"] == snapshot["tails"]
+        assert co.plan(request, ctx).breakpoints == plan.breakpoints
         previous = current
         request = _extend_active_tool_request(request, suffix=str(round_))
 
@@ -134,44 +133,45 @@ def test_usage_and_late_receipts_do_not_change_positions():
     old, _, _ = send(co, request, ctx, "old")
     newer = _extend_active_tool_request(request, suffix="new")
     new, _, _ = send(co, newer, ctx, "new")
-    before = co.snapshot()["tail"]
+    before = co.plan(newer, ctx).breakpoints
     for plan, identity in ((new, "new"), (old, "old"), (old, "old")):
         co.record_success(plan, LLMUsageIR(input_tokens=50000, cached_input_tokens=45000, reported=True), request_id=identity)
-    assert co.snapshot()["tail"] == before
+    assert co.plan(newer, ctx).breakpoints == before
 
 
-def test_turn_prefix_and_mode_changes_discard_tail_history():
+def test_turn_changes_keep_session_anchors_and_rederive_recent_paths():
     co, ctx = PromptCacheCoordinator(), context()
     request = replace(_active_tool_request(_request()), metadata={"turn_id": "one"})
     first, _, _ = send(co, request, ctx, "first")
     co.end_turn("one")
-    assert co.snapshot()["tail"]["tails"] == []
-    next_turn = replace(request, metadata={"turn_id": "two"})
+    next_turn = replace(_extend_active_tool_request(request, suffix="two"), metadata={"turn_id": "two"})
     plan = co.plan(next_turn, ctx)
-    assert not any(p.label == "tail_previous" for p in plan.breakpoints)
-    send(co, next_turn, ctx, "second")
+    assert plan.breakpoints[:2] == first.breakpoints[:2]
+    assert plan.breakpoints[-2].path == first.breakpoints[-1].path
+    assert plan.breakpoints[-1].path > first.breakpoints[-1].path
+    assert PromptCacheCoordinator().plan(next_turn, ctx).breakpoints == plan.breakpoints
     changed = replace(next_turn, messages=(replace(next_turn.messages[0], parts=(TextPartIR("different system"),)), *next_turn.messages[1:]))
-    plan = co.plan(changed, ctx)
-    assert co.snapshot()["tail"]["tails"] == []
-    assert not any(p.label == "tail_previous" for p in plan.breakpoints)
-    hybrid, encoded, _ = send(co, changed, context("hybrid"), "hybrid")
+    from pal.llm.cache_wire import boundary_at
+    changed_plan = co.plan(changed, ctx)
+    assert boundary_at(changed_plan.prepared_encoded, changed_plan.breakpoints[0].message_id, changed_plan.breakpoints[0].path).fingerprint != boundary_at(plan.prepared_encoded, plan.breakpoints[0].message_id, plan.breakpoints[0].path).fingerprint
+    hybrid, _, _ = send(co, changed, context("hybrid"), "hybrid")
     assert len(hybrid.breakpoints) == 2
     co.record_success(first, LLMUsageIR(), request_id="first")
-    assert co.snapshot()["tail"]["tails"] == []
+    assert co.plan(next_turn, ctx).breakpoints == plan.breakpoints
 
 
 def test_partial_batch_and_tampered_marker_are_rejected():
     co, ctx = PromptCacheCoordinator(), context()
     complete = _active_tool_request(_request())
     partial = replace(complete, messages=(*complete.messages[:-2], complete.messages[-1]))
-    assert len(co.plan(partial, ctx).breakpoints) == 2
+    assert {p.message_id for p in co.plan(partial, ctx).breakpoints} == {m.message_id for m in complete.messages[:3]}
     raw = codec_for_shape(ctx.wire_shape).encode(complete, ctx)
     plan = co.plan(complete, ctx, raw)
     encoded = co.inject(raw, plan)
     tampered = replace(encoded, extra_body={**encoded.extra_body, "cache_control": {"type": "ephemeral"}})
     with pytest.raises(CacheProfileError):
         co.start_attempt(plan, request=complete, context=ctx, encoded=tampered, raw_encoded=raw, request_id="bad")
-    assert co.snapshot()["tail"]["tails"] == []
+    assert co.snapshot()["tail"] is None
 
 
 def test_capabilities_defaults_overrides_and_unknown_models():
@@ -196,9 +196,9 @@ def test_mixed_scopes_are_bounded_and_old_receipt_does_not_evict_current_tail():
     old, _, _ = send(co, request, context(), "old")
     current = replace(request, logical_scope_id="another-session")
     send(co, current, context(), "new")
-    before = co.snapshot()["tail"]
+    before = co.snapshot()["last_scope_key"]
     co.record_success(old, LLMUsageIR(reported=True), request_id="old")
-    assert co.snapshot()["tail"] == before
+    assert co.snapshot()["last_scope_key"] == before
     assert co.snapshot()["scope_count"] == 1
     send(co, current, context("implicit"), "implicit")
     assert co.snapshot()["scope_count"] == 1
@@ -219,7 +219,7 @@ def test_content_tampering_and_stale_generation_cannot_be_submitted():
     with pytest.raises(CacheProfileError):
         co.start_attempt(plan, request=request, context=ctx, raw_encoded=raw,
                          encoded=encoded, request_id="stale")
-    assert co.snapshot()["tail"]["tails"] == []
+    assert co.snapshot()["tail"] is None
 
 
 class Provider:
@@ -258,3 +258,63 @@ def test_independent_provider_reuse_and_documented_fallback(fail):
     hit3, end3 = server.respond(third)
     assert end3 > end2 > end1
     assert hit3 < end1 if fail else hit3 == end2
+
+
+@pytest.mark.parametrize("provider,url", [("openai", "https://api.openai.com/v1"), ("openrouter", "https://openrouter.ai/api/v1")])
+def test_52_lookup_markers_keep_first_two_and_latest_fifty_across_turns(provider, url):
+    from pal.llm.ir import LLMMessageIR, MessageRole, PromptRegionIR
+    ctx = replace(context(provider=provider), base_url=url)
+    request = _request()
+    history = tuple(LLMMessageIR(MessageRole.USER, (TextPartIR(f"Entry {i}"),), message_id=f"entry-{i}", prompt_region=PromptRegionIR.SETTLED_HISTORY) for i in range(100))
+    request = replace(request, messages=(request.messages[0], *history), metadata={"turn_id": "first"})
+    co = PromptCacheCoordinator()
+    first, encoded, _ = send(co, request, ctx, "first")
+    assert len(first.breakpoints) == 52
+    assert [p.message_id for p in first.breakpoints] == [request.messages[0].message_id, "entry-0", *[f"entry-{i}" for i in range(50,100)]]
+    co.end_turn("first")
+    next_request = replace(request, messages=(*request.messages, replace(history[-1], message_id="next", parts=(TextPartIR("Next"),))), metadata={"turn_id": "next"})
+    second, _, _ = send(co, next_request, ctx, "second")
+    assert second.scope_key == first.scope_key
+    assert second.cache_key == first.cache_key
+    assert co.snapshot()["recent_attempts"][-1]["prefix_preserved"]
+    assert second.breakpoints[:2] == first.breakpoints[:2]
+    assert [p.path for p in second.breakpoints[2:-1]] == [p.path for p in first.breakpoints[3:]]
+    assert second.breakpoints[-1].message_id == "next"
+    assert PromptCacheCoordinator().plan(next_request, ctx).breakpoints == second.breakpoints
+    assert audit(encoded, tuple(p.path for p in first.breakpoints), lookup_limit=52)[0]
+
+
+def test_explicit_side_branch_shares_routing_but_not_session_diagnostics():
+    co, ctx = PromptCacheCoordinator(), context()
+    request = replace(_active_tool_request(_request()), metadata={"turn_id": "main"})
+    main, _, _ = send(co, request, ctx, "main")
+    anchor = dict(co._anchor_evidence)
+    branch = replace(request, metadata={"turn_id": "side", "transient_history": True})
+    side, _, _ = send(co, branch, ctx, "side")
+    assert main.cache_key == side.cache_key
+    assert main.scope_key != side.scope_key
+    assert main.breakpoints == side.breakpoints
+    assert co.snapshot()["last_scope_key"] == main.scope_key
+    assert co._anchor_evidence == anchor
+
+
+def test_warm_semantic_compact_uses_own_admission_scope_not_closed_turn():
+    from pal.llm.compaction_engine import CompactionEngine, CompactionSnapshot
+    from pal.llm.resident_compaction import PalCompactionPolicy
+    policy = PalCompactionPolicy()
+    ctx = context()
+    co = PromptCacheCoordinator()
+    original = replace(_active_tool_request(_request()), metadata={"turn_id": "closed"})
+    main, _, _ = send(co, original, ctx, "main")
+    anchor = co.eligible_anchor_request()["request"]
+    co.end_turn("closed")
+    snapshot = CompactionSnapshot(target_input_budget=8192, reserved_output_tokens=512,
+        clock_kind=policy.clock_kind, clock_value=1, replay_request=anchor, replay_wire_shape="openai_response",
+        metadata={"compaction_op_id": "test-run"})
+    compact = CompactionEngine(policy)._request(snapshot, "fixture", attempt=1)
+    plan, _, diagnostics = send(co, compact, ctx, "compact")
+    assert plan.turn_id == "compact:test-run"
+    assert plan.scope_key != main.scope_key
+    assert plan.cache_key == main.cache_key
+    assert diagnostics["operation"] == "semantic_compact"
+    assert co.snapshot()["last_scope_key"] == main.scope_key

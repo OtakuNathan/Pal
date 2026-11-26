@@ -131,3 +131,9 @@ Remaining limits: isolated models do not prove cross-subsystem composition,
 ordinary callback failure tests do not prove arbitrary external code termination,
 and verifier foreground locks do not make external filesystem writes atomic with
 durable receipts. See each model's contract map and the original audit report.
+
+2026-11-26: the admission-owned marker history described above is historical.
+`SessionChaseTail` now derives lookup positions mechanically from the closed
+prefix; its fixed-anchor mutant and `CooperativeToolBatch`'s premature-close
+mutant are active inventory cases. Transport receipt identity remains separate
+from marker selection.

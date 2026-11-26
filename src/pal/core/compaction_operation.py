@@ -13,6 +13,7 @@ from pal.llm.compaction_engine import CompactionClockKind, CompactionRunResult
 from pal.llm.compaction_contracts import CompactionService
 from pal.llm.conversions import tool_definition_ir_from_dict
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
+from pal.memory.prompt_context import prompt_date_pin
 from pal.shared.tool_protocol import ToolResultIR
 
 LOGGER = logging.getLogger(__name__)
@@ -238,11 +239,20 @@ class CompactionOperation:
 
         def build_compaction_request(endpoint_id, model_id):
             from pal.shared import PromptAssemblyContext
+            context = assembly_context or PromptAssemblyContext(metadata={"typed_l1_projection": True})
+            pin = prompt_date_pin(memory_service)
+            if pin is not None:
+                context = replace(context, metadata={**context.metadata, "prompt_utc_date": pin["date"]})
             shell = self._build_canonical_prompt(
-                assembly_context or PromptAssemblyContext(metadata={"typed_l1_projection": True}),
+                context,
                 max_output_tokens=max(512, reserved_output_tokens), model_hint=model_id)
+            supports_suffix = llm_runtime.metadata(preferred_endpoint_id=endpoint_id).supports_suffix_instructions
+            active = memory_service.active_l1_turn(continuation.turn_id) if continuation is not None else None
+            if active is not None and any(str(key).startswith("runtime:") for key in active.metadata.get("prompt_context_state", {}).get("sources", {})):
+                supports_suffix = False
             return replace(shell,
                 tools=tuple(tool_definition_ir_from_dict(tool) for tool in self._build_llm_tool_contracts()),
+                request_instructions=str(shell.metadata.get("runtime_reminder_text") or "").strip() if supports_suffix else "",
                 metadata={**shell.metadata, **metadata, "preferred_endpoint_id": endpoint_id})
 
         def prepare_source(left_snapshot):
