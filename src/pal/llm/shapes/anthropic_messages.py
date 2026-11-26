@@ -30,6 +30,7 @@ from pal.llm.shapes.base import (
     ShapeDecodeError,
     _JSONFrame,
     finalize_cache_spans,
+    apply_request_root_instructions,
     request_parameter_supported,
 )
 from pal.llm.shapes.builder import ResponseBlockBuilder, canonical_finish_reason
@@ -241,7 +242,8 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                 }
             else:
                 payload["thinking"] = {"type": "adaptive"}
-        return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
+        return finalize_cache_spans(apply_request_root_instructions(
+            EncodedRequest(payload, tuple(spans)), context, request.request_instructions))
 
     def _new_decoder(self, context: ShapeContext) -> "AnthropicMessagesDecoder":
         return AnthropicMessagesDecoder(context)

@@ -246,13 +246,15 @@ class CompactionOperation:
             shell = self._build_canonical_prompt(
                 context,
                 max_output_tokens=max(512, reserved_output_tokens), model_hint=model_id)
-            supports_suffix = llm_runtime.metadata(preferred_endpoint_id=endpoint_id).supports_suffix_instructions
+            facts = llm_runtime.metadata(preferred_endpoint_id=endpoint_id)
+            supports_request_instructions = not facts.supports_turn_scoped_instructions and (
+                facts.supports_request_instructions or facts.supports_response_instructions or facts.supports_suffix_instructions)
             active = memory_service.active_l1_turn(continuation.turn_id) if continuation is not None else None
             if active is not None and any(str(key).startswith("runtime:") for key in active.metadata.get("prompt_context_state", {}).get("sources", {})):
-                supports_suffix = False
+                supports_request_instructions = False
             return replace(shell,
                 tools=tuple(tool_definition_ir_from_dict(tool) for tool in self._build_llm_tool_contracts()),
-                request_instructions=str(shell.metadata.get("runtime_reminder_text") or "").strip() if supports_suffix else "",
+                request_instructions=str(shell.metadata.get("runtime_reminder_text") or "").strip() if supports_request_instructions else "",
                 metadata={**shell.metadata, **metadata, "preferred_endpoint_id": endpoint_id})
 
         def prepare_source(left_snapshot):

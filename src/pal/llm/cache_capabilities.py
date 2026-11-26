@@ -120,6 +120,19 @@ def _default_capabilities(
     return PromptCacheCapabilities(protocol, explicit, implicit)
 
 
+def supports_response_instructions(shape: WireShape | str, capabilities: Mapping[str, Any]) -> bool:
+    """Responses compatibility promises the standard request-level field.
+
+    This makes no promise about where the provider renders or caches it.
+    """
+    return shape == WireShape.OPENAI_RESPONSE and capabilities.get("request_instruction_mode", "auto") != "chronological"
+
+def supports_root_instructions(shape: WireShape | str, capabilities: Mapping[str, Any]) -> bool:
+    """Standard request-local system guidance, without a suffix-cache promise."""
+    return (shape in {WireShape.OPENAI_COMPLETION, WireShape.ANTHROPIC_MESSAGES}
+            and capabilities.get("request_instruction_mode", "auto") != "chronological")
+
+
 def supports_suffix_instructions(shape: WireShape | str, model_id: str, base_url: str) -> bool:
     """Documented GPT-6.2 Responses suffix, not a generic compatible API."""
     return (shape == WireShape.OPENAI_RESPONSE
@@ -165,8 +178,14 @@ def supports_turn_scoped_instructions(shape: WireShape | str, model_id: str, bas
 
 def supports_interaction_instructions(shape: WireShape | str, model_id: str, base_url: str,
                                       capabilities: Mapping[str, Any]) -> bool:
-    # Changing the root system_instruction invalidates Gemini's prompt cache.
-    # This is a semantic opt-in, never a cache-preserving suffix default.
-    return (shape == WireShape.GEMINI_INTERACTIONS and model_id.startswith("gemini-")
-            and base_url.rstrip("/") == "https://generativelanguage.googleapis.com/v1beta"
-            and capabilities.get("request_instruction_mode") == "interaction")
+    # Changing the root system_instruction can invalidate the prompt cache.
+    # Normal requests have no temporary instruction.
+    return (shape == WireShape.GEMINI_INTERACTIONS
+            and capabilities.get("request_instruction_mode", "auto") in {"auto", "interaction"})
+
+
+def supports_request_instructions(shape: WireShape | str, model_id: str, base_url: str,
+                                  capabilities: Mapping[str, Any]) -> bool:
+    return (supports_response_instructions(shape, capabilities)
+            or supports_root_instructions(shape, capabilities)
+            or supports_interaction_instructions(shape, model_id, base_url, capabilities))

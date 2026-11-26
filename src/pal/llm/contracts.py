@@ -358,6 +358,8 @@ class LLMMetadata:
     default_thinking_level: str | None = None
 
     supports_suffix_instructions: bool = False
+    supports_response_instructions: bool = False
+    supports_request_instructions: bool = False
     supports_turn_scoped_instructions: bool = False
     supports_interaction_instructions: bool = False
 

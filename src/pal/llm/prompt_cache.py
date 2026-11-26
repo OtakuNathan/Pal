@@ -631,6 +631,7 @@ class PromptCacheCoordinator:
             message_spans=encoded.message_spans,
             extra_body=extra_body,
             applied_cache_breakpoint_message_ids=tuple(applied_breakpoint_message_ids),
+            instructions_are_suffix=encoded.instructions_are_suffix,
         )
 
     def discard_accounted_attempt(self, plan: PromptCachePlan, request_id: str) -> None:
@@ -1232,6 +1233,17 @@ class PromptCacheCoordinator:
         """
 
         existing = self._anchor_evidence.get(plan.scope_key)
+        wire_instructions = (plan.prepared_encoded.payload.get("instructions")
+                             if plan.prepared_encoded is not None else None)
+        if request.request_instructions or wire_instructions:
+            from pal.llm.cache_capabilities import supports_suffix_instructions
+            suffix = (plan.prepared_encoded.instructions_are_suffix if plan.prepared_encoded is not None
+                      else context is not None and supports_suffix_instructions(context.wire_shape, context.model_id, context.base_url))
+            if not suffix:
+                # An exceptional request may have a different leading system
+                # prompt. Stripping its instructions cannot reproduce that anchor.
+                self._anchor_evidence.pop(plan.scope_key, None)
+                return
         message_id = plan.anchor.submitted_message_id
         fingerprint = plan.anchor.submitted_fingerprint
         prefix_tokens = plan.anchor.submitted_prefix_tokens

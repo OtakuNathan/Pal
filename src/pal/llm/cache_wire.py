@@ -78,7 +78,8 @@ def clean_request(encoded: EncodedRequest, *, normalize_chat: bool = True, final
                       and isinstance(at(payload, path).get("content"), list)
                       else path for path in span.cache_targets)
         spans.append(replace(span, cache_targets=paths))
-    result = EncodedRequest(payload, tuple(spans))
+    result = EncodedRequest(payload, tuple(spans),
+        instructions_are_suffix=encoded.instructions_are_suffix and payload.get("model") == encoded.payload.get("model"))
     return finalize_cache_spans(result) if finalize else result
 
 
@@ -107,7 +108,8 @@ def inject_exact(encoded: EncodedRequest, points: tuple, cache_key: str,
             "mode": "explicit" if mode == "explicit" else "implicit", "ttl": "30m"}
     if gateway:
         extra["session_id"] = cache_key
-    return EncodedRequest(payload, clean.message_spans, extra, tuple(applied))
+    return EncodedRequest(payload, clean.message_spans, extra, tuple(applied),
+                          instructions_are_suffix=clean.instructions_are_suffix)
 
 
 def audit(encoded: EncodedRequest, expected: tuple[tuple, ...], *, mode: str = "explicit",
@@ -142,9 +144,10 @@ class Boundary:
 def boundary_at(encoded: EncodedRequest, message_id: str, path: tuple, *, payload: dict | None = None) -> Boundary | None:
     """Describe a selected block, including an interior continuity block."""
     from pal.llm.shapes.base import _provider_prefix
-    prefix = _provider_prefix(payload if payload is not None else thaw_json(encoded.payload), path)
+    prefix = _provider_prefix(payload if payload is not None else thaw_json(encoded.payload), path,
+                              instructions_are_suffix=encoded.instructions_are_suffix)
     if prefix is None or not isinstance(at(encoded.payload, path), Mapping):
         return None
-    serialized = json.dumps(prefix, ensure_ascii=False, separators=(",", ":"))
+    serialized = json.dumps(prefix, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return Boundary(message_id, path, hashlib.sha256(serialized.encode()).hexdigest(),
                     max(1, (len(serialized) + 3) // 4))

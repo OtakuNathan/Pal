@@ -1342,8 +1342,10 @@ class TurnExecutor:
             )
         context_committed = False
         facts = metadata.get("llm_capabilities", {})
-        request_instructions = bool(facts.get("supports_suffix_instructions") or facts.get("supports_interaction_instructions"))
         turn_scoped = bool(facts.get("supports_turn_scoped_instructions"))
+        request_instructions = not turn_scoped and bool(facts.get("supports_request_instructions")
+            or facts.get("supports_response_instructions") or facts.get("supports_suffix_instructions")
+            or facts.get("supports_interaction_instructions"))
         reminder_text = str(prompt.metadata.get("runtime_reminder_text") or "").strip()
         # A restored active legacy turn keeps its original delivery policy.
         if active_turn is not None:

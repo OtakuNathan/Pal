@@ -942,8 +942,10 @@ class LLMRuntime:
                 "thinking_levels": [],
                 "default_thinking_level": None,
             }
-        from pal.llm.cache_capabilities import supports_suffix_instructions, supports_turn_scoped_instructions, supports_interaction_instructions
+        from pal.llm.cache_capabilities import supports_request_instructions, supports_response_instructions, supports_suffix_instructions, supports_turn_scoped_instructions, supports_interaction_instructions
         return {
+            "supports_request_instructions": supports_request_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob),
+            "supports_response_instructions": supports_response_instructions(endpoint.wire_shape, endpoint.capabilities_blob),
             "supports_suffix_instructions": endpoint.capabilities_blob.get("request_instruction_mode") != "chronological" and supports_suffix_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url),
             "supports_turn_scoped_instructions": supports_turn_scoped_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob),
             "supports_interaction_instructions": supports_interaction_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob),
@@ -1775,9 +1777,8 @@ class LLMRuntime:
         ))
         hooked = replace(hooked, metadata={**dict(hooked.metadata), "cache_policy_selection": policy})
         if hooked.request_instructions:
-            from pal.llm.cache_capabilities import supports_suffix_instructions, supports_interaction_instructions
-            if not (supports_suffix_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url)
-                    or supports_interaction_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob)):
+            from pal.llm.cache_capabilities import supports_request_instructions
+            if not supports_request_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob):
                 raise LLMRequestPreparationError("Endpoint does not support request-scoped instructions")
         level = hooked.policy.thinking_level
         levels = self._thinking_levels(endpoint)

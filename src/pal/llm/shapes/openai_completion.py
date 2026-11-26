@@ -25,6 +25,7 @@ from pal.llm.shapes.base import (
     ShapeDecodeError,
     _JSONFrame,
     finalize_cache_spans,
+    apply_request_root_instructions,
     openai_reasoning_effort,
     request_parameter_supported,
 )
@@ -155,7 +156,8 @@ class OpenAICompletionCodec(ShapeCodecBase):
         effort = openai_reasoning_effort(context, policy.thinking_level)
         if effort is not None:
             payload["reasoning_effort"] = effort
-        return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
+        return finalize_cache_spans(apply_request_root_instructions(
+            EncodedRequest(payload, tuple(spans)), context, request.request_instructions))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAICompletionDecoder":
         return OpenAICompletionDecoder(context)

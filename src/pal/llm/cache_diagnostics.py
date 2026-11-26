@@ -34,7 +34,16 @@ def describe_request(request, raw_encoded, encoded) -> dict[str, Any]:
     never described twice (no whole-item cache_targets re-enumeration).
     """
 
-    payload = raw_encoded.payload
+    payload = dict(raw_encoded.payload)
+    # Attribution uses the marker-free codec view, but these envelope fields
+    # must reflect the final transport merge. An overridden model or leading
+    # instruction must not inherit a verified suffix-cache classification.
+    effective = {**encoded.payload, **encoded.extra_body}
+    for field in ("model", "instructions", "system_instruction"):
+        if field in effective:
+            payload[field] = effective[field]
+        else:
+            payload.pop(field, None)
     spans = {s.message_id: s for s in raw_encoded.message_spans}
 
     def component_for(message) -> str:
@@ -138,7 +147,9 @@ def describe_request(request, raw_encoded, encoded) -> dict[str, Any]:
             parent = at_path(encoded.payload, path[:2])
             markers.append({"path": [*path, marker], "message_id": span.message_id,
                             "parent_item_type": parent.get("type", parent.get("role", "unknown"))})
-    suffix = str(payload.get("model", "")).removeprefix("openai/") in {"gpt-6.2-astra", "gpt-6.2-sol"} and container_key == "input"
+    suffix = (raw_encoded.instructions_are_suffix and encoded.instructions_are_suffix
+              and effective.get("model") == raw_encoded.payload.get("model")
+              and container_key == "input")
     if suffix and payload.get("instructions"):
         groups["dynamic"].append(payload["instructions"])
         components["dynamic"] = dict(zip(("hash", "bytes"), fingerprint(groups["dynamic"])))

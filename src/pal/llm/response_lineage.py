@@ -18,12 +18,15 @@ def _canonical(value: Any) -> bytes:
     return json.dumps(thaw_json(value), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
 
 
-def _prefix_digests(payload: Mapping, items: Iterable, lengths: set[int]) -> dict[int, bytes]:
+def _prefix_digests(payload: Mapping, items: Iterable, lengths: set[int], *,
+                    instructions_are_suffix: bool = False) -> dict[int, bytes]:
     # Frame each JSON value independently so a changed early item invalidates
     # all later references in a single pass. JSON strings escape newlines.
     state = sha256(_canonical([
+        payload.get("model"),
+        instructions_are_suffix,
         payload.get("system_instruction"),
-        None if str(payload.get("model", "")).removeprefix("openai/") in {"gpt-6.2-astra", "gpt-6.2-sol"} else payload.get("instructions"),
+        None if instructions_are_suffix else payload.get("instructions"),
         payload.get("tools"),
     ]))
     digests = {}
@@ -50,12 +53,14 @@ class ResponseLineage:
     prefixes: OrderedDict = field(default_factory=OrderedDict)
     lock: RLock = field(default_factory=RLock)
 
-    def remember(self, scope, message_id: str, response_id: str, payload: Mapping, output: Sequence) -> None:
+    def remember(self, scope, message_id: str, response_id: str, payload: Mapping, output: Sequence, *,
+                 instructions_are_suffix: bool = False) -> None:
         items = payload.get("input")
         if not items or not output or not response_id:
             return
         length = len(items) + len(output)
-        digest = _prefix_digests(payload, chain(items, output), {length})[length]
+        digest = _prefix_digests(payload, chain(items, output), {length},
+                                 instructions_are_suffix=instructions_are_suffix)[length]
         key = (scope, message_id)
         prefix = ResponsePrefix(response_id, length, digest)
         with self.lock:
@@ -64,7 +69,8 @@ class ResponseLineage:
             if len(self.prefixes) > 256:
                 self.prefixes.popitem(last=False)
 
-    def match(self, scope, messages: Sequence[LLMMessageIR], payload: Mapping) -> ResponsePrefix | None:
+    def match(self, scope, messages: Sequence[LLMMessageIR], payload: Mapping, *,
+              instructions_are_suffix: bool = False) -> ResponsePrefix | None:
         items = payload.get("input", ())
         with self.lock:
             candidates = [
@@ -75,6 +81,7 @@ class ResponseLineage:
         eligible = [prefix for prefix in candidates if prefix and prefix.length < len(items)]
         if not eligible:
             return None
-        digests = _prefix_digests(payload, items, {prefix.length for prefix in eligible})
+        digests = _prefix_digests(payload, items, {prefix.length for prefix in eligible},
+                                  instructions_are_suffix=instructions_are_suffix)
         return max((prefix for prefix in eligible if prefix.digest == digests.get(prefix.length)),
                    key=lambda prefix: prefix.length, default=None)

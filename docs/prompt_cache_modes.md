@@ -46,11 +46,15 @@ elapsed. Missing evidence and DeepSeek's early reminder alone do not authorize
 that refresh. Otherwise a changed UTC date is appended once as an L1 fact.
 There is no midnight timer or date-driven compact.
 
-On GPT-6.2 Astra/Sol Responses, exceptional request-scoped runtime reminders use top-level
-`instructions`, rendered after `input` and billed as uncached input. They are
-counted in budgets but excluded from reusable prefix fingerprints. Standing
-system/developer instructions stay in `input`. Older models and unsupported
-routes keep chronological runtime context records. Existing active legacy turns
+All Responses-compatible routes use top-level `instructions` for exceptional
+request-scoped reminders. On verified GPT-6.2 Astra/Sol routes this field is
+rendered after `input` and billed as uncached input; it counts in budgets but
+not reusable prefix fingerprints. Other routes' instructions remain part of
+the conservative prefix fingerprint; acceptance of the standard field does
+not prove suffix caching. Standing system/developer instructions stay in
+`input`. Other wire protocols use their corresponding standard request-local
+system field, except verified Claude routes which use native scoped records.
+Existing active legacy turns
 are not rewritten when the new delivery policy becomes available. Normal rounds
 need no temporary instructions. Checklist progress is delivered by actual tool
 history, a short new-turn reminder, or an unfinished-only recovery record when
@@ -127,5 +131,7 @@ inventory, and both new TLC models with their expected-failure mutants passed.
 Claude turn-scoped reminders are orthogonal to the Anthropic cache-control
 strategy: keep the immutable record, let the provider clear its semantic effect,
 and mark only ordinary cacheable content. Gemini's root interaction-scoped
-option is deliberately opt-in because changing it caused a complete read miss in
-an isolated Hydrogen probe. See [prompt context lifecycle](prompt_context_lifecycle.md).
+instructions are request-local; an isolated Hydrogen probe showed that changing
+the root can lose cache reuse. Since healthy requests no longer carry temporary
+instructions, the default uses that standard field only for exceptional controls.
+See [prompt context lifecycle](prompt_context_lifecycle.md).

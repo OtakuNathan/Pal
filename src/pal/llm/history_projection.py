@@ -207,6 +207,7 @@ class HistoryProjection:
             from pal.llm.projection_contracts import AttemptKey, OwnerFence
             from pal.llm.projection_session import HistoryView
             from pal.llm.shapes.base import EncodedRequest
+            from pal.llm.cache_capabilities import supports_suffix_instructions
 
             attempt = AttemptKey(
                 identity,
@@ -225,6 +226,8 @@ class HistoryProjection:
                 applied_cache_breakpoint_message_ids=tuple(
                     prepared.applied_cache_breakpoint_message_ids
                 ),
+                instructions_are_suffix=supports_suffix_instructions(
+                    binding.wire_shape, binding.model_id, binding.base_url),
             )
         except Exception as exc:
             diagnostics = self.diagnostics

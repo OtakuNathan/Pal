@@ -173,6 +173,30 @@ def test_expired_route_refreshes_the_next_turn_not_a_busy_turn(monkeypatch):
     assert prompt_date_pin(memory)["date"] == "2026-11-27"
 
 
+@pytest.mark.parametrize("shape", [WireShape.OPENAI_COMPLETION, WireShape.ANTHROPIC_MESSAGES, WireShape.GEMINI_INTERACTIONS])
+def test_compatible_route_temporary_control_does_not_enter_l1(shape):
+    core = build_core()
+    memory = MemoryService()
+    register_memory(core.context, memory)
+    facts = LLMMetadata(endpoint_id="node", model_id="compatible",
+                        wire_shape=shape.value, supports_request_instructions=True)
+    core.context.port_registry["llm:llm"] = scripted_llm(metadata=lambda **_: facts)
+    memory.begin_l1_turn("turn", user_text="task")
+    cont = TurnContinuation("turn", iter(()), "request")
+    cont.finalization_only = True
+    cont.finalization_reason = "TEMPORARY CONTROL"
+    prompt = core.turn_executor.build_turn_prompt(cont, PromptAssemblyContext(), max_output_tokens=128)
+    assert "TEMPORARY CONTROL" in prompt.request_instructions
+    assert all("TEMPORARY CONTROL" not in m.text for m in memory.active_l1_turn("turn").messages)
+    assert not any(k.startswith("runtime:") for k in memory.active_l1_turn("turn").metadata["prompt_context_state"]["sources"])
+    ctx = ShapeContext(shape, "node", "compatible", "proxy", "https://example.test")
+    assert "TEMPORARY CONTROL" in str(codec_for_shape(shape).encode(prompt, ctx).payload)
+    cont.finalization_only = False
+    successor = core.turn_executor.build_turn_prompt(cont, PromptAssemblyContext(), max_output_tokens=128)
+    assert not successor.request_instructions
+    assert "TEMPORARY CONTROL" not in str(codec_for_shape(shape).encode(successor, ctx).payload)
+
+
 @pytest.mark.parametrize("shape", ["openai", "anthropic", "gemini", "legacy"])
 def test_compiler_resident_50_rounds_and_midnight(monkeypatch, shape):
     core = build_core()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections.abc import Iterator
 from typing import Any, Iterable, Mapping, Protocol, TypeAlias
 
@@ -67,6 +67,52 @@ class EncodedRequest:
     message_spans: tuple[EncodedMessageSpan, ...] = ()
     extra_body: Mapping[str, Any] = field(default_factory=dict)
     applied_cache_breakpoint_message_ids: tuple[str, ...] = ()
+    # Local route evidence, never serialized into the provider payload.
+    instructions_are_suffix: bool = False
+
+
+def apply_request_root_instructions(encoded: EncodedRequest, context: ShapeContext,
+                                    instructions: str) -> EncodedRequest:
+    """Apply ordinary Messages/Chat system guidance to this wire request only.
+
+    The same operation is used by cold and assembled encodes. It never
+    manufactures a durable history record or claims cache-independent scope.
+    """
+    if not instructions:
+        return encoded
+    from pal.llm.cache_capabilities import supports_root_instructions
+    if not supports_root_instructions(context.wire_shape, context.capabilities):
+        raise ShapeDecodeError("request-scoped root instructions disabled for this endpoint")
+    payload = thaw_json(encoded.payload)
+    if context.wire_shape == WireShape.ANTHROPIC_MESSAGES:
+        system = payload.get("system") or []
+        if isinstance(system, str):
+            system = [{"type": "text", "text": system}]
+        payload["system"] = [*system, {"type": "text", "text": instructions}]
+        return replace(encoded, payload=payload)
+
+    messages = payload["messages"]
+    head_end = next((i for i, item in enumerate(messages)
+                     if item.get("role") not in {"system", "developer"}), len(messages))
+    if head_end:
+        content = messages[head_end - 1].get("content")
+        if isinstance(content, list):
+            content.append({"type": "text", "text": instructions})
+        else:
+            messages[head_end - 1]["content"] = "\n\n".join(filter(None, (content, instructions)))
+        return replace(encoded, payload=payload)
+    messages.insert(0, {"role": "system", "content": instructions})
+
+    def shift(path: tuple[JSONPathPart, ...]) -> tuple[JSONPathPart, ...]:
+        if len(path) >= 2 and path[0] == "messages" and isinstance(path[1], int):
+            return (path[0], path[1] + 1, *path[2:])
+        return path
+
+    return replace(encoded, payload=payload, message_spans=tuple(
+        replace(span, cache_targets=tuple(shift(p) for p in span.cache_targets),
+                wire_item_paths=tuple(shift(p) for p in span.wire_item_paths),
+                continuity_target=shift(span.continuity_target))
+        for span in encoded.message_spans))
 
 
 def finalize_cache_spans(encoded: EncodedRequest) -> EncodedRequest:
@@ -79,7 +125,7 @@ def finalize_cache_spans(encoded: EncodedRequest) -> EncodedRequest:
         if not paths:
             spans.append(span)
             continue
-        prefix = _provider_prefix(payload, paths[-1])
+        prefix = _provider_prefix(payload, paths[-1], instructions_are_suffix=encoded.instructions_are_suffix)
         if prefix is None:
             spans.append(span)
             continue
@@ -87,6 +133,7 @@ def finalize_cache_spans(encoded: EncodedRequest) -> EncodedRequest:
             prefix,
             ensure_ascii=False,
             separators=(",", ":"),
+            sort_keys=True,
         )
         spans.append(
             EncodedMessageSpan(
@@ -107,12 +154,14 @@ def finalize_cache_spans(encoded: EncodedRequest) -> EncodedRequest:
         applied_cache_breakpoint_message_ids=(
             encoded.applied_cache_breakpoint_message_ids
         ),
+        instructions_are_suffix=encoded.instructions_are_suffix,
     )
 
 
 def _provider_prefix(
     payload: dict[str, Any],
     path: tuple[JSONPathPart, ...],
+    *, instructions_are_suffix: bool = False,
 ) -> dict[str, Any] | None:
     if len(path) < 2 or path[0] not in {"input", "messages", "system"}:
         return None
@@ -132,7 +181,7 @@ def _provider_prefix(
         for key, value in payload.items()
         if key not in {"max_tokens", "max_output_tokens", "temperature"}
     }
-    if root == "input" and str(payload.get("model", "")).removeprefix("openai/") in {"gpt-6.2-astra", "gpt-6.2-sol"}:
+    if root == "input" and instructions_are_suffix:
         prefix.pop("instructions", None)
     prefix_sequence = thaw_json(sequence[: root_index + 1])
     if len(path) >= 4 and path[2] in {"content", "output"}:

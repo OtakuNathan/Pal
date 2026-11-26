@@ -159,10 +159,10 @@ class OpenAIResponseCodec(ShapeCodecBase):
             "input": input_items,
             "max_output_tokens": policy.max_output_tokens,
         }
+        from pal.llm.cache_capabilities import supports_response_instructions, supports_suffix_instructions
         if request.request_instructions:
-            from pal.llm.cache_capabilities import supports_suffix_instructions
-            if not supports_suffix_instructions(context.wire_shape, context.model_id, context.base_url):
-                raise ShapeDecodeError("unsupported request-scoped suffix instructions")
+            if not supports_response_instructions(context.wire_shape, context.capabilities):
+                raise ShapeDecodeError("request-scoped instructions disabled for this endpoint")
             payload["instructions"] = request.request_instructions
         # L1 owns the conversation. Request portable reasoning instead of
         # relying on provider-side response storage. The explicit include
@@ -197,7 +197,8 @@ class OpenAIResponseCodec(ShapeCodecBase):
             for item in input_items:
                 if item.get("type") == "function_call":
                     item["namespace"] = "pal"
-        return finalize_cache_spans(EncodedRequest(payload, tuple(spans)))
+        return finalize_cache_spans(EncodedRequest(payload, tuple(spans),
+            instructions_are_suffix=supports_suffix_instructions(context.wire_shape, context.model_id, context.base_url)))
 
     def _new_decoder(self, context: ShapeContext) -> "OpenAIResponseDecoder":
         return OpenAIResponseDecoder(context, subscription=self.subscription)

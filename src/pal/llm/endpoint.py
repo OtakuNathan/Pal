@@ -326,7 +326,8 @@ class ShapeEndpointInvoker:
             and not {"input", "model", "instructions", "system_instruction"}.intersection(encoded.extra_body)
         )
         scope = (scope_id, binding.lineage_generation) if isinstance(binding, LLMEndpoint) else None
-        prefix = self.lineage.match(scope, request.messages, encoded.payload) if chain else None
+        prefix = self.lineage.match(scope, request.messages, encoded.payload,
+                                    instructions_are_suffix=encoded.instructions_are_suffix) if chain else None
         wire_sends = []
         first_frame_seconds = None
 
@@ -427,7 +428,8 @@ class ShapeEndpointInvoker:
                 output = replay.payload.get(key)
                 if shape == WireShape.GEMINI_INTERACTIONS or (completed_output and completed_output == output):
                     self.lineage.remember(scope, last.response.message.message_id, evidence.provider_generation_id,
-                                          encoded.payload, output)
+                                          encoded.payload, output,
+                                          instructions_are_suffix=encoded.instructions_are_suffix)
             if status == "failed":
                 save_failure(RuntimeError("Provider returned finish_reason=error"))
         except BaseException as exc:

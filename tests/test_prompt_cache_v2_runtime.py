@@ -319,21 +319,29 @@ def test_real_compiler_executor_hook_codec_same_turn_chain(profile, rounds, tmp_
             assert [r["round_index"] for r in records] == list(range(1, rounds + 1))
             assert all(r["turn_id"] == "fixture-turn" and r["task_id"] == "fixture-task" for r in records)
             assert all(r["prefix_preserved"] for i, r in enumerate(records[1:], 1)
-                       if not (i == 4 and mutation in {"tools", "compaction"}))
+                       if not ((i == 4 and mutation in {"tools", "compaction"})
+                               or (i >= 4 and mutation == "dynamic")))
             if mutation in {"tools", "compaction"}:
                 assert records[4]["change_reason"] == ("tools_changed" if mutation == "tools" else "prefix_changed")
             if mutation == "dynamic":
-                assert all(r["prefix_preserved"] for r in records[4:])
+                # Older Responses models may render invocation instructions
+                # before the conversation; the client must not assert a hit.
+                assert all(not r["prefix_preserved"] and r["change_reason"] == "parameters_changed"
+                           for r in records[4:])
             if mutation == "profile":
                 assert all(r["profile_id"] == profile for r in records)
             assert records[-1]["estimated_prefix_tokens"] > records[0]["estimated_prefix_tokens"]
-            assert llm.endpoint_invoker.prompt_cache.snapshot()["observation"]["stall_suspected"] is True
+            observation = llm.endpoint_invoker.prompt_cache.snapshot()["observation"]
+            assert observation["stall_suspected"] is (mutation != "dynamic")
+            if mutation == "dynamic":
+                assert observation["stall_reason"] == "prefix_changed_or_unknown"
             assert not llm.endpoint_invoker.prompt_cache.snapshot()["confirmed_checkpoint"]
             for index, request in enumerate(transport.requests):
                 payload = thaw_json(request.payload)
                 assert "<pal_context" in str(payload["input"])
                 if mutation is None:
-                    assert str(payload["input"]).count("stable-runtime") == 1
+                    assert "stable-runtime" not in str(payload["input"])
+                    assert payload["instructions"].count("stable-runtime") == 1
                     assert str(payload["input"]).count("reference-only fixture context") == 1
                 assert "reference-only fixture context" in str(payload["input"])
                 # Byte truth first: every reasoning item still on the wire is

@@ -1170,11 +1170,13 @@ class EndpointProjectionSession:
                 break
         preamble_only = shell_messages[:head_end]
         gemini_instruction = shell.request_instructions if self.binding.wire_shape == WireShape.GEMINI_INTERACTIONS else ""
+        root_instruction = shell.request_instructions if self.binding.wire_shape in {
+            WireShape.OPENAI_COMPLETION, WireShape.ANTHROPIC_MESSAGES} else ""
         if gemini_instruction:
             from pal.llm.cache_capabilities import supports_interaction_instructions
             if not supports_interaction_instructions(context.wire_shape, context.model_id, context.base_url, context.capabilities):
-                raise ProjectionSessionError("Gemini interaction-scoped instructions require explicit endpoint opt-in")
-        wire_shell = replace(shell, request_instructions="") if gemini_instruction else shell
+                raise ProjectionSessionError("Gemini interaction-scoped instructions disabled for this endpoint")
+        wire_shell = replace(shell, request_instructions="") if gemini_instruction or root_instruction else shell
         encoded_shell = codec.encode(
             replace(wire_shell, messages=preamble_only), context
         )
@@ -1430,15 +1432,16 @@ class EndpointProjectionSession:
         # frontiers "exactly like a cold encode" (and to keep the stall
         # diagnostics fed with a truthful growing prefix estimate).
         from pal.llm.shapes.base import EncodedRequest as _AssembledRequest
-        from pal.llm.shapes.base import finalize_cache_spans
+        from pal.llm.shapes.base import finalize_cache_spans, apply_request_root_instructions
 
-        finalized = finalize_cache_spans(
-            _AssembledRequest(payload=payload, message_spans=tuple(assembled_spans))
-        )
+        finalized = finalize_cache_spans(apply_request_root_instructions(
+            _AssembledRequest(payload=payload, message_spans=tuple(assembled_spans),
+                              instructions_are_suffix=encoded_shell.instructions_are_suffix),
+            context, root_instruction))
         return PreparedRequest.build(
             attempt=self._active.attempt,
             base_cursor=view.cursor,
-            payload=payload,
+            payload=finalized.payload,
             message_spans=tuple(finalized.message_spans),
             extra_body=dict(encoded_shell.extra_body or {}),
         )

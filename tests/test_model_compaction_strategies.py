@@ -84,6 +84,17 @@ def assistant(text="answer", **kwargs):
     return LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR(text),), **kwargs)
 
 
+def test_older_responses_runtime_accepts_standard_instructions_without_suffix_claim():
+    rt, ep, _ = runtime(model="gpt-6-luna")
+    assert rt.metadata().supports_response_instructions
+    assert not rt.metadata().supports_suffix_instructions
+    req = replace(request(user()), request_instructions="Temporary operator control")
+    prepared = rt._compile_request(ep, req, count_native=False)
+    raw = rt.endpoint_invoker.encode_request(ep, prepared.request)
+    assert raw.payload["instructions"] == req.request_instructions
+    assert not raw.instructions_are_suffix
+
+
 @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.2-astra", "gpt-6.2-sol"])
 def test_verified_official_models_bind_native(model):
     assert bind_model_adapter(LLMEndpointSpec.from_value(endpoint(model=model))).compaction_strategy == "openai_responses"

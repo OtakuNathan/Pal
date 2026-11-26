@@ -102,7 +102,7 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     add_parser.add_argument("--compaction-strategy", choices=("auto", "semantic_checkpoint", "openai_responses"), default=None)
     add_parser.add_argument("--continuation-mode", choices=("auto", "full"), default=None)
     add_parser.add_argument("--instruction-mode", choices=("auto", "chronological", "turn_scoped", "interaction"), default=None,
-                            help="Scoped instructions: automatic, legacy chronological, verified Claude turn scope, or Gemini root interaction scope (may miss cache)")
+                            help="Scoped instructions: automatic protocol-native carrier, legacy chronological, verified Claude turn scope, or Gemini root interaction scope")
     add_parser.add_argument("--cache-mode", choices=("implicit", "hybrid", "explicit"), default=None,
                             help="Cache policy: automatic, fixed anchors plus automatic, or rolling explicit anchors")
     add_parser.add_argument("--cache-protocol", choices=("general", *(item.value for item in PromptCacheDialect)),

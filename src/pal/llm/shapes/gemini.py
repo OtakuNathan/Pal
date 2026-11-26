@@ -91,7 +91,7 @@ class GeminiInteractionsCodec(ShapeCodecBase):
         if request.request_instructions:
             from pal.llm.cache_capabilities import supports_interaction_instructions
             if not supports_interaction_instructions(context.wire_shape, context.model_id, context.base_url, context.capabilities):
-                raise ShapeDecodeError("Gemini interaction-scoped instructions require explicit endpoint opt-in")
+                raise ShapeDecodeError("Gemini interaction-scoped instructions disabled for this endpoint")
             system.append(request.request_instructions)
         if system:
             payload["system_instruction"] = "\n\n".join(system)
