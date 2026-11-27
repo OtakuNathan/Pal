@@ -61,14 +61,13 @@ class BunshinRunner:
             )
             # A manager-issued pack may predate an offline endpoint rename.
             # Adapt the local copy; never rewrite the immutable invocation artifact.
+            preferred = self.pack.metadata.get("preferred_endpoint_id")
             from pal.llm.runtime import LLMRuntime
-            if isinstance(bundle.llm_runtime, LLMRuntime):
+            if preferred and isinstance(bundle.llm_runtime, LLMRuntime):
                 from pal.llm.replay_compatibility import historical_endpoint_id
                 from pal.llm.repository import LLMEndpointRepository
-                preferred = self.pack.metadata.get("preferred_endpoint_id")
-                if preferred:
-                    self.pack.metadata["preferred_endpoint_id"] = historical_endpoint_id(
-                        str(preferred), LLMEndpointRepository().list_all())
+                self.pack.metadata["preferred_endpoint_id"] = historical_endpoint_id(
+                    str(preferred), LLMEndpointRepository().list_all())
             self.components.memory_results.bind_generation(bundle.memory_generation_id, bundle.memory_service)
             accepted_payload = {
                 "phase": "accepted",
