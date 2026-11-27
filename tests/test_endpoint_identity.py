@@ -228,3 +228,24 @@ def test_cli_only_migrates_explicitly_and_respects_the_live_runtime_lease(tmp_pa
     assert run("add", "--provider", "openai", "--model-id", "model", "--replace", "--wire-shape", "openai_completion") == 0
     with sqlite3.connect(path) as raw:
         assert raw.execute("SELECT endpoint_id, wire_shape FROM llm_endpoints").fetchall() == [("openai-model", "openai_completion")]
+
+
+def test_setup_upgrade_reports_duplicate_choice_without_mutating_runtime(tmp_path, capsys):
+    from pal.wizard.cli import run_setup_upgrade
+    path = legacy_database(tmp_path, payload(endpoint_id="old response"),
+                           payload(endpoint_id="old completion", wire_shape="openai_completion"))
+    before = path.read_bytes()
+    assert run_setup_upgrade(runtime_root=tmp_path) == 2
+    output = capsys.readouterr().out
+    assert "duplicate openai-model" in output and "--keep" in output
+    assert path.read_bytes() == before
+
+
+def test_setup_upgrade_cli_forwards_selected_endpoint(tmp_path, monkeypatch):
+    from pal.main import main
+    from unittest.mock import patch
+    import sys
+    monkeypatch.setattr(sys, "argv", ["pal", "setup", "--upgrade", "--runtime-root", str(tmp_path), "--keep", "old response"])
+    with patch("pal.wizard.cli.run_setup_upgrade", return_value=0) as upgrade:
+        assert main() == 0
+        upgrade.assert_called_once_with(runtime_root=tmp_path, embedding_remote_only=False, keep=("old response",))

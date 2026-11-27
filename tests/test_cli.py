@@ -78,7 +78,7 @@ class PalV2CliParserTests(unittest.TestCase):
         ):
             self.assertEqual(main(), 0)
 
-        run_setup_upgrade.assert_called_once_with(runtime_root=runtime_root.resolve(), embedding_remote_only=False)
+        run_setup_upgrade.assert_called_once_with(runtime_root=runtime_root.resolve(), embedding_remote_only=False, keep=())
 
     def test_tty_subcommand_parses_with_runtime_root(self) -> None:
         args = _build_parser().parse_args(
@@ -151,7 +151,7 @@ def test_setup_default_and_quoted_tilde_are_normalized(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'argv', ['pal', 'setup', '--upgrade', '--embedding-remote-only'])
     with patch('pal.wizard.cli.run_setup_upgrade', return_value=0) as upgrade:
         assert main() == 0
-    upgrade.assert_called_once_with(runtime_root=tmp_path / '.pal', embedding_remote_only=True)
+    upgrade.assert_called_once_with(runtime_root=tmp_path / '.pal', embedding_remote_only=True, keep=())
 
 
 def test_missing_default_runtime_does_not_create_another_pal(tmp_path, monkeypatch, capsys):
@@ -212,3 +212,13 @@ def test_stale_tty_socket_returns_failure(monkeypatch):
         monkeypatch.setattr(sys, 'argv', ['pal', 'tty', '--runtime-root', str(runtime_root)])
         with patch('pal.main.run_tty', new=AsyncMock(return_value=False)):
             assert main() == 2
+
+
+def test_legacy_schema_startup_reports_offline_upgrade_without_traceback(tmp_path, monkeypatch, capsys):
+    from pal.llm.schema import LLMEndpointSchemaError
+    (tmp_path / "pal.sqlite3").touch()
+    monkeypatch.setattr(sys, "argv", ["pal", "run", "--runtime-root", str(tmp_path)])
+    with patch("pal.main.build_runtime_app", side_effect=LLMEndpointSchemaError("run offline pal llm migrate-ids")):
+        assert main() == 2
+    err = capsys.readouterr().err
+    assert "Pal cannot start:" in err and "migrate-ids" in err and "Traceback" not in err

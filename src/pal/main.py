@@ -26,6 +26,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Upgrade an existing runtime without interactive reconfiguration",
     )
+    setup_parser.add_argument("--keep", action="append", default=[], metavar="OLD_ENDPOINT_ID",
+                              help="With --upgrade, explicitly keep this legacy endpoint when a provider/model pair is duplicated (repeatable)")
     setup_parser.add_argument("--embedding-remote-only", action="store_true",
                               help="With --upgrade, use only configured remote Ollama endpoints for the embedding rebuild")
     setup_parser.add_argument(
@@ -142,8 +144,13 @@ async def _run_async(args: argparse.Namespace) -> int:
             return 2
         configure_process_logging(component="pal")
         from pal.packages.process import runtime_lease
+        from pal.llm.schema import LLMEndpointSchemaError
         with runtime_lease(args.runtime_root):
-            app = build_runtime_app(args.runtime_root)
+            try:
+                app = build_runtime_app(args.runtime_root)
+            except LLMEndpointSchemaError as exc:
+                print(f"Pal cannot start: {exc}", file=sys.stderr)
+                return 2
             await app.run()
         return 0
     if args.command in {"client", "tty"}:
@@ -211,6 +218,8 @@ def main() -> int:
             parser.error("setup --check, --upgrade and --llm are mutually exclusive")
         if args.embedding_remote_only and not args.upgrade:
             parser.error("--embedding-remote-only requires --upgrade")
+        if args.keep and not args.upgrade:
+            parser.error("--keep requires --upgrade")
         if args.llm:
             from pal.wizard.cli import run_llm_setup_wizard
             return run_llm_setup_wizard(runtime_root=args.runtime_root)
@@ -220,7 +229,7 @@ def main() -> int:
         if getattr(args, "upgrade", False):
             from pal.wizard.cli import run_setup_upgrade
             runtime_root = getattr(args, "runtime_root", None)
-            return run_setup_upgrade(runtime_root=runtime_root, embedding_remote_only=args.embedding_remote_only)
+            return run_setup_upgrade(runtime_root=runtime_root, embedding_remote_only=args.embedding_remote_only, keep=tuple(args.keep))
         return run_setup_wizard(runtime_root=getattr(args, "runtime_root", None))
 
     if args.command == "browser-service":

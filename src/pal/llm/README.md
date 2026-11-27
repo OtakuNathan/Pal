@@ -167,6 +167,7 @@ New configurations use `pal llm add --provider PROVIDER --model-id MODEL`.
 
 For legacy databases, first run `pal llm migrate-ids --dry-run --runtime-root ROOT`.
 Each duplicate requires `--keep OLD_ID`; the chosen route's settings win.
+The same repeatable `--keep OLD_ID` flag works with `pal setup --upgrade`.
 Run the same command without `--dry-run` only after the external host and all
 Bunshin workers have stopped. It backs up changed databases and configuration,
 updates references, and keeps resident and role recovery journals unchanged.

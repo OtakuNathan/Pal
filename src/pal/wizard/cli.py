@@ -429,7 +429,12 @@ def run_llm_setup_wizard(*, runtime_root: Path) -> int:
     if not db_path.is_file():
         print(f"Existing runtime required at {runtime_root}; run pal wizard for initial setup.")
         return 2
-    assert_runtime_endpoint_schema(runtime_root, db_path)
+    from pal.llm.schema import LLMEndpointSchemaError
+    try:
+        assert_runtime_endpoint_schema(runtime_root, db_path)
+    except LLMEndpointSchemaError as exc:
+        print(f"LLM setup failed: {exc}")
+        return 2
     database = PalV2Database(db_path)
     database.initialize((LLMEndpointModel, PalRuntimeSettingModel))
     try:
@@ -474,10 +479,15 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     print("  Interactive Setup Wizard")
 
     service = WizardService()
-    result = run_interactive_wizard(
-        existing_loader=service.load_existing_wizard_data,
-        runtime_root=runtime_root,
-    )
+    from pal.llm.schema import LLMEndpointSchemaError
+    try:
+        result = run_interactive_wizard(
+            existing_loader=service.load_existing_wizard_data,
+            runtime_root=runtime_root,
+        )
+    except LLMEndpointSchemaError as exc:
+        print(f"  Setup could not proceed: {exc}")
+        return 2
     if result is None:
         print("\n  Setup cancelled.")
         return 1
@@ -542,22 +552,22 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     return 0
 
 
-def run_setup_upgrade(*, runtime_root: Path, embedding_remote_only: bool = False) -> int:
+def run_setup_upgrade(*, runtime_root: Path, embedding_remote_only: bool = False, keep: tuple[str, ...] = ()) -> int:
     """Apply runtime-owned upgrade steps without changing user configuration."""
 
     from pal.packages.process import PackageError, runtime_lease
     runtime_root = Path(runtime_root).expanduser().resolve()
     if not (runtime_root / DEFAULT_DB_FILENAME).is_file():
-        return _run_setup_upgrade_offline(runtime_root=runtime_root, embedding_remote_only=embedding_remote_only)
+        return _run_setup_upgrade_offline(runtime_root=runtime_root, embedding_remote_only=embedding_remote_only, keep=keep)
     try:
         with runtime_lease(runtime_root):
-            return _run_setup_upgrade_offline(runtime_root=runtime_root, embedding_remote_only=embedding_remote_only)
+            return _run_setup_upgrade_offline(runtime_root=runtime_root, embedding_remote_only=embedding_remote_only, keep=keep)
     except PackageError:
         print("  Stop Pal before running pal setup --upgrade; the runtime is in use.")
         return 2
 
 
-def _run_setup_upgrade_offline(*, runtime_root: Path, embedding_remote_only: bool = False) -> int:
+def _run_setup_upgrade_offline(*, runtime_root: Path, embedding_remote_only: bool = False, keep: tuple[str, ...] = ()) -> int:
 
     resolved_root = Path(runtime_root).expanduser().resolve()
     db_path = resolved_root / DEFAULT_DB_FILENAME
@@ -573,7 +583,15 @@ def _run_setup_upgrade_offline(*, runtime_root: Path, embedding_remote_only: boo
     from pal.web_fetch.schema import migrate_web_fetch_schema
 
     require_bunshin_runtime_stopped(resolved_root)
-    llm_result = migrate_runtime_endpoint_ids(resolved_root, already_locked=True)
+    from pal.llm.schema import LLMEndpointSchemaError
+    try:
+        llm_result = migrate_runtime_endpoint_ids(resolved_root, already_locked=True, keep=keep)
+    except LLMEndpointSchemaError as exc:
+        print(f"  LLM endpoint upgrade could not proceed: {exc}")
+        if str(exc).startswith("duplicate "):
+            print("  Resolve duplicate routes with --keep OLD_ENDPOINT_ID (one choice per duplicate pair), then retry.")
+        print(f"  Preview the endpoint cutover with pal llm migrate-ids --dry-run --runtime-root {resolved_root}")
+        return 2
     web_fetch_result = migrate_web_fetch_schema(db_path)
     result = cutover_bunshin_runtime(resolved_root)
     from pal.memory.embedding_migration import upgrade_legacy_embeddings
