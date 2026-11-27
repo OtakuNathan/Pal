@@ -208,7 +208,7 @@ settlement. They cannot carry cache markers. Switching to an unsupported model
 filters them from that model's projection without deleting canonical history.
 
 Use the native mechanism automatically on documented direct Claude models.
-Gateways require verified opt-in (`pal llm add ENDPOINT --replace --instruction-mode
+Gateways require verified opt-in (`pal llm add --provider PROVIDER --model-id MODEL --replace --instruction-mode
 turn_scoped --runtime-root ROOT`). DeepSeek and other Anthropic-compatible
 providers use ordinary request-local system guidance, not unverified
 `clear_at`. If a reminder cannot

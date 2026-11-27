@@ -37,6 +37,23 @@ class _BunshinLLMRuntimeAdapter:
     def end_prompt_cache_turn(self, turn_id):
         self._base.end_prompt_cache_turn(turn_id)
 
+    # Idle keep-alive is exclusive to the resident owner. Borrowed workers
+    # must neither renew nor invalidate its frozen cache lease.
+    def prompt_cache_keepalive_snapshot(self):
+        return {"eligible": False, "reason": "not_resident"}
+
+    async def keepalive_once(self, epoch):
+        return False
+
+    def clear_keepalive(self):
+        pass
+
+    def claim_keepalive_compact(self, epoch):
+        return False
+
+    def keepalive_compact_valid(self, epoch):
+        return False
+
     def prompt_cache_reminder_snapshot(self):
         return self._base.prompt_cache_reminder_snapshot()
 

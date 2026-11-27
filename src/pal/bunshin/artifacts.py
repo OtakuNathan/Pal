@@ -226,3 +226,18 @@ class ContentAddressedArtifactStore:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+def read_typed_artifact_json(runtime_root: Path, value: Mapping[str, Any]) -> Any:
+    """Read a complete typed reference without opening a writable repository."""
+    ref = ArtifactRef.from_mapping(value)
+    digest = ref.sha256
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("invalid typed artifact digest")
+    if not ref.artifact_type or not ref.schema_version or not ref.media_type:
+        raise ValueError("typed artifact reference is incomplete")
+    data = (artifact_store_root(runtime_root) / digest[:2] / digest).read_bytes()
+    if ContentAddressedArtifactStore._typed_digest(data, artifact_type=ref.artifact_type,
+            schema_version=ref.schema_version, media_type=ref.media_type) != digest:
+        raise IOError("artifact failed digest verification")
+    return json.loads(data)

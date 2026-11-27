@@ -22,3 +22,5 @@ class LLMAttemptResult:
     # P4: canonical native continuation payload captured before response
     # hooks dropped it (empty when the attempt produced no native envelope).
     native_payload_json: str = ""
+    operation: str = "generate"
+    estimated_cost: float | None = None

@@ -29,7 +29,7 @@ from pal.llm.contracts import (
 )
 from pal.llm.credentials import LLMCredentialUnavailableError
 from pal.llm.endpoint_factory import build_default_endpoint_invoker
-from pal.llm.invocation_contracts import LLMEndpointInvokerPort, ManagedEndpointInvokerPort
+from pal.llm.invocation_contracts import KeepaliveInvokerPort, LLMEndpointInvokerPort, ManagedEndpointInvokerPort
 from pal.llm.endpoint_spec import LLMEndpointSpec
 from pal.llm.request_contracts import LLMPreparedPlan, PreparedLLMRequest, LLMProgressEvent
 from pal.llm.ir import (
@@ -353,11 +353,19 @@ class LLMRuntime:
                 if item.get("role") not in {"system", "developer"}:
                     break
                 prefix.append(thaw_json(item))
+            from pal.llm.effort_updates import EFFORT_PIN
+            window = {"version": 1, "origin": native_origin(endpoint), "covered_prefix": prefix,
+                      "adapter": adapter.identity}
+            base = prepared.request.policy.thinking_level
+            updates = [item["reasoning"]["effort"] for item in encoded.payload["input"]
+                       if item.get("type") == "configuration_update"
+                       and item.get("reasoning", {}).get("effort")]
+            if updates and base is not None:
+                window[EFFORT_PIN] = {"endpoint_id": endpoint.endpoint_id, "model_id": endpoint.model_id,
+                                     "route_origin": native_origin(endpoint),
+                    "wire_shape": endpoint.wire_shape, "base": base.value, "effective": updates[-1]}
             replay = ReplayEnvelope(WireShape.OPENAI_RESPONSE, endpoint.endpoint_id, endpoint.model_id,
-                {"output": output, NATIVE_WINDOW_KEY: {
-                    "version": 1, "origin": native_origin(endpoint), "covered_prefix": prefix,
-                    "adapter": adapter.identity,
-                }})
+                {"output": output, NATIVE_WINDOW_KEY: window})
             validate_native_window(replay)
             seed = LLMMessageIR(role=MessageRole.ASSISTANT, replay=replay,
                                 semantic_kind="conversation_continuity")
@@ -641,6 +649,7 @@ class LLMRuntime:
             config_fingerprint=f"fingerprint-{fingerprint}",
             endpoint_config_digest=self._endpoint_config_digest(endpoint),
             base_url=str(endpoint.base_url), provider_id=str(endpoint.provider),
+            route_origin=native_origin(endpoint),
         )
 
     def _binding_is_current(
@@ -695,7 +704,8 @@ class LLMRuntime:
         # External settings refresh cannot perform a history handoff. Keep the
         # admitted source model until the idle control path commits a selection.
         endpoint = self.active_endpoint()
-        self.think_level = self._effective_thinking_level(endpoint) or ""
+        level = self._effective_thinking_level(endpoint) or ""
+        self.think_level = level
         if endpoint is not None and (
             previous is None or previous.endpoint_id != endpoint.endpoint_id
         ):
@@ -713,6 +723,14 @@ class LLMRuntime:
         previous_endpoints = self.endpoint_resolver.endpoints
         try:
             self.endpoint_resolver.refresh()
+            # The supported config path performs a semantic handoff and an
+            # offline replacement. An external edit must not bypass it by
+            # refreshing the same ID while its old route is still resident.
+            from pal.llm.effort_updates import effort_route_changed
+            previous_by_id = {ep.endpoint_id: ep for ep in previous_endpoints}
+            if any(ep.endpoint_id in previous_by_id and effort_route_changed(previous_by_id[ep.endpoint_id], ep)
+                   for ep in self.endpoint_resolver.endpoints):
+                raise ValueError("Replay-affecting endpoint changes require an offline replacement after history handoff")
             adapters = self._bind_model_adapters(self.endpoint_resolver.endpoints, model_hooks, response_hooks)
         except Exception:
             self.endpoint_resolver.endpoints = previous_endpoints
@@ -773,6 +791,7 @@ class LLMRuntime:
             raise ValueError(f"unknown enabled LLM endpoint: {normalized}")
         self.settings_repository.set_active_llm_endpoint_id(normalized)
         if self.active_endpoint_id != normalized:
+            self.clear_keepalive()
             self._usage_boundaries.clear()
         self.active_endpoint_id = normalized
         self._observed_configured_selection = normalized
@@ -825,6 +844,9 @@ class LLMRuntime:
                 )
             ) for message in (*request.messages, *prepared.request.messages)
         )
+        from pal.llm.effort_updates import incompatible_effort_update
+        facts = self._endpoint_facts(preferred_endpoint_id=endpoint_id)
+        incompatible = incompatible or any(incompatible_effort_update(m, facts) for m in request.messages)
         source = self.active_endpoint()
         cross_model = source is not None and source.model_id != endpoint.model_id and any(
             m.prompt_region == PromptRegionIR.SETTLED_HISTORY
@@ -853,7 +875,10 @@ class LLMRuntime:
         if endpoint is None:
             return {"available": False, "endpoint_id": None, "model_id": None, "current": None, "choices": []}
         levels = self._thinking_levels(endpoint)
+        from pal.llm.cache_capabilities import supports_effort_updates
         return {
+            "effort_update_mode": "append" if supports_effort_updates(
+                endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob) else "compact",
             "available": bool(levels),
             "endpoint_id": endpoint.endpoint_id,
             "model_id": endpoint.model_id,
@@ -942,8 +967,10 @@ class LLMRuntime:
                 "thinking_levels": [],
                 "default_thinking_level": None,
             }
-        from pal.llm.cache_capabilities import supports_request_instructions, supports_response_instructions, supports_suffix_instructions, supports_turn_scoped_instructions, supports_interaction_instructions
+        from pal.llm.cache_capabilities import supports_request_instructions, supports_response_instructions, supports_suffix_instructions, supports_turn_scoped_instructions, supports_interaction_instructions, supports_effort_updates
         return {
+            "route_origin": native_origin(endpoint),
+            "supports_effort_updates": supports_effort_updates(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob),
             "supports_request_instructions": supports_request_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob),
             "supports_response_instructions": supports_response_instructions(endpoint.wire_shape, endpoint.capabilities_blob),
             "supports_suffix_instructions": endpoint.capabilities_blob.get("request_instruction_mode") != "chronological" and supports_suffix_instructions(endpoint.wire_shape, endpoint.model_id, endpoint.base_url),
@@ -961,6 +988,7 @@ class LLMRuntime:
             "input_modalities": list(endpoint.input_modalities_blob or ()),
             "output_modalities": list(endpoint.output_modalities_blob or ()),
             "capabilities": dict(endpoint.capabilities_blob or {}),
+            "replay_compatible_bindings": compatible_replay_bindings(endpoint, self.endpoint_resolver.endpoints),
             "thinking_levels": list(endpoint.thinking_levels_blob or ()),
             "default_thinking_level": endpoint.default_thinking_level,
         }
@@ -1614,6 +1642,39 @@ class LLMRuntime:
         if callable(close):
             close(str(turn_id))
 
+    def prompt_cache_keepalive_snapshot(self) -> dict[str, Any]:
+        endpoint = self.active_endpoint()
+        invoker = self.endpoint_invoker
+        return invoker.keepalive_snapshot(endpoint) if endpoint is not None and isinstance(invoker, KeepaliveInvokerPort) else {"eligible": False, "reason": "unsupported_endpoint"}
+
+    async def keepalive_once(self, epoch: str) -> bool:
+        endpoint = self.active_endpoint()
+        invoker = self.endpoint_invoker
+        if endpoint is None or not isinstance(invoker, KeepaliveInvokerPort):
+            return False
+        control = LLMStreamControl()
+        task = asyncio.create_task(asyncio.to_thread(invoker.invoke_keepalive, endpoint, epoch, control))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            control.cancel("keepalive cancelled")
+            self._track_detached_stream_task(task)
+            raise
+
+    def clear_keepalive(self) -> None:
+        if isinstance(self.endpoint_invoker, KeepaliveInvokerPort):
+            self.endpoint_invoker.clear_keepalive()
+
+    def claim_keepalive_compact(self, epoch: str) -> bool:
+        endpoint = self.active_endpoint()
+        return bool(endpoint is not None and isinstance(self.endpoint_invoker, KeepaliveInvokerPort)
+                    and self.endpoint_invoker.claim_keepalive_compact(endpoint, epoch))
+
+    def keepalive_compact_valid(self, epoch: str) -> bool:
+        endpoint = self.active_endpoint()
+        return bool(endpoint is not None and isinstance(self.endpoint_invoker, KeepaliveInvokerPort)
+                    and self.endpoint_invoker.keepalive_compact_valid(endpoint, epoch))
+
     def prompt_cache_reminder_snapshot(self) -> dict[str, Any]:
         from pal.llm.cache_policy import resolve_mode
         from pal.llm.cache_reminder import reminder_binding
@@ -1792,9 +1853,20 @@ class LLMRuntime:
             level = next(item for item in ThinkingLevel if item.value in levels)
             budget = None
         elif level is None:
-            effective = self._effective_thinking_level(endpoint, persist=check_replay)
+            # Core freezes settings when it admits a logical turn. Every
+            # later round, preflight, and retry must honor that same snapshot.
+            turn_levels = request.metadata.get("think_levels")
+            if isinstance(turn_levels, Mapping) and endpoint.endpoint_id in turn_levels:
+                effective = turn_levels[endpoint.endpoint_id]
+                if effective not in levels:
+                    raise LLMRequestPreparationError(
+                        f"turn thinking_level={effective!r} is not declared by endpoint "
+                        f"{endpoint.endpoint_id}; available={list(levels)}"
+                    )
+            else:
+                effective = self._effective_thinking_level(endpoint, persist=check_replay)
             level = ThinkingLevel(effective) if effective else None
-        elif level.value not in levels:
+        if level is not None and level.value not in levels:
             raise LLMRequestPreparationError(
                 f"thinking_level={level.value!r} is not declared by endpoint "
                 f"{endpoint.endpoint_id}; available={list(levels)}"
@@ -1824,6 +1896,15 @@ class LLMRuntime:
             **dict(hooked.metadata), REPLAY_BINDINGS_KEY: replay_bindings,
         })
         from pal.llm.replay_acceptance import has_opaque_continuation, validate_native_for_send
+
+        from pal.llm.effort_updates import incompatible_effort_update
+        from pal.llm.cache_capabilities import supports_effort_updates
+        effort_facts = {"endpoint_id": endpoint.endpoint_id, "model_id": endpoint.model_id,
+                        "wire_shape": endpoint.wire_shape, "route_origin": native_origin(endpoint),
+                        "capabilities": {**dict(endpoint.capabilities_blob or {}), REPLAY_BINDINGS_KEY: replay_bindings}, "thinking_levels": self._thinking_levels(endpoint),
+                        "supports_effort_updates": supports_effort_updates(endpoint.wire_shape, endpoint.model_id, endpoint.base_url, endpoint.capabilities_blob)}
+        if check_replay and any(incompatible_effort_update(m, effort_facts) for m in (*request.messages, *prepared.messages)):
+            raise LLMRequestPreparationError("Retained effort updates require semantic handoff on the previous route")
 
         # Hooks may transform the wire projection, but cannot erase the original
         # history's model binding and thereby bypass the replay guard.

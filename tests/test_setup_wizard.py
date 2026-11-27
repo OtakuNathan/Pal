@@ -45,8 +45,8 @@ def _make_collected() -> WizardCollectedData:
         ),
         endpoints=[
             WizardLLMEndpoint(
-                endpoint_id="test-claude",
-                model_id="claude-sonnet-4-20250514",
+                endpoint_id="anthropic-claude-sonnet-4-20250514",
+                model_id="claude-sonnet-4-20250514", provider="anthropic",
                 wire_shape="anthropic_messages",
                 base_url="https://api.anthropic.com/v1/messages",
                 api_key="sk-test-key-123",
@@ -65,7 +65,7 @@ def _make_collected() -> WizardCollectedData:
             channel_kind="socket",
             binding_key="/tmp/test-pal-wizard/pal.sock",
         ),
-        active_endpoint_id="test-claude",
+        active_endpoint_id="anthropic-claude-sonnet-4-20250514",
     )
 
 
@@ -157,7 +157,7 @@ class TestSeedFromWizard(unittest.TestCase):
         repo = LLMEndpointRepository()
         endpoints = repo.list_enabled()
         self.assertEqual(len(endpoints), 1)
-        self.assertEqual(endpoints[0].endpoint_id, "test-claude")
+        self.assertEqual(endpoints[0].endpoint_id, "anthropic-claude-sonnet-4-20250514")
         self.assertEqual(endpoints[0].model_id, "claude-sonnet-4-20250514")
         self.assertEqual(endpoints[0].wire_shape, "anthropic_messages")
         self.assertEqual(endpoints[0].context_window, 200000)
@@ -171,7 +171,7 @@ class TestSeedFromWizard(unittest.TestCase):
 
         secrets_path = self.runtime_root / "secrets.json"
         store = EncryptedFileSecretStore(str(secrets_path))
-        key = store.get_secret(SecretRef(service="test-claude", account="api-key"))
+        key = store.get_secret(SecretRef(service="anthropic-claude-sonnet-4-20250514", account="api-key"))
         self.assertEqual(key, "sk-test-key-123")
         endpoint = LLMEndpointRepository().list_enabled()[0]
         self.assertIsNotNone(endpoint)
@@ -200,9 +200,9 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(existing.identity.display_name, "TestPal")
         self.assertEqual(existing.identity.language, "zh")
         self.assertEqual(existing.identity.timezone, "Asia/Shanghai")
-        self.assertEqual(existing.endpoints[0].endpoint_id, "test-claude")
+        self.assertEqual(existing.endpoints[0].endpoint_id, "anthropic-claude-sonnet-4-20250514")
         self.assertIsNone(existing.endpoints[0].api_key)
-        self.assertEqual(existing.active_endpoint_id, "test-claude")
+        self.assertEqual(existing.active_endpoint_id, "anthropic-claude-sonnet-4-20250514")
         self.assertEqual(existing.channel.endpoint_id, "socket_default")
         self.assertEqual(existing.channel.binding_key, "/tmp/test-pal-wizard/pal.sock")
 
@@ -260,7 +260,7 @@ class TestSeedFromWizard(unittest.TestCase):
 
         settings = RuntimeSettingRepository()
         active = settings.get_active_llm_endpoint_id()
-        self.assertEqual(active, "test-claude")
+        self.assertEqual(active, "anthropic-claude-sonnet-4-20250514")
 
     def test_seed_from_wizard_writes_channel(self) -> None:
         from pal.channel import ChannelEndpointRepository
@@ -386,8 +386,8 @@ class TestSeedFromWizard(unittest.TestCase):
         updated = _make_collected()
         updated.identity.display_name = "UpdatedPal"
         updated.endpoints[0] = WizardLLMEndpoint(
-            endpoint_id="test-claude",
-            model_id="claude-opus-4-20250514",
+            endpoint_id="anthropic-claude-opus-4-20250514",
+            model_id="claude-opus-4-20250514", provider="anthropic",
             wire_shape="anthropic_messages",
             base_url="https://api.anthropic.com/v1/messages",
             api_key=None,
@@ -400,14 +400,15 @@ class TestSeedFromWizard(unittest.TestCase):
             supports_vision=True,
             priority=0,
         )
+        updated.active_endpoint_id = updated.endpoints[0].endpoint_id
         self.wizard.seed_from_wizard(self.registration, updated)
 
         persona = IdentityRepository().get_persona()
         self.assertEqual(persona.display_name, "UpdatedPal")
 
         endpoints = LLMEndpointRepository().list_enabled()
-        self.assertEqual(len(endpoints), 1)
-        self.assertEqual(endpoints[0].model_id, "claude-opus-4-20250514")
+        self.assertEqual(len(endpoints), 2)
+        self.assertIn("claude-opus-4-20250514", [ep.model_id for ep in endpoints])
 
     def test_rerun_seed_from_wizard_preserves_existing_api_key_when_blank(self) -> None:
         from pal.llm import LLMEndpointRepository, LLMCredentialResolver
@@ -418,7 +419,7 @@ class TestSeedFromWizard(unittest.TestCase):
 
         updated = _make_collected()
         updated.endpoints[0].api_key = None
-        updated.endpoints[0].model_id = "claude-opus-4-20250514"
+        updated.endpoints[0].notes = "Updated without key"
         self.wizard.seed_from_wizard(self.registration, updated)
 
         store = EncryptedFileSecretStore(str(self.runtime_root / "secrets.json"))
@@ -435,8 +436,8 @@ class TestSeedFromWizard(unittest.TestCase):
         collected = _make_collected()
         collected.endpoints.append(
             WizardLLMEndpoint(
-                endpoint_id="deepseek-fallback",
-                model_id="deepseek-chat",
+                endpoint_id="deepseek-deepseek-chat",
+                model_id="deepseek-chat", provider="deepseek",
                 wire_shape="openai_completion",
                 base_url="https://api.deepseek.com/v1/chat/completions",
                 api_key="ds-test-key",
@@ -454,8 +455,8 @@ class TestSeedFromWizard(unittest.TestCase):
 
         endpoints = LLMEndpointRepository().list_enabled()
         self.assertEqual(len(endpoints), 2)
-        self.assertEqual(endpoints[0].endpoint_id, "test-claude")
-        self.assertEqual(endpoints[1].endpoint_id, "deepseek-fallback")
+        self.assertEqual(endpoints[0].endpoint_id, "anthropic-claude-sonnet-4-20250514")
+        self.assertEqual(endpoints[1].endpoint_id, "deepseek-deepseek-chat")
 
 class TestLLMPreflight(unittest.TestCase):
     def test_preflight_passes_text_and_tool_probe(self) -> None:

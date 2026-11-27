@@ -4,10 +4,11 @@ from peewee import BooleanField, Check, CharField, IntegerField, TextField
 from playhouse.sqlite_ext import JSONField
 
 from pal.foundation.persistence import BaseModel, utc_now
+from pal.llm.endpoint_identity import IDENTITY_CHECK
 
 
 class LLMEndpointModel(BaseModel):
-    endpoint_id = CharField(primary_key=True)
+    endpoint_id = CharField(primary_key=True, constraints=[Check(IDENTITY_CHECK)])
     provider = CharField()
     model_id = TextField()
     display_name = TextField(null=True)
@@ -44,6 +45,7 @@ class LLMEndpointModel(BaseModel):
     class Meta:
         table_name = "llm_endpoints"
         indexes = (
+            (("provider", "model_id"), True),
             (("enabled", "priority"), False),
             (("enabled", "supports_tools", "supports_streaming"), False),
         )

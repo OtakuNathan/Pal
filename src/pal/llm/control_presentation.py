@@ -36,7 +36,13 @@ def build_think_panel_interaction(
         return f"> {display}" if choice_id == current else display
 
     if choices:
-        text = f"Think level for {endpoint_id}: {current}\nSelect a level for new turns."
+        mode = think_status.get("effort_update_mode")
+        if mode:
+            timing = ("Changes take effect after the next successful compact of a live prefix."
+                      if mode == "compact" else "Effort changes append at new user turns; mode changes wait for compact.")
+            text = f"Requested think level for {endpoint_id}: {current}\n{timing}"
+        else:
+            text = f"Think level for {endpoint_id}: {current}\nSelect a level for new turns."
     else:
         text = f"Endpoint {endpoint_id} does not expose configurable thinking levels."
     if banner:
@@ -88,9 +94,10 @@ def think_panel_delivery(
         if not choices:
             return delivery_for_reply(None, f"Endpoint {endpoint_id} does not expose configurable thinking levels.")
         available = ", ".join(str(choice.get("id") or "") for choice in choices)
+        label = "Requested think level" if think_status.get("effort_update_mode") else "Think level"
         return delivery_for_reply(
             None,
-            f"Think level for {endpoint_id}: {current}\nAvailable levels: {available}",
+            f"{label} for {endpoint_id}: {current}\nAvailable levels: {available}",
         )
     return delivery_for_interaction(
         route,

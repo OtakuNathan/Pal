@@ -37,7 +37,7 @@ endpoint's declared choices. Interactive prompts ask again rather than silently
 filtering or replacing the input. Seeding validates every thinking declaration
 before changing setup state.
 
-For an existing runtime, use `pal llm add ENDPOINT --replace` for a narrow endpoint
+For an existing runtime, use `pal llm add --provider PROVIDER --model-id MODEL --replace` for a narrow endpoint
 edit, then `/refresh_llm_endpoint` to load the configuration. Accepted keywords
 are not proof of remote model support. See the
 [LLM contract](../../../docs/pal_llm_contract.md#thinking-selection-validation-and-wire-encoding)

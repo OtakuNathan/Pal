@@ -124,6 +124,8 @@ class LLMUsageLedger:
         self.scope = str(scope or "resident_process")
         self.started_at = datetime.now(timezone.utc).isoformat()
         self._total = _UsageBucket()
+        self._keepalive = _UsageBucket()
+        self._keepalive_estimated_cost = 0.
         self._by_endpoint: dict[str, _UsageBucket] = {}
         self._lock = RLock()
         self._accounted_attempts: set[tuple[str, str]] = set()
@@ -149,6 +151,14 @@ class LLMUsageLedger:
             if identity in self._accounted_attempts:
                 return False
             self._accounted_attempts.add(identity)
+            if attempt.operation == "keepalive":
+                self._keepalive.record_attempt(attempt)
+                self._keepalive_estimated_cost += float(attempt.estimated_cost or 0.)
+                if attempt.status == "success":
+                    self._keepalive.record_success(attempt.usage, provider_response_count=1, usage_accounted=True)
+                else:
+                    self._keepalive.failed_request_count += 1
+                return True
             bucket = self._endpoint_bucket(attempt.endpoint_id, model_id=attempt.model_id, provider=attempt.provider)
             bucket.record_attempt(attempt)
             self._total.record_attempt(attempt)
@@ -179,6 +189,8 @@ class LLMUsageLedger:
                 "scope": self.scope,
                 "started_at": self.started_at,
                 **total,
+                "keepalive": {**self._keepalive.to_dict(), "estimated_cost": self._keepalive_estimated_cost},
+                "known_cost_including_keepalive": self._total.usage.cost + self._keepalive.usage.cost,
                 "by_endpoint": [
                     self._by_endpoint[endpoint_id].to_dict()
                     for endpoint_id in sorted(self._by_endpoint)

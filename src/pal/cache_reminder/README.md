@@ -32,3 +32,10 @@ captured history and installation.
 The user-facing CLI remains `pal core cache-reminder show/configure`. Online
 configuration requires the plugin; offline configuration preserves existing keys
 and reports activation on the next start. Timer state is process-local.
+
+The optional `keep-alive` policy reuses the same timer scope. It admits at most
+one cancellable asynchronous LLM heartbeat per idle deadline, and hands the
+terminal compact to the existing context-change lease. LLM owns frozen wire
+requests, renewal evidence, and economic decisions; the plugin never interprets
+provider payloads. `/cache_policy [reminder|keep-alive]` changes the persisted
+policy; the default remains `reminder`.

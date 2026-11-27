@@ -59,6 +59,7 @@ class ContextChangePort(Protocol):
         reserved_output_tokens: int = 0, guard: Callable[[], bool] | None = None,
         max_attempts: int | None = None, replay_guard: Callable[[], bool] | None = None,
         force_semantic: bool = False,
+        keepalive_compact_epoch: str = "",
     ) -> CompactionRunResult: ...
     async def close(self) -> None: ...
 

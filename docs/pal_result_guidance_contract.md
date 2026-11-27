@@ -14,7 +14,10 @@ Guidance information is stored in three places according to "when it is needed",
 
 **Default behavior**: for successful results, `affordances=[]` and `recovery_hint=""`. Success, switching workspace,
 the appearance of a path/ID, or seeing a tool for the first time — none of these constitute a reason to suggest. This is not "prompt on first use, deduplicate afterwards" — there is
-no reason to prompt the first time either. Selection does not depend on any presentation history; there is no cross-turn seen set, prompt count, or TTL.
+no reason to prompt the first time either. Routine successful tool results omit the metadata suffix entirely;
+optional result-specific actions and recovery are still rendered, and exceptional effects and delivery failures
+retain their explicit facts. The known effect remains available in local L1 records.
+Selection does not depend on any presentation history; there is no cross-turn seen set, prompt count, or TTL.
 
 ## Types and Fields
 

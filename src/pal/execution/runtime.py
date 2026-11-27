@@ -6,7 +6,7 @@ from pal.execution.turn_io_contracts import TURN_IO, TurnIOPort
 
 import hashlib
 
-from pal.execution.result_snapshots import ResultSnapshotStore, head_tail, render_snapshot_hint
+from pal.execution.result_snapshots import ResultSnapshotStore, head_tail, render_snapshot_hint, snapshot_hint_variants
 
 from pal.shared.tool_protocol import ToolCallIR, ToolContextMessageIR
 from pal.shared.registration import RegistrationKey, OwnerRelation, OwnershipEvent, owner_relation, reduce_ownership
@@ -1525,6 +1525,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
         result = self._normalize_invocation_result_inner(record, call, raw, budget=budget, turn_id=turn_id)
         if not result.snapshot_refs and isinstance(raw, CapabilityResult) and raw.snapshot_refs:
             result = result.model_copy(update={"snapshot_refs": tuple(raw.snapshot_refs)})
+        # A real receipt contradicting a no-effect contract is not routine
+        # success. Mark it against the actual target before any wrapper returns.
+        if (isinstance(result, CompleteResult) and result.effect == EffectOutcome.APPLIED
+                and record.execution.effect_kind == EffectKind.NONE):
+            result = result.model_copy(update={"report_effect": True})
         return result
 
     def deliver_invocation_result(
@@ -1625,7 +1630,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         and receipts must never pass through this diagnostic summarizer.
         """
         text = result.llm_text
-        if any(ref.coverage == "complete failure diagnostic" and text.endswith(render_snapshot_hint(ref))
+        if any(ref.coverage == "complete failure diagnostic" and text.endswith(snapshot_hint_variants(ref))
                for ref in result.snapshot_refs):
             return result
         if len(text) <= _DIAGNOSTIC_PREVIEW_CHARS and "Traceback (most recent call last):" not in text:
@@ -2103,13 +2108,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
         recovery_hint: str | None = None,
         affordances: list[ToolAffordance] | None = None,
     ) -> dict[str, Any]:
-        metadata: dict[str, Any] = {
-            "kind": result.kind,
-            "effect": result.effect.value,
-        }
+        metadata: dict[str, Any] = {}
         if isinstance(result, (RejectedResult, FailedResult)):
             metadata.update(
                 {
+                    "kind": result.kind,
+                    "effect": result.effect.value,
                     "error_code": result.error_code,
                     "retry": result.retry.value,
                 }
@@ -2119,11 +2123,19 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     metadata["operation_result"] = result.operation_result
                 if result.effect_receipt:
                     metadata["effect_receipt"] = result.effect_receipt
-        elif result.output_error:
-            metadata["delivery_error"] = result.output_error
         hint = (
             str(result.recovery_hint or "") if recovery_hint is None else recovery_hint
         ).strip()
+        if isinstance(result, CompleteResult):
+            # Completion is the default; only exceptional effects need an
+            # explicit receipt on the model wire. Applied effects during
+            # recovery (e.g. partially completed edits) remain unambiguous.
+            if (result.report_effect or result.output_error
+                    or result.effect not in {EffectOutcome.NONE, EffectOutcome.APPLIED}
+                    or (hint and result.effect == EffectOutcome.APPLIED)):
+                metadata["effect"] = result.effect.value
+            if result.output_error:
+                metadata["delivery_error"] = result.output_error
         if hint:
             metadata["recovery"] = hint
         actions = result.affordances if affordances is None else affordances
@@ -2139,7 +2151,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         metadata = cls._invocation_metadata_values(
             result, affordances=None if include_affordances else []
         )
-        if metadata == {"kind": "complete", "effect": EffectOutcome.NONE.value}:
+        if not metadata:
             return ""
         return f"\n\nTool result metadata: {render_structured_for_llm(metadata)}"
 

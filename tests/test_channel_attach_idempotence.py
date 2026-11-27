@@ -108,6 +108,7 @@ def test_public_facade_preserves_noop_facts_and_conditional_affordances(tmp_path
         assert manager.runtime.get_endpoint('demo_endpoint') is old
         assert 'manage_channel_endpoint' in result.llm_text
         assert 'inspect_channel_endpoint' in result.llm_text
-        assert '"effect":"none"' in result.llm_text
+        assert result.invocation_result.effect.value == "none"
+        assert '"effect":"none"' not in result.llm_text
     finally:
         fx.close()

@@ -201,12 +201,13 @@ class WizardLLMEndpoint:
     supports_streaming: bool
     supports_vision: bool
     priority: int
-    provider: str | None = None
+    provider: str
     auth_kind: str = "api_key_ref"
     credential_ref: str | None = None
     capabilities_blob: dict[str, Any] = field(default_factory=dict)
     notes: str | None = None
     transport: str = "http"
+    display_name: str | None = None
 
 
 @dataclass
@@ -353,8 +354,9 @@ def _prompt_transport(wire_shape: str, default: str = "http") -> str:
 
 def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -> WizardLLMEndpoint | None:
     print(f"\n  Endpoint #{index}:")
-    label = ask("  Label (e.g. my-claude, deepseek-chat)", current.endpoint_id if current else "")
-    if not label:
+    from pal.llm.endpoint_identity import canonical_endpoint_id
+    provider = ask("  Provider (e.g. openai, deepseek, openrouter)", current.provider if current else "")
+    if not provider:
         return None
 
     current_shape_choice = {
@@ -373,7 +375,8 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         "4": "gemini_interactions",
     }.get(shape_choice.strip(), "openai_completion")
 
-    model_id = ask("  Model ID", current.model_id if current else label)
+    model_id = ask("  Model ID", current.model_id if current else "")
+    label = canonical_endpoint_id(provider, model_id)
 
     if wire_shape in {"openai_completion", "openai_response"}:
         default_url = "https://api.openai.com/v1"
@@ -448,12 +451,10 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         supports_tools = ask_yes_no("  Supports tool calling", True)
         supports_streaming = ask_yes_no("  Supports streaming", True)
 
-    provider = None
     credential_ref = None
     capabilities_blob: dict[str, Any] = {}
     notes = None
     if current is not None and label == current.endpoint_id and base_url == current.base_url and wire_shape == current.wire_shape:
-        provider = current.provider
         credential_ref = current.credential_ref
         capabilities_blob = dict(current.capabilities_blob or {})
         notes = current.notes
@@ -477,6 +478,7 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         credential_ref=credential_ref,
         capabilities_blob=capabilities_blob,
         notes=notes,
+        display_name=current.display_name if current and label == current.endpoint_id else None,
     )
 
     if ask_yes_no("  Run live LLM preflight now", current is None and bool(api_key)):
@@ -1095,7 +1097,8 @@ def prompt_chatgpt_endpoint(runtime_root: Path | None, current: WizardLLMEndpoin
         if not 0 <= index < len(models):
             raise ValueError("Invalid model number")
         model = models[index]
-        label = ask("  Endpoint ID", current.endpoint_id if current else "chatgpt-" + model["slug"])
+        from pal.llm.endpoint_identity import canonical_endpoint_id
+        label = canonical_endpoint_id("chatgpt", model["slug"])
         context = int(ask("  Local context budget (tokens)", str(current.context_window if current else model.get("context_window") or 32768)))
         budget = int(ask("  Local output budget (not sent as an API limit)", str(current.max_output_tokens if current else 4096)))
         if context <= 0 or budget <= 0 or budget > context:
@@ -1108,7 +1111,7 @@ def prompt_chatgpt_endpoint(runtime_root: Path | None, current: WizardLLMEndpoin
             thinking_levels=thinking_levels, default_thinking_level=default_thinking_level,
             supports_tools=True, supports_streaming=True,
             supports_vision=current.supports_vision if current else "image" in model.get("input_modalities", []),
-            priority=current.priority if current else 0, provider="openai", auth_kind="oauth",
+            priority=current.priority if current else 0, provider="chatgpt", auth_kind="oauth",
             credential_ref=credential_ref(client_id), capabilities_blob={"access_profile": PROFILE},
             notes="Using ChatGPT plan. Switch endpoints manually with /model.",
         )

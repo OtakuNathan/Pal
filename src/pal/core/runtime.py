@@ -1733,6 +1733,7 @@ class PalCore(MemoryMaintenanceMixin):
         max_attempts: int | None = None, replay_guard: Callable[[], bool] | None = None,
         commit_guard: Callable[[], bool] | None = None,
         force_semantic: bool = False,
+        keepalive_compact_epoch: str = "",
     ) -> CompactionRunResult:
         gate = self._compaction_gate()
 
@@ -1751,6 +1752,7 @@ class PalCore(MemoryMaintenanceMixin):
             preferred_endpoint_id=preferred_endpoint_id,
             max_attempts=max_attempts, replay_guard=replay_guard, commit_guard=eligible,
             **({"force_semantic": True} if force_semantic else {}),
+            **({"keepalive_compact_epoch": keepalive_compact_epoch} if keepalive_compact_epoch else {}),
         )
         if run_result.success:
             async with self.state.channel_turn_transition_lock:

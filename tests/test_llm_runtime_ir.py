@@ -648,6 +648,40 @@ class LLMRuntimeIRTests(unittest.TestCase):
         prepared = runtime._compile_request(endpoint, request)
         self.assertEqual(prepared.request.policy.thinking_budget_tokens, 1024)
 
+    def test_thinking_snapshot_controls_actual_generation_until_next_turn(self) -> None:
+        endpoint = _endpoint()
+        invoker = _Invoker()
+        runtime = LLMRuntime(EndpointResolver(endpoints=(endpoint,)), _Settings(),
+            endpoint_invoker=invoker, config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())))
+        try:
+            runtime.set_think_level("low")
+            same_turn = replace(_request(), metadata=runtime.snapshot_turn_settings().to_payload())
+            self.assertEqual(runtime._generate_response(same_turn).text, "ok")
+            runtime.set_think_level("high")
+            self.assertEqual(runtime._generate_response(same_turn).text, "ok")
+            next_turn = replace(_request(), metadata=runtime.snapshot_turn_settings().to_payload())
+            self.assertEqual(runtime._generate_response(next_turn).text, "ok")
+            self.assertEqual([r.policy.thinking_level.value for r in invoker.requests],
+                             ["low", "low", "high"])
+            explicit = replace(same_turn, policy=replace(same_turn.policy, thinking_level="high"))
+            self.assertEqual(runtime._compile_request(endpoint, explicit).request.policy.thinking_level.value, "high")
+            lowest = replace(explicit, policy=replace(explicit.policy, thinking_selection="lowest_supported"))
+            self.assertEqual(runtime._compile_request(endpoint, lowest).request.policy.thinking_level.value, "off")
+        finally:
+            runtime.close()
+
+    def test_invalid_frozen_thinking_level_never_silently_uses_live_setting(self) -> None:
+        from pal.llm.runtime import LLMRequestPreparationError
+        endpoint = _endpoint()
+        runtime = LLMRuntime(EndpointResolver(endpoints=(endpoint,)), _Settings(),
+            endpoint_invoker=_Invoker(), config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())))
+        try:
+            request = replace(_request(), metadata={"think_levels": {"ep": "not-supported"}})
+            with self.assertRaisesRegex(LLMRequestPreparationError, "turn thinking_level"):
+                runtime._compile_request(endpoint, request)
+        finally:
+            runtime.close()
+
     def test_db_thinking_enum_drives_request_without_provider_heuristics(self) -> None:
         invoker = _Invoker()
         settings = _Settings()

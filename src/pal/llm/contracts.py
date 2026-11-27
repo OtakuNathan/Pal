@@ -214,6 +214,16 @@ class LLMService(Protocol):
 
     def end_prompt_cache_turn(self, turn_id: str) -> None: ...
 
+    def prompt_cache_keepalive_snapshot(self) -> dict[str, Any]: ...
+
+    async def keepalive_once(self, epoch: str) -> bool: ...
+
+    def clear_keepalive(self) -> None: ...
+
+    def claim_keepalive_compact(self, epoch: str) -> bool: ...
+
+    def keepalive_compact_valid(self, epoch: str) -> bool: ...
+
     def prompt_cache_reminder_snapshot(self) -> dict[str, Any]: ...
 
     def prompt_cache_warm_deadline_snapshot(self) -> dict[str, Any]: ...
@@ -357,6 +367,9 @@ class LLMMetadata:
     thinking_levels: list[str] = field(default_factory=list)
     default_thinking_level: str | None = None
 
+    route_origin: str | None = None
+    replay_compatible_bindings: list[list[str]] | None = None
+    supports_effort_updates: bool = False
     supports_suffix_instructions: bool = False
     supports_response_instructions: bool = False
     supports_request_instructions: bool = False

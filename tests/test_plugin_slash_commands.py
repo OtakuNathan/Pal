@@ -206,6 +206,10 @@ def test_optional_cache_reminder_plugin_reload_and_detach(runtime):
     assert loaded["status"] == "ok", loaded
     old = host.generations["cache_reminder"].handle
     manager = core.context.port_registry["cache_reminder:reminder"]
+    assert control.registry.resolve("cache_policy") is not None
+    assert manager.inspect()["mode"] == "reminder"
+    manager.configure(mode="keep-alive")
+    assert manager.inspect()["mode"] == "keep-alive"
     manager.schedule_after_turn_commit(route=ControlRoute("test", "socket"), turn_id="one")
     assert manager.inspect()["timer_scheduled"]
     replaced = host.reattach("cache_reminder")
@@ -215,7 +219,10 @@ def test_optional_cache_reminder_plugin_reload_and_detach(runtime):
     assert core.context.configuration_operations["cache_reminder.inspect"][1] is successor.configuration_handlers["cache_reminder.inspect"]
     assert not manager.inspect()["timer_scheduled"]
     assert core.context.port_registry["cache_reminder:reminder"] is not manager
+    assert core.context.port_registry["cache_reminder:reminder"].inspect()["mode"] == "keep-alive"
+    assert control.registry.resolve("cache_policy") is not None
     assert host.detach("cache_reminder")["status"] == "ok"
     assert core.context.port_registry.get("cache_reminder:reminder") is None
     assert core.context.control_action_registry.resolve("cache_warm_deadline_compact") is None
     assert "cache_reminder.inspect" not in core.context.configuration_operations
+    assert control.registry.resolve("cache_policy") is None

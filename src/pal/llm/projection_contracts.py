@@ -113,6 +113,7 @@ class EndpointBinding:
     endpoint_config_digest: str = ""
     base_url: str = ""
     provider_id: str = ""
+    route_origin: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.endpoint_id, "endpoint id")

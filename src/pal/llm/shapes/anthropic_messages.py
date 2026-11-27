@@ -42,6 +42,26 @@ from pal.shared.json_values import thaw_json
 class AnthropicMessagesCodec(ShapeCodecBase):
     wire_shape: WireShape = WireShape.ANTHROPIC_MESSAGES
 
+    def prepare_keepalive(self, encoded: EncodedRequest, context: ShapeContext) -> EncodedRequest | None:
+        payload, extra = thaw_json(encoded.payload), thaw_json(encoded.extra_body)
+        merged = {**payload, **extra}
+        if ((merged.get("thinking") or {}).get("type") == "enabled"
+                or (merged.get("output_config") or {}).get("format")
+                or (merged.get("tool_choice") or {}).get("type") in {"tool", "any"}
+                or any(tool.get("type") not in {None, "custom"} for tool in merged.get("tools", ()))):
+            return None
+        if context.base_url.rstrip("/") == "https://openrouter.ai/api":
+            # The gateway accepts zero but silently treats it as a regular
+            # generation. A one-token request was verified instead.
+            if "messages" in extra:
+                return None
+            payload["max_tokens"] = 1
+            payload["messages"].append({"role": "user", "content": "Reply with PING only."})
+        else:
+            payload["max_tokens"] = 0
+        extra.pop("max_tokens", None)
+        return replace(encoded, payload=payload, extra_body=extra)
+
     def encode(self, request: LLMRequestIR, context: ShapeContext) -> EncodedRequest:
         system_parts: list[dict[str, Any]] = []
         messages: list[dict[str, Any]] = []
@@ -49,6 +69,7 @@ class AnthropicMessagesCodec(ShapeCodecBase):
         from pal.llm.cache_capabilities import supports_turn_scoped_instructions, canonical_claude_model
         scoped_supported = supports_turn_scoped_instructions(context.wire_shape, context.model_id, context.base_url, context.capabilities)
         opus55 = canonical_claude_model(context.model_id) == "claude-opus-5-5"
+        from pal.llm.effort_updates import message_effort_update
         for message in request.messages:
             wire_start = len(messages)
             system_start = len(system_parts)
@@ -180,6 +201,9 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                     continue
                 blocks = _anthropic_user_content(message.parts)
                 if blocks:
+                    effort = message_effort_update(message, context)
+                    if effort is not None:
+                        messages.append({"role": "system", "content": [], "output_config": {"effort": effort}})
                     _append_message(messages, "user", blocks)
                 spans.append(
                     EncodedMessageSpan(

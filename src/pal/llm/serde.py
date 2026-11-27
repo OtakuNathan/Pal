@@ -24,6 +24,7 @@ from pal.shared.json_values import thaw_json
 from pal.shared.tool_protocol import (
     ToolCallIR,
     ToolResultIR,
+    EffectOutcome,
 )
 
 
@@ -148,6 +149,7 @@ def part_to_payload(part: Any) -> dict[str, Any]:
             ),
             "replay_result_ref": part.replay_result_ref,
             "snapshot_refs": [ref.to_dict() for ref in part.snapshot_refs],
+            **({"effect": part.effect.value} if part.effect is not None else {}),
         }
     raise TypeError(f"unsupported LLM IR part: {type(part).__name__}")
 
@@ -190,5 +192,6 @@ def part_from_payload(payload: Mapping[str, Any]) -> Any:
             ),
             replay_result_ref=str(payload.get("replay_result_ref") or ""),
             snapshot_refs=tuple(ResultSnapshotRef.from_dict(item) for item in payload.get("snapshot_refs", ())),
+            effect=EffectOutcome(payload["effect"]) if payload.get("effect") is not None else None,
         )
     raise ValueError(f"unknown LLM IR part kind: {kind}")

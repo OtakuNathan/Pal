@@ -278,6 +278,12 @@ class AgentSession:
                 state=state,
             ),
         )
+        preferred = str(restored_state.get("preferred_llm_endpoint_id") or "")
+        from pal.llm.runtime import LLMRuntime
+        if preferred and isinstance(bundle.llm_runtime, LLMRuntime):
+            from pal.llm.replay_compatibility import historical_endpoint_id
+            from pal.llm.repository import LLMEndpointRepository
+            preferred = historical_endpoint_id(preferred, LLMEndpointRepository().list_all())
         continuation = TurnContinuation(
             turn_id=turn_id,
             opening_event=state.channel_envelope.event,
@@ -290,7 +296,7 @@ class AgentSession:
             control_scope_key=f"bunshin:{self.run_id}",
             turn_settings_snapshot=_bunshin_turn_settings_snapshot(self.pack, bundle.llm_runtime),
             tool_batch_count=max(0, int(restored_state.get("tool_batch_count") or 0)),
-            preferred_llm_endpoint_id=str(restored_state.get("preferred_llm_endpoint_id") or "") or None,
+            preferred_llm_endpoint_id=preferred or None,
             preferred_llm_model_id=str(restored_state.get("preferred_llm_model_id") or "") or None,
         )
         return continuation, program, turn_id

@@ -61,6 +61,8 @@ from pal.llm.ir import (
 from pal.memory.compact import memory_candidates_from_compact_result, compact_normalization_diagnostics
 from pal.memory.contracts import L1MessageKind, MemoryPackRequest
 from pal.memory.prompt_context import prompt_date_pin, select_prompt_date_pin
+from pal.memory.effort_pin import plan_effort_pin, pinned_think_levels
+from pal.llm.effort_updates import EFFORT_PIN, EFFORT_UPDATE
 from pal.llm.cache_reminder import prefix_refresh_likely_cold
 from pal.shared.prompt_dates import today_for_timezone
 from pal.shared import (
@@ -1260,6 +1262,12 @@ class TurnExecutor:
                 }
         if active_turn is not None:
             metadata["active_l1_owns_primary_input"] = True
+            if (logical_scope_id == "pal:resident" and assembly_context.core_mode != "bunshin"
+                    and EFFORT_PIN in active_turn.metadata):
+                snapshot_think_levels = pinned_think_levels(
+                    memory_service, metadata["llm_capabilities"], snapshot_think_levels,
+                    active_turn=active_turn)
+                metadata["think_levels"] = snapshot_think_levels
         if assembly_context.turn_kind != "failure":
             try:
                 memory_service = self.memory.current
@@ -1743,6 +1751,26 @@ class TurnExecutor:
                     "conversation_origin": origin,
                     "conversation_timestamp": event.created_at if event is not None else datetime.now(timezone.utc).isoformat()})
             turn_metadata.update(conversation_tracking=True, conversation_input_kind=origin)
+        # Admission is the sole point at which a new resident turn can
+        # select an effort or append a configuration update to its input.
+        if (assembly_context.core_mode != "bunshin"
+                and assembly_context.turn_kind != "proactive_trigger"
+                and self.borrowed_prompt_date is None
+                and continuation.turn_settings_snapshot.get("think_levels")
+                and memory_service.active_l1_turn(str(continuation.turn_id)) is None):
+            facts = self._resolve_llm_capabilities(continuation)
+            levels = continuation.turn_settings_snapshot.get("think_levels") or {}
+            desired = levels.get(facts.get("endpoint_id"))
+            if desired in facts.get("thinking_levels", ()) and (user_message is not None or text):
+                pin, update = plan_effort_pin(memory_service, facts, desired)
+                turn_metadata[EFFORT_PIN] = pin
+                if update is not None:
+                    if user_message is None:
+                        user_message = LLMMessageIR(role=MessageRole.USER, parts=(TextPartIR(text),),
+                                                   semantic_kind="user_request")
+                        text = ""
+                    user_message = replace(user_message, metadata={
+                        **thaw_json(user_message.metadata), EFFORT_UPDATE: update})
         memory_service.begin_l1_turn(
             str(continuation.turn_id),
             user_text=text,
@@ -1781,6 +1809,7 @@ class TurnExecutor:
                 ),
                 replay_result_ref=str(result.replay_result_ref or ""),
                 snapshot_refs=result.snapshot_refs,
+                effect=result.invocation_result.effect if result.invocation_result is not None else None,
         )
         try:
             memory_service.append_l1_tool_result(turn_id, tool_result)

@@ -3668,7 +3668,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tool_message = next(message for message in generate_requests[1].messages if message.role.value == "tool")
         self.assertIn('<recalled_memories view="summary">', tool_message.text)
         self.assertIn("[fact:1]:", tool_message.text)
-        self.assertIn('"kind":"complete"', tool_message.text)
+        self.assertNotIn('"kind":"complete"', tool_message.text)
         self.assertNotIn("legacy assistant", tool_message.text)
         self.assertIn("The test user built Pal and wants it to act directly.", tool_message.text)
 
@@ -3987,8 +3987,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             budget=ToolCallBudget(max_output_chars=2000, preview_chars=500))
         self.assertTrue(read.ok, read.text)
         self.assertEqual(read.snapshot_refs, (ref,))
-        self.assertIn("wc -lc", read.llm_text)
-        self.assertIn("bounded character/byte fragments", read.llm_text)
+        self.assertIn(f"Output snapshot: {ref.path}", read.llm_text)
+        self.assertIn(f"Coverage: {ref.coverage}.", read.llm_text)
+        self.assertNotIn("wc -lc", read.llm_text)
         self.assertIsNone(read.invocation_result.context_delivery)
 
     def test_snapshot_preview_includes_both_ends(self):

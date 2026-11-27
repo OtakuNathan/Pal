@@ -673,6 +673,9 @@ class CompactionEngine:
         }
         if snapshot.replay_request is not None:
             replay = snapshot.replay_request
+            if snapshot.metadata.get("keepalive_compact_epoch"):
+                metadata["keepalive_compact_epoch"] = snapshot.metadata["keepalive_compact_epoch"]
+                metadata["single_compaction_attempt"] = True
             replay_source = [
                 self.policy.system_prompt(snapshot).strip() + inventory_text,
                 "",
@@ -710,7 +713,7 @@ class CompactionEngine:
                 policy=replace(
                     replay.policy,
                     max_output_tokens=max_output,
-                    tool_choice=("none" if snapshot.replay_wire_shape in {
+                    tool_choice=("none" if not snapshot.metadata.get("keepalive_compact_epoch") and snapshot.replay_wire_shape in {
                         "openai_response", "openai_completion", "gemini_interactions"
                     } else replay.policy.tool_choice),
                 ),

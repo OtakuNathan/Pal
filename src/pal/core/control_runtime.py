@@ -56,12 +56,14 @@ class ContextChange:
         reserved_output_tokens: int = 0, guard: Callable[[], bool] | None = None,
         max_attempts: int | None = None, replay_guard: Callable[[], bool] | None = None,
         force_semantic: bool = False,
+        keepalive_compact_epoch: str = "",
     ) -> CompactionRunResult:
         await self._core.control_runtime.notify("core.context_change.started", {"trigger": self._ticket.trigger})
         return await self._core._run_control_compaction_async(
             self._ticket, preferred_endpoint_id=preferred_endpoint_id,
             target_input_budget=target_input_budget, reserved_output_tokens=reserved_output_tokens,
-            commit_guard=guard, max_attempts=max_attempts, replay_guard=replay_guard, force_semantic=force_semantic)
+            commit_guard=guard, max_attempts=max_attempts, replay_guard=replay_guard, force_semantic=force_semantic,
+            **({"keepalive_compact_epoch": keepalive_compact_epoch} if keepalive_compact_epoch else {}))
 
     async def close(self) -> None:
         async with self._core.state.channel_turn_transition_lock:

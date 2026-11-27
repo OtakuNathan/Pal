@@ -41,6 +41,7 @@ class EncryptedJsonEnvelopeCodec:
 
     runtime_root: Path
     purpose: str
+    read_only: bool = False
 
     def encrypt(self, value: Mapping[str, Any]) -> str:
         from cryptography.fernet import Fernet
@@ -66,7 +67,8 @@ class EncryptedJsonEnvelopeCodec:
         return dict(decoded)
 
     def _key(self) -> bytes:
-        master = _load_or_create_runtime_master_key(self.runtime_root)
+        master = (_read_runtime_master_key(self.runtime_root / "data/security/runtime_state.key")
+                  if self.read_only else _load_or_create_runtime_master_key(self.runtime_root))
         digest = hmac.new(
             master,
             str(self.purpose).encode("utf-8"),

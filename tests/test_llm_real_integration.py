@@ -250,6 +250,7 @@ def _real_openai_completion_runtime(*, max_output_tokens: int = 4096) -> LLMRunt
 
 def _seed_real_endpoint(runtime_root: Path, *, endpoint_id: str = "real_e2e") -> None:
     api_key, base_url, model = _configured_real_llm()
+    endpoint_id = f"openai_compatible-{model}"
     EncryptedFileSecretStore(runtime_root / "secrets.json").set_secret(
         SecretRef(service="PAL_TEST_LLM_API_KEY", account="api-key"),
         api_key,

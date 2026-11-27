@@ -68,7 +68,7 @@ class RuntimeStabilitySoakTests(unittest.TestCase):
         self.wizard = WizardService()
         self.provisioned = self.wizard.provision_stub_runtime(self.runtime_root)
         from pal.llm import RuntimeSettingRepository
-        RuntimeSettingRepository().set_active_llm_endpoint_id("stub_llm_default")
+        RuntimeSettingRepository().set_active_llm_endpoint_id("stub-stub-model")
         self.handle = compose_runtime(
             wizard=self.wizard,
             registration=self.provisioned.registration,

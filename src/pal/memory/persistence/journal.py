@@ -102,10 +102,10 @@ def _apply(value: dict, operations: list) -> None:
 
 
 class ResidentJournalStore:
-    def __init__(self, runtime_root: Path):
-        self.base = ResidentCheckpointStore(runtime_root)
+    def __init__(self, runtime_root: Path, *, read_only: bool = False):
+        self.base = ResidentCheckpointStore(runtime_root, read_only=read_only)
         self.path = runtime_root / "data" / "core" / "resident_journal.jsonl"
-        self.codec = EncryptedJsonEnvelopeCodec(runtime_root, JOURNAL_KEY_PURPOSE)
+        self.codec = EncryptedJsonEnvelopeCodec(runtime_root, JOURNAL_KEY_PURPOSE, read_only=read_only)
         self.sequence = 0
         self.state: dict | None = None
         self.tail_offset: int | None = None

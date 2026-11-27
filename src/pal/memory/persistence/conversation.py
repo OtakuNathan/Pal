@@ -13,7 +13,7 @@ from typing import Callable, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pal.memory.persistence.checkpoint import _fsync_directory
-from pal.execution.result_snapshots import render_snapshot_hint
+from pal.execution.result_snapshots import snapshot_hint_variants
 from pal.foundation.diagnostics import diagnostic_text
 from pal.foundation.service_logging import redact_service_log_text
 from pal.llm.ir import MessageRole, TextPartIR
@@ -68,7 +68,8 @@ def conversation_records(turns: Iterable[L1TurnIR]) -> list[dict]:
                         continue
                     text = part.content
                     for ref in part.snapshot_refs:
-                        text = text.replace(render_snapshot_hint(ref), "[External snapshot omitted; archived preview only.]")
+                        for hint in snapshot_hint_variants(ref):
+                            text = text.replace(hint, "[External snapshot omitted; archived preview only.]")
                     records.append({**base, "message_id": f"{message.message_id}:{part.call_id}",
                                     "role": "tool", "tool_name": part.name, "call_id": part.call_id,
                                     "ok": part.ok, "status": part.status,

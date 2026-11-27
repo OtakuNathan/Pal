@@ -49,10 +49,29 @@ class OpenAIResponseCodec(ShapeCodecBase):
     # codec API, whose callers supply their profile through ShapeContext.
     subscription: bool | None = None
 
+    def prepare_keepalive(self, encoded: EncodedRequest, context: ShapeContext) -> EncodedRequest | None:
+        if self.subscription or not request_parameter_supported(context, "max_output_tokens"):
+            return None
+        payload, extra = thaw_json(encoded.payload), thaw_json(encoded.extra_body)
+        if any(tool.get("type") != "function" for tool in extra.get("tools", payload.get("tools", ()))):
+            return None
+        if any(k in extra for k in ("input", "max_output_tokens", "instructions")) or payload.get("tool_choice") not in (None, "auto", "none"):
+            return None
+        if payload.get("previous_response_id") or extra.get("previous_response_id") or payload.get("store") is True:
+            return None
+        payload["max_output_tokens"] = 16
+        ping = "Reply only with PING. Do not call tools."
+        if encoded.instructions_are_suffix:
+            payload["instructions"] = ping
+        else:
+            payload["input"].append({"role": "user", "content": [{"type": "input_text", "text": ping}]})
+        return replace(encoded, payload=payload, extra_body=extra)
+
     def encode(self, request: LLMRequestIR, context: ShapeContext) -> EncodedRequest:
         subscription = self.subscription if self.subscription is not None else is_chatgpt(context.capabilities)
         input_items: list[dict[str, Any]] = []
         spans: list[EncodedMessageSpan] = []
+        from pal.llm.effort_updates import message_effort_update, EFFORT_PIN
         for message in request.messages:
             replaced_prefix = []
             replaced_spans = []
@@ -83,6 +102,12 @@ class OpenAIResponseCodec(ShapeCodecBase):
                     output = message.replay.payload.get("output")
                     if isinstance(output, (list, tuple)):
                         input_items.extend(thaw_json(item) for item in output if isinstance(item, Mapping))
+                        if is_native_window(message):
+                            pin = message.replay.payload[NATIVE_WINDOW_KEY].get(EFFORT_PIN)
+                            if (pin and pin["effective"] != pin["base"]
+                                    and request.policy.thinking_level in {None, pin["base"]}):
+                                input_items.append({"type": "configuration_update",
+                                    "reasoning": {"effort": pin["effective"]}})
                         if replaced_prefix and input_items[wire_start:wire_start + len(replaced_prefix)] == replaced_prefix:
                             spans = replaced_spans
                         spans.append(EncodedMessageSpan(message.message_id))
@@ -141,6 +166,9 @@ class OpenAIResponseCodec(ShapeCodecBase):
                     continue
                 content = _responses_user_content(message.parts)
                 if content:
+                    effort = message_effort_update(message, context)
+                    if effort is not None:
+                        input_items.append({"type": "configuration_update", "reasoning": {"effort": effort}})
                     input_items.append({"role": "user", "content": content})
                     if isinstance(content[-1], Mapping):
                         targets.append(("input", len(input_items) - 1, "content", len(content) - 1))

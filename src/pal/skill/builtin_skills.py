@@ -72,13 +72,14 @@ accepts `plugin`, `provider`, or `builtin`.
 | `pal setup --check`, `pal doctor` | Check local dependencies and report remediation. These are diagnostic entrypoints, not configuration reloads. |
 | `pal setup --upgrade` | Offline runtime upgrade: LLM/browser schema migration, Bunshin cutover and generation-owned memory database separation. Legacy vectors without a recorded identity are rebuilt into a separate generation with the configured model. Requires a stopped host and a reachable embedding endpoint for the rebuild. Pass `--embedding-remote-only` to restrict the rebuild to configured remote Ollama endpoints. Re-run to resume; verified publication preserves source data and user configuration. Use explicit embedding migration for a model change. |
 | `pal llm list [--all] [--json]` | Inspect persisted endpoint configuration, optionally including disabled rows; not proof that the running endpoint cache has refreshed. |
-| `pal llm add ENDPOINT [--replace]` | Add or update endpoint metadata and optionally credentials/active selection. Replace preserves omitted fields. Refresh the running LLM afterwards. |
+| `pal llm add --provider PROVIDER --model-id MODEL [--replace]` | Add or update the unique model route. Replace preserves omitted fields. Compatible edits refresh online; replay-incompatible replacements require offline handoff. |
+| `pal llm migrate-ids [--dry-run] [--keep OLD_ID]` | Preview or apply the offline canonical-ID cutover with backup, reference migration and preserved L1. Duplicate pairs require an explicit survivor. |
 | `pal llm delete ENDPOINT` | Delete an endpoint; shared credentials remain. Deleting the active endpoint selects the next enabled endpoint or clears active selection. Refresh afterwards. |
 | `pal web-search list/show/active` | Inspect persisted search backend configuration; show requires NAME. Health and last request errors remain live tools. |
 | `pal web-search configure NAME --patch-file FILE` | Merge a JSON object into settings. Omitted keys are preserved; actual consumption depends on the provider. |
 | `pal web-search auth NAME --stdin` | Merge a JSON credentials object from stdin; do not put secrets in argv or echo them. Results report accepted keys, not values. |
 | `pal web-search enable/disable/set-active NAME` | Update backend enabled state or configured selection. A disabled backend cannot become active. Subsequent searches read the new configuration; success does not prove network recovery. |
-| `pal core cache-reminder show/configure` | Show or change enabled, lead_seconds and min_prefix_tokens. Configure accepts --enabled/--no-enabled, --lead-seconds (>=30), --min-prefix-tokens (>=1024). Online calls reach the resident owner; disabling cancels its current timer immediately. Lead/min changes apply to subsequent scheduling. |
+| `pal core cache-reminder show/configure` | Show or change mode, enabled, lead_seconds and min_prefix_tokens. Configure accepts --mode reminder|keep-alive, --enabled/--no-enabled, --lead-seconds (>=30), --min-prefix-tokens (>=1024). `/cache_policy [reminder|keep-alive]` switches the mode. Online calls reach the resident owner; disabling cancels its current timer immediately. Lead/min changes apply to subsequent scheduling. |
 | `pal identity show/refresh` | Show the resident projection (persisted identity when offline), or refresh it online after an authorized external edit. Language/tone/preferences update in subsequent prompt assembly. System name/core policy remain startup-pinned. Refresh requires a running host; owner failure is not an offline fallback. |
 | `pal memory providers/inspect [NAME]` | Inspect the resident memory owner; offline reads inspect the published SQLite memory generation. Online failures never fall back to direct database changes. |
 | `pal memory attach/detach/select NAME` | Resident backend lifecycle controls, rejected while Pal is busy. Selection lasts until host restart; this is not an embedding-space migration. |
@@ -109,29 +110,27 @@ endpoint. Enabling and choosing an endpoint are separate choices. `--set-active`
 requires an enabled endpoint. Do not invent flags for arbitrary capabilities_blob
 fields that the CLI does not expose.
 
-Use the same human-readable string for an LLM endpoint's `endpoint_id` and
-`display_name`. Join the route's provider label, the exact API `model_id`, and
-the stored `wire_shape` with single spaces. Preserve the upstream prefix and
-slash when the model ID includes one, as in
-`OpenRouter openai/gpt-6.2-sol openai_response`. A direct model uses its bare
-ID, as in `BigModel glm-5.4 anthropic_messages`. Provider labels identify the
-actual route (for example OpenAI, ChatGPT, Z.ai or BigModel). Quote the whole
-name when passing it as a shell argument.
+An LLM endpoint has exactly one identity: its access provider slug and exact upstream
+`model_id`. Pal derives `endpoint_id` as `{provider}-{model_id}`; `display_name`
+is presentation only. For example, `openrouter-openai/gpt-6.2-sol`,
+`bigmodel-glm-5.4`, `zai-glm-5.4`, and `chatgpt-gpt-6.2-sol`.
+`wire_shape` is configuration, not identity. Replace the existing pair instead
+of registering another protocol variant. Use `provider=chatgpt` for ChatGPT OAuth.
 
-When renaming existing endpoints, check for collisions and migrate the active
-selection, per-endpoint thinking levels, Bunshin profile preferences and other
-configured endpoint references. Preserve credential references. For retained
-conversation replay, record each former ID under
-`capabilities_blob.replay_endpoint_aliases` with its pre-rename
-`pal.llm.compaction.native_origin` digest.
+For older runtimes use `pal llm migrate-ids --dry-run --runtime-root ...` and
+resolve any duplicate pair by choosing its old ID with `--keep`. The actual
+migration requires an externally stopped Pal and Bunshin sidecar. It preserves
+credentials and L1, updates mutable references, and admits only verified replay
+aliases for former IDs. Do not rename rows manually. A route replacement that
+changes replay/effort compatibility requires a source semantic handoff first.
 
 Runnable command shapes (replace the example values with verified user choices):
 
 ```sh
 pal llm list --all --json --runtime-root /path/to/runtime
-pal llm add "Example example-model openai_completion" --model-id example-model --provider example --wire-shape openai_completion --base-url https://api.example.com/v1 --store-api-key --no-enabled --runtime-root /path/to/runtime
-pal llm add "Example example-model openai_completion" --replace --enabled --set-active --runtime-root /path/to/runtime
-pal llm delete example --runtime-root /path/to/runtime
+pal llm add --model-id example-model --provider example --wire-shape openai_completion --base-url https://api.example.com/v1 --store-api-key --no-enabled --runtime-root /path/to/runtime
+pal llm add --provider example --model-id example-model --replace --enabled --set-active --runtime-root /path/to/runtime
+pal llm delete example-example-model --runtime-root /path/to/runtime
 pal web-search list --json --runtime-root /path/to/runtime
 pal web-search configure example --patch-file /path/to/settings-patch.json --json --runtime-root /path/to/runtime
 pal web-search auth example --stdin --json --runtime-root /path/to/runtime < /path/to/authorized-credentials.json
@@ -170,8 +169,9 @@ Do not claim this command reloads all config.toml settings or Python implementat
 
 Use `inspect_llm` to verify running endpoint metadata; the selected endpoint is labelled (active).
 `/model ENDPOINT` starts a user-controlled switch to a loaded enabled endpoint.
-Switching requires an idle conversation and may require confirmed compaction; `/think LEVEL` changes the supported thinking choice. These affect future
-requests, not a request already in flight. `/control` lists available controls;
+Switching requires an idle conversation and may require confirmed compaction; `/think LEVEL` requests a supported thinking choice.
+Verified effort-update endpoints append the change at a new user turn; other endpoints retain a live prefix's effort until a successful compact.
+Neither changes an in-flight turn's thinking choice. `/control` lists available controls;
 `/status` reports Pal's current activity (idle, in a turn, queued, or in maintenance),
 active turns, queued messages, and LLM statistics. `/reset` resets the conversation, not the host.
 `/log start` and `/log end` control diagnostic logging; `/compact` and `/interrupt`
@@ -880,8 +880,8 @@ Keep hooks small and deterministic. They may add developer instructions or use `
 
 Create or update endpoint metadata only after checking the existing endpoint list. Required fields include:
 
-- `endpoint_id`: stable unique ID, such as `my_provider_gpt_5`.
-- `provider`: display, credential, and telemetry identity only.
+- `endpoint_id`: derived as `{provider}-{model_id}`, such as `my_provider-gpt-5`.
+- `provider`: lowercase access-route ID, also used for credentials and telemetry; never chooses the wire codec.
 - `model_id`: exact model identifier used by model-hook lookup.
 - `wire_shape` accepts `openai_completion`, `openai_response`, `anthropic_messages`, or `gemini_interactions`.
 - Gemini Interactions uses the Google API base URL ending in `/v1beta`. On this shape and on Responses WebSocket endpoints, `--continuation-mode full` forces complete local replay.
@@ -897,14 +897,14 @@ Create or update endpoint metadata only after checking the existing endpoint lis
 Prepare Astra without activating it:
 
 ```text
-pal llm add gpt-6-astra --api-key-env OPENAI_API_KEY --no-enabled
+pal llm add --provider openai --model-id gpt-6-astra --api-key-env OPENAI_API_KEY --no-enabled
 ```
 
 The exact-model preset uses OpenAI Responses, the official 1,050,000-token context and 128,000-token output limits, vision/tool/stream support, reasoning levels `low`, `medium`, `high`, `xhigh`, and `max`, and omits unsupported `temperature`, `top_p`, and `top_logprobs` request parameters. Keep the endpoint disabled until API access and credentials are available; enabling or selecting it remains an explicit operator action.
 
 OpenRouter exposes the same model as `openai/gpt-6-astra`. Configure that exact model id with the OpenRouter base URL and credential; Pal applies the same Responses and unsupported-parameter profile. OpenRouter advertises the full 1,050,000-token context, while a deployment may deliberately cap it at 272,000 tokens to avoid the higher long-context pricing tier.
 
-For endpoint configuration, use `pal llm list --all --json`, `pal llm add ENDPOINT --replace`, and `pal llm delete ENDPOINT` with the verified `--runtime-root`. Add without --replace creates a new endpoint; replace preserves omitted fields. Use --store-api-key for secure user input or --api-key-stdin for authorized secret input, never secrets in argv. Use --enabled/--no-enabled and --set-active only as requested. CLI writes require `/refresh_llm_endpoint` to refresh a running instance. For a field the CLI cannot express, inspect the current repository/schema and prepare a scoped patch. Existing explicit authorization covers its agreed actions; ask only for uncovered database or credential changes.
+For endpoint configuration, use `pal llm list --all --json`, `pal llm add --provider PROVIDER --model-id MODEL --replace`, and `pal llm delete ENDPOINT` with the verified `--runtime-root`. Add without --replace creates a new endpoint; replace preserves omitted fields. Use --store-api-key for secure user input or --api-key-stdin for authorized secret input, never secrets in argv. Use --enabled/--no-enabled and --set-active only as requested. Compatible CLI writes require `/refresh_llm_endpoint` to refresh a running instance; identity migration and replay-incompatible replacement are offline operations. For a field the CLI cannot express, inspect the current repository/schema and prepare a scoped patch. Existing explicit authorization covers its agreed actions; ask only for uncovered database or credential changes.
 
 ## Verification Workflow
 

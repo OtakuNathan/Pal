@@ -50,6 +50,7 @@ class ResidentCheckpointStore:
     """One encrypted, atomically replaceable exit checkpoint for resident Pal."""
 
     runtime_root: Path
+    read_only: bool = False
 
     @property
     def path(self) -> Path:
@@ -66,7 +67,7 @@ class ResidentCheckpointStore:
         try:
             private = EncryptedJsonEnvelopeCodec(
                 runtime_root=self.runtime_root,
-                purpose=RESIDENT_CHECKPOINT_KEY_PURPOSE,
+                purpose=RESIDENT_CHECKPOINT_KEY_PURPOSE, read_only=self.read_only,
             ).decrypt(str(envelope["ciphertext"]))
         except ValueError as exc:
             raise ResidentCheckpointError(

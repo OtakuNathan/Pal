@@ -93,6 +93,8 @@ class ToolResultIR:
     context_delivery: Mapping[str, Any] | None = None
     snapshot_refs: tuple[ResultSnapshotRef, ...] = ()
     replay_result_ref: str = ""
+    # Local execution truth even when routine success has no wire metadata.
+    effect: EffectOutcome | None = None
 
     def __post_init__(self) -> None:
         if not str(self.call_id or "").strip():
@@ -108,6 +110,8 @@ class ToolResultIR:
                 freeze_json_mapping(self.context_delivery),
             )
         object.__setattr__(self, "replay_result_ref", str(self.replay_result_ref or ""))
+        if self.effect is not None:
+            object.__setattr__(self, "effect", EffectOutcome(self.effect))
 
 
 @dataclass(frozen=True)
@@ -180,6 +184,8 @@ class CompleteResult(_StrictProtocolModel, Generic[T]):
     recovery_hint: str = ""
     context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
     output_error: str = Field(default="", exclude=True)
+    # Retain an exceptional actual effect that contradicts the declared contract.
+    report_effect: bool = Field(default=False, exclude=True)
     snapshot_refs: tuple[ResultSnapshotRef, ...] = Field(default=(), exclude=True)
     replay_result_ref: str = Field(default="", exclude=True)
     context_messages: tuple[ToolContextMessageIR, ...] = Field(default=(), exclude=True)

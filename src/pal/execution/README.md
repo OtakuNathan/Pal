@@ -65,7 +65,10 @@ Notes:
   Missing optional or role-scoped hints are omitted from model descriptions;
   their authored relations remain available for future registry generations
 - invocation returns a discriminated `complete`, `rejected`, or
-  `failed` result; effect outcome and retry direction are explicit
+  `failed` result; actual effect and retry decisions remain typed local facts.
+  Ordinary complete results render no metadata; only result-specific guidance,
+  exceptional effects, delivery faults, and failures add a suffix. L1 retains
+  the known effect independently of what the provider sees.
 - each tool/provider owns its failure presentation at its execution exit:
   a concise cause, an observed effect receipt and result-specific recovery.
   Execution preserves that text and those facts; it does not append private
@@ -80,8 +83,9 @@ Notes:
   diagnostics respect escaped quotes and newlines, preserving the cause after
   a credential while keeping the original host evidence separate
 - complete output is validated before budgeting. Large output is saved as an
-  immutable UTF-8 file with a bounded head/tail preview and its local path. Use
-  `rg` or `read_file` to inspect the copy; business-query pagination is unchanged
+  immutable UTF-8 file with a bounded head/tail preview, local path and coverage.
+  Static inspection instructions live in the shell/read tool descriptions,
+  rather than every result. Business-query pagination is unchanged
 - `search_tools()` lists visible owner domains. With domain alone it returns the
   complete compact directory, ordered by alias, with supplied filters preserved.
   Large directories use the ordinary output snapshot and `read_file`, not a

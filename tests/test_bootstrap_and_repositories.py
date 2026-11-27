@@ -429,7 +429,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_legacy_oauth_profile_requires_new_chatgpt_authorization(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="openai_oauth",
+            endpoint_id="openai-gpt-test",
             provider="openai",
             model_id="gpt-test",
             wire_shape="openai_response",
@@ -549,7 +549,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_oauth_profile_without_access_token_does_not_become_api_key(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="openai_oauth",
+            endpoint_id="openai-gpt-test",
             provider="openai",
             model_id="gpt-test",
             wire_shape="openai_response",

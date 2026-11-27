@@ -367,6 +367,7 @@ class EndpointProjectionSession:
             model_id=self.binding.model_id,
             base_url=self.binding.base_url, provider_id=self.binding.provider_id,
             capabilities=self._capabilities,
+            route_origin=self.binding.route_origin,
             has_conversation_prefix=has_conversation_prefix,
         )
 

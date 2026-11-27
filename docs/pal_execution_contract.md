@@ -98,7 +98,11 @@ A received call must already have an explicit call id; only Pal-originated calls
 ## Failure, Effect And Retry
 
 Model invocation results distinguish `complete`, `rejected`, and `failed`, and explicitly express the effect outcome
-and retry direction. The original exception chain, owner diagnostics, receipt, and recovery
+and retry direction. Routine completed results omit the model-visible metadata
+suffix; the known effect is retained in L1 independently. Exceptional effects,
+delivery faults, recovery and result-specific affordances remain visible.
+Failures and rejections retain their explicit kind, effect, error code and retry.
+The original exception chain, owner diagnostics, receipt, and recovery
 information must pass through the adapter and must not be overwritten by later output faults.
 
 A completed business action may additionally carry a `delivery_error`, indicating a secondary failure of the result output or guidance.

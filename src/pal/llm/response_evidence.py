@@ -44,6 +44,7 @@ class WireResponseEvidence:
         complete_chat = isinstance(choices, (list, tuple)) and (
             not choices or any(isinstance(c, Mapping) and ("message" in c or c.get("finish_reason")) for c in choices)
         )
+        final = final or (self.wire_shape == WireShape.ANTHROPIC_MESSAGES and event == "message" and "content" in payload)
         final = final or bool(not event and ("output" in payload or "content" in payload or complete_chat))
         for source in objects:
             if self.wire_shape == WireShape.OPENAI_RESPONSE:

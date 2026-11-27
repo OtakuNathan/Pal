@@ -49,3 +49,49 @@ Policy basis: [OpenAI caching documentation](https://developers.openai.com/api/d
 [DeepSeek caching documentation](https://api-docs.deepseek.com/guides/kv_cache/),
 [OpenRouter caching documentation](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
 These documents describe provider behavior; the scheduling estimates in the table above are not retention commitments by the providers.
+
+## Optional cache keep-alive
+
+`/cache_policy` shows the current policy; `/cache_policy reminder` preserves the
+original behavior, and `/cache_policy keep-alive` enables bounded paid renewal
+on supported explicit-cache HTTP endpoints. The default is `reminder`. The
+same persistent selection is available via `pal core cache-reminder configure
+--mode reminder|keep-alive --runtime-root <dir>`. Existing `--no-enabled`
+disables both policies.
+
+LLM retains only the latest successful resident request's frozen wire payload
+and cache controls. Heartbeats are isolated generation operations with no L1
+output or tool execution. OpenAI preserves reasoning effort and uses a short
+uncached suffix with a 16-token output budget. Claude direct uses zero-output
+prewarming; the verified OpenRouter Claude Opus 5.5 route instead uses a
+one-token chronological suffix because the gateway ignores a zero cap.
+DeepSeek, Gemini, OAuth and unknown compatible routes retain reminders.
+
+Renewal uses complete observed read/write usage, stops on misses, routing
+changes, unexpected writes or incomplete evidence, and consumes a bounded
+price-relative budget. The last slot is reserved for one guarded semantic
+compact; stale or mismatching prefixes cannot submit a cold fallback. The
+normal cache ratio excludes heartbeat attempts. Their separate usage appears
+in status and their estimated cost in `/cache_policy`.
+
+`python scripts/verify_cache_keepalive.py --runtime-root <dir> --endpoint
+<configured-endpoint> --cross-ttl` is an isolated, paid synthetic probe. It
+never reads resident history or changes endpoint settings.
+
+### Verification (2026-11-27)
+
+Isolated synthetic API probes observed full reuse after the original TTL:
+
+| Route | Original TTL | Cached tokens after expiry | Cache writes |
+| --- | --- | ---: | --- |
+| OpenAI GPT-6.2 Sol | 30m | 2,461 | 0 |
+| OpenAI GPT-6 Luna | 30m | 2,458 | 0 |
+| OpenRouter GPT-6.2 Sol | 30m | 2,459 | Counter omitted on later reads |
+| OpenRouter Claude Opus 5.5 (Claude Platform on AWS) | 5m | 5,704 | 0 |
+
+OpenRouter Luna also passed an immediate read. GPT-6.2 Sol with `max` effort
+retained the entire marked prefix while returning an incomplete response at
+its 16-token output cap. The OpenRouter Sol counter omission is intentionally
+not interpreted as zero: an automated heartbeat with incomplete usage stops
+rather than assuming another renewal is economical. These observations cover
+the tested routes and intervals, not a guarantee about all future routing.

@@ -5,6 +5,7 @@ import re
 
 import pytest
 
+from pal.shared.tool_protocol import EffectOutcome
 from tests.test_tool_failure_affordances import invoke, metadata, read, runtime
 
 
@@ -31,7 +32,8 @@ def test_delete_unlinks_final_symlink_and_preserves_target(runtime, tmp_path, ki
     assert result.structured["file_path"] == str(link)
     assert result.structured["path_kind"] == "symlink"
     assert result.structured["recursive"] is False
-    assert metadata(result)["effect"] == "applied"
+    assert result.invocation_result.effect == EffectOutcome.APPLIED
+    assert "Tool result metadata:" not in result.llm_text
     if kind == "file":
         assert target.read_text() == "target must survive"
     elif kind == "directory":

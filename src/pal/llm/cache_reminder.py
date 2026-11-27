@@ -5,7 +5,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -21,6 +21,7 @@ from pal.llm.shapes.base import EncodedRequest, ShapeContext
 DEFAULT_REMINDER_TTL_SECONDS = 30 * 60
 PROVIDER_TTL_SECONDS: Mapping[str, int] = MappingProxyType({
     "openai": 30 * 60,
+    "chatgpt": 30 * 60,
     "openrouter": 30 * 60,
     "anthropic": 5 * 60,
     # DeepSeek documents hours to days, not a fixed lifetime. One hour is a
@@ -45,7 +46,7 @@ def prefix_refresh_likely_cold(snapshot: Mapping[str, Any], *, endpoint_id: str,
     if source in {"request_cache_ttl", "endpoint_policy", "model_policy"}:
         return True
     return (source == "provider_policy"
-            and snapshot.get("provider_id") in {"openai", "openrouter", "anthropic"}
+            and snapshot.get("provider_id") in {"openai", "chatgpt", "openrouter", "anthropic"}
             and "deepseek" not in model_id.lower())
 
 
@@ -148,6 +149,12 @@ class CacheReminderTracker:
         self._responses.move_to_end(key)
         while len(self._responses) > max(1, maximum):
             self._responses.popitem(last=False)
+
+    def renew(self, epoch: str, *, started_at: float) -> None:
+        for key, response in self._responses.items():
+            if response.basis.observation_id == epoch:
+                self._responses[key] = replace(response, returned_at=started_at)
+                return
 
     def snapshot(self, *, logical_scope_id: str, binding: str) -> dict[str, Any]:
         response = self._responses.get((logical_scope_id, binding))

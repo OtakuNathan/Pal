@@ -555,29 +555,29 @@ def test_narrow_wizard_preserves_non_llm_configuration(tmp_path, monkeypatch, ke
     database = PalV2Database(tmp_path / "pal.sqlite3")
     database.initialize((LLMEndpointModel, PalRuntimeSettingModel))
     api = endpoint()
-    api.endpoint_id = "existing-api"
+    api.endpoint_id = "openai-account-model"
     api.auth_kind = "api_key_ref"
     api.capabilities_blob = {}
     api.credential_ref = "EXISTING_API_KEY"
     LLMEndpointRepository().upsert(**vars(api))
-    RuntimeSettingRepository().set_active_llm_endpoint_id("existing-api")
-    RuntimeSettingRepository().set_think_level("existing-api", "off")
+    RuntimeSettingRepository().set_active_llm_endpoint_id("openai-account-model")
+    RuntimeSettingRepository().set_think_level("openai-account-model", "off")
     database.close()
     seed(EncryptedFileSecretStore(tmp_path / "secrets.json"))
     original_secrets = (tmp_path / "secrets.json").read_bytes()
     config = tmp_path / "config.toml"
     config.write_text('[unchanged]\nvalue = "keep"\n')
     selected = WizardLLMEndpoint(
-        endpoint_id="new-chatgpt", model_id="account-model", wire_shape="openai_response", base_url=API_URL,
+        endpoint_id="chatgpt-account-model", model_id="account-model", wire_shape="openai_response", base_url=API_URL,
         api_key=None, context_window=32768, max_output_tokens=4096, thinking_levels=["off"],
         default_thinking_level="off", supports_tools=True, supports_streaming=True, supports_vision=False,
-        priority=1, provider="openai", auth_kind="oauth", credential_ref="pal.chatgpt:oaiapp_test",
+        priority=1, provider="chatgpt", auth_kind="oauth", credential_ref="pal.chatgpt:oaiapp_test",
         capabilities_blob={"access_profile": PROFILE},
     )
     def prompt(current, active, **kwargs):
-        assert active == "existing-api"
+        assert active == "openai-account-model"
         assert current[0].credential_ref == "EXISTING_API_KEY"
-        return [*(current if keep_existing else []), selected], "new-chatgpt"
+        return [*(current if keep_existing else []), selected], "chatgpt-account-model"
     monkeypatch.setattr("pal.wizard.prompts.prompt_llm_endpoints_with_current", prompt)
     monkeypatch.setattr("pal.wizard.cli.ask_yes_no", lambda *a: save)
     monkeypatch.setattr("pal.wizard.cli._prompt_service_setup", lambda *a: pytest.fail("must not set up services"))
@@ -585,10 +585,10 @@ def test_narrow_wizard_preserves_non_llm_configuration(tmp_path, monkeypatch, ke
     assert config.read_text() == '[unchanged]\nvalue = "keep"\n'
     assert (tmp_path / "secrets.json").read_bytes() == original_secrets
     with sqlite3.connect(tmp_path / "pal.sqlite3") as db:
-        row = db.execute("SELECT credential_ref FROM llm_endpoints WHERE endpoint_id='existing-api'").fetchone()
+        row = db.execute("SELECT credential_ref FROM llm_endpoints WHERE endpoint_id='openai-account-model'").fetchone()
         assert row == (("EXISTING_API_KEY",) if keep_existing or not save else None)
         if not save:
-            assert db.execute("SELECT endpoint_id FROM llm_endpoints WHERE endpoint_id='new-chatgpt'").fetchone() is None
+            assert db.execute("SELECT endpoint_id FROM llm_endpoints WHERE endpoint_id='chatgpt-account-model'").fetchone() is None
 
 
 def test_wizard_aliases_accept_narrow_mode():
@@ -645,7 +645,7 @@ def test_subscription_preflight_checks_tool_round_trip():
         endpoint_id=ep.endpoint_id, model_id=ep.model_id, wire_shape=ep.wire_shape, base_url=ep.base_url,
         api_key=None, context_window=ep.context_window, max_output_tokens=ep.max_output_tokens,
         thinking_levels=["low", "medium", "high"], default_thinking_level="high", supports_tools=True, supports_streaming=True,
-        supports_vision=False, priority=0, auth_kind="oauth", credential_ref=ep.credential_ref,
+        supports_vision=False, priority=0, provider="chatgpt", auth_kind="oauth", credential_ref=ep.credential_ref,
         capabilities_blob=ep.capabilities_blob,
     )
     class Invoker:
@@ -684,7 +684,7 @@ def test_bunshin_proxy_preserves_subscription_failure(tmp_path):
 
     async def scenario():
         database, manager = _manager(tmp_path)
-        ep = LLMEndpointRepository().upsert(**vars(endpoint()))
+        ep = LLMEndpointRepository().upsert(**{**vars(endpoint()), "endpoint_id": "chatgpt-account-model", "provider": "chatgpt"})
         manager.runs["run-1"] = BunshinRunState(
             bunshin_id="bunshin-1", run_id="run-1", pack=BunshinInvocationPack(invocation_id="bunshin-1"),
         )

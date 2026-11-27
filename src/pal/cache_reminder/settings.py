@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pal.llm.settings_contracts import RuntimeSettingsPort
 
 
 class CacheReminderPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    mode: Literal["reminder", "keep-alive"] | None = None
     enabled: bool | None = None
     lead_seconds: int | None = Field(default=None, ge=30)
     min_prefix_tokens: int | None = Field(default=None, ge=1024)
 
 
+CACHE_POLICY_MODE_KEY = "cache_policy_mode"
 CACHE_WARM_DEADLINE_ENABLED_KEY = "cache_warm_deadline_enabled"
 CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY = "cache_warm_deadline_lead_seconds"
 CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY = (
@@ -26,6 +29,7 @@ DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS = 32_768
 
 @dataclass(frozen=True)
 class CacheWarmDeadlineSettings:
+    mode: str = "reminder"
     enabled: bool = DEFAULT_CACHE_WARM_DEADLINE_ENABLED
     lead_seconds: int = DEFAULT_CACHE_WARM_DEADLINE_LEAD_SECONDS
     min_prefix_tokens: int = DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS
@@ -35,6 +39,7 @@ def read_cache_reminder_settings(repository: RuntimeSettingsPort | None) -> Cach
     if repository is None:
         return CacheWarmDeadlineSettings()
     return CacheWarmDeadlineSettings(
+        mode="keep-alive" if repository.get(CACHE_POLICY_MODE_KEY) == "keep-alive" else "reminder",
         enabled=_setting_bool(repository.get(CACHE_WARM_DEADLINE_ENABLED_KEY), DEFAULT_CACHE_WARM_DEADLINE_ENABLED),
         lead_seconds=_setting_int(repository.get(CACHE_WARM_DEADLINE_LEAD_SECONDS_KEY), DEFAULT_CACHE_WARM_DEADLINE_LEAD_SECONDS, minimum=30),
         min_prefix_tokens=_setting_int(repository.get(CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS_KEY), DEFAULT_CACHE_WARM_DEADLINE_MIN_PREFIX_TOKENS, minimum=1024),
@@ -42,10 +47,15 @@ def read_cache_reminder_settings(repository: RuntimeSettingsPort | None) -> Cach
 
 
 def configure_cache_reminder_settings(repository: RuntimeSettingsPort, *, enabled: bool | None = None,
+                                     mode: str | None = None,
                                      lead_seconds: int | None = None,
                                      min_prefix_tokens: int | None = None) -> CacheWarmDeadlineSettings:
     # Validate the entire patch before storing any value, including enabled.
     updates = {}
+    if mode is not None:
+        if mode not in {"reminder", "keep-alive"}:
+            raise ValueError("cache policy must be reminder or keep-alive")
+        updates[CACHE_POLICY_MODE_KEY] = mode
     if lead_seconds is not None:
         if int(lead_seconds) < 30:
             raise ValueError("lead_seconds must be at least 30")

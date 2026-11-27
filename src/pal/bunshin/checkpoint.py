@@ -130,7 +130,7 @@ def seal_agent_session_checkpoint(
 
 def open_agent_session_checkpoint(
     runtime_root: Any,
-    checkpoint: Mapping[str, Any],
+    checkpoint: Mapping[str, Any], *, read_only: bool = False,
 ) -> dict[str, Any]:
     """Authenticate and open one complete logical-coroutine safe point."""
 
@@ -138,7 +138,7 @@ def open_agent_session_checkpoint(
     try:
         value = EncryptedJsonEnvelopeCodec(
             runtime_root=Path(runtime_root),
-            purpose=AGENT_SESSION_CHECKPOINT_KEY_PURPOSE,
+            purpose=AGENT_SESSION_CHECKPOINT_KEY_PURPOSE, read_only=read_only,
         ).decrypt(str(envelope["ciphertext"]))
     except ValueError as exc:
         raise AgentSessionCheckpointError(

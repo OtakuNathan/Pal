@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pal.foundation import utc_now
-from pal.llm.endpoint_spec import merge_endpoint_spec_payload
+from pal.llm.endpoint_spec import LLMEndpointSpec, merge_endpoint_spec_payload
+from pal.llm.endpoint_identity import bind_endpoint_identity, canonical_endpoint_id
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 
 
@@ -15,11 +16,13 @@ LLM_ENDPOINT_FALLBACK_SETTING_KEY = "llm.endpoint_fallback_enabled"
 
 class LLMEndpointRepository:
     def upsert(self, **payload) -> LLMEndpointModel:
-        endpoint_id = str(payload["endpoint_id"] or "").strip()
+        endpoint_id = canonical_endpoint_id(payload.get("provider"), payload.get("model_id"))
+        if payload.get("endpoint_id", endpoint_id) != endpoint_id:
+            raise ValueError(f"endpoint_id must be {endpoint_id!r}")
         payload = {**payload, "endpoint_id": endpoint_id}
         instance = LLMEndpointModel.get_or_none(LLMEndpointModel.endpoint_id == endpoint_id)
         spec = merge_endpoint_spec_payload(payload, existing=instance)
-        validated_payload = spec.to_payload()
+        validated_payload = LLMEndpointSpec.from_value(bind_endpoint_identity(spec.to_payload())).to_payload()
         now = utc_now()
         if instance is None:
             return LLMEndpointModel.create(

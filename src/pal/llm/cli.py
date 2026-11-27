@@ -4,7 +4,7 @@ import argparse
 import getpass
 import json
 import sys
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, ExitStack
 from pathlib import Path
 
 from pal.cli_paths import default_runtime_root, RUNTIME_ROOT_HELP, RUNTIME_ROOT_HINT
@@ -17,7 +17,9 @@ from pal.llm.ir import WireShape
 from pal.llm.endpoint_spec import validate_thinking_levels
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
-from pal.llm.schema import migrate_llm_endpoint_schema
+from pal.llm.schema import assert_llm_endpoint_schema_current
+from pal.llm.endpoint_identity import canonical_endpoint_id, bind_endpoint_identity
+import sqlite3
 from pal.llm.secret_store import EncryptedFileSecretStore
 
 
@@ -76,9 +78,9 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     parser.epilog = (
         "examples:\n"
         "  pal llm list\n"
-        "  pal llm add deepseek-v4-pro --store-api-key --set-active\n"
-        "  pal llm add gpt-6-astra --api-key-env OPENAI_API_KEY --no-enabled\n"
-        "  pal llm delete deepseek-v4-pro"
+        "  pal llm add --provider deepseek --model-id deepseek-v4-pro --store-api-key --set-active\n"
+        "  pal llm add --provider openai --model-id gpt-6-astra --api-key-env OPENAI_API_KEY --no-enabled\n"
+        "  pal llm delete deepseek-deepseek-v4-pro"
     )
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
     commands = parser.add_subparsers(dest="llm_command", required=True)
@@ -90,9 +92,8 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
 
     add_parser = commands.add_parser("add", help="Add an LLM endpoint")
     _add_runtime_root(add_parser)
-    add_parser.add_argument("endpoint_id", help="Stable endpoint identifier")
-    add_parser.add_argument("--model-id", default=None)
-    add_parser.add_argument("--provider", default=None)
+    add_parser.add_argument("--model-id", required=True)
+    add_parser.add_argument("--provider", required=True)
     add_parser.add_argument("--display-name", default=None)
     add_parser.add_argument("--wire-shape", choices=tuple(item.value for item in WireShape), default=None)
     add_parser.add_argument("--transport", choices=("http", "websocket"), default=None)
@@ -156,6 +157,11 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
     )
     add_parser.add_argument("--set-active", action="store_true", help="Use this endpoint for future turns")
 
+    migration = commands.add_parser("migrate-ids", help="Migrate endpoint identity while Pal is stopped")
+    _add_runtime_root(migration)
+    migration.add_argument("--dry-run", action="store_true")
+    migration.add_argument("--keep", action="append", default=[], metavar="OLD_ID")
+
     delete_parser = commands.add_parser(
         "delete",
         help="Delete an LLM endpoint",
@@ -171,12 +177,17 @@ def configure_llm_parser(parser: argparse.ArgumentParser) -> None:
 def run_llm_cli(args: argparse.Namespace) -> int:
     runtime_root = Path(args.runtime_root).expanduser().resolve()
     try:
+        if args.llm_command == "migrate-ids":
+            from pal.wizard.endpoint_migration import migrate_runtime_endpoint_ids
+            result = migrate_runtime_endpoint_ids(runtime_root, dry_run=args.dry_run, keep=tuple(args.keep))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         with _open_runtime_database(runtime_root) as database:
             if args.llm_command == "list":
                 return _run_list(args)
             if args.llm_command == "add":
-                with database.transaction():
-                    return _run_add(args, runtime_root)
+                with ExitStack() as guards, database.transaction():
+                    return _run_add(args, runtime_root, guards)
             if args.llm_command == "delete":
                 with database.transaction():
                     return _run_delete(args)
@@ -219,18 +230,19 @@ def _run_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
+def _run_add(args: argparse.Namespace, runtime_root: Path, guards: ExitStack) -> int:
     repository = LLMEndpointRepository()
-    endpoint_id = str(args.endpoint_id or "").strip()
-    if not endpoint_id:
-        raise ValueError("endpoint_id must be non-empty")
+    provider = args.provider
+    model_id = args.model_id
+    endpoint_id = canonical_endpoint_id(provider, model_id)
     existing = repository.get(endpoint_id)
+    if args.replace and existing is None:
+        raise ValueError(f"endpoint {endpoint_id!r} does not exist")
     if existing is not None and not args.replace:
         raise ValueError(f"endpoint {endpoint_id!r} already exists; pass --replace to update it")
 
-    model_id = _option(args.model_id, existing, "model_id", endpoint_id)
     model_defaults = _model_endpoint_defaults(model_id)
-    requested_provider = _option(args.provider, existing, "provider", "")
+    requested_provider = provider
     requested_shape = _option(args.wire_shape, existing, "wire_shape", "")
     requested_base_url = _option(args.base_url, existing, "base_url", "")
     provider, wire_shape, base_url = _endpoint_identity_defaults(
@@ -239,11 +251,13 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
         wire_shape=requested_shape,
         base_url=requested_base_url,
     )
-    auth_kind = _option(args.auth_kind, existing, "auth_kind", "api_key_ref")
+    auth_kind = _option(args.auth_kind, existing, "auth_kind", "oauth" if provider == "chatgpt" else "api_key_ref")
     credential_ref = str(
         args.api_key_env
         or _option(args.credential_ref, existing, "credential_ref", f"{endpoint_id}:api-key")
     ).strip()
+    if auth_kind == "oauth" and (args.store_api_key or args.api_key_stdin or args.api_key_env):
+        raise ValueError("OAuth accounts must use their saved credential reference, not an API key")
     if auth_kind != "local_provider_auth" and not credential_ref:
         raise ValueError("credential_ref is required unless auth-kind is local_provider_auth")
 
@@ -354,6 +368,9 @@ def _run_add(args: argparse.Namespace, runtime_root: Path) -> int:
             WireShape(wire_shape), endpoint_id, model_id, provider_id=provider,
             base_url=base_url, capabilities=capabilities,
         ))
+    payload = bind_endpoint_identity(payload)
+    from pal.wizard.endpoint_migration import endpoint_replacement_guard
+    guards.enter_context(endpoint_replacement_guard(runtime_root, existing, payload))
     endpoint = repository.upsert(**payload)
     _store_api_key_if_requested(args, runtime_root, endpoint)
     if args.set_active:
@@ -400,7 +417,10 @@ def _open_runtime_database(runtime_root: Path) -> Iterator[PalV2Database]:
     db_path = runtime_root / "pal.sqlite3"
     if not db_path.is_file():
         raise FileNotFoundError(f"Pal runtime database does not exist: {db_path}. {RUNTIME_ROOT_HINT}")
-    migrate_llm_endpoint_schema(db_path)
+    from pal.wizard.endpoint_migration import assert_no_pending_endpoint_migration
+    assert_no_pending_endpoint_migration(runtime_root)
+    with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        assert_llm_endpoint_schema_current(connection)
     database = PalV2Database(db_path)
     database.initialize((LLMEndpointModel, PalRuntimeSettingModel))
     try:
@@ -442,8 +462,11 @@ def _endpoint_identity_defaults(
     normalized_shape = str(wire_shape or "").strip()
     normalized_url = str(base_url or "").strip()
     model_defaults = _model_endpoint_defaults(normalized_model)
-    deepseek = normalized_provider == "deepseek" or normalized_model.lower().startswith("deepseek-") or "deepseek.com" in normalized_url.lower()
+    deepseek = normalized_provider == "deepseek"
     google_base = "https://generativelanguage.googleapis.com/v1beta"
+    if normalized_provider == "chatgpt":
+        normalized_shape = normalized_shape or "openai_response"
+        normalized_url = normalized_url or _OPENAI_BASE_URL
     if not normalized_shape and normalized_provider == "google" and normalized_url.rstrip("/") in {"", google_base}:
         normalized_shape = WireShape.GEMINI_INTERACTIONS.value
     if normalized_shape == WireShape.GEMINI_INTERACTIONS.value:
@@ -451,7 +474,6 @@ def _endpoint_identity_defaults(
         if not normalized_url or normalized_url.rstrip("/") == google_base + "/openai":
             normalized_url = google_base
     elif deepseek:
-        normalized_provider = "deepseek"
         normalized_shape = normalized_shape or WireShape.ANTHROPIC_MESSAGES.value
         normalized_url = normalized_url or _DEEPSEEK_ANTHROPIC_BASE_URL
     else:
@@ -459,16 +481,11 @@ def _endpoint_identity_defaults(
             model_defaults.get("wire_shape")
             or WireShape.OPENAI_COMPLETION.value
         )
-        if not normalized_provider:
-            normalized_provider = str(model_defaults.get("provider") or "") or (
-                "anthropic"
-                if normalized_shape == WireShape.ANTHROPIC_MESSAGES.value
-                else "openai"
-            )
         if not normalized_url:
             normalized_url = (
                 "https://api.anthropic.com"
                 if normalized_shape == WireShape.ANTHROPIC_MESSAGES.value
+                else _OPENROUTER_BASE_URL if normalized_provider == "openrouter"
                 else str(model_defaults.get("base_url") or _OPENAI_BASE_URL)
             )
     WireShape(normalized_shape)

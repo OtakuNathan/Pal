@@ -78,7 +78,8 @@ def standard_input_limit(endpoint: LLMEndpointSpec) -> int | None:
 def message_fingerprint(message: LLMMessageIR) -> bytes:
     replay = message.replay
     content = (replay.wire_shape, replay.endpoint_id, replay.model_id, replay.payload) if replay else message.parts
-    return hashlib.sha256(repr((message.role, message.prompt_region == "active_dynamic", message.instruction_scope, content)).encode()).digest()
+    from pal.llm.effort_updates import EFFORT_UPDATE
+    return hashlib.sha256(repr((message.role, message.prompt_region == "active_dynamic", message.instruction_scope, content, message.metadata.get(EFFORT_UPDATE))).encode()).digest()
 
 
 @dataclass(frozen=True)

@@ -45,9 +45,17 @@ Exposes:
   see [model compaction](../../../docs/llm_compaction.md)
 
 Invariants:
+- a persisted endpoint is uniquely identified by its lowercase access-provider slug and exact upstream model ID; `endpoint_id` is derived as `{provider}-{model_id}`. Display labels and wire shapes are not identity.
 - provider is credential/display/telemetry identity and may select only a
   response-syntax normalizer; it never selects request semantics or a codec
 - the validated endpoint row is the only thinking-level truth source
+- Resident thinking requests are frozen at turn admission. The first turn in
+  a prefix pins its root effort in L1; documented/verified effort-update
+  routes append a native update before the next user message. Other routes
+  retain their root until a committed compact (not promotion or expiration).
+  Tool rounds, retries, and keepalive never choose a new effort. Native
+  standalone compact omits update items from its submitted copy and restores
+  the captured effective effort alongside the returned window.
 - non-off effort values are transmitted unchanged in each shape's wire field;
   there is no effort mapping table or codec fallback to another level
 - configuration errors list shape-accepted levels; invalid defaults and runtime
@@ -143,3 +151,25 @@ thinking choices and cache policies. Core and Bunshin consume the same snapshot;
 refresh errors propagate instead of silently selecting empty settings.
 `resolve_output_budget()` owns endpoint limits and the configured default,
 including a caller's explicit requested budget.
+
+Cache keep-alive retains one process-local resident wire request after a
+successful explicit-cache generation. The bound codec constructs an isolated
+bounded-output request without changing effort or marker positions. Provider
+usage renews the matching reminder epoch only on a complete read with no
+writes; keepalive attempts never advance response lineage, change history, or
+contribute to the normal cache ratio. The scheduler remains plugin-owned.
+
+## Endpoint identity cutover
+
+New configurations use `pal llm add --provider PROVIDER --model-id MODEL`.
+`--replace` updates that pair. ChatGPT OAuth uses provider `chatgpt`, not
+`openai`; upstream namespaces such as `openai/gpt-6.2-sol` remain intact.
+
+For legacy databases, first run `pal llm migrate-ids --dry-run --runtime-root ROOT`.
+Each duplicate requires `--keep OLD_ID`; the chosen route's settings win.
+Run the same command without `--dry-run` only after the external host and all
+Bunshin workers have stopped. It backs up changed databases and configuration,
+updates references, and keeps resident and role recovery journals unchanged.
+Interrupted migrations block startup and restore the backup on offline retry.
+A pure rename retains verified native replay aliases but starts a new local
+cache identity. Incompatible route changes require a source semantic handoff.

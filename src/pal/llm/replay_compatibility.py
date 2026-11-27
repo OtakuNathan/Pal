@@ -68,3 +68,15 @@ def accepts_replay(
         return True
     identity = (replay.wire_shape.value, replay.endpoint_id, replay.model_id)
     return any(identity == tuple(binding) for binding in capabilities.get(REPLAY_BINDINGS_KEY, ()))
+
+
+def historical_endpoint_id(endpoint_id: str, endpoints: Any) -> str:
+    """Resolve a persisted historical reference, never a new model selection."""
+    endpoints = tuple(endpoints)
+    if not endpoint_id or any(ep.endpoint_id == endpoint_id for ep in endpoints):
+        return endpoint_id
+    matches = [ep.endpoint_id for ep in endpoints
+               if (ep.capabilities_blob or {}).get("replay_endpoint_aliases", {}).get(endpoint_id) == native_origin(ep)]
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous historical endpoint reference: {endpoint_id}")
+    return matches[0] if matches else endpoint_id

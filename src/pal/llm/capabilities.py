@@ -23,6 +23,8 @@ from pal.shared.inspection import inspection_snapshot
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
+    from pal.memory.contracts import MemoryServicePort
+    from pal.shared.ports import ServiceRef
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,20 @@ class LLMThinkLevelSnapshot:
 class LLMIntrospectionProvider:
     runtime: LLMRuntime
     module_id: str = "llm"
+    memory: ServiceRef[MemoryServicePort] | None = None
+
+    def _thinking_snapshot(self) -> dict[str, Any]:
+        status = self.runtime.thinking_status()
+        memory = self.memory.optional if self.memory is not None else None
+        if memory is not None and status.get("endpoint_id"):
+            from pal.memory.effort_pin import history_effort_pin, pinned_think_levels
+            facts = self.runtime.metadata().to_payload()
+            pin = history_effort_pin(memory, facts)
+            if pin is not None:
+                root = pinned_think_levels(memory, facts, {}).get(status["endpoint_id"])
+                return {**status, "requested": status.get("current"), "applied": pin["effective"],
+                        "root_effort": root, "pending": status.get("current") != pin["effective"]}
+        return status
 
     def iter_endpoints(self) -> list[LLMEndpointModel]:
         return list(self.runtime.endpoint_resolver.enabled())
@@ -141,8 +157,8 @@ class LLMIntrospectionProvider:
             ],
         }, sections={
             "thinking": lambda: {
-                key: value for key, value in self.runtime.thinking_status().items()
-                if key in {"available", "current"}
+                key: value for key, value in self._thinking_snapshot().items()
+                if key in {"available", "current", "requested", "applied", "root_effort", "pending"}
             },
             "usage": lambda: llm_status_payload(self)["usage"],
         })
@@ -243,7 +259,7 @@ class LLMIntrospectionProvider:
 
     def think_level(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        status = self.runtime.thinking_status()
+        status = self._thinking_snapshot()
         endpoint_id = str(status.get("endpoint_id") or "").strip() or None
         snapshot = LLMThinkLevelSnapshot(
             endpoint_id=endpoint_id,
@@ -252,7 +268,7 @@ class LLMIntrospectionProvider:
                 if endpoint_id is not None
                 else None
             ),
-            effective_think_level=str(status.get("current") or "").strip() or None,
+            effective_think_level=str(status.get("applied", status.get("current")) or "").strip() or None,
             available_levels=tuple(
                 str(choice.get("id") or "")
                 for choice in status.get("choices") or []
@@ -556,6 +572,13 @@ def render_llm_status(payload: dict[str, Any]) -> str:
         f"Cache partition unknown for {int(usage.get('cache_partition_unknown_attempt_count') or 0)} attempts",
         f"Usage reporting coverage: {reporting_rate:.1%}",
     ]
+    keepalive = usage.get("keepalive") or {}
+    if keepalive.get("provider_request_count"):
+        lines.extend(["", "Cache keep-alive (separate from normal cache ratio)",
+            f"{int(keepalive.get('provider_request_count') or 0)} attempts; "
+            f"{int(keepalive.get('cached_input_tokens') or 0):,} cache reads; "
+            f"known cost ${float(keepalive.get('cost') or 0.):.6f}; "
+            f"estimated total ${float(keepalive.get('estimated_cost') or 0.):.6f}"])
     if endpoint_rows:
         lines.append("")
         lines.append("🔌 By endpoint")
@@ -581,7 +604,9 @@ def register_with_core(context: MainContext, runtime: LLMRuntime) -> ModuleHandl
     from pal.llm.control import LLMControl
     from pal.llm.settings_contracts import LLM_SETTINGS
 
-    provider = LLMIntrospectionProvider(runtime=runtime)
+    from pal.memory.contracts import MEMORY
+
+    provider = LLMIntrospectionProvider(runtime=runtime, memory=context.port_registry.observe(MEMORY))
     control = LLMControl(context, runtime, lambda: render_llm_status(llm_status_payload(provider)))
     handle = ModuleHandle(
         module_id="llm",

@@ -14,7 +14,7 @@ from pal.memory.persistence.journal import ResidentJournalStore
 from pal.memory.persistence.owner import ResidentHistoryPromptProvider
 from pal.llm.compaction_engine import CompactionEngine, CompactionSnapshot, CompactionClockKind
 from pal.llm.resident_compaction import PalCompactionPolicy
-from pal.execution.result_snapshots import render_snapshot_hint
+from pal.execution.result_snapshots import render_snapshot_hint, snapshot_hint_variants
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR, ReasoningPartIR, ReplayEnvelope, WireShape
 from pal.memory.contracts import L2Entry
 from pal.shared import PromptAssemblyContext
@@ -295,14 +295,16 @@ def test_complete_corrupt_journal_is_not_overwritten_by_later_saves(tmp_path):
     asyncio.run(scenario())
 
 
-def test_archive_is_jsonl_with_original_dialogue_and_first_preview_only(tmp_path):
+@pytest.mark.parametrize("legacy_hint", [False, True])
+def test_archive_is_jsonl_with_original_dialogue_and_first_preview_only(tmp_path, legacy_hint):
     instance = app(tmp_path)
     memory = begin(instance)
     result_store = instance.handle.core.context.execution_runtime.result_snapshots
     result = result_store.capture("FULL OUTPUT SHOULD NOT BE ARCHIVED", call_id="c", lifetime="t")
     memory.stream_l1_assistant("t", LLMMessageIR(
         MessageRole.ASSISTANT, (ReasoningPartIR("PRIVATE REASONING"), ToolCallIR("c", "read", {})), message_id="call"))
-    memory.append_l1_tool_result("t", ToolResultIR("c", "read", "first preview\n" + render_snapshot_hint(result),
+    hint = snapshot_hint_variants(result)[0] if legacy_hint else render_snapshot_hint(result)
+    memory.append_l1_tool_result("t", ToolResultIR("c", "read", "first preview\n" + hint,
         snapshot_refs=(result,), replay_result_ref="HANDLER", structured={"full": "SECRET STRUCTURED"}))
     memory.append_l1_user_contexts("t", (LLMMessageIR(MessageRole.USER, (TextPartIR("INJECTED CONTEXT"),),
                                                     semantic_kind="pal_prompt_context"),))
@@ -323,7 +325,7 @@ def test_archive_is_jsonl_with_original_dialogue_and_first_preview_only(tmp_path
     assert [item["role"] for item in records[1:]] == ["user", "tool", "assistant"]
     assert records[1]["text"] == "原话\n第二行"
     for excluded in ["PRIVATE REASONING", "INJECTED CONTEXT", "HANDLER", "SECRET STRUCTURED",
-                     "FULL OUTPUT SHOULD NOT BE ARCHIVED", result.path]:
+                     "FULL OUTPUT SHOULD NOT BE ARCHIVED", result.path, "Immutable captured output"]:
         assert excluded not in body
     assert "first preview" in body
     assert archive.paths[0].stat().st_mode & 0o777 == 0o600

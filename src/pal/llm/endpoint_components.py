@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from threading import RLock
 
+from pal.llm.compaction import native_origin
 from pal.llm.model_adapter import BoundModelAdapter, bind_model_adapter
 from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.endpoint_auth import EndpointAuth
@@ -45,6 +46,7 @@ def compile_endpoint_codec(
     registry = response_hooks if response_hooks is not None else ProviderResponseHookRegistry.builtin()
     adapter = bind_model_adapter(spec, model_hooks, registry)
     return EndpointCodec(spec, codec, ShapeContext(
+        route_origin=native_origin(spec),
         wire_shape=shape, endpoint_id=spec.endpoint_id, model_id=spec.model_id,
         provider_id=spec.provider, base_url=spec.base_url, capabilities=spec.capabilities_blob,
     ), response_hooks=adapter.response_hooks, adapter=adapter)

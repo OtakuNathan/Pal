@@ -289,12 +289,22 @@ class ResultSnapshotStore:
 
 
 def render_snapshot_hint(ref: ResultSnapshotRef) -> str:
-    return (f"Output snapshot: {ref.path}\nCoverage: {ref.coverage}.\n"
-            "Immutable captured output, not current source state. "
-            "Locate relevant lines with rg -n; if file size is unknown, inspect it with wc -lc. "
-            "Read bounded ranges with read_file. For oversized lines, use run_shell to extract "
-            "bounded character/byte fragments from this file rather than copying it again. "
-            "Query again if current state is needed; do not replay side-effecting operations merely to refresh output.")
+    return f"Output snapshot: {ref.path}\nCoverage: {ref.coverage}."
+
+
+def snapshot_hint_variants(ref: ResultSnapshotRef) -> tuple[str, str]:
+    """Recognize both delivery formats for legacy L1 without rewriting it.
+
+    Longest first so archival removal consumes the whole old hint, not only
+    the common path/coverage header.
+    """
+    short = render_snapshot_hint(ref)
+    legacy = (short + "\nImmutable captured output, not current source state. "
+              "Locate relevant lines with rg -n; if file size is unknown, inspect it with wc -lc. "
+              "Read bounded ranges with read_file. For oversized lines, use run_shell to extract "
+              "bounded character/byte fragments from this file rather than copying it again. "
+              "Query again if current state is needed; do not replay side-effecting operations merely to refresh output.")
+    return legacy, short
 
 
 def head_tail(text: str, budget: int) -> tuple[str, tuple[tuple[int, int], ...]]:

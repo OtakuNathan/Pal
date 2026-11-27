@@ -106,6 +106,21 @@ refreshes that independent runtime in the same action. A cold Bunshin broker
 loads the refreshed registry on its first request. Runtime statistics remain
 separate because the two runtimes have distinct lifecycle and accounting.
 
+Each persisted route has a mandatory lowercase `provider` slug and the exact
+upstream `model_id`. The database enforces one row per pair and derives
+`endpoint_id` as `{provider}-{model_id}`. Model namespaces and their case are
+preserved. `display_name` is independent presentation metadata, and
+`wire_shape` is mutable configuration, not another endpoint identity. API and
+ChatGPT OAuth routes use `openai` and `chatgpt` respectively.
+
+Run `pal llm migrate-ids --dry-run --runtime-root ROOT` for a preview of a
+legacy database. Resolve duplicate pairs using one `--keep OLD_ID` per pair.
+The actual command requires an externally stopped host and Bunshin workers,
+backs up the affected databases/configuration, and preserves immutable L1.
+Verified old replay/effort bindings are accepted only when their original
+route is compatible with the new canonical ID. Origin-changing replacements
+require semantic handoff on the previous route before offline configuration.
+
 `provider` is credential/display/telemetry identity. It never selects a codec
 or changes request semantics. It may select a built-in response-syntax
 normalizer when a provider leaks its textual model protocol through a standard
@@ -159,7 +174,7 @@ rejects:
 ```
 
 The shape codec omits those fields without changing Pal's provider-neutral
-generation policy. `pal llm add gpt-6-astra` installs the official OpenAI
+generation policy. `pal llm add --provider openai --model-id gpt-6-astra` installs the official OpenAI
 Responses profile: `openai_response`, reasoning levels `low` through `max`,
 vision/tool/stream support, and the unsupported sampling-parameter declaration.
 The command does not activate the endpoint unless explicitly requested.
@@ -433,7 +448,7 @@ invalid thinking level: 'ultra'; available for openai_response: off, minimal, lo
 For an existing endpoint known to support `low`, `medium`, and `high`:
 
 ```sh
-pal llm add my-endpoint --replace --thinking-levels low,medium,high --default-thinking-level low --runtime-root /path/to/runtime
+pal llm add --provider my_provider --model-id my-model --replace --thinking-levels low,medium,high --default-thinking-level low --runtime-root /path/to/runtime
 ```
 
 Invalid thinking declarations are rejected before endpoint, credential, or active
@@ -538,7 +553,7 @@ For example, an endpoint whose cache behavior is not yet known can declare:
 {"prompt_cache": {"protocol": "general", "mode": "implicit", "reminder_ttl_seconds": 1800}}
 ```
 
-Use `pal llm add <endpoint> --replace --cache-protocol general --cache-mode
+Use `pal llm add --provider PROVIDER --model-id MODEL --replace --cache-protocol general --cache-mode
 implicit --cache-reminder-ttl-seconds 1800 --runtime-root <dir>` to update an
 existing endpoint through the CLI. Omitted cache fields are preserved, and
 protocol/shape mismatches are rejected before the endpoint is written.

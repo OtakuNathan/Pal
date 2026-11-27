@@ -97,8 +97,8 @@ class _FailingAfterStartTransport:
 
 def _register_endpoint() -> object:
     endpoint = LLMEndpointRepository().upsert(
-        endpoint_id="proxy-endpoint",
-        provider="OpenAI",
+        endpoint_id="openai-proxy-model",
+        provider="openai",
         model_id="proxy-model",
         display_name="Proxy",
         wire_shape="openai_completion",
@@ -253,7 +253,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 database, manager = _manager(root)
                 _register_endpoint()
                 endpoint = LLMEndpointRepository().upsert(
-                    endpoint_id="proxy-endpoint", context_window=1_000_000,
+                    endpoint_id="openai-proxy-model", provider="openai", model_id="proxy-model", context_window=1_000_000,
                     max_output_tokens=12_288,
                 )
                 pack = BunshinInvocationPack(
@@ -672,7 +672,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                             for key, value in old_endpoint.__data__.items()
                             if key not in {"created_at", "updated_at"}
                         },
-                        changed_field: "websocket" if changed_field == "transport" else "changed-model",
+                        changed_field: "websocket" if changed_field == "transport" else "http://changed.invalid/v1",
                     }
                 )
                 proxy = ManagerProxyTransport(root, "run-1", request_timeout_seconds=2)
@@ -699,7 +699,7 @@ class BunshinLLMTransportTests(unittest.TestCase):
                 database.close()
 
         with patch.dict(os.environ, {"PAL_BUNSHIN_SANDBOXED": "0"}, clear=False):
-            for changed_field in ("model_id", "transport"):
+            for changed_field in ("base_url", "transport"):
                 with self.subTest(changed_field=changed_field):
                     asyncio.run(scenario(changed_field))
 

@@ -70,7 +70,7 @@ and [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices
 ## Configuration and activation
 
 ```sh
-pal llm add ENDPOINT --replace --cache-mode explicit --runtime-root /path/to/runtime
+pal llm add --provider PROVIDER --model-id MODEL --replace --cache-mode explicit --runtime-root /path/to/runtime
 pal llm list --all --json --runtime-root /path/to/runtime
 ```
 

@@ -84,7 +84,7 @@ def _choose_primary_wizard_channel(records: list[ChannelEndpointModel]) -> Chann
 
 DEFAULT_LLM_ENDPOINTS = (
     {
-        "endpoint_id": "stub_llm_default",
+        "endpoint_id": "stub-stub-model",
         "provider": "stub",
         "model_id": "stub-model",
         "display_name": "Stub LLM",
@@ -165,6 +165,8 @@ class WizardService(WizardServicePort):
         self,
         registration: PalRegistration,
     ) -> PalV2Database:
+        from pal.wizard.endpoint_migration import assert_no_pending_endpoint_migration
+        assert_no_pending_endpoint_migration(registration.runtime.runtime_root)
         # Wizard owns the on-disk runtime association. Bootstrap only
         # composes in-process services from the already-associated database.
         database = PalV2Database(db_path=registration.runtime.db_path)
@@ -280,9 +282,9 @@ class WizardService(WizardServicePort):
             if len(candidates) != 1:
                 return None
             db_path = candidates[0]
-        from pal.llm.schema import migrate_llm_endpoint_schema
+        from pal.wizard.endpoint_migration import assert_runtime_endpoint_schema
 
-        migrate_llm_endpoint_schema(db_path)
+        assert_runtime_endpoint_schema(runtime_root, db_path)
         database = PalV2Database(db_path=db_path)
         try:
             database.initialize(ALL_MODELS)
@@ -301,7 +303,7 @@ class WizardService(WizardServicePort):
             endpoints = [
                 WizardLLMEndpoint(
                     endpoint_id=endpoint.endpoint_id,
-                    model_id=endpoint.model_id,
+                    model_id=endpoint.model_id, display_name=endpoint.display_name,
                     wire_shape=endpoint.wire_shape,
                     transport=endpoint.transport,
                     base_url=endpoint.base_url,
@@ -364,7 +366,7 @@ class WizardService(WizardServicePort):
         finally:
             database.close()
 
-    def save_llm_endpoints(self, runtime_root: Path, endpoints: list, active_endpoint_id: str) -> None:
+    def save_llm_endpoints(self, runtime_root: Path, endpoints: list, active_endpoint_id: str, *, remove_endpoint_ids: tuple[str, ...] = ()) -> None:
         """Persist only LLM configuration; callers own the database transaction."""
         from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
         from pal.llm.secret_store import EncryptedFileSecretStore, SecretRef
@@ -375,6 +377,11 @@ class WizardService(WizardServicePort):
         secret_store = EncryptedFileSecretStore(str(secrets_path))
 
         from pal.llm.endpoint_spec import LLMEndpointSpec
+        from pal.llm.endpoint_identity import bind_endpoint_identity
+        from pal.wizard.endpoint_migration import endpoint_replacement_guard
+        from pal.llm.effort_updates import effort_route_changed
+        from pal.packages.process import runtime_lease
+        from contextlib import ExitStack
         from pal.llm.models import LLMEndpointModel
         if not endpoints or active_endpoint_id not in {ep.endpoint_id for ep in endpoints}:
             raise ValueError("Choose an active endpoint from the configured endpoints")
@@ -382,25 +389,9 @@ class WizardService(WizardServicePort):
             raise ValueError("Endpoint IDs must be unique")
         validated = []
         for ep in endpoints:
-            provider = str(ep.provider or "").strip()
-            base_url = str(ep.base_url or "")
-            if provider:
-                pass
-            elif ep.wire_shape == "anthropic_messages":
-                provider = "anthropic"
-            elif ep.wire_shape in {"openai_completion", "openai_response"}:
-                # Try to infer from base_url
-                if "deepseek" in base_url:
-                    provider = "deepseek"
-                elif "zhipu" in base_url or "z.ai" in base_url or "bigmodel.cn" in base_url:
-                    provider = "zhipu"
-                elif "moonshot" in base_url or "kimi" in base_url:
-                    provider = "moonshot"
-                else:
-                    provider = "openai"
-            else:
-                provider = ep.endpoint_id
-
+            existing = llm_repo.get(ep.endpoint_id)
+            provider = ep.provider
+            base_url = ep.base_url
             auth_kind = str(ep.auth_kind or "api_key_ref")
             credential_ref = ep.credential_ref
             if credential_ref is None:
@@ -410,7 +401,7 @@ class WizardService(WizardServicePort):
                 "endpoint_id": ep.endpoint_id,
                 "provider": provider,
                 "model_id": ep.model_id,
-                "display_name": ep.endpoint_id,
+                "display_name": ep.display_name or (existing.display_name if existing else None) or ep.endpoint_id,
                 "wire_shape": ep.wire_shape,
                 "transport": ep.transport,
                 "base_url": base_url,
@@ -432,17 +423,30 @@ class WizardService(WizardServicePort):
                 "capabilities_blob": dict(ep.capabilities_blob or {}),
                 "notes": ep.notes or "Configured via setup wizard.",
             }
-            validated.append((ep, LLMEndpointSpec.from_value(payload).to_payload()))
+            payload = LLMEndpointSpec.from_value(bind_endpoint_identity(payload)).to_payload()
+            validated.append((ep, payload, existing))
 
         # Complete validation before touching credentials or publishing rows.
-        with LLMEndpointModel._meta.database.atomic():
-            for ep, payload in validated:
+        with ExitStack() as guards:
+            if any(existing is not None and effort_route_changed(LLMEndpointSpec.from_value(existing), LLMEndpointSpec.from_value(payload))
+                   for _, payload, existing in validated):
+                guards.enter_context(runtime_lease(runtime_root))
+                for _, payload, existing in validated:
+                    guards.enter_context(endpoint_replacement_guard(runtime_root, existing, payload, already_locked=True))
+            guards.enter_context(LLMEndpointModel._meta.database.atomic())
+            for ep, payload, _ in validated:
                 llm_repo.upsert(**payload)
                 if ep.api_key:
-                    secret_store.set_secret(
-                        SecretRef(service=ep.endpoint_id, account="api-key"), ep.api_key,
-                    )
-            RuntimeSettingRepository().set_active_llm_endpoint_id(active_endpoint_id)
+                    from pal.llm.credentials import LLMCredentialResolver
+                    ref = LLMCredentialResolver(secret_store=secret_store).secret_ref_for_endpoint(LLMEndpointSpec.from_value(payload))
+                    if ref is None:
+                        raise ValueError("endpoint has no credential reference")
+                    secret_store.set_secret(ref, ep.api_key)
+            settings = RuntimeSettingRepository()
+            settings.set_active_llm_endpoint_id(active_endpoint_id)
+            for endpoint_id in remove_endpoint_ids:
+                llm_repo.delete(endpoint_id)
+                settings.delete_think_level(endpoint_id)
 
     def seed_from_wizard(self, registration: PalRegistration, collected: object) -> None:
         """Seed the database from wizard-collected data."""

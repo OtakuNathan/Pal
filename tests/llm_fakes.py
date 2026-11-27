@@ -54,6 +54,21 @@ class NonStreamingLLM:
     def end_prompt_cache_turn(self, turn_id):
         pass
 
+    def prompt_cache_keepalive_snapshot(self):
+        return {}
+
+    async def keepalive_once(self, epoch):
+        return False
+
+    def clear_keepalive(self):
+        pass
+
+    def claim_keepalive_compact(self, epoch):
+        return False
+
+    def keepalive_compact_valid(self, epoch):
+        return False
+
     def prompt_cache_reminder_snapshot(self):
         return {}
 

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pal.llm.endpoint_identity import IDENTITY_CHECK
 from pal.llm.schema import LLMEndpointSchemaError, assert_llm_endpoint_schema_current, migrate_llm_endpoint_schema
 from pal.foundation import PalV2Database
 from pal.llm.models import LLMEndpointModel
@@ -15,13 +16,16 @@ from tests.test_chatgpt_subscription import endpoint
 
 class LLMEndpointSchemaMigrationTests(unittest.TestCase):
     def _create_previous_schema(self, path: Path) -> None:
+        from pal.llm.schema import _CREATE_NEXT_TABLE_SQL
+        with sqlite3.connect(path) as conn:
+            conn.execute(_CREATE_NEXT_TABLE_SQL.replace("llm_endpoints__next", "llm_endpoints").replace(f" CHECK ({IDENTITY_CHECK})", "").replace(",\n    UNIQUE (provider, model_id)", ""))
         database = PalV2Database(path)
         database.initialize((LLMEndpointModel,))
         try:
             spec = LLMEndpointSpec.from_value(endpoint())
             LLMEndpointModel.create(**spec.to_payload())
             api = spec.to_payload()
-            api.update(endpoint_id="api", auth_kind="api_key_ref", capabilities_blob={}, transport="http")
+            api.update(endpoint_id="api", model_id="api-model", auth_kind="api_key_ref", capabilities_blob={}, transport="http")
             LLMEndpointModel.create(**api)
         finally:
             database.close()
@@ -40,8 +44,8 @@ class LLMEndpointSchemaMigrationTests(unittest.TestCase):
             self.assertEqual((result.status, result.migrated_rows), ("migrated", 2))
             with sqlite3.connect(path) as connection:
                 assert_llm_endpoint_schema_current(connection)
-                self.assertEqual(before, connection.execute("SELECT endpoint_id, credential_ref, model_id, capabilities_blob FROM llm_endpoints ORDER BY endpoint_id").fetchall())
-                self.assertEqual(connection.execute("SELECT endpoint_id, transport FROM llm_endpoints ORDER BY endpoint_id").fetchall(), [("api", "http"), ("chatgpt", "websocket")])
+                self.assertEqual(sorted((row[1], row[2]) for row in before), sorted(connection.execute("SELECT credential_ref, model_id FROM llm_endpoints").fetchall()))
+                self.assertEqual(connection.execute("SELECT endpoint_id, transport FROM llm_endpoints ORDER BY endpoint_id").fetchall(), [("chatgpt-account-model", "websocket"), ("openai-api-model", "http")])
             self.assertEqual(migrate_llm_endpoint_schema(path).status, "current")
 
     def test_previous_shape_constraint_expands_without_changing_existing_rows(self) -> None:
@@ -55,7 +59,7 @@ class LLMEndpointSchemaMigrationTests(unittest.TestCase):
             db = PalV2Database(path)
             db.initialize((LLMEndpointModel,))
             try:
-                LLMEndpointModel.create(**LLMEndpointSpec.from_value(endpoint()).to_payload())
+                LLMEndpointModel.create(**{**LLMEndpointSpec.from_value(endpoint()).to_payload(), "endpoint_id": "chatgpt-account-model", "provider": "chatgpt"})
             finally:
                 db.close()
             with sqlite3.connect(path) as conn:
@@ -65,7 +69,7 @@ class LLMEndpointSchemaMigrationTests(unittest.TestCase):
                 self.assertEqual(before, conn.execute("SELECT * FROM llm_endpoints").fetchall())
                 self.assertIn("endpoint_note", [row[1] for row in conn.execute("PRAGMA index_list(llm_endpoints)")])
                 conn.execute("UPDATE llm_endpoints SET wire_shape='gemini_interactions', transport='http', "
-                             "auth_kind='api_key_ref', capabilities_blob='{}'")
+                             "provider='openai', endpoint_id='openai-account-model', auth_kind='api_key_ref', capabilities_blob='{}'")
             self.assertEqual(migrate_llm_endpoint_schema(path).status, "current")
 
     def test_failed_transport_upgrade_rolls_back_schema_and_rows(self) -> None:

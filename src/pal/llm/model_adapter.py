@@ -51,7 +51,11 @@ class BoundModelAdapter:
             raise ValueError("endpoint uses semantic checkpoint compaction")
         # The standalone API has a separate schema. In particular, instructions
         # here change preserved-reasoning behavior on newer models.
-        return {"model": self.spec.model_id, "input": encoded["input"]}
+        # Standalone compact rejects configuration_update items. Omit them
+        # only from this operation's copy; the installed window restores the
+        # latest effort separately and the original L/R is untouched.
+        return {"model": self.spec.model_id, "input": [
+            item for item in encoded["input"] if item.get("type") != "configuration_update"]}
 
 
 def supports_native_compaction(spec: LLMEndpointSpec) -> bool:

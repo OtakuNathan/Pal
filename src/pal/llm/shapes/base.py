@@ -36,6 +36,7 @@ class ShapeContext:
     # must consult this instead of inferring position from an empty list,
     # because encode(prefix + tail) != encode(prefix) + encode(tail).
     has_conversation_prefix: bool = False
+    route_origin: str | None = None
     cache_capabilities: PromptCacheCapabilities = field(init=False)
 
     def __post_init__(self) -> None:
@@ -232,6 +233,9 @@ class ShapeCodec(Protocol):
     def encode(self, request: LLMRequestIR, context: ShapeContext) -> EncodedRequest:
         ...
 
+    def prepare_keepalive(self, encoded: EncodedRequest, context: ShapeContext) -> EncodedRequest | None:
+        ...
+
     def decode(
         self,
         frames: Iterable[_JSONFrame],
@@ -288,6 +292,9 @@ def openai_reasoning_effort(context: ShapeContext, level: ThinkingLevel | None) 
 
 class ShapeCodecBase:
     """Internal iterator codec shared by single-shot and streaming transports."""
+
+    def prepare_keepalive(self, encoded: EncodedRequest, context: ShapeContext) -> EncodedRequest | None:
+        return None
 
     def _new_decoder(self, context: ShapeContext) -> _ShapeDecoder:
         raise NotImplementedError

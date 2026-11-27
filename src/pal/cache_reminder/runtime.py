@@ -8,7 +8,7 @@ from pal.cache_reminder.settings import CacheReminderPatch
 
 from pal.cache_reminder.cache_warm_deadline import CacheWarmDeadlineManager, CacheWarmDeadlineNotice
 from pal.cache_reminder.presentation import cache_warm_deadline_delivery, cache_warm_deadline_expire_delivery
-from pal.control.contracts import ControlAction
+from pal.control.contracts import ControlAction, ControlCommandInvocation, ControlCommandSpec, ControlDelivery
 from pal.control.interactions import terminal_delivery_for_action
 from pal.control.runtime_contracts import CORE_CONTROL, ControlBusyError
 from pal.core.control_action_registry import ControlActionSpec
@@ -30,12 +30,15 @@ class CacheReminder:
         self._llm = context.port_registry.observe(LLM_RUNTIME)
         self._settings = context.port_registry.observe(LLM_SETTINGS)
         self.timers = self._host.current.open_timer_scope()
+        self._auto_compacting = False
         self.manager = CacheWarmDeadlineManager(
             cache_snapshot=lambda: self._llm.current.prompt_cache_reminder_snapshot(),
             settings_provider=lambda: self._settings.current,
             has_active_turn=lambda: bool(self._host.current.busy_reason()),
             deliver_notice=self.deliver_notice, expire_notice=self.expire_notice,
             timers=self.timers,
+            keepalive_snapshot=lambda: self._llm.current.prompt_cache_keepalive_snapshot(),
+            keepalive_step=self.keepalive_step,
         )
 
     async def deliver_notice(self, notice: CacheWarmDeadlineNotice) -> bool:
@@ -57,6 +60,63 @@ class CacheReminder:
 
     async def context_change(self, payload: dict[str, Any]) -> None:
         await self.manager.clear_for_compaction()
+        if not self._auto_compacting:
+            self._llm.current.clear_keepalive()
+
+    async def keepalive_step(self, notice: CacheWarmDeadlineNotice, decision: str) -> bool:
+        host, llm = self._host.current, self._llm.current
+        if host.busy_reason():
+            return False
+        release = host.retain_modules(("cache_reminder", "llm"))
+        try:
+            if decision == "keepalive":
+                return await llm.keepalive_once(notice.epoch)
+            if decision != "compact":
+                return False
+            def claim() -> None:
+                if not llm.claim_keepalive_compact(notice.epoch):
+                    raise ValueError("Warm cache no longer eligible")
+            try:
+                lease = await host.begin_context_change("manual_hot", claim=claim, max_attempts=1)
+            except (ControlBusyError, ValueError):
+                await host.deliver(ControlDelivery("reply", route=notice.route,
+                    text="Cache keep-alive ended; warm compact is no longer available. Use /compact if needed."), require_provider=True)
+                return False
+            self._auto_compacting = True
+            try:
+                result = await lease.compact(max_attempts=1, force_semantic=True,
+                    keepalive_compact_epoch=notice.epoch,
+                    replay_guard=lambda: llm.keepalive_compact_valid(notice.epoch))
+                text = ("Context compacted after cache keep-alive." if result.success else
+                        f"Cache keep-alive ended; automatic warm compact did not complete ({result.status}). Use /compact if needed.")
+                await host.deliver(ControlDelivery("reply", route=notice.route, text=text), require_provider=True)
+                if result.success and result.memory_result is not None:
+                    await host.deliver_compact_candidates(ControlAction("cache_warm_deadline_compact", "cache_reminder", route=notice.route), result.memory_result)
+            except Exception as exc:
+                LOGGER.exception("Automatic warm compact failed")
+                await host.deliver(ControlDelivery("reply", route=notice.route,
+                    text=f"Cache keep-alive ended; compact failed: {exception_reason(exc)}"), require_provider=True)
+            finally:
+                self._auto_compacting = False
+                llm.clear_keepalive()
+                await lease.close()
+            return False
+        finally:
+            release()
+
+    async def cache_policy(self, action: ControlAction) -> None:
+        mode = action.args.get("mode")
+        if mode is not None:
+            self.manager.configure(mode=str(mode))
+        state = self.manager.inspect()
+        keep = state["keepalive"]
+        text = f"Cache policy: {state['mode']} ({'enabled' if state['enabled'] else 'disabled'})"
+        if state['mode'] == 'keep-alive':
+            text += (f"\nKeep-alive: {keep.get('renewals', 0)}/{keep.get('max_actions', 0)}; "
+                     f"estimated cost ${float(keep.get('estimated_cost', 0)):.6f}; {keep.get('reason', 'unavailable')}")
+        if state['seconds_until_notice'] is not None:
+            text += f"\nNext action in {state['seconds_until_notice']}s."
+        await self._host.current.reply(action, text)
 
     async def ignore(self, action: ControlAction) -> None:
         ignored = self.manager.ignore(str(action.args.get("cache_epoch") or ""))
@@ -143,6 +203,14 @@ class CacheReminder:
         self.manager.close()
 
 
+def _cache_policy_command(invocation: ControlCommandInvocation) -> ControlAction:
+    if len(invocation.argv) > 1 or (invocation.argv and invocation.argv[0] not in {"reminder", "keep-alive"}):
+        return ControlAction("invalid_command", "control", route=invocation.route,
+                             notes="Use /cache_policy [reminder|keep-alive].")
+    return ControlAction("cache_policy", "cache_reminder", route=invocation.route,
+                         args={"mode": invocation.argv[0]} if invocation.argv else {})
+
+
 def register_with_core(context: MainContext) -> ModuleHandle:
     feature = CacheReminder(context)
     handle = ModuleHandle(
@@ -153,7 +221,10 @@ def register_with_core(context: MainContext) -> ModuleHandle:
         control_observers={"core.turn.settled": feature.turn_settled,
                            "core.user_activity": feature.user_activity,
                            "core.context_change.started": feature.context_change},
+        control_commands=(ControlCommandSpec(name="cache_policy", handler=_cache_policy_command,
+            description="Show or switch idle cache policy.", usage="/cache_policy [reminder|keep-alive]", show_in_panel=True),),
         control_action_handlers={
+            "cache_policy": ControlActionSpec(feature.cache_policy),
             "cache_warm_deadline_ignore": ControlActionSpec(feature.ignore),
             "cache_warm_deadline_disable": ControlActionSpec(feature.disable),
             "cache_warm_deadline_compact": ControlActionSpec(feature.compact),

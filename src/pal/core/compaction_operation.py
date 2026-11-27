@@ -14,6 +14,7 @@ from pal.llm.compaction_contracts import CompactionService
 from pal.llm.conversions import tool_definition_ir_from_dict
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.memory.prompt_context import prompt_date_pin
+from pal.memory.effort_pin import pinned_think_levels
 from pal.shared.tool_protocol import ToolResultIR
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class CompactionOperation:
         replay_guard: Callable[[], bool] | None = None,
         commit_guard: Callable[[], bool] | None = None,
         force_semantic: bool = False,
+        keepalive_compact_epoch: str = "",
     ) -> CompactionRunResult:
         engine = self.engine
         if engine is None:
@@ -76,6 +78,8 @@ class CompactionOperation:
         if max_attempts is not None or timeout_seconds is not None:
             engine = engine.with_limits(max_attempts=max_attempts, timeout_seconds=timeout_seconds)
         metadata = dict(assembly_context.metadata) if assembly_context is not None else {}
+        if keepalive_compact_epoch:
+            metadata["keepalive_compact_epoch"] = keepalive_compact_epoch
         logical_scope_id = str(
             metadata.get("prompt_cache_scope_id") or ""
         ).strip()
@@ -252,10 +256,13 @@ class CompactionOperation:
             active = memory_service.active_l1_turn(continuation.turn_id) if continuation is not None else None
             if active is not None and any(str(key).startswith("runtime:") for key in active.metadata.get("prompt_context_state", {}).get("sources", {})):
                 supports_request_instructions = False
+            levels = pinned_think_levels(memory_service, facts.to_payload(), {},
+                                         active_turn=active)
             return replace(shell,
                 tools=tuple(tool_definition_ir_from_dict(tool) for tool in self._build_llm_tool_contracts()),
                 request_instructions=str(shell.metadata.get("runtime_reminder_text") or "").strip() if supports_request_instructions else "",
-                metadata={**shell.metadata, **metadata, "preferred_endpoint_id": endpoint_id})
+                metadata={**shell.metadata, **metadata, "preferred_endpoint_id": endpoint_id,
+                          "think_levels": levels})
 
         def prepare_source(left_snapshot):
             return self.projection.prepare_compaction_source(

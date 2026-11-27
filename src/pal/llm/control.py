@@ -60,8 +60,16 @@ class LLMControl:
         except ValueError as exc:
             await self._host.reply(action, exception_reason(exc))
             return
-        endpoint = self.runtime.thinking_status().get("endpoint_id") or "the active endpoint"
-        await self._host.reply(action, f"Think level for {endpoint} updated to {resolved}. This applies to new turns only.")
+        status = self.runtime.thinking_status()
+        endpoint = status.get("endpoint_id") or "the active endpoint"
+        mode = status.get("effort_update_mode")
+        if mode == "compact":
+            timing = "This takes effect on new turns after the next successful compact."
+        elif mode == "append":
+            timing = "New turns append the effort change; thinking-mode changes wait for compact."
+        else:
+            timing = "This applies to new turns only."
+        await self._host.reply(action, f"Think level for {endpoint} updated to {resolved}. {timing}")
 
     async def _handle_show_model_async(self, action: ControlAction) -> None:
         if action.route is not None:

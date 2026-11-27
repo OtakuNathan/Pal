@@ -6,6 +6,7 @@ from pal.memory.swap_state import binding_ready
 from pal.shared.result_snapshot import ResultSnapshotRef
 
 from pal.shared.tool_protocol import (
+    EffectOutcome,
     ToolCallIR,
     ToolResultIR,
 )
@@ -1372,6 +1373,8 @@ def _turn_from_transcript(turn_id: str, transcript: list[L1TranscriptMessage]) -
                         replay_result_ref=str(
                             result_state.get("replay_result_ref") or ""
                         ),
+                        effect=next((item for item in EffectOutcome
+                                     if item.value == result_state.get("effect")), None),
                     )
                 )
         messages.append(
@@ -1420,7 +1423,7 @@ def _transcript_from_turn(turn: L1TurnIR) -> list[L1TranscriptMessage]:
             payload["_pal_result_state"] = {
                 "ok": bool(result.ok),
                 "kind": str(structured.get("kind") or result.status or "ok"),
-                "effect": str(structured.get("effect") or ""),
+                "effect": result.effect.value if result.effect is not None else str(structured.get("effect") or ""),
                 "replay_result_ref": result.replay_result_ref,
                 "snapshot_refs": [r.to_dict() for r in result.snapshot_refs],
             }

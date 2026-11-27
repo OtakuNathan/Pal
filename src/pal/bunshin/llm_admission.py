@@ -90,6 +90,9 @@ def authorize_role_request(
         raise LLMProxyError("LLM transport endpoint_id is required")
     preferred = str(pack_metadata.get("preferred_endpoint_id") or "").strip()
     if preferred and endpoint_id != preferred:
+        from pal.llm.replay_compatibility import historical_endpoint_id
+        preferred = historical_endpoint_id(preferred, LLMEndpointRepository().list_all())
+    if preferred and endpoint_id != preferred:
         raise PermissionError(
             f"role assignment does not allow LLM endpoint {endpoint_id}"
         )

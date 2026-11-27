@@ -27,13 +27,13 @@ class LLMCLITests(unittest.TestCase):
         return parser.parse_args(list(argv))
 
     def test_native_google_endpoint_can_select_full_replay(self) -> None:
-        args = self._parse("add", "google-demo", "--provider", "google", "--model-id", "gemini-4-carbon",
+        args = self._parse("add", "--provider", "google", "--model-id", "gemini-4-carbon",
                            "--continuation-mode", "full", "--runtime-root", str(self.runtime_root))
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_llm_cli(args), 0)
         with sqlite3.connect(self.runtime_root / "pal.sqlite3") as db:
             shape, url, capabilities = db.execute(
-                "SELECT wire_shape, base_url, capabilities_blob FROM llm_endpoints WHERE endpoint_id = 'google-demo'"
+                "SELECT wire_shape, base_url, capabilities_blob FROM llm_endpoints WHERE endpoint_id = 'google-gemini-4-carbon'"
             ).fetchone()
         self.assertEqual(shape, "gemini_interactions")
         self.assertEqual(url, "https://generativelanguage.googleapis.com/v1beta")
@@ -47,16 +47,16 @@ class LLMCLITests(unittest.TestCase):
                 result = run_llm_cli(self._parse(*argv, "--runtime-root", str(self.runtime_root)))
             return result, output.getvalue()
 
-        self.assertEqual(run("add", "ws", "--model-id", "gpt-6-astra", "--transport", "websocket")[0], 0)
-        self.assertEqual(run("add", "ws", "--replace", "--notes", "keep transport")[0], 0)
+        self.assertEqual(run("add", "--provider", "openai", "--model-id", "gpt-6-astra", "--transport", "websocket")[0], 0)
+        self.assertEqual(run("add", "--provider", "openai", "--model-id", "gpt-6-astra", "--replace", "--notes", "keep transport")[0], 0)
         before = json.loads(run("list", "--json")[1])["items"]
         self.assertEqual(before[0]["transport"], "websocket")
         self.assertIn("TRANSPORT", run("list")[1])
         with patch("pal.llm.cli._store_api_key_if_requested") as store:
-            self.assertEqual(run("add", "ws", "--replace", "--wire-shape", "anthropic_messages")[0], 2)
+            self.assertEqual(run("add", "--provider", "openai", "--model-id", "gpt-6-astra", "--replace", "--wire-shape", "anthropic_messages")[0], 2)
             store.assert_not_called()
         self.assertEqual(json.loads(run("list", "--json")[1])["items"], before)
-        self.assertEqual(run("add", "ws", "--replace", "--transport", "http")[0], 0)
+        self.assertEqual(run("add", "--provider", "openai", "--model-id", "gpt-6-astra", "--replace", "--transport", "http")[0], 0)
         self.assertEqual(json.loads(run("list", "--json")[1])["items"][0]["transport"], "http")
 
     def test_cache_mode_update_preserves_fields_and_rejects_unsupported_binding(self) -> None:
@@ -65,16 +65,16 @@ class LLMCLITests(unittest.TestCase):
                 result = run_llm_cli(self._parse(*args, "--runtime-root", str(self.runtime_root)))
             return result, out.getvalue()
 
-        self.assertEqual(run("add", "cache-demo", "--model-id", "gpt-6-astra",
+        self.assertEqual(run("add", "--provider", "openai", "--model-id", "gpt-6-astra",
                              "--cache-mode", "explicit", "--notes", "keep")[0], 0)
-        self.assertEqual(run("add", "cache-demo", "--replace", "--cache-mode", "hybrid")[0], 0)
+        self.assertEqual(run("add", "--provider", "openai", "--model-id", "gpt-6-astra", "--replace", "--cache-mode", "hybrid")[0], 0)
         before = json.loads(run("list", "--all", "--json")[1])["items"][0]
         self.assertEqual(before["capabilities"]["prompt_cache"]["mode"], "hybrid")
         self.assertIn("unsupported_request_parameters", before["capabilities"])
         with sqlite3.connect(self.runtime_root / "pal.sqlite3") as db:
-            self.assertEqual(db.execute("SELECT notes FROM llm_endpoints WHERE endpoint_id = ?", ("cache-demo",)).fetchone()[0], "keep")
-        self.assertEqual(run("add", "cache-demo", "--replace", "--cache-mode", "explicit",
-                             "--provider", "unknown", "--base-url", "https://example.test")[0], 2)
+            self.assertEqual(db.execute("SELECT notes FROM llm_endpoints WHERE endpoint_id = ?", ("openai-gpt-6-astra",)).fetchone()[0], "keep")
+        self.assertEqual(run("add", "--provider", "openai", "--model-id", "gpt-6-astra", "--replace", "--cache-mode", "explicit",
+                             "--cache-protocol", "anthropic_explicit")[0], 2)
         after = json.loads(run("list", "--all", "--json")[1])["items"][0]
         self.assertEqual(after, before)
 
@@ -83,7 +83,7 @@ class LLMCLITests(unittest.TestCase):
             for invalid in ("ultra", ""):
                 with self.subTest(shape=shape, invalid=invalid):
                     args = self._parse(
-                        "add", "demo", "--runtime-root", str(self.runtime_root),
+                        "add", "--provider", "openai", "--runtime-root", str(self.runtime_root),
                         "--model-id", "demo", "--base-url", "https://example.test",
                         "--wire-shape", shape, "--thinking-levels", invalid,
                     )
@@ -101,9 +101,9 @@ class LLMCLITests(unittest.TestCase):
                 result = run_llm_cli(self._parse(*args, "--runtime-root", str(self.runtime_root)))
             return result, out.getvalue()
 
-        self.assertEqual(run("add", "deepseek-v4-pro", "--cache-protocol", "general",
+        self.assertEqual(run("add", "--provider", "deepseek", "--model-id", "deepseek-v4-pro", "--cache-protocol", "general",
                              "--cache-mode", "implicit", "--cache-reminder-ttl-seconds", "900")[0], 0)
-        self.assertEqual(run("add", "deepseek-v4-pro", "--replace", "--notes", "keep policy")[0], 0)
+        self.assertEqual(run("add", "--provider", "deepseek", "--model-id", "deepseek-v4-pro", "--replace", "--notes", "keep policy")[0], 0)
         item = json.loads(run("list", "--json")[1])["items"][0]
         self.assertEqual(item["provider"], "deepseek")
         self.assertEqual(item["capabilities"]["prompt_cache"], {
@@ -116,16 +116,16 @@ class LLMCLITests(unittest.TestCase):
                 result = run_llm_cli(self._parse(*args, "--runtime-root", str(self.runtime_root)))
             return result, out.getvalue()
 
-        self.assertEqual(run("add", "alias", "--provider", "proxy", "--base-url", "https://example.test",
+        self.assertEqual(run("add", "--provider", "proxy", "--model-id", "alias", "--base-url", "https://example.test",
                              "--cache-protocol", "openai_chat_explicit", "--cache-mode", "explicit")[0], 0)
         before = json.loads(run("list", "--json")[1])["items"]
-        self.assertEqual(run("add", "alias", "--replace", "--cache-protocol", "anthropic_explicit")[0], 2)
+        self.assertEqual(run("add", "--provider", "proxy", "--model-id", "alias", "--replace", "--cache-protocol", "anthropic_explicit")[0], 2)
         self.assertEqual(json.loads(run("list", "--json")[1])["items"], before)
 
     def test_invalid_anthropic_effort_does_not_mutate_add_or_replace(self) -> None:
         from unittest.mock import patch
 
-        base = ["add", "demo", "--runtime-root", str(self.runtime_root),
+        base = ["add", "--provider", "openai", "--runtime-root", str(self.runtime_root),
                 "--model-id", "demo", "--base-url", "https://example.test",
                 "--wire-shape", "anthropic_messages", "--credential-ref", "DEMO_KEY"]
         def snapshot():
@@ -151,8 +151,7 @@ class LLMCLITests(unittest.TestCase):
 
     def test_add_deepseek_defaults_to_official_anthropic_shape(self) -> None:
         args = self._parse(
-            "add",
-            "deepseek-v4-flash",
+            "add", "--provider", "deepseek", "--model-id", "deepseek-v4-flash",
             "--runtime-root",
             str(self.runtime_root),
             "--credential-ref",
@@ -172,12 +171,11 @@ class LLMCLITests(unittest.TestCase):
         self.assertEqual(endpoint["wire_shape"], "anthropic_messages")
         self.assertEqual(endpoint["base_url"], "https://api.deepseek.com/anthropic")
         self.assertEqual(endpoint["thinking_levels"], ["off", "high", "max"])
-        self.assertEqual(payload["active_endpoint_id"], "deepseek-v4-flash")
+        self.assertEqual(payload["active_endpoint_id"], "deepseek-deepseek-v4-flash")
 
     def test_add_gpt_6_astra_uses_official_responses_profile(self) -> None:
         args = self._parse(
-            "add",
-            "gpt-6-astra",
+            "add", "--provider", "openai", "--model-id", "gpt-6-astra",
             "--runtime-root",
             str(self.runtime_root),
             "--api-key-env",
@@ -233,15 +231,14 @@ class LLMCLITests(unittest.TestCase):
                             "operator_extension": True,
                         }
                     ),
-                    "gpt-6-astra",
+                    "openai-gpt-6-astra",
                 ),
             )
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(
                 run_llm_cli(
                     self._parse(
-                        "add",
-                        "gpt-6-astra",
+                        "add", "--provider", "openai", "--model-id", "gpt-6-astra",
                         "--runtime-root",
                         str(self.runtime_root),
                         "--replace",
@@ -261,12 +258,9 @@ class LLMCLITests(unittest.TestCase):
 
     def test_add_openrouter_gpt_6_astra_uses_responses_profile(self) -> None:
         args = self._parse(
-            "add",
-            "openrouter-gpt-6-astra",
+            "add", "--provider", "openrouter", "--model-id", "openai/gpt-6-astra",
             "--runtime-root",
             str(self.runtime_root),
-            "--model-id",
-            "openai/gpt-6-astra",
             "--credential-ref",
             "openrouter:api-key",
             "--context-window",
@@ -297,18 +291,17 @@ class LLMCLITests(unittest.TestCase):
 
     def test_list_reports_corrupt_endpoint_contract_instead_of_returning_empty(self) -> None:
         args = self._parse(
-            "add",
-            "demo",
+            "add", "--provider", "openai",
             "--runtime-root",
             str(self.runtime_root),
             "--base-url",
-            "https://example.test/v1",
+            "https://example.test/v1", "--model-id", "demo",
         )
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_llm_cli(args), 0)
         with sqlite3.connect(self.runtime_root / "pal.sqlite3") as database:
             database.execute(
-                "UPDATE llm_endpoints SET default_thinking_level = 'max' WHERE endpoint_id = 'demo'"
+                "UPDATE llm_endpoints SET default_thinking_level = 'max' WHERE endpoint_id = 'openai-demo'"
             )
 
         stderr = io.StringIO()
@@ -322,8 +315,7 @@ class LLMCLITests(unittest.TestCase):
 
     def test_duplicate_requires_replace_and_replace_preserves_omitted_fields(self) -> None:
         initial = self._parse(
-            "add",
-            "demo",
+            "add", "--provider", "openai",
             "--runtime-root",
             str(self.runtime_root),
             "--model-id",
@@ -341,8 +333,7 @@ class LLMCLITests(unittest.TestCase):
             self.assertEqual(run_llm_cli(initial), 2)
 
         replacement = self._parse(
-            "add",
-            "demo",
+            "add", "--provider", "openai", "--model-id", "demo-model",
             "--runtime-root",
             str(self.runtime_root),
             "--replace",
@@ -362,8 +353,7 @@ class LLMCLITests(unittest.TestCase):
 
     def test_delete_active_endpoint_clears_selection_without_fallback(self) -> None:
         first = self._parse(
-            "add",
-            "first",
+            "add", "--provider", "openai", "--model-id", "first",
             "--runtime-root",
             str(self.runtime_root),
             "--base-url",
@@ -371,8 +361,7 @@ class LLMCLITests(unittest.TestCase):
             "--set-active",
         )
         second = self._parse(
-            "add",
-            "second",
+            "add", "--provider", "openai", "--model-id", "second",
             "--runtime-root",
             str(self.runtime_root),
             "--base-url",
@@ -384,7 +373,7 @@ class LLMCLITests(unittest.TestCase):
             self.assertEqual(run_llm_cli(first), 0)
             self.assertEqual(run_llm_cli(second), 0)
 
-        delete_first = self._parse("delete", "first", "--runtime-root", str(self.runtime_root))
+        delete_first = self._parse("delete", "openai-first", "--runtime-root", str(self.runtime_root))
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(run_llm_cli(delete_first), 0)
@@ -396,9 +385,9 @@ class LLMCLITests(unittest.TestCase):
             self.assertEqual(run_llm_cli(list_args), 0)
         payload = json.loads(listed.getvalue())
         self.assertIsNone(payload["active_endpoint_id"])
-        self.assertEqual([item["endpoint_id"] for item in payload["items"]], ["second"])
+        self.assertEqual([item["endpoint_id"] for item in payload["items"]], ["openai-second"])
 
-        delete_second = self._parse("delete", "second", "--runtime-root", str(self.runtime_root))
+        delete_second = self._parse("delete", "openai-second", "--runtime-root", str(self.runtime_root))
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_llm_cli(delete_second), 0)
         listed = io.StringIO()

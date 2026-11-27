@@ -1113,6 +1113,21 @@ class PromptCacheCoordinator:
                 ),
             }
 
+    def renew_keepalive(self, epoch: str, scope_key: str, *, plan_sequence: int, started_at: float) -> None:
+        # This is an observation on the same frozen request, not a new plan.
+        with self._lock:
+            self._reminders.renew(epoch, started_at=started_at)
+            stats = self._stats.get(scope_key)
+            if stats is None or stats.next_plan_sequence != plan_sequence:
+                return
+            evidence = self._anchor_evidence.get(scope_key)
+            if evidence is not None:
+                evidence.submitted_at = started_at
+                if evidence.confirmed:
+                    evidence.confirmed_at = started_at
+                # Do not turn estimated token coordinates into per-marker ACKs.
+            stats.last_access_at = started_at
+
     def warm_deadline_snapshot(self, *, logical_scope_id: str = "", endpoint_id: str = "") -> dict[str, Any]:
         return {"eligible": False, "reason": "boundary_evidence_unavailable",
                 "anchor_epoch": "", "anchor_ttl_seconds": 0, "prefix_tokens": 0}

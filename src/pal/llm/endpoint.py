@@ -22,6 +22,8 @@ from pal.llm.ir import (
     WireShape,
 )
 from pal.llm.attempts import LLMAttemptResult
+from pal.llm.cache_capabilities import keepalive_profile
+from pal.llm.cache_keepalive import CacheKeepalive
 from pal.llm.decode_diagnostics import DecodeFailureCapture
 from pal.llm.response_evidence import WireResponseEvidence
 from pal.llm.models import LLMEndpointModel
@@ -60,6 +62,7 @@ class ShapeEndpointInvoker:
         default_factory=ProviderResponseHookRegistry.builtin
     )
     prompt_cache: PromptCacheCoordinator = field(default_factory=PromptCacheCoordinator)
+    keepalive: CacheKeepalive = field(default_factory=CacheKeepalive)
     attempt_sink: Callable[[LLMAttemptResult], Any] | None = None
     model_hooks: ModelHookRegistry = field(default_factory=lambda: ModelHookRegistry({}))
     _codecs: dict[str, tuple[str, EndpointCodec]] = field(default_factory=dict, init=False, repr=False)
@@ -95,6 +98,7 @@ class ShapeEndpointInvoker:
             activate(endpoint_id)
 
     def close(self) -> None:
+        self.keepalive.clear()
         close = getattr(self.transport, "close", None)
         if callable(close):
             close()
@@ -102,6 +106,7 @@ class ShapeEndpointInvoker:
             self._codecs.clear()
 
     def prepare_endpoints(self, endpoints: Iterable[LLMEndpointModel]) -> None:
+        self.keepalive.clear()
         with self._binding_lock:
             if isinstance(self.transport, DirectEndpointTransport):
                 self.transport.prepare_endpoints(endpoints)
@@ -124,6 +129,7 @@ class ShapeEndpointInvoker:
             return current[1]
 
     def configure_response_hooks(self, registry: ProviderResponseHookRegistry) -> None:
+        self.keepalive.clear()
         with self._binding_lock:
             self.response_hooks = registry
             self._codecs.clear()
@@ -131,11 +137,69 @@ class ShapeEndpointInvoker:
                 self.transport.configure_response_hooks(registry)
 
     def configure_model_hooks(self, registry: ModelHookRegistry) -> None:
+        self.keepalive.clear()
         with self._binding_lock:
             self.model_hooks = registry
             self._codecs.clear()
             if isinstance(self.transport, DirectEndpointTransport):
                 self.transport.configure_model_hooks(registry)
+
+    def keepalive_snapshot(self, endpoint: LLMEndpointModel) -> dict[str, Any]:
+        return self.keepalive.snapshot(endpoint_spec_fingerprint(endpoint))
+
+    def clear_keepalive(self) -> None:
+        self.keepalive.clear()
+
+    def claim_keepalive_compact(self, endpoint: LLMEndpointModel, epoch: str) -> bool:
+        return self.keepalive.claim_compact(epoch, endpoint_spec_fingerprint(endpoint))
+
+    def keepalive_compact_valid(self, endpoint: LLMEndpointModel, epoch: str) -> bool:
+        return self.keepalive.compact_valid(epoch, endpoint_spec_fingerprint(endpoint))
+
+    def invoke_keepalive(self, endpoint: LLMEndpointModel, epoch: str, control: LLMStreamControl) -> bool:
+        binding = self._binding(endpoint)
+        anchor = self.keepalive.begin(epoch, endpoint_spec_fingerprint(binding.spec))
+        if anchor is None:
+            return False
+        attempt_id = f"llm_keepalive_{uuid4().hex}"
+        started = time.monotonic()
+        evidence = WireResponseEvidence(binding.context.wire_shape)
+        accepted = False
+        error = ""
+        try:
+            control.raise_if_cancelled()
+            heartbeat = binding.codec.prepare_keepalive(anchor.encoded, binding.context)
+            if heartbeat is None:
+                raise ValueError("keepalive carrier no longer supported")
+            request = EncodedTransportRequest(request_id=attempt_id, wire_shape=binding.context.wire_shape,
+                timeout_seconds=min(60., max(1., anchor.expires_at - started)),
+                payload=heartbeat.payload, extra_body=heartbeat.extra_body,
+                stream=False, stream_control=control)
+            frames = binding.frames(request) if isinstance(binding, LLMEndpoint) else self._transport().frames(binding.spec, request)
+            with contextlib.closing(frames):
+                for frame in frames:
+                    evidence.observe(frame)
+                    body = frame.payload.get("response", frame.payload)
+                    accepted = (not body.get("error") and body.get("status") not in {"failed", "cancelled"}
+                                and frame.payload.get("type") not in {"error", "response.failed"})
+            accepted = accepted and not control.cancelled
+        except Exception as exc:
+            error = type(exc).__name__
+            accepted = False
+        finally:
+            renewed = self.keepalive.settle(anchor, evidence.usage, started_at=started,
+                accepted=accepted, provider=evidence.actual_provider)
+            if renewed:
+                self.prompt_cache.renew_keepalive(anchor.epoch, anchor.scope_key, plan_sequence=anchor.plan_sequence, started_at=started)
+            attempt = LLMAttemptResult(attempt_id, binding.spec.endpoint_id, binding.spec.model_id,
+                binding.spec.provider, "success" if accepted else "failed", evidence.usage,
+                actual_provider=evidence.actual_provider, returned_model=evidence.returned_model,
+                service_tier=evidence.service_tier, elapsed_seconds=time.monotonic()-started,
+                error_type=error, operation="keepalive",
+                estimated_cost=anchor.last_cost * anchor.profile.input_price / 1_000_000)
+            if self.attempt_sink is not None:
+                self.attempt_sink(attempt)
+        return renewed
 
     def encode_request(self, endpoint: LLMEndpointModel, request: LLMRequestIR) -> EncodedRequest:
         from pal.llm.replay_compatibility import REPLAY_BINDINGS_KEY
@@ -154,6 +218,20 @@ class ShapeEndpointInvoker:
         from pal.llm.cache_policy import resolve_mode
         from pal.llm.ir import PromptRegionIR
         raw = replace(encoded, payload=binding.adapter.compact_payload(encoded.payload), extra_body={})
+        if len(raw.payload["input"]) != len(encoded.payload["input"]):
+            from pal.llm.projection_spans import map_span
+            from pal.llm.shapes.base import finalize_cache_spans
+            indexes = {old: new for new, old in enumerate(
+                i for i, item in enumerate(encoded.payload["input"])
+                if item.get("type") != "configuration_update")}
+
+            def remap(path):
+                if len(path) >= 2 and path[0] == "input":
+                    return ("input", indexes[path[1]], *path[2:]) if path[1] in indexes else None
+                return path
+
+            raw = finalize_cache_spans(replace(raw, message_spans=tuple(
+                map_span(span, remap) for span in encoded.message_spans)))
         if resolve_mode(context) != "explicit":
             return raw
         # Actual compact schema has no tools or ephemeral instructions. Its
@@ -303,6 +381,12 @@ class ShapeEndpointInvoker:
             request, context, raw_encoded, request_id,
             finalize_request=lambda value: apply_provider_request_hooks(value, context),
         )
+        epoch = str(request.metadata.get("keepalive_compact_epoch") or "")
+        if epoch and not self.keepalive.prove_compact(epoch, endpoint_spec_fingerprint(binding.spec), encoded):
+            raise ValueError("hot cache compaction prefix no longer matches")
+        resident = request.logical_scope_id == "pal:resident" and not request.metadata.get("transient_history")
+        if resident:
+            self.keepalive.clear()
         submitted = False
 
         def observe_submission() -> None:
@@ -492,6 +576,21 @@ class ShapeEndpointInvoker:
                 if status == "success":
                     self.prompt_cache.record_success(plan, usage,
                         applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids, **diag)
+                    if resident and submitted and plan.reminder and plan.mode == "explicit" and encoded.applied_cache_breakpoint_message_ids:
+                        try:
+                            profile = keepalive_profile(binding.spec, tuple(p.ttl for p in plan.breakpoints))
+                            if profile is not None and plan.reminder.ttl_seconds < profile.ttl_seconds:
+                                profile = replace(profile, ttl_seconds=plan.reminder.ttl_seconds)
+                            heartbeat = codec.prepare_keepalive(encoded, context) if profile else None
+                            if profile is not None and heartbeat is not None:
+                                self.keepalive.capture(epoch=plan.reminder.observation_id, endpoint_id=binding.spec.endpoint_id,
+                                    binding=endpoint_spec_fingerprint(binding.spec), scope_key=plan.scope_key,
+                                    turn_id=str(request.metadata.get("turn_id") or ""), encoded=encoded,
+                                    plan_sequence=plan.plan_sequence, profile=profile, usage=usage, started_at=started_at,
+                                    provider=evidence.actual_provider)
+                        except Exception:
+                            # Optional idle optimization must never fail an accepted response.
+                            logger.exception("Could not retain a keepalive anchor")
                 else:
                     self.prompt_cache.record_attempt(plan, status=status, usage=usage,
                         applied_cache_breakpoint_message_ids=encoded.applied_cache_breakpoint_message_ids,

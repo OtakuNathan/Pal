@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Mapping
@@ -42,6 +43,11 @@ class CacheWarmDeadlineManager:
     deliver_notice: NoticeDelivery
     expire_notice: NoticeDelivery
     timers: TimerScopePort
+    keepalive_snapshot: CacheSnapshotProvider = lambda: {}
+    keepalive_step: Callable[[CacheWarmDeadlineNotice, str], Awaitable[bool]] | None = None
+    _keepalive_task: asyncio.Task[None] | None = None
+    _last_route: ControlRoute | None = None
+    _last_turn_id: str = ""
     _notice_timer: TimerHandlePort | None = None
     _expiry_timer: TimerHandlePort | None = None
     _generation: int = 0
@@ -63,13 +69,15 @@ class CacheWarmDeadlineManager:
         self,
         *,
         enabled: bool | None = None,
+        mode: str | None = None,
         lead_seconds: int | None = None,
         min_prefix_tokens: int | None = None,
     ) -> dict[str, Any]:
         repository = self.settings_provider()
         if repository is None:
             raise RuntimeError("runtime settings repository is unavailable")
-        resolved = configure_cache_reminder_settings(repository, enabled=enabled,
+        previous = self.settings()
+        resolved = configure_cache_reminder_settings(repository, enabled=enabled, mode=mode,
             lead_seconds=lead_seconds, min_prefix_tokens=min_prefix_tokens)
         if not resolved.enabled:
             notice = self._active_notice
@@ -78,7 +86,25 @@ class CacheWarmDeadlineManager:
                 async def expire_disabled() -> None:
                     await self._expire_active_notice(notice)
                 self.timers.schedule(0, expire_disabled)
+        elif previous.mode != resolved.mode or not previous.enabled:
+            notice = self._active_notice
+            self.cancel()
+            if notice is not None:
+                async def expire_switched() -> None:
+                    await self._expire_active_notice(notice)
+                self.timers.schedule(0, expire_switched)
+            self._notified_epoch = ""
+            self._ignored_epoch = ""
+            if self._last_route is not None:
+                self.schedule_after_turn_commit(route=self._last_route, turn_id=self._last_turn_id)
         return self.inspect()
+
+    def _keepalive_for(self, epoch: str, turn_id: str) -> dict[str, Any]:
+        if self.settings().mode != "keep-alive" or self.keepalive_step is None:
+            return {}
+        state = dict(self.keepalive_snapshot() or {})
+        return state if (state.get("eligible") and state.get("anchor_epoch") == epoch
+                         and state.get("turn_id") == turn_id) else {}
 
     def schedule_after_turn_commit(
         self,
@@ -87,6 +113,7 @@ class CacheWarmDeadlineManager:
         turn_id: str,
     ) -> bool:
         self.cancel()
+        self._last_route, self._last_turn_id = route, turn_id
         settings = self.settings()
         snapshot = dict(self.cache_snapshot() or {})
         epoch = str(snapshot.get("anchor_epoch") or "").strip()
@@ -108,7 +135,13 @@ class CacheWarmDeadlineManager:
         # Estimates start when the response returns, including time spent
         # committing/delivering the turn. Never restart that clock here.
         lifetime = float(remaining_ttl) if estimated and remaining_ttl is not None else ttl_seconds
-        delay_seconds = max(0, lifetime - settings.lead_seconds)
+        keep = self._keepalive_for(epoch, turn_id)
+        lead = settings.lead_seconds
+        if keep and int(keep.get("prefix_tokens") or 0) >= settings.min_prefix_tokens:
+            ttl_seconds = int(keep["anchor_ttl_seconds"])
+            lifetime = float(keep["anchor_remaining_ttl_seconds"])
+            lead = min(lead, ttl_seconds // 5)
+        delay_seconds = max(0, lifetime - lead)
         self._generation += 1
         generation = self._generation
         self._scheduled_epoch = epoch
@@ -121,7 +154,7 @@ class CacheWarmDeadlineManager:
         self._cache_expires_at = scheduled_at + timedelta(seconds=lifetime)
         notice = CacheWarmDeadlineNotice(
             route=route, epoch=epoch, turn_id=turn_id, ttl_seconds=ttl_seconds,
-            lead_seconds=settings.lead_seconds, prefix_tokens=prefix_tokens,
+            lead_seconds=lead, prefix_tokens=prefix_tokens,
             expires_at=self._cache_expires_at, estimated=estimated,
         )
 
@@ -140,6 +173,14 @@ class CacheWarmDeadlineManager:
 
     def cancel(self) -> None:
         self._generation += 1
+        task, self._keepalive_task = self._keepalive_task, None
+        if task is not None and not task.done():
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if task is not current:
+                task.cancel()
         for timer in (self._notice_timer, self._expiry_timer):
             if timer is not None:
                 timer.cancel()
@@ -150,6 +191,7 @@ class CacheWarmDeadlineManager:
     async def clear_for_user_activity(self) -> None:
         notice = self._active_notice
         self.cancel()
+        self._last_route, self._last_turn_id = None, ""
         self._notified_epoch = ""
         self._ignored_epoch = ""
         self._consumed_epoch = ""
@@ -158,6 +200,7 @@ class CacheWarmDeadlineManager:
     async def clear_for_compaction(self) -> None:
         notice = self._active_notice
         self.cancel()
+        self._last_route, self._last_turn_id = None, ""
         await self._expire_active_notice(notice)
 
     async def _expire_active_notice(
@@ -245,6 +288,8 @@ class CacheWarmDeadlineManager:
         return {
             "unscheduled_reason": reason,
             "enabled": settings.enabled,
+            "mode": settings.mode,
+            "keepalive": dict(self.keepalive_snapshot() or {}),
             "lead_seconds": settings.lead_seconds,
             "min_prefix_tokens": settings.min_prefix_tokens,
             "timer_scheduled": scheduled,
@@ -290,6 +335,10 @@ class CacheWarmDeadlineManager:
                     or _context_tokens(snapshot) < settings.min_prefix_tokens
                     or notice.epoch in {self._ignored_epoch, self._notified_epoch}):
                 return
+            keep = self._keepalive_for(notice.epoch, notice.turn_id)
+            if keep and int(keep.get("prefix_tokens") or 0) >= settings.min_prefix_tokens:
+                self._keepalive_task = asyncio.create_task(self._run_keepalive(notice, generation, str(keep["decision"])))
+                return
             if await self.deliver_notice(notice):
                 if generation != self._generation:
                     await self._expire_active_notice(notice)
@@ -298,6 +347,34 @@ class CacheWarmDeadlineManager:
                 self._active_notice = notice
         except Exception as exc:
             self._last_error = exception_reason(exc)
+
+    async def _run_keepalive(self, notice: CacheWarmDeadlineNotice, generation: int, decision: str) -> None:
+        try:
+            assert self.keepalive_step is not None
+            renewed = await self.keepalive_step(notice, decision)
+            if generation != self._generation:
+                return
+            if renewed:
+                self.schedule_after_turn_commit(route=notice.route, turn_id=notice.turn_id)
+            elif decision == "keepalive" and datetime.now(timezone.utc) < notice.expires_at:
+                # Delivery must settle even if the user starts a turn while
+                # it is in flight. A stale delivered notice is then expired.
+                if self._keepalive_task is asyncio.current_task():
+                    self._keepalive_task = None
+                # A failed probe must not be retried.
+                if await self.deliver_notice(notice):
+                    if generation != self._generation:
+                        await self._expire_active_notice(notice)
+                        return
+                    self._notified_epoch = notice.epoch
+                    self._active_notice = notice
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._last_error = exception_reason(exc)
+        finally:
+            if self._keepalive_task is asyncio.current_task():
+                self._keepalive_task = None
 
     def _clear_schedule(self) -> None:
         self._scheduled_epoch = ""

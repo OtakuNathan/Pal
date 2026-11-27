@@ -21,6 +21,7 @@ from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.memory.persistence.contracts import RESIDENT_HISTORY
 from pal.memory.prompt_context import prompt_date_pin
+from pal.memory.effort_pin import pinned_think_levels
 from pal.shared.prompt_dates import today_for_timezone
 from pal.shared import EventKind, LLMFinishReason, LLMPreflightStatus, RuntimeStatus
 from pal.shared.ports import PortRegistry
@@ -134,6 +135,9 @@ class BtwTurn:
             facts = self.llm.metadata()
             endpoint_id = (main.preferred_llm_endpoint_id if main is not None else None) or facts.endpoint_id
             model_id = (main.preferred_llm_model_id if main is not None else None) or facts.model_id
+            settings["think_levels"] = pinned_think_levels(
+                self.memory, self.llm.metadata(preferred_endpoint_id=endpoint_id).to_payload(),
+                settings.get("think_levels") or {})
             # ToolSurface returns fresh contract dictionaries backed by the
             # captured generation's immutable schemas. Retain those schemas;
             # deepcopy tries to mutate their frozen dict/list implementations.

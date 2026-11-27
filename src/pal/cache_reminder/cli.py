@@ -17,6 +17,7 @@ def configure_core_parser(parser: argparse.ArgumentParser) -> None:
     commands = groups.add_parser("cache-reminder").add_subparsers(dest="core_command", required=True)
     show = commands.add_parser("show")
     configure = commands.add_parser("configure")
+    configure.add_argument("--mode", choices=("reminder", "keep-alive"))
     configure.add_argument("--enabled", action=argparse.BooleanOptionalAction, default=None)
     configure.add_argument("--lead-seconds", type=int)
     configure.add_argument("--min-prefix-tokens", type=int)
@@ -30,6 +31,7 @@ async def run_core_cli_async(args: argparse.Namespace) -> int:
         patch = {}
         if args.core_command == "configure":
             patch = {key: value for key, value in {
+                "mode": vars(args).get("mode"),
                 "enabled": args.enabled, "lead_seconds": args.lead_seconds,
                 "min_prefix_tokens": args.min_prefix_tokens,
             }.items() if value is not None}

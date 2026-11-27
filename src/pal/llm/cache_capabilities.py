@@ -103,12 +103,12 @@ def _default_capabilities(
     provider = provider_id.strip().lower()
     gateway = provider == "openrouter" or urlsplit(base_url or "").hostname == "openrouter.ai"
     implicit = (PromptCacheDialect.OPENROUTER_AUTOMATIC if gateway else
-                PromptCacheDialect.OPENAI_AUTOMATIC if provider == "openai" else PromptCacheDialect.NONE)
+                PromptCacheDialect.OPENAI_AUTOMATIC if provider in {"openai", "chatgpt"} else PromptCacheDialect.NONE)
     explicit = PromptCacheDialect.NONE
     if shape == WireShape.ANTHROPIC_MESSAGES and (gateway or provider == "anthropic"):
         explicit = (PromptCacheDialect.OPENROUTER_ANTHROPIC_EXPLICIT if gateway
                     else PromptCacheDialect.ANTHROPIC_EXPLICIT)
-    elif ((gateway or provider == "openai")
+    elif ((gateway or provider in {"openai", "chatgpt"})
           and re.fullmatch(r"(?:gpt-5\.6|gpt-6-astra)(?:-[a-z0-9.-]+)?|gpt-6-(?:sol|luna)|gpt-6\.1-(?:sol|terra)|gpt-6\.2-(?:astra|sol)",
                            model_id.lower().removeprefix("openai/"))
           and shape in (WireShape.OPENAI_RESPONSE, WireShape.OPENAI_COMPLETION)):
@@ -176,6 +176,35 @@ def supports_turn_scoped_instructions(shape: WireShape | str, model_id: str, bas
         url == "https://openrouter.ai/api" and model_id.startswith("anthropic/") and mode == "turn_scoped")
 
 
+ANTHROPIC_EFFORT_UPDATE_BETA = "mid-conversation-output-config-2026-07-01"
+_OPENAI_EFFORT_MODELS = frozenset({
+    "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra",
+    "gpt-6.2-astra", "gpt-6.2-sol",
+})
+_CLAUDE_EFFORT_MODELS = frozenset({
+    "claude-fable-5-2", "claude-fable-5-1", "claude-mythos-5-2", "claude-mythos-5-1",
+    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+})
+
+
+def supports_effort_updates(shape: WireShape | str, model_id: str, base_url: str,
+                            capabilities: Mapping[str, Any]) -> bool:
+    """Only documented native APIs and independently verified gateway routes."""
+    if capabilities.get("access_profile"):
+        return False
+    url = base_url.rstrip("/")
+    if shape == WireShape.OPENAI_RESPONSE:
+        model = model_id.removeprefix("openai/")
+        return (url == "https://api.openai.com/v1" and model in _OPENAI_EFFORT_MODELS
+                or url == "https://openrouter.ai/api/v1" and model_id == "openai/gpt-6.2-sol")
+    if shape == WireShape.ANTHROPIC_MESSAGES:
+        model = canonical_claude_model(model_id)
+        return (url == "https://api.anthropic.com" and model in _CLAUDE_EFFORT_MODELS
+                or url == "https://openrouter.ai/api" and model_id.startswith("anthropic/")
+                and model == "claude-opus-5-5")
+    return False
+
+
 def supports_interaction_instructions(shape: WireShape | str, model_id: str, base_url: str,
                                       capabilities: Mapping[str, Any]) -> bool:
     # Changing the root system_instruction can invalidate the prompt cache.
@@ -189,3 +218,36 @@ def supports_request_instructions(shape: WireShape | str, model_id: str, base_ur
     return (supports_response_instructions(shape, capabilities)
             or supports_root_instructions(shape, capabilities)
             or supports_interaction_instructions(shape, model_id, base_url, capabilities))
+
+
+@dataclass(frozen=True)
+class KeepaliveProfile:
+    """Billing and renewal data; the codec owns the actual request shape."""
+    read_multiplier: float
+    write_multiplier: float
+    output_multiplier: float
+    ttl_seconds: int
+    output_limit: int
+    input_price: float  # USD per million ordinary input tokens
+
+
+def keepalive_profile(spec: Any, ttls: tuple[str, ...]) -> KeepaliveProfile | None:
+    if spec.auth_kind != "api_key_ref" or spec.transport != "http" or not ttls:
+        return None
+    url, model = spec.base_url.rstrip("/"), spec.model_id
+    shape = spec.wire_shape
+    if shape == "openai_response" and (url == "https://api.openai.com/v1" or
+            (url == "https://openrouter.ai/api/v1" and model.startswith("openai/"))):
+        prices = {"gpt-6.2-sol": (2., .05), "gpt-6.2-astra": (8., .05),
+                  "gpt-6.1-sol": (2., .05), "gpt-6.1-terra": (.5, .05),
+                  "gpt-6-luna": (.05, .1), "gpt-6-astra": (10., .1)}
+        price = prices.get(model.removeprefix("openai/"))
+        if price and set(ttls) == {"30m"}:
+            return KeepaliveProfile(price[1], 1.25, 5., 1800, 16, price[0])
+    if (shape == "anthropic_messages" and canonical_claude_model(model) == "claude-opus-5-5"
+            and (url == "https://api.anthropic.com" or
+                 (url == "https://openrouter.ai/api" and model.startswith("anthropic/")))
+            and set(ttls) <= {"5m", "1h"}):
+        return KeepaliveProfile(.05, 1.25 if "5m" in ttls else 2., 5.,
+                                300 if "5m" in ttls else 3600, 1 if url == "https://openrouter.ai/api" else 0, 4.)
+    return None
