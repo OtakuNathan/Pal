@@ -6,6 +6,19 @@ import hashlib
 from pal.control.contracts import InteractionMessageSpec
 
 
+_MARKDOWN_LITERAL_ESCAPE = str.maketrans({
+    **{char: "\\" + char for char in "`*_~#+-.!|="},
+    **{char: f"&#{ord(char)};" for char in "\\[]<>&$"},
+})
+
+
+def markdown_literal(text: str) -> str:
+    """Quote dynamic text before inserting it into a Markdown card."""
+    # Entity-quote brackets instead of producing \[...\], which Markdown
+    # renderers with math extensions interpret as a LaTeX expression.
+    return text.translate(_MARKDOWN_LITERAL_ESCAPE)
+
+
 def interaction_projection(spec: InteractionMessageSpec) -> tuple[dict, dict]:
     actions: dict = {}
     prefix = "r" + hashlib.sha256(spec.revision.encode()).hexdigest()[:12] if spec.revision else ""

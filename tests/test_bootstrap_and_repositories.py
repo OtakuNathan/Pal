@@ -4970,6 +4970,48 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(messages), 1)
         self.assertTrue(any(kind == "edit_message_text" for kind, _ in self.fake_bot.actions))
 
+    async def test_cache_policy_panel_uses_generic_telegram_buttons_and_edits_in_place(self) -> None:
+        from pal.cache_reminder.presentation import cache_policy_panel_delivery
+        from pal.control.contracts import ControlRoute
+
+        self.endpoint.endpoint.send_policy["max_message_chars"] = 4096
+        route = ControlRoute("telegram_main", "telegram", {"chat_id": "42"}, "telegram:42")
+        handle = self.endpoint.build_response_handle(reply_target=route.reply_target)
+        state = {"mode": "reminder", "enabled": True, "keepalive": {}, "seconds_until_notice": None}
+        first = cache_policy_panel_delivery(route, state)
+        self.endpoint.queue_status(first.delivery_kind, payload={"spec": first.interaction}, response_handle=handle)
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["parse_mode"], "MarkdownV2")
+        self.assertIn("*Cache policy*", messages[0]["text"])
+        self.assertIn(r"*No paid heartbeats\.*", messages[0]["text"])
+        keyboard = messages[0]["reply_markup"].inline_keyboard
+        self.assertEqual([row[0].text for row in keyboard], ["> reminder", "keep-alive", "Back"])
+        target = self.endpoint._restore_interaction(first.interaction.interaction_id)
+        callback = types.SimpleNamespace(
+            data=keyboard[1][0].callback_data,
+            message=_FakeTelegramMessage(chat_id=42, user_id=42, message_id=target["message_id"], text=""),
+            from_user=_FakeTelegramUser(42), id="cache-policy-callback",
+        )
+        result = await self.endpoint._interaction_result_from_update(types.SimpleNamespace(callback_query=callback))
+        self.assertEqual(result.action_key, "control.command.run")
+        self.assertEqual(result.action_args, {"command_name": "cache_policy", "argv": ["keep-alive"]})
+
+        second = cache_policy_panel_delivery(route, {**state, "mode": "keep-alive"})
+        self.endpoint.queue_status(second.delivery_kind, payload={"spec": second.interaction}, response_handle=handle)
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+        self.assertEqual(len([payload for kind, payload in self.fake_bot.actions if kind == "message"]), 1)
+        edited = [payload for kind, payload in self.fake_bot.actions if kind == "edit_message_text"][-1]
+        self.assertEqual(edited["message_id"], target["message_id"])
+        self.assertEqual(edited["parse_mode"], "MarkdownV2")
+        self.assertIn(r"Current: *keep\-alive*", edited["text"])
+        self.assertEqual([row[0].text for row in edited["reply_markup"].inline_keyboard],
+                         ["reminder", "> keep-alive", "Back"])
+
     async def test_telegram_endpoint_not_modified_edit_is_idempotent(self) -> None:
         self.endpoint._interactive_messages["ctl_panel_stale"] = {
             "chat_id": 42,
@@ -5085,7 +5127,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("expired", self.endpoint._interactive_messages)
         edit = next(payload for kind, payload in self.fake_bot.actions if kind == "edit_message_text")
-        self.assertEqual(edit["text"], "This reset request expired.")
+        self.assertEqual(edit["text"], r"This reset request expired\.")
         self.assertIsNone(edit["reply_markup"])
 
     async def test_telegram_explicit_delete_expiration_removes_interaction_message(self) -> None:

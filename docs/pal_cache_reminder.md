@@ -52,7 +52,9 @@ These documents describe provider behavior; the scheduling estimates in the tabl
 
 ## Optional cache keep-alive
 
-`/cache_policy` shows the current policy; `/cache_policy reminder` preserves the
+`/cache_policy` opens the control-panel menu with descriptions of both modes,
+the current mode marked with `>`, and buttons to switch in place.
+`/cache_policy reminder` preserves the
 original behavior, and `/cache_policy keep-alive` enables bounded paid renewal
 on supported explicit-cache HTTP endpoints. The default is `reminder`. The
 same persistent selection is available via `pal core cache-reminder configure

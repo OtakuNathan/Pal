@@ -17,6 +17,7 @@ from pal.control.contracts import (
     ControlPlanePort,
 )
 from pal.shared import EventKind
+from pal.control.presentation import markdown_literal
 
 @dataclass
 class ControlCommandRegistry:
@@ -162,14 +163,14 @@ class ControlPlane(ControlPlanePort):
 
     def render_panel_text(self) -> str:
         lines = [
-            "Pal Control Panel",
+            "# Pal Control Panel",
             "",
-            "Commands:",
+            "**Commands**",
         ]
         for spec in self.list_panel_commands():
             usage = spec.usage or f"/{spec.name}"
             description = spec.description or "No description."
-            lines.append(f"{usage} - {description}")
+            lines.append(f"- **{markdown_literal(usage)}** — {markdown_literal(description)}")
         return "\n".join(lines).strip()
 
     def parse_event(self, event: ControlEvent) -> ControlAction | None:

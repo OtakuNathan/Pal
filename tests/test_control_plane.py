@@ -315,7 +315,8 @@ class ControlPlaneTests(unittest.TestCase):
             ),
         ))
 
-        rendered = plane.render_panel_text()
+        from telegramify_markdown import convert
+        rendered, _ = convert(plane.render_panel_text())
 
         self.assertIn("/control", rendered)
         self.assertIn("/think [level]", rendered)
@@ -451,7 +452,8 @@ class ControlPlaneTests(unittest.TestCase):
         assert action is not None
         self.assertEqual(action.action_kind, "refresh_llm_endpoint")
         self.assertEqual(action.target_scope, "runtime")
-        self.assertIn("/refresh_llm_endpoint", plane.render_panel_text())
+        from telegramify_markdown import convert
+        self.assertIn("/refresh_llm_endpoint", convert(plane.render_panel_text())[0])
 
     def test_telegram_bot_mention_suffix_is_ignored_for_slash_commands(self) -> None:
         plane = build_control_plane()
@@ -1017,9 +1019,10 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(statuses), 2)
         self.assertEqual(statuses[-2].kind, "interactive_update")
         spec = statuses[-2].payload["spec"]
-        self.assertIn("Model: stub", spec.text)
-        self.assertIn("> Stub LLM (stub)", spec.text)
-        self.assertIn("  Backup LLM (backup)", spec.text)
+        self.assertIn("Active: **stub**", spec.text)
+        self.assertIn("**test**", spec.text)
+        self.assertIn("**Stub LLM (stub) (active)**", spec.text)
+        self.assertIn("• Backup LLM (backup)", spec.text)
         flattened = [button for row in spec.buttons for button in row]
         self.assertTrue(
             any(
@@ -1128,7 +1131,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         statuses = list(self.endpoint.status_outbox)
         self.assertGreaterEqual(len(statuses), 2)
         self.assertEqual(statuses[-2].kind, "interactive_update")
-        self.assertEqual(statuses[-2].payload["spec"].text, "Debug log: off\nUse /log start or /log end. Changes apply to new turns and Bunshin role runs only.")
+        self.assertEqual(statuses[-2].payload["spec"].text, "**Debug log:** **off**\n\nUse /log start or /log end. Changes apply to new turns and Bunshin role runs only.")
 
     async def test_base_channel_falls_back_to_interaction_text(self) -> None:
         delivery = ControlDelivery(
@@ -1207,7 +1210,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statuses[-2].kind, "interactive_update")
         spec = statuses[-2].payload["spec"]
         flattened = [button for row in spec.buttons for button in row]
-        self.assertEqual(spec.text, "Debug log: on\nUse /log start or /log end. Changes apply to new turns and Bunshin role runs only.")
+        self.assertEqual(spec.text, "**Debug log:** **on**\n\nUse /log start or /log end. Changes apply to new turns and Bunshin role runs only.")
         self.assertTrue(any(button.label == "> Start logging" and button.action_key == "control.log.start" for button in flattened))
         self.assertTrue(any(button.label == "Stop logging" and button.action_key == "control.log.end" for button in flattened))
 
@@ -2533,7 +2536,8 @@ class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         await self.endpoint._open_or_update_interaction_async(
             ResponseHandle("telegram_main", route.reply_target), spec=spec, allow_update=False)
         sent = bot.send_message.call_args.kwargs
-        self.assertIn("Prefer explicit APIs.", sent["text"])
+        self.assertIn(r"Prefer explicit APIs\.", sent["text"])
+        self.assertEqual(sent["parse_mode"], "MarkdownV2")
         button = sent["reply_markup"].inline_keyboard[0][0]
         self.assertEqual(button.text, "Preview")
         token = button.callback_data.rsplit(":", 1)[-1]
@@ -2735,4 +2739,4 @@ class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(payload)
         self.assertNotIn("reset_1", self.endpoint._interactive_messages)
         self.assertEqual(len(edits), 1)
-        self.assertEqual(edits[0]["text"], "This reset request expired.")
+        self.assertEqual(edits[0]["text"], r"This reset request expired\.")

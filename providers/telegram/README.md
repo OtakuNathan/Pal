@@ -24,8 +24,14 @@ Bunshin questions and architecture reviews send their details first, followed by
 one short decision message replying to those details. Short details remain chat
 messages; text exceeding `send_policy.max_message_chars` (capped at Telegram's
 4096 UTF-16 units) is sent intact as a UTF-8 Markdown file. Other oversized
-interaction cards use the same presentation. Ordinary replies and short control
-panels keep their existing rendering.
+interaction cards use the same presentation.
+
+Version 0.3.5 renders interaction message bodies through the same MarkdownV2
+converter as ordinary replies, including in-place keyboard updates. Producers
+own headings, emphasis and grouping in ordinary Markdown; this provider does
+not define slash-command-specific layouts. Button labels remain plain text.
+A rejected Markdown format is retried without formatting, preserving the
+same keyboard and action mapping.
 
 Bunshin's existing task YAML and architecture Markdown attachments are sent
 before the decision card. An identical delivered text attachment is reused as

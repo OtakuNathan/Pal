@@ -25,6 +25,12 @@ Its async handler executes the owning module's business operation and returns
 interactive delivery and coordination. There is no result-shape negotiation or
 Core branch for a module's command name. Domain rendering lives with its module.
 
+Interaction message bodies use ordinary Markdown. The owning module writes the
+headings, emphasis and grouping; channels render the same body using their
+native presentation. Button labels remain plain text and action payloads are
+independent of presentation. Escape dynamic literals before embedding them in
+Markdown (see `markdown_literal` in `presentation.py`).
+
 A normal slash request is local control work: Core admits it, supplies status and
 routing, dispatches its action, and releases its reservation on completion or
 failure. It does not create an LLM turn or append L1 history. `/btw` explicitly

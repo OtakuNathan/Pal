@@ -7,7 +7,7 @@ import logging
 from pal.cache_reminder.settings import CacheReminderPatch
 
 from pal.cache_reminder.cache_warm_deadline import CacheWarmDeadlineManager, CacheWarmDeadlineNotice
-from pal.cache_reminder.presentation import cache_warm_deadline_delivery, cache_warm_deadline_expire_delivery
+from pal.cache_reminder.presentation import cache_policy_panel_delivery, cache_warm_deadline_delivery, cache_warm_deadline_expire_delivery
 from pal.control.contracts import ControlAction, ControlCommandInvocation, ControlCommandSpec, ControlDelivery
 from pal.control.interactions import terminal_delivery_for_action
 from pal.control.runtime_contracts import CORE_CONTROL, ControlBusyError
@@ -106,17 +106,8 @@ class CacheReminder:
 
     async def cache_policy(self, action: ControlAction) -> None:
         mode = action.args.get("mode")
-        if mode is not None:
-            self.manager.configure(mode=str(mode))
-        state = self.manager.inspect()
-        keep = state["keepalive"]
-        text = f"Cache policy: {state['mode']} ({'enabled' if state['enabled'] else 'disabled'})"
-        if state['mode'] == 'keep-alive':
-            text += (f"\nKeep-alive: {keep.get('renewals', 0)}/{keep.get('max_actions', 0)}; "
-                     f"estimated cost ${float(keep.get('estimated_cost', 0)):.6f}; {keep.get('reason', 'unavailable')}")
-        if state['seconds_until_notice'] is not None:
-            text += f"\nNext action in {state['seconds_until_notice']}s."
-        await self._host.current.reply(action, text)
+        state = self.manager.configure(mode=str(mode)) if mode is not None else self.manager.inspect()
+        await self._host.current.deliver(cache_policy_panel_delivery(action.route, state))
 
     async def ignore(self, action: ControlAction) -> None:
         ignored = self.manager.ignore(str(action.args.get("cache_epoch") or ""))
@@ -222,7 +213,8 @@ def register_with_core(context: MainContext) -> ModuleHandle:
                            "core.user_activity": feature.user_activity,
                            "core.context_change.started": feature.context_change},
         control_commands=(ControlCommandSpec(name="cache_policy", handler=_cache_policy_command,
-            description="Show or switch idle cache policy.", usage="/cache_policy [reminder|keep-alive]", show_in_panel=True),),
+            description="Show or switch idle cache policy.", usage="/cache_policy [reminder|keep-alive]",
+            show_in_panel=True, panel_button=True, panel_label="Cache Policy"),),
         control_action_handlers={
             "cache_policy": ControlActionSpec(feature.cache_policy),
             "cache_warm_deadline_ignore": ControlActionSpec(feature.ignore),

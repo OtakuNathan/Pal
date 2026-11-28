@@ -190,7 +190,8 @@ class TelegramInteractionPresentationTests(unittest.IsolatedAsyncioTestCase):
         await self.open(spec)
         self.assertEqual([kind for kind, _ in self.bot.calls], ["message", "message"])
         details, card = [payload for _, payload in self.bot.calls]
-        self.assertEqual(details["text"], spec.text)
+        self.assertEqual(details["text"], spec.text.replace(".", r"\."))
+        self.assertEqual(details["parse_mode"], "MarkdownV2")
         self.assertNotIn("reply_markup", details)
         self.assertIn("A: Surface", card["text"])
         self.assertIn("B: Cloud", card["text"])
@@ -200,3 +201,32 @@ class TelegramInteractionPresentationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.action_args, {"answer": "surface"})
         await self.open(spec, update=True)
         self.assertEqual([kind for kind, _ in self.bot.calls], ["message", "message", "edit"])
+
+    async def test_generic_markdown_card_retries_format_rejection_as_plain_text(self):
+        spec = self.review(interaction_kind="custom_panel", text="**Title**\n\nChoose *one*.",
+                           buttons=((InteractionButtonSpec("> Choice", "choose", {"value": 1}),),))
+        self.endpoint.endpoint.send_policy["max_message_chars"] = 4096
+        send = self.bot.send_message
+        edit = self.bot.edit_message_text
+
+        async def reject_format(method, **kwargs):
+            if kwargs.get("parse_mode"):
+                raise RuntimeError("Bad Request: can't parse entities")
+            return await method(**kwargs)
+
+        async def send_message(**kwargs):
+            return await reject_format(send, **kwargs)
+        async def edit_message_text(**kwargs):
+            return await reject_format(edit, **kwargs)
+        self.bot.send_message = AsyncMock(side_effect=send_message)
+        self.bot.edit_message_text = AsyncMock(side_effect=edit_message_text)
+        await self.open(spec)
+        card = self.bot.calls[-1][1]
+        self.assertEqual(card["text"], "Title\n\nChoose one.")
+        self.assertNotIn("parse_mode", card)
+        self.assertEqual(card["reply_markup"].inline_keyboard[0][0].text, "> Choice")
+        result = await self.endpoint._interaction_result_from_update(self.callback(spec, card))
+        self.assertEqual(result.action_args, {"value": 1})
+        await self.open(replace(spec, text="**Updated**"), update=True)
+        self.assertEqual(self.bot.calls[-1][1]["text"], "Updated")
+        self.assertEqual(self.bot.calls[-1][1]["message_id"], card["message_id"])

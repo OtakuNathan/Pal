@@ -88,6 +88,8 @@ class InteractionItemSpec:
 
 @dataclass(frozen=True)
 class InteractionMessageSpec:
+    """Channel-neutral Markdown body and plain-text button labels."""
+
     interaction_id: str
     interaction_kind: str
     route: ControlRoute | None = None

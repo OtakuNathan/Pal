@@ -12,6 +12,7 @@ from pal.control.contracts import (
     InteractionButtonSpec,
     InteractionMessageSpec,
 )
+from pal.control.presentation import markdown_literal
 
 INTERACTIVE_DELIVERY_KINDS: set[str] = {
     "interactive_open",
@@ -99,7 +100,7 @@ def build_control_panel_interaction(
         )
     text = str(control_plane.render_panel_text())
     if banner:
-        text = f"{banner}\n\n{text}"
+        text = f"{markdown_literal(banner)}\n\n{text}"
     return InteractionMessageSpec(
         interaction_id=control_panel_interaction_id(route),
         interaction_kind="control_panel",

@@ -4,7 +4,58 @@ from __future__ import annotations
 from uuid import uuid4
 
 from pal.control.contracts import ControlDelivery, ControlRoute, InteractionButtonSpec, InteractionMessageSpec
-from pal.control.interactions import delivery_for_interaction, build_terminal_interaction
+from pal.control.presentation import markdown_literal
+from pal.control.interactions import (
+    build_terminal_interaction,
+    control_panel_interaction_id,
+    delivery_for_interaction,
+    delivery_for_reply,
+)
+
+
+def cache_policy_panel_delivery(
+    route: ControlRoute | None, state: dict,
+) -> ControlDelivery:
+    """Use the same persistent control panel as model and thinking selection."""
+    current = state["mode"]
+    enabled = "enabled" if state["enabled"] else "disabled"
+    text = (
+        f"# Cache policy\nCurrent: **{current}** ({enabled})\n\n"
+        "**reminder** — Manual Compact\n"
+        "Notify you before the estimated cache deadline so you can Compact manually. "
+        "**No paid heartbeats.**\n\n"
+        "**keep-alive** — Automatic renewal\n"
+        "- Renew an eligible warm cache on supported explicit-cache HTTP routes "
+        "while idle using bounded paid requests, without changing L1 or thinking effort.\n"
+        "- **At most 19 actions** within a price-based budget; the last slot is reserved "
+        "for one automatic Compact if the warm prefix is still verified.\n"
+        "- Stop on unconfirmed renewal. Unsupported routes or failed renewals fall back to reminders."
+    )
+    if current == "keep-alive":
+        keep = state["keepalive"]
+        text += (f"\n\n**Keep-alive status**\n"
+                 f"Renewals: {keep.get('renewals', 0)}; action limit: {keep.get('max_actions', 0)}.\n"
+                 f"Estimated cost: ${float(keep.get('estimated_cost', 0)):.6f}\n"
+                 f"{markdown_literal(str(keep.get('reason', 'unavailable')))}.")
+    if state["seconds_until_notice"] is not None:
+        text += f"\nNext action in {state['seconds_until_notice']}s."
+    if not state["enabled"]:
+        text += "\n\n**Both policies are currently disabled.**"
+    modes = ("reminder", "keep-alive")
+    labels = tuple(f"> {mode}" if mode == current else mode for mode in modes)
+    if route is None:
+        return delivery_for_reply(None, text + "\n\n" + "\n".join(markdown_literal(label) for label in labels)
+                                  + "\nUse /cache_policy [reminder|keep-alive].")
+    buttons = tuple(
+        (InteractionButtonSpec(label=label, action_key="control.command.run",
+                               action_args={"command_name": "cache_policy", "argv": [mode]}),)
+        for mode, label in zip(modes, labels)
+    ) + ((InteractionButtonSpec(label="Back", action_key="control.panel.back"),),)
+    return delivery_for_interaction(route, "interactive_update", InteractionMessageSpec(
+        interaction_id=control_panel_interaction_id(route),
+        interaction_kind="control_panel", route=route, text=text,
+        buttons=buttons, expires_at=None,
+    ))
 
 
 def cache_warm_deadline_interaction_id(epoch: str) -> str:

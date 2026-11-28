@@ -37,5 +37,7 @@ The optional `keep-alive` policy reuses the same timer scope. It admits at most
 one cancellable asynchronous LLM heartbeat per idle deadline, and hands the
 terminal compact to the existing context-change lease. LLM owns frozen wire
 requests, renewal evidence, and economic decisions; the plugin never interprets
-provider payloads. `/cache_policy [reminder|keep-alive]` changes the persisted
-policy; the default remains `reminder`.
+provider payloads. `/cache_policy` opens a control-panel menu and shows both
+policies' behavior and the selected mode. Buttons use the generic command
+dispatch path and update the same panel. `/cache_policy [reminder|keep-alive]`
+also changes the persisted policy; the default remains `reminder`.

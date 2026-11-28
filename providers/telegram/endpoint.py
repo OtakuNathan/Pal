@@ -286,13 +286,27 @@ def _telegram_text_segments(text: str, *, limit: int) -> list[_TelegramTextSegme
 
 
 def _telegram_interaction_segments(spec: InteractionMessageSpec, *, limit: int) -> list[_TelegramTextSegment]:
-    text = interaction_text(spec)
-    if spec.interaction_kind == "approval_request":
-        return _telegram_text_segments(text, limit=limit)
-    return [
-        _TelegramTextSegment(rendered_text=part, fallback_text=part, parse_mode=None)
-        for part in _segment_text(text, limit=limit)
-    ]
+    return _telegram_text_segments(interaction_text(spec), limit=limit)
+
+
+async def _deliver_interaction_segment(
+    send: Callable[..., Awaitable[Any]],
+    segment: _TelegramTextSegment,
+    kwargs: dict[str, Any],
+) -> Any:
+    kwargs = dict(kwargs, text=segment.rendered_text)
+    if segment.parse_mode is not None:
+        kwargs["parse_mode"] = segment.parse_mode
+    try:
+        return await send(**kwargs)
+    except Exception as exc:
+        # A rejected format is safe to retry as text. Do not duplicate a card
+        # after a transport failure with an uncertain delivery outcome.
+        if segment.parse_mode is None or "can't parse entities" not in str(exc).lower():
+            raise
+        kwargs.pop("parse_mode", None)
+        kwargs["text"] = segment.fallback_text
+        return await send(**kwargs)
 
 
 def _safe_int(value: Any) -> int | None:
@@ -1799,10 +1813,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 sent = await self.application.bot.send_document(document=file_obj, filename="interaction-details.md", **kwargs)
         else:
             part = parts[0]
-            kwargs["text"] = part.rendered_text
-            if part.parse_mode is not None:
-                kwargs["parse_mode"] = part.parse_mode
-            sent = await self.application.bot.send_message(**kwargs)
+            sent = await _deliver_interaction_segment(self.application.bot.send_message, part, kwargs)
         return self._remember_delivered_details(response_handle, content, sent, document=document)
 
     async def _apply_interactive_status_async(
@@ -1887,9 +1898,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         else:
             parts = _telegram_interaction_segments(spec, limit=max_chars)
         for index, part in enumerate(parts):
-            kwargs: dict[str, Any] = {"chat_id": chat_id, "text": part.rendered_text}
-            if part.parse_mode is not None:
-                kwargs["parse_mode"] = part.parse_mode
+            kwargs: dict[str, Any] = {"chat_id": chat_id}
             if thread_id is not None:
                 kwargs["message_thread_id"] = thread_id
             if separate and target.get("details_message_id"):
@@ -1897,7 +1906,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             if index == len(parts) - 1 and markup is not None:
                 kwargs["reply_markup"] = markup
             try:
-                sent = await self.application.bot.send_message(**kwargs)
+                sent = await _deliver_interaction_segment(self.application.bot.send_message, part, kwargs)
             except Exception as exc:
                 self.last_delivery_error = str(exc)
                 raise ChannelDeliveryError(str(exc) or "Telegram decision card failed", permanent=False,
@@ -1991,12 +2000,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             parts = [_TelegramTextSegment(card, card, None)]
         else:
             parts = _telegram_interaction_segments(spec, limit=max_chars)
-        if len(parts) == 1:
-            kwargs["text"] = parts[0].rendered_text
-            if parts[0].parse_mode is not None:
-                kwargs["parse_mode"] = parts[0].parse_mode
         try:
-            await self.application.bot.edit_message_text(**kwargs)
+            if len(parts) == 1:
+                await _deliver_interaction_segment(self.application.bot.edit_message_text, parts[0], kwargs)
+            else:
+                await self.application.bot.edit_message_text(**kwargs)
         except Exception as exc:
             if _telegram_message_is_not_modified(exc):
                 self.last_delivery_error = ""

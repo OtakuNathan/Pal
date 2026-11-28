@@ -14,6 +14,7 @@ from pal.control.interactions import (
     delivery_for_reply,
     delivery_for_interaction,
 )
+from pal.control.presentation import markdown_literal
 
 if TYPE_CHECKING:
     from pal.core.contracts import PendingControlRequest
@@ -34,9 +35,12 @@ def build_log_panel_interaction(
 ) -> InteractionMessageSpec:
     start_label = "> Start logging" if enabled else "Start logging"
     end_label = "Stop logging" if enabled else "> Stop logging"
-    text = render_log_status_text(enabled)
+    text = (
+        f"**Debug log:** **{'on' if enabled else 'off'}**\n\n"
+        "Use /log start or /log end. Changes apply to new turns and Bunshin role runs only."
+    )
     if banner:
-        text = f"{banner}\n\n{text}"
+        text = f"{markdown_literal(banner)}\n\n{text}"
     return InteractionMessageSpec(
         interaction_id=control_panel_interaction_id(route),
         interaction_kind="control_panel",

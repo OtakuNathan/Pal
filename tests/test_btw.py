@@ -160,7 +160,8 @@ def test_slash_preserves_question_text_and_rejects_empty():
     assert parsed.args["text"] == text
     assert parsed.route == ROUTE
     assert plane.parse_event(ControlEvent(EventKind.SLASH_COMMAND, "channel", {"text": "/btw"})).action_kind == "invalid_command"
-    assert "/btw <question>" in plane.render_panel_text()
+    from telegramify_markdown import convert
+    assert "/btw <question>" in convert(plane.render_panel_text())[0]
 
 
 def test_side_turn_uses_only_left_and_never_writes_resident_history():
