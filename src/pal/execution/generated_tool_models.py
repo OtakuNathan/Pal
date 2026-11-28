@@ -1138,9 +1138,9 @@ BunshinScopedExecutionOpBunshinArtifactWriteInput = _strict_model(
 BunshinCandidateBuilderOpBunshinCandidateSubmitInput = _strict_model(
     'BunshinCandidateBuilderOpBunshinCandidateSubmitInput',
     {
-        "result_text": (str, Field(None)),
-        "next_steps": (list[str], Field(None)),
-        "deliverable_paths": (list[str], Field(None)),
+        "result_text": (str, Field(None, description="Actual result for the intended recipient (Resident findings or channel-facing content), not an execution or verification report. For scheduled channel delivery this is the exact message.")),
+        "next_steps": (list[str], Field(None, description="Outstanding follow-up for Resident; not appended to scheduled channel messages.")),
+        "deliverable_paths": (list[str], Field(None, description="Intended result files only, excluding private state, backups and intermediate files. Scheduled work keeps file artifacts available for retrieval without sending attachments.")),
     },
 )
 

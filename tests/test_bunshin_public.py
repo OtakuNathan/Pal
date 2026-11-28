@@ -8076,6 +8076,61 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
         )
         self.assertNotIn("clarification_id", json.dumps(workflow["pending_question"]))
 
+    def test_resident_result_suppresses_channel_delivery_but_not_control_closure(self) -> None:
+        manager = BunshinManager(self.runtime_root)
+        manager.workflow_service.repository.snapshots.read_snapshot = lambda *_args: AggregateSnapshot(
+            aggregate_type=AggregateType.WORKFLOW, aggregate_id="wf", workflow_id="wf",
+            state="COMPLETED", version=2, payload={"task_id": "task", "channel_delivery_requested": False},
+            created_at="2026-01-01T00:00:00+00:00", updated_at="2026-01-01T00:00:00+00:00")
+        queued = []
+        manager.workflow_service.repository.deliveries.enqueue_task_delivery = lambda **kwargs: {
+            "delivery_id": "delivery", "task_id": kwargs["task_id"], "payload": kwargs["payload"], "status": "pending"}
+        manager.events.queue_event = lambda event: queued.append(event)
+        manager._publish_workflow_event({"workflow_id": "wf", "status": "completed", "summary": "internal research"})
+        self.assertEqual(queued, [])
+        manager._publish_workflow_event({"workflow_id": "wf", "status": "completed",
+            "summary": "internal research", "resolved_interactions": [
+                {"interaction_id": "question", "interaction_kind": "bunshin_clarification"}]})
+        self.assertEqual(len(queued), 1)
+        self.assertIs(queued[0]["payload"]["channel_delivery_requested"], False)
+
+    def test_resident_control_ack_does_not_change_result_delivery_status(self) -> None:
+        from pal.foundation.background_inbox import BackgroundInbox
+        inbox = BackgroundInbox(self.runtime_root)
+        inbox.publish("wf", {"result_text": "internal research"}, delivery_status="not_requested")
+        provider = BunshinManagerProvider(runtime_root=self.runtime_root)
+        event = {"event_kind": "workflow_terminal", "workflow_id": "wf",
+                 "background_handoff": True, "channel_delivery_requested": False}
+        provider.settle_event(event, accepted=False)
+        self.assertEqual(inbox.pending()[0]["delivery_status"], "not_requested")
+        provider.settle_event(event, accepted=True)
+        self.assertEqual(inbox.pending()[0]["delivery_status"], "not_requested")
+
+    def test_manager_keeps_plain_worker_terminal_in_ledger_not_delivery(self) -> None:
+        manager = BunshinManager(self.runtime_root)
+        state = BunshinRunState(
+            bunshin_id="inv-evidence", run_id="run-evidence",
+            pack=BunshinInvocationPack(invocation_id="inv-evidence",
+                metadata={"prompt_log_enabled": True, "bunshin": {"workflow_id": "wf-evidence"}}),
+        )
+        manager.runs[state.run_id] = state
+        recorded, queued = [], []
+        manager.workflow_service.repository.role_events.record_worker_event = lambda event: recorded.append(dict(event))
+        manager._queue_task_delivery_event = lambda event, *, dedup_key: queued.append(event)
+        asyncio.run(manager._publish_worker_event({
+            "event_kind": "terminal", "run_id": state.run_id,
+            "payload": {"status": "completed", "summary": "assignment produced completion evidence"},
+        }))
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(state.status, "exiting")
+        self.assertEqual(state.last_event["event_kind"], "terminal")
+        self.assertEqual(queued, [])
+
+    def test_legacy_worker_terminal_without_actions_does_not_require_channel(self) -> None:
+        provider = BunshinManagerProvider(runtime_root=self.runtime_root)
+        event = {"event_kind": "terminal", "delivery_id": "legacy", "payload": {"summary": "internal evidence"}}
+        self.assertEqual(provider._prepare_delivery_event(event), event)
+
     def test_manager_routes_worker_question_through_task_delivery_outbox(self) -> None:
         manager = BunshinManager(self.runtime_root)
         state = BunshinRunState(
@@ -8109,6 +8164,7 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
         )
         manager.workflow_service.repository.deliveries.enqueue_task_delivery = lambda **kwargs: {
             "delivery_id": "delivery-routed-question",
+            "status": "pending",
             "task_id": kwargs["task_id"],
             "payload": kwargs["payload"],
         }

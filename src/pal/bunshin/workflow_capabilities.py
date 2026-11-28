@@ -64,6 +64,10 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
         "Select execution_mode=direct for a clear task or agreed plan; use planned when architecture design is needed. "
         "Direct supports general and software_engineering new_requirement workflows: it skips Architect and Architect Reviewer, "
         "and gives Executor and any configured Verifier the same complete task and frozen source inputs in an isolated repository workspace. For recurring general work, select workspace.kind=managed_git to keep a semantic Task directory. "
+        "For ordinary delegated work or research, use profile=general.generic, execution_mode=direct, and managed_git. "
+        "General Direct defaults to result_recipient=resident: Pal can read or wait for the result with read_bunshin_task_result, "
+        "or receive it at the next ordinary user turn without a channel push. Set result_recipient=channel only when the "
+        "user wants the result delivered directly to the current channel. "
         "Choose by identity binding and task nature, not by prose length or step count. Reuse known skill contracts, "
         "discovery results, and the user's existing approval for this workflow. Use search_skills only when relevant "
         "manuals still need discovery; read_tool is needed only for missing contract information. For newly selected "
@@ -76,7 +80,8 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
         "Do not use for work strongly bound to Pal's relationship with the user, including conversation, Q&A, "
         "check-ins, quizzes, or personal technical discussion. A delegated repository investigation can use direct mode. "
         "Do not inspect or implement a delegated target concurrently in the foreground. After acceptance, do not poll status or create "
-        "a proactive polling task; callbacks deliver clarification, review, and completion events."
+        "a proactive polling task. Clarification and review use callbacks; final results follow result_recipient. "
+        "Read or briefly wait for an internal result when the current conversation needs it."
     ),
     failure_next_steps=(
         "Correct invalid task, profile, workspace, operation, artifact, or approved skill input. If creation may have "
@@ -146,13 +151,17 @@ class BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput(StrictToolModel
     profile: str | None = Field(
         default=None,
         description=(
-            "Canonical Task profile, such as software_engineering.v2_coder or "
-            "lifestyle.nutritionist. Required when task is omitted and immutable after "
+            "Canonical Task profile, such as software_engineering.v2_coder, "
+            "general.generic (ordinary background tasks), or lifestyle.nutritionist. Required when task is omitted and immutable after "
             "Task creation."
         ),
     )
     execution_mode: Literal["planned", "direct"] = Field(
         default="planned", description="Direct uses an externally supplied task plan and one repository execution cycle. General Direct defaults to no independent verifier; software engineering retains its verifier. Planned designs and reviews contracts first. In task_spec, deliverable_paths lists repository-relative files that must be delivered.",
+    )
+    result_recipient: Literal["resident", "channel"] | None = Field(
+        default=None,
+        description="Final result audience. General Direct defaults to resident (internal handoff to Pal; no channel push). Choose channel for direct delivery to the user. Other workflow types retain channel delivery. Approval and clarification still use the Task route.",
     )
     memory_policy: Literal["enabled", "disabled"] | None = None
     role_overrides: dict[str, str | None] | None = Field(default=None, description="Override role profiles; null verifier/reviewer skips independent verification/review. Null executor requires an external product.")
@@ -228,7 +237,7 @@ class BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput(StrictToolModel
         ),
     )
     references: list[Any] | None = None
-    research_mode: Literal["none", "local_only", "external_allowed"] = "local_only"
+    research_mode: Literal["none", "local_only", "external_allowed"] = Field(default="local_only", description="Use external_allowed when the task requires internet research; local_only and none do not grant web tools.")
     artifact: str | None = Field(
         default=None,
         description="Natural-language name previously given to submit_bunshin_artifact.",
@@ -570,7 +579,7 @@ class BunshinPublicProvider:
                 "Checking workflow phase, module Coder/Verifier state, blockers, next legal actions, timings, or liveness. "
                 "When workflow.human_review_available is true, call with view=human_review to read the durable review."
             ),
-            do_not_use_when="Do not poll repeatedly after workflow acceptance; completion returns through system callbacks.",
+            do_not_use_when="Do not poll repeatedly after workflow acceptance; use read_bunshin_task_result when the conversation needs an internal result.",
             failure_next_steps="Correct the Task title; reconcile with search_bunshin_tasks if the title is uncertain.",
         ),
         InputModel=BunshinCapabilitiesBunshinPublicProviderStatusInput,
@@ -631,7 +640,7 @@ class BunshinPublicProvider:
                 if workflow.get("workflow_state") in {"COMPLETED", "REJECTED", "CANCELLED"}:
                     delivery = dict(workflow.get("delivery") or {})
                     result = _public_result("bunshin task result", {"workflow_id": workflow_id, "state": workflow["workflow_state"], "delivery": delivery})
-                    if delivery.get("kind") == "files":
+                    if workflow.get("background_handoff"):
                         result = replace(result, context_messages=(ToolContextMessageIR(
                             content="Background task result has been explicitly read.",
                             semantic_kind="runtime_context",

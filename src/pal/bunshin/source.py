@@ -8,7 +8,7 @@ from pal.control.interactions import delivery_for_reply, terminal_delivery_for_i
 from pal.core.events import EventHandler, EventSource
 from pal.foundation import EventEnvelope
 from pal.foundation.diagnostics import exception_reason
-from pal.bunshin.event_contracts import BunshinEventPort
+from pal.bunshin.event_contracts import BunshinEventPort, terminal_has_user_actions, terminal_is_control_only
 from pal.bunshin.interactions import bunshin_approval_delivery, bunshin_architecture_review_delivery, bunshin_question_delivery
 from pal.memory.contracts import MEMORY
 from pal.shared import EventKind, SourceKind
@@ -52,6 +52,11 @@ class BunshinControlEventHandler(EventHandler):
 
     async def handle(self, event: EventEnvelope, context) -> list[EventEnvelope]:
         payload = dict(event.payload or {})
+        worker_terminal = payload.get("event_kind") == "terminal"
+        control_only = terminal_is_control_only(payload.get("event_kind"), payload)
+        if control_only and not terminal_has_user_actions(payload):
+            self.provider.settle_event(payload, accepted=True)
+            return []
         route = _route(payload.get("route"))
         if route is None:
             self.provider.settle_event(payload, accepted=False, error="bunshin event has no delivery route")
@@ -73,10 +78,12 @@ class BunshinControlEventHandler(EventHandler):
                 route, interaction_id=f"bunshin_v2_architecture_{revision_id}",
                 interaction_kind="bunshin_architecture_review",
                 text=str(payload.get("summary") or "Bunshin architecture decision recorded.")) if revision_id else None)
+        elif control_only:
+            delivery = None
         else:
             text = str(payload.get("summary") or payload.get("status") or "Bunshin workflow completed.")
             delivery = delivery_for_reply(route, text)
-        if delivery is None:
+        if delivery is None and not control_only:
             self.provider.settle_event(payload, accepted=False, error="bunshin event has no delivery")
             return []
         deliveries: list[tuple[str, ControlDelivery]] = []
@@ -88,17 +95,20 @@ class BunshinControlEventHandler(EventHandler):
                 if interaction_id and interaction_kind:
                     deliveries.append((f"interaction:{index}", terminal_delivery_for_interaction(
                         route, interaction_id=interaction_id, interaction_kind=interaction_kind,
-                        text=str(payload.get("summary") or payload.get("status") or "Bunshin workflow completed."))))
-        if event.event_kind in {EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING, EventKind.BUNSHIN_TERMINAL}:
+                        text=("Bunshin assignment ended; this request is closed." if worker_terminal else
+                              "Bunshin workflow ended; this request is closed.") if control_only else
+                        str(payload.get("summary") or payload.get("status") or "Bunshin workflow completed."))))
+        if not control_only and event.event_kind in {EventKind.BUNSHIN_ARCHITECTURE_REVIEW_PENDING, EventKind.BUNSHIN_TERMINAL}:
             for index, attachment in enumerate(list(payload.get("attachments") or [])):
                 item = dict(attachment or {})
                 if str(item.get("path") or "").strip():
                     deliveries.append((f"attachment:{index}", ControlDelivery(
                         delivery_kind="attachment", route=route, payload=item)))
-        deliveries.append(("primary", delivery))
+        if delivery is not None:
+            deliveries.append(("primary", delivery))
         accepted = True
         error = ""
-        background = payload.get("background_handoff") and payload.get("event_kind") == "workflow_terminal"
+        background = not control_only and payload.get("background_handoff") and payload.get("event_kind") == "workflow_terminal"
         try:
             completed_parts = self.provider.delivered_event_parts(payload)
             if event.event_kind == EventKind.BUNSHIN_TERMINAL and payload.get("memory_candidates") and "memory_proposals" not in completed_parts:
@@ -158,6 +168,8 @@ def _event_payload(item: dict) -> dict:
     payload = dict(item.get("payload") or {})
     for key in ("task_id", "delivery_id", "event_kind", "bunshin_id", "run_id", "invocation_id", "workflow_id", "bunshin_profile", "created_at"):
         payload.setdefault(key, item.get(key) or "")
+    # Delivery authority belongs to the outer Manager event, not role text.
+    payload["event_kind"] = item.get("event_kind") or ""
     if item.get("task_id"):
         payload["task_id"] = item["task_id"]
     route = payload.get("route")

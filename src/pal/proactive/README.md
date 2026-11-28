@@ -31,6 +31,11 @@ The dedicated `general.proactive_worker` profile uses the normal Bunshin LLM
 broker, worktree, tool permissions, interaction and recovery protocols. It has
 no independent verifier by default and cannot propose long-term memories.
 Resident does not run an LLM turn at admission or when a workflow finishes.
+Scheduled channel delivery sends only the worker's exact user-facing
+`result_text`. Execution logs, checks, file inventories and private working
+files stay in Bunshin and the managed data repository. Follow-up notes and
+file references remain in the durable handoff; they are not pushed as messages
+or attachments. Worker termination notices are not user-facing results.
 There is no resident-turn execution fallback. Historical definitions and run
 records remain readable without being re-executed.
 

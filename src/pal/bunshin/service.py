@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pal.bunshin.event_contracts import channel_result_requested
 from pal.bunshin.workflow_request_values import _normalize_workspace as _normalize_workspace
 from pal.bunshin.workflow_request_values import _normalize_references as _normalize_references
 from pal.bunshin.workflow_request_values import _normalize_skill_refs as _normalize_skill_refs
@@ -438,6 +439,17 @@ class BunshinWorkflowService:
             raise ValueError("managed Git tasks require direct execution; planned artifact tasks retain their existing workspace adapter")
         delivery_policy = ("files" if execution_mode == "direct" and effective_binding.get("family_id") == "general"
                            else "git" if effective_binding.get("execution_adapter") == "software_git.v2" else "artifact")
+        if frozen_execution_source is not None:
+            channel_delivery_requested = channel_result_requested(frozen_execution_source.payload)
+        elif data.get("scheduled_run_id"):
+            channel_delivery_requested = bool(data.get("channel_delivery_requested"))
+        else:
+            recipient = data.get("result_recipient")
+            if recipient not in (None, "resident", "channel"):
+                raise ValueError("result_recipient must be resident or channel")
+            if recipient == "resident" and delivery_policy != "files":
+                raise ValueError("resident-only result delivery requires General Direct")
+            channel_delivery_requested = recipient == "channel" if recipient is not None else delivery_policy != "files"
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
         task_spec = data.get("task_spec")
         if task_spec is not None and (not isinstance(task_spec, Mapping) or not task_spec):
@@ -549,8 +561,8 @@ class BunshinWorkflowService:
             "execution_mode": execution_mode,
             "memory_policy": memory_policy,
             "delivery_policy": delivery_policy,
+            "channel_delivery_requested": channel_delivery_requested,
             **({"scheduled_run_id": data["scheduled_run_id"], "scheduled_request_fingerprint": data.get("scheduled_request_fingerprint"), "scheduled_task_name": str(data.get("scheduled_task_name") or "__PROACTIVE__"), "frozen_delivery_binding": delivery_binding,
-                "channel_delivery_requested": bool(data.get("channel_delivery_requested")),
                 "discard_output": bool(data.get("discard_output"))} if data.get("scheduled_run_id") else {}),
             **({"scheduled_archive_snapshot": data["scheduled_archive_snapshot"]} if data.get("scheduled_archive_snapshot") else {}),
             "goal": raw_goal,
@@ -644,9 +656,9 @@ class BunshinWorkflowService:
                         "execution_mode": execution_mode,
                         "memory_policy": memory_policy,
                         "delivery_policy": delivery_policy,
+                        "channel_delivery_requested": channel_delivery_requested,
                         **({"scheduled_run_id": data["scheduled_run_id"], "scheduled_request_fingerprint": data.get("scheduled_request_fingerprint"), "scheduled_task_name": str(data.get("scheduled_task_name") or "__PROACTIVE__"), "frozen_delivery_binding": delivery_binding,
-                            "channel_delivery_requested": bool(data.get("channel_delivery_requested")),
-                "discard_output": bool(data.get("discard_output"))} if data.get("scheduled_run_id") else {}),
+                            "discard_output": bool(data.get("discard_output"))} if data.get("scheduled_run_id") else {}),
                         "background_handoff": delivery_policy == "files",
                         "research_mode": research_mode.value,
                         "owner": actor,
@@ -668,6 +680,7 @@ class BunshinWorkflowService:
             "task_name": str(task_rows[0].get("title") or "") if task_rows else "",
             "workflow_name": workflow_name,
             "state": result.snapshot.state,
+            "result_recipient": "channel" if channel_delivery_requested else "resident",
             "request_ref": request_ref.to_dict(),
             "next_action": "manager_outbox_tick",
         }

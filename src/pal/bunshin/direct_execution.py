@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
+from pal.bunshin.event_contracts import channel_result_requested
 from pal.bunshin.artifacts import ArtifactRef
 from pal.bunshin.contracts import AggregateSnapshot
 from pal.bunshin.graph_protocol import GraphIR, NodeSpec, RoleBinding
@@ -79,6 +80,7 @@ def prepare_direct_execution(
     payload = {
         "schema_version": "1", "execution_mode": "direct", "requirements_ref": task_ref.to_dict(),
         "domain": binding["family_id"],
+        **({"result_recipient": "channel" if channel_result_requested(request) else "resident"} if binding["family_id"] == "general" else {}),
         "delivery_policy": request.get("delivery_policy") or ("files" if binding["family_id"] == "general" else "git"),
         **({"scheduled_archive_snapshot": request["scheduled_archive_snapshot"]} if request.get("scheduled_archive_snapshot") else {}),
         "input_binding_ref": dict(request.get("input_binding_ref") or {}),

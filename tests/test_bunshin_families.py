@@ -632,6 +632,14 @@ workspace_policy: {}
         self.assertNotIn("op_web_search", local.allowed_capabilities)
         self.assertNotIn("op_browser_read", local.allowed_capabilities)
 
+    def test_generic_worker_can_research_only_when_explicitly_allowed(self) -> None:
+        pack = self._pack("general.generic")
+        for mode in ("none", "local_only", "external_allowed"):
+            with self.subTest(mode=mode):
+                effective = apply_research_capability_policy(pack, research_mode=mode)
+                self.assertEqual("op_web_search" in effective.allowed_capabilities, mode == "external_allowed")
+                self.assertEqual("op_browser_read" in effective.allowed_capabilities, mode == "external_allowed")
+
     def test_software_architect_gets_web_only_when_research_mode_allows_it(self) -> None:
         architect = self._pack("software_engineering.v2_architect")
         self.assertIn("op_web_search", architect.allowed_capabilities)

@@ -469,8 +469,9 @@ Existing archive contract tests cover task reuse and public status projection.
 
 
 - `BackgroundHandoffLifecycle.tla` abstracts the durable occurrence admission,
-  stable workflow binding, explicit result observation, checkpoint/ack cut and
-  uncertain external delivery. Runtime regressions in
+  stable workflow binding, explicit result observation, checkpoint/ack cut,
+  frozen optional channel delivery, receipt projection before send and uncertain
+  external delivery. Runtime regressions in
   `tests/test_bunshin_background_engine.py` exercise the SQLite trigger cursor,
   durable consumption tombstone and Memory snapshot restoration at these cuts.
 - `ManagedTaskPromotion.tla` abstracts the foreground capture, accepted

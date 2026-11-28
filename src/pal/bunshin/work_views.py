@@ -191,6 +191,7 @@ class UnitWorkViewBuilder:
             "schema_version": "3",
             "execution_mode": str(artifact.get("execution_mode") or "planned"),
             "domain": str(artifact.get("domain") or "software_engineering"),
+            **({"result_recipient": artifact["result_recipient"]} if artifact.get("result_recipient") else {}),
             **({"scheduled_archive_snapshot": artifact["scheduled_archive_snapshot"]} if artifact.get("scheduled_archive_snapshot") else {}),
             "requirements_ref": dict(artifact.get("requirements_ref") or {}),
             "deliverable_paths": list(artifact.get("deliverable_paths") or []),

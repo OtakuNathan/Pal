@@ -115,7 +115,20 @@ def test_external_direct_product_without_worker_delivers_actual_commit(tmp_path)
     assert delivery["verification_status"] == "not_required"
     assert delivery["commit_sha"] == candidate
     assert (canonical / "note.md").read_text() == "actual result"
-    assert BackgroundInbox(service.runtime_root).pending()[0]["result_text"] == "Note written"
+    handoff, = BackgroundInbox(service.runtime_root).pending()
+    assert handoff["result_text"] == "Note written"
+    assert handoff["delivery_status"] == "not_requested"
+    assert workflow.payload["channel_delivery_requested"] is False
+    terminals = [event for event in events if event.get("status") == "completed"]
+    assert terminals
+    assert all(event["channel_delivery_requested"] is False and "attachments" not in event for event in terminals)
+    assert service.workflow_status(workflow_id)["result_recipient"] == "resident"
+    manifest = service.artifacts.read_json(node.payload["architecture_manifest_ref"])
+    assert manifest["result_recipient"] == "resident"
+    from pal.bunshin.contract_runtime import ContractArtifactAccess
+    from pal.bunshin.work_views import UnitWorkViewBuilder
+    view = UnitWorkViewBuilder(ContractArtifactAccess(service.artifacts, service.repository)).build(node)
+    assert service.artifacts.read_json(view)["result_recipient"] == "resident"
     cycle = service.repository.cycles.read_graph_execution(workflow_id=workflow_id).cycles["repository"]
     assert cycle.last_verdict is None
 
@@ -370,7 +383,7 @@ def test_external_wait_pause_resume_cancel_never_admits_a_worker(tmp_path, mode)
         "goal": "External task", "execution_mode": mode, "role_overrides": overrides,
         "task_spec": {"authoritative_text": "External task"},
         "delivery_binding": {"channel_id": "null", "channel_kind": "null", "reply_target": {"sink": "null"}}})
-    processor = BunshinOutboxProcessor(service, semantic_effects=SemanticOrchestrator(service))
+    processor = BunshinOutboxProcessor(service, publish_workflow_event=lambda _: None, semantic_effects=SemanticOrchestrator(service))
     workflow_id = response["workflow_id"]
     aggregate_type = AggregateType.DAG_NODE_RUN if mode == "direct" else AggregateType.ARCHITECTURE_REVISION
 
@@ -396,6 +409,33 @@ def test_external_wait_pause_resume_cancel_never_admits_a_worker(tmp_path, mode)
     service.control_workflow(workflow_id=workflow_id, command="cancel", actor="pal", source_channel="test")
     asyncio.run(drain())
     assert service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id).state == "CANCELLED"
+    if mode == "direct":
+        from pal.bunshin.workflow_capabilities import BunshinPublicProvider
+        from pal.execution.contracts import CapabilityCall
+        inbox = BackgroundInbox(service.runtime_root)
+        assert inbox.pending()[0]["workflow_id"] == workflow_id
+        result = asyncio.run(BunshinPublicProvider(service.runtime_root).read_task_result(
+            CapabilityCall(name="read_bunshin_task_result", args={"task": "external"})))
+        assert result.status == "ok"
+        assert result.structured["state"] == "CANCELLED"
+        assert result.context_messages[0].metadata["background_workflow_id"] == workflow_id
+        # Only a persisted Resident L1 acceptance consumes the receipt.
+        from types import SimpleNamespace
+        from pal.shared.tool_protocol import ToolExecutionResult, new_tool_call
+        from tests.test_resident_checkpoint import _build_app
+        app = _build_app(service.runtime_root)
+        app.handle.memory_service.begin_l1_turn("read", user_text="What happened?")
+        async def accept_result():
+            executor = app.handle.core.turn_executor
+            await executor._append_l1_tool_context_messages_async(
+                SimpleNamespace(turn_id="read"), (new_tool_call(name="read_bunshin_task_result", args={}),),
+                (ToolExecutionResult(name="read_bunshin_task_result", ok=True, llm_text="Cancelled",
+                                     context_messages=tuple(result.context_messages)),))
+            assert inbox.pending()
+            await executor._checkpoint_resident_async("read", "round")
+        asyncio.run(accept_result())
+        assert not inbox.pending()
+        app.handle.core.context.execution_runtime.shutdown()
 
 
 def test_schedule_storage_failure_preserves_cursor_and_retries(tmp_path, monkeypatch):
@@ -433,3 +473,215 @@ def test_schedule_storage_failure_preserves_cursor_and_retries(tmp_path, monkeyp
         assert repo.list_definitions()[0].next_due_at_utc is None
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("scheduled,channel", [(True, True), (False, True), (False, False), (False, None)])
+def test_channel_publication_separates_scheduled_message_from_internal_files(tmp_path, monkeypatch, scheduled, channel):
+    import hashlib
+    from types import SimpleNamespace
+    from pal.bunshin.workflow_publication import WorkflowPublication
+
+    service = BunshinWorkflowService(tmp_path / "runtime")
+    content = b"internal answer key\n"
+    file_ref = service.artifacts.put_bytes(content, artifact_type="TaskDeliverableArtifact", media_type="text/markdown")
+    receipt = service.artifacts.put_json({
+        "schema_version": "5", "kind": "files",
+        "verification_ref": {}, "verification_status": "not_required",
+        "result_text": "The requested quiz, without answers.",
+        "next_steps": ["Grade it when the user replies."],
+        "files": [{"repository_path": "answer-key.md", "content_sha256": hashlib.sha256(content).hexdigest(),
+                   "artifact_ref": file_ref.to_dict(), "mime_type": "text/markdown"}],
+    }, artifact_type="DeliveryReceiptArtifact", schema_version="5")
+    payload = {"background_handoff": True, "result_artifact_ref": receipt.to_dict(),
+               **({"channel_delivery_requested": channel} if channel is not None else {}),
+               **({"scheduled_run_id": "run"} if scheduled else {})}
+    workflow = SimpleNamespace(state="COMPLETED", updated_at="2026-11-28T10:16:00Z", payload=payload)
+    monkeypatch.setattr(service.repository.snapshots, "read_snapshot", lambda *args: workflow)
+    events = []
+    WorkflowPublication(service, publish_workflow_event=events.append).publish_terminal("workflow")
+    event, = events
+    result, = BackgroundInbox(service.runtime_root).pending()
+    assert result["result_text"] == "The requested quiz, without answers."
+    assert result["next_steps"] == ["Grade it when the user replies."]
+    assert result["files"][0]["artifact_ref"] == file_ref.to_dict()
+    if scheduled or channel is False:
+        assert event["summary"] == result["result_text"]
+        assert "attachments" not in event
+        assert result["delivery_status"] == ("pending" if channel else "not_requested")
+        if channel is False:
+            assert event["channel_delivery_requested"] is False
+    else:
+        assert event["attachments"][0]["file_name"] == "answer-key.md"
+        assert "Next steps:" in event["summary"]
+
+
+def test_scheduled_delivery_contract_is_frozen_into_each_task_ledger(tmp_path):
+    from pal.bunshin.scheduled_workflows import start_scheduled_run, SCHEDULED_DELIVERY_CONTRACT
+    service = BunshinWorkflowService(tmp_path / "runtime")
+    result = start_scheduled_run(service, {
+        "run_id": "run", "task_name": "daily-quiz", "goal": "Send today's quiz",
+        "method": "Use the private answer key only for grading",
+        "delivery_binding": {"channel_id": "telegram", "channel_kind": "telegram", "reply_target": {"chat_id": "1"}},
+    })
+    wf = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, result["workflow_id"])
+    request = service.artifacts.read_json(wf.payload["request_ref"])
+    ledger = service.artifacts.read_json(request["requirements_ref"])
+    assert ledger["original"]["goal"] == "Send today's quiz"
+    assert ledger["original"]["method"] == "Use the private answer key only for grading"
+    assert ledger["original"]["delivery_contract"] == SCHEDULED_DELIVERY_CONTRACT
+
+
+@pytest.mark.parametrize("recipient,expected", [(None, False), ("resident", False), ("channel", True)])
+def test_general_direct_result_audience_frozen_per_workflow(tmp_path, recipient, expected):
+    service = BunshinWorkflowService(tmp_path / "runtime")
+    result = service.start_workflow({
+        "title": "research", "profile": "general.generic", "execution_mode": "direct",
+        "goal": "Research a topic", "workspace": {"kind": "managed_git"},
+        "result_recipient": recipient, "task_spec": {"authoritative_text": "Research a topic"},
+        "delivery_binding": {"channel_id": "telegram", "channel_kind": "telegram", "reply_target": {"chat_id": "1"}},
+    })
+    workflow_id = result["workflow_id"]
+    assert result["result_recipient"] == ("channel" if expected else "resident")
+    wf = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+    request = service.artifacts.read_json(wf.payload["request_ref"])
+    assert wf.payload["channel_delivery_requested"] is expected
+    assert request["channel_delivery_requested"] is expected
+    assert service.workflow_status(workflow_id)["result_recipient"] == ("channel" if expected else "resident")
+    # The binding is still present for approval and clarification regardless of result audience.
+    binding = service.repository.delivery_bindings.read_task_delivery(wf.payload["task_id"])
+    assert binding["current"]["channel_id"] == "telegram"
+
+
+@pytest.mark.parametrize("primary_sent", [False, True])
+def test_legacy_scheduled_outbox_recovers_text_only_without_replaying_parts(tmp_path, monkeypatch, primary_sent):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from pal.bunshin.manager import BunshinManager, _delivery_event_from_row
+    from pal.bunshin.capabilities import BunshinManagerProvider
+    from pal.bunshin.workflow_publication import WorkflowPublication
+    from pal.bunshin.source import BunshinControlEventHandler, _event_payload
+    from pal.foundation import EventEnvelope
+    from pal.shared import EventKind, SourceKind
+    from pal.shared.ports import PortRegistry
+
+    manager = BunshinManager(tmp_path / "runtime")
+    service = manager.workflow_service
+    route = {"channel_id": "telegram", "channel_kind": "telegram", "reply_target": {"chat_id": "1"}}
+    service.create_task({"task_id": "__PROACTIVE__", "title": "__PROACTIVE__", "objective": "Quiz",
+                         "profile": "general.proactive_worker", "workspace": {"kind": "managed_git"},
+                         "actor": "pal", "delivery_binding": route})
+    response = service.start_workflow({"task_id": "__PROACTIVE__", "scheduled_run_id": "run",
+        "scheduled_task_name": "quiz", "channel_delivery_requested": True, "execution_mode": "direct",
+        "goal": "Generate quiz", "task_spec": {"authoritative_text": "Keep answer key private"},
+        "role_overrides": {"implementation": None}, "delivery_binding": route, "memory_policy": "disabled"})
+    wid = response["workflow_id"]
+    published = []
+    processor = BunshinOutboxProcessor(service, publish_workflow_event=published.append,
+                                       semantic_effects=SemanticOrchestrator(service))
+
+    async def drain():
+        for _ in range(30):
+            result = await processor.process_once(limit=20)
+            assert result["failed"] == 0
+            if not result["claimed"]:
+                break
+
+    asyncio.run(drain())
+    node = next(n for n in service.repository.queries.list_workflow_snapshots(wid)
+                if n.aggregate_type == AggregateType.DAG_NODE_RUN)
+    clone = tmp_path / "external"
+    _git(tmp_path, "clone", str(service.runtime_root / "proactive"), str(clone))
+    candidate = commit(clone, "answer-key.md", "private fixture answer")
+    submit_external_product(service.repository, service.artifacts, {
+        "workflow_id": wid, "node_run_id": node.aggregate_id, "generation": node.payload["graph_generation"],
+        "submission_id": "external-1", "repository": str(clone), "commit_sha": candidate,
+        "result_text": "Question text only", "next_steps": ["Grade on reply"], "deliverable_paths": ["answer-key.md"]})
+    asyncio.run(drain())
+    workflow = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, wid)
+    assert workflow.state == "COMPLETED"
+    canonical = next(e for e in published if e.get("status") == "completed")
+    receipt = service.artifacts.read_json(workflow.payload["result_artifact_ref"])
+    file = receipt["files"][0]
+    file_record = service.repository.artifacts.read_artifact_record(file["artifact_ref"]["sha256"])
+
+    # Persist exactly the old presentation under the same delivery identity.
+    old = deepcopy(canonical)
+    old["summary"] += "\n\nNext steps:\nGrade on reply"
+    old["attachments"] = [{"path": file_record["storage_path"], "file_name": "answer-key.md",
+                           "mime_type": "text/markdown", "caption": "Task deliverable: answer-key.md"}]
+    manager._publish_workflow_event(old)
+    old_row, = service.repository.deliveries.list_pending_task_deliveries()
+    did = old_row["delivery_id"]
+    deliveries = service.repository.deliveries
+    assert deliveries.acknowledge_task_delivery_part(did, "attachment:0")
+    if primary_sent:
+        assert deliveries.acknowledge_task_delivery_part(did, "primary")
+        BackgroundInbox(service.runtime_root).update_delivery(wid, "delivered")
+
+    queued = []
+    manager.events.queue_event = queued.append
+    WorkflowPublication(service, publish_workflow_event=manager._publish_workflow_event).publish_terminal(wid)
+    replay, = queued
+    assert replay["delivery_id"] == did
+    assert deliveries.delivered_task_delivery_parts(did) == (("attachment:0", "primary") if primary_sent else ("attachment:0",))
+    # Different receipt/route identities must still fail deduplication.
+    changed = deepcopy(canonical)
+    changed["result_artifact_ref"] = {**changed["result_artifact_ref"], "sha256": "0" * 64}
+    with pytest.raises(ValueError, match="dedup key collision"):
+        manager._publish_workflow_event(changed)
+
+    provider = BunshinManagerProvider(service.runtime_root)
+    monkeypatch.setattr(provider, "_live_route_for_binding", lambda _: {
+        "endpoint_id": "telegram", "channel_kind": "telegram", "reply_target": {"chat_id": "1"}})
+
+    def request_sync(method, args):
+        if method == "list_task_delivery_parts":
+            return {"parts": deliveries.delivered_task_delivery_parts(args["delivery_id"])}
+        if method == "ack_task_delivery_part":
+            return {"acknowledged": deliveries.acknowledge_task_delivery_part(args["delivery_id"], args["part_key"])}
+        if method == "ack_task_delivery":
+            return {"acknowledged": deliveries.acknowledge_task_delivery(args["delivery_id"])}
+        raise AssertionError(method)
+    monkeypatch.setattr(provider.client, "request_sync", request_sync)
+    prepared = provider._prepare_delivery_event(replay)
+    assert prepared["payload"]["summary"] == "Question text only"
+    assert "attachments" not in prepared["payload"]
+    sent = []
+    async def deliver(delivery, *, require_provider):
+        sent.append(delivery.delivery_kind)
+        return True
+    handler = BunshinControlEventHandler(provider, SimpleNamespace(deliver=deliver))
+    event = EventEnvelope(event_kind=EventKind.BUNSHIN_TERMINAL, source_kind=SourceKind.BUNSHIN,
+                          payload=_event_payload(prepared))
+    asyncio.run(handler.handle(event, SimpleNamespace(port_registry=PortRegistry())))
+    assert sent == ([] if primary_sent else ["reply"])
+    assert not deliveries.list_pending_task_deliveries()
+    final = deliveries.latest_task_delivery(task_id="__PROACTIVE__", workflow_id=wid, event_kind="workflow_terminal")
+    assert final["delivery_id"] == did and final["status"] == "delivered"
+    assert final["payload"] == old_row["payload"]  # historical packet remains intact
+    queued.clear()
+    WorkflowPublication(service, publish_workflow_event=manager._publish_workflow_event).publish_terminal(wid)
+    assert queued == []
+
+
+def test_legacy_worker_terminal_is_suppressed_not_forged_as_delivery(tmp_path, monkeypatch):
+    from pal.bunshin.capabilities import BunshinManagerProvider
+    service = BunshinWorkflowService(tmp_path / "runtime")
+    response = service.start_workflow({"title": "research", "profile": "general.generic", "execution_mode": "direct",
+        "goal": "Research", "workspace": {"kind": "managed_git"}, "task_spec": {"authoritative_text": "Research"},
+        "delivery_binding": {"channel_id": "null", "channel_kind": "null", "reply_target": {"sink": "null"}}})
+    w = service.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, response["workflow_id"])
+    deliveries = service.repository.deliveries
+    row = deliveries.enqueue_task_delivery(task_id=w.payload["task_id"], workflow_id=w.aggregate_id,
+        event_kind="terminal", payload={"event_kind": "terminal", "payload": {"summary": "internal evidence"}},
+        dedup_key="legacy")
+    provider = BunshinManagerProvider(service.runtime_root)
+    def sync(method, args):
+        assert method == "suppress_task_delivery"
+        return {"acknowledged": deliveries.suppress_task_delivery(args["delivery_id"])}
+    monkeypatch.setattr(provider.client, "request_sync", sync)
+    provider.settle_event({"event_kind": "terminal", "delivery_id": row["delivery_id"]}, accepted=True)
+    latest = deliveries.latest_task_delivery(task_id=w.payload["task_id"], workflow_id=w.aggregate_id, event_kind="terminal")
+    assert latest["status"] == "suppressed"
+    assert deliveries.delivered_task_delivery_parts(row["delivery_id"]) == ()
+    assert not deliveries.list_pending_task_deliveries()

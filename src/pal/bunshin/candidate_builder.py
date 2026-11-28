@@ -58,7 +58,9 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "use_when": (
                 "Use after focused checks pass. Complete the initial implementation checklist; during repair, "
                 "address the full RepairBill and submit for automated precheck when the "
-                "implementation is ready for independent verification. For general direct tasks, submit result_text, optional next_steps and deliverable_paths; for software tasks omit arguments; "
+                "implementation is ready for independent verification. For general direct tasks, result_text is the actual result for the audience in the bound work view: resident receives useful findings and conclusions, channel receives the requested user-facing content. Do not substitute a work or self-check report. "
+                "Use next_steps only for outstanding follow-up and deliverable_paths only for intended deliverables, never internal data or intermediate files. "
+                "When a scheduled task has a channel destination, only result_text is sent. For software tasks omit arguments; "
                 "the Manager derives Git delta and journal fields. A software module may "
                 "submit an unchanged baseline when it already satisfies the bound contract "
                 "and focused checks pass; do not manufacture changes for submission."

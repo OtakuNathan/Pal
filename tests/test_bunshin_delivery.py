@@ -58,6 +58,41 @@ class _Core:
 
 
 class BunshinCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_worker_terminal_without_actions_is_acknowledged_without_route(self):
+        provider, core = _Provider(), _Core()
+        context = SimpleNamespace(port_registry=PortRegistry())
+        event = EventEnvelope(event_kind=EventKind.BUNSHIN_TERMINAL, source_kind=SourceKind.BUNSHIN,
+            payload={"event_kind": "terminal", "delivery_id": "old-role-terminal",
+                     "summary": "assignment produced completion evidence"})
+        await BunshinControlEventHandler(provider, core).handle(event, context)
+        self.assertEqual(core.deliveries, [])
+        self.assertEqual(provider.settlements, [True])
+
+    async def test_resident_workflow_terminal_only_resolves_the_interaction(self):
+        provider, core = _Provider(), _Core()
+        context = SimpleNamespace(port_registry=PortRegistry())
+        event = EventEnvelope(event_kind=EventKind.BUNSHIN_TERMINAL, source_kind=SourceKind.BUNSHIN,
+            payload={"event_kind": "workflow_terminal", "background_handoff": True, "channel_delivery_requested": False,
+                     "summary": "Resident-only research", "resolved_interactions": [
+                         {"interaction_id": "approval", "interaction_kind": "bunshin_approval"}],
+                     "route": {"endpoint_id": "telegram", "channel_kind": "telegram"}})
+        await BunshinControlEventHandler(provider, core).handle(event, context)
+        self.assertEqual([d.delivery_kind for d in core.deliveries], ["interactive_resolve"])
+        self.assertEqual(provider.parts, {"interaction:0"})
+        self.assertEqual(provider.settlements, [True])
+
+    async def test_worker_terminal_only_resolves_the_interaction(self):
+        provider, core = _Provider(), _Core()
+        context = SimpleNamespace(port_registry=PortRegistry())
+        event = EventEnvelope(event_kind=EventKind.BUNSHIN_TERMINAL, source_kind=SourceKind.BUNSHIN,
+            payload={"event_kind": "terminal", "delivery_id": "role-terminal", "summary": "internal evidence",
+                     "resolved_interactions": [{"interaction_id": "approval", "interaction_kind": "bunshin_approval"}],
+                     "route": {"endpoint_id": "telegram", "channel_kind": "telegram"}})
+        await BunshinControlEventHandler(provider, core).handle(event, context)
+        self.assertEqual([d.delivery_kind for d in core.deliveries], ["interactive_resolve"])
+        self.assertEqual(provider.parts, {"interaction:0"})
+        self.assertEqual(provider.settlements, [True])
+
     def test_workflow_terminal_uses_terminal_delivery_path(self) -> None:
         self.assertEqual(_event_kind("workflow_terminal"), EventKind.BUNSHIN_TERMINAL)
 
@@ -283,7 +318,7 @@ class BunshinMemoryProposalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         provider, core = _Provider(), _Core()
         core.fail_second_attachment_once = False
         context = SimpleNamespace(port_registry=PortRegistry({"memory:memory": memory}))
-        payload = {"delivery_id": "d", "task_id": "t", "workflow_id": "w", "invocation_id": "i",
+        payload = {"event_kind": "terminal", "delivery_id": "d", "task_id": "t", "workflow_id": "w", "invocation_id": "i",
             "status": "completed", "summary": "done",
             "route": {"endpoint_id": "socket", "channel_kind": "socket", "reply_target": {"session_id": "task"}},
             "memory_candidates": [{"kind": "fact", "title": "test", "summary": "test", "source_excerpt": "source"}]}
@@ -298,4 +333,4 @@ class BunshinMemoryProposalDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["source"]["task_id"], "t")
         self.assertEqual(state["drafts"][0]["decision"], "pending")
         await handler.handle(event, context)
-        self.assertEqual(len(core.deliveries), 2)
+        self.assertEqual(len(core.deliveries), 1)

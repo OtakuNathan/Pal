@@ -28,6 +28,7 @@ from pal.bunshin.llm_proxy import LLMProxy, serve_llm_stream
 from pal.bunshin.run_ledger import BunshinRunState, ProcessStatusView, RunLedger
 from pal.bunshin.config import effective_bunshin_runtime_config
 from pal.bunshin.event_delivery import BunshinEventDelivery
+from pal.bunshin.event_contracts import channel_result_requested, terminal_has_user_actions
 from pal.bunshin.ipc import (
     cleanup_manager_endpoint,
     cleanup_role_gateway_endpoint,
@@ -445,6 +446,9 @@ class BunshinManager:
                 )
             self._wake_event.set()
             return result
+        if workflow_method == "suppress_task_delivery":
+            return {"acknowledged": self.workflow_service.repository.deliveries.suppress_task_delivery(
+                str(params.get("delivery_id") or ""))}
         if workflow_method == "ack_task_delivery":
             return {
                 "acknowledged": self.workflow_service.repository.deliveries.acknowledge_task_delivery(
@@ -744,8 +748,13 @@ class BunshinManager:
                     },
                 }
             )
-        if kind == "terminal" and event_payload.get("status") == "suspended" and event_payload.get("interaction_id"):
-            return
+        if kind == "terminal":
+            if event_payload.get("status") == "suspended" and event_payload.get("interaction_id"):
+                return
+            # The run ledger is already updated. Only actual interaction
+            # closure or memory review needs a user-facing delivery event.
+            if not terminal_has_user_actions(event_payload):
+                return
         if kind in {"approval_requested", "clarification_requested", "terminal"}:
             self._queue_task_delivery_event(
                 item,
@@ -809,8 +818,13 @@ class BunshinManager:
         item["task_id"] = task_id
         if workflow is not None and workflow.payload.get("scheduled_run_id"):
             item["frozen_delivery_binding"] = workflow.payload["frozen_delivery_binding"]
-            if item.get("event_kind") == "workflow_terminal" and not workflow.payload.get("channel_delivery_requested"):
+        if item.get("event_kind") == "workflow_terminal" and workflow is not None and not channel_result_requested(workflow.payload):
+            payload = {**dict(item.get("payload") or {}), "channel_delivery_requested": False}
+            if not terminal_has_user_actions(payload):
                 return
+            # Interaction closure remains deliverable even when the result is
+            # only for Resident. It must not mark the result as channel sent.
+            item["payload"] = payload
         row = self.workflow_service.repository.deliveries.enqueue_task_delivery(
             task_id=task_id,
             workflow_id=workflow_id,
@@ -818,7 +832,8 @@ class BunshinManager:
             payload=item,
             dedup_key=str(dedup_key),
         )
-        self.events.queue_event(_delivery_event_from_row(row))
+        if row["status"] == "pending":
+            self.events.queue_event(_delivery_event_from_row(row))
 
     def _pending_task_delivery_events(self) -> list[dict[str, Any]]:
         return [

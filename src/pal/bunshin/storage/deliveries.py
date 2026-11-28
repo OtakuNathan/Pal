@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pal.bunshin.event_contracts import same_scheduled_terminal_intent, terminal_has_user_actions, terminal_is_control_only
 from pal.bunshin.storage.serialization import _delivery_outbox_row
 from pal.bunshin.storage.serialization import _json
 from pal.bunshin.storage.serialization import _utc_datetime
@@ -84,11 +85,15 @@ class DeliveriesStore:
                 (normalized_key,),
             ).fetchone()
             if row is not None:
+                stored_payload = json.loads(str(row["payload_json"]))
                 same_request = (
                     str(row["task_id"]) == normalized_task_id
                     and str(row["workflow_id"]) == normalized_workflow_id
                     and str(row["event_kind"]) == normalized_kind
-                    and json.loads(str(row["payload_json"])) == dict(payload or {})
+                    and (
+                        stored_payload == dict(payload or {})
+                        or (normalized_kind == "workflow_terminal" and same_scheduled_terminal_intent(stored_payload, payload))
+                    )
                 )
                 if not same_request:
                     raise ValueError(
@@ -152,6 +157,26 @@ class DeliveriesStore:
                 (utc_now(), str(delivery_id or "").strip()),
             )
         return cursor.rowcount == 1
+
+    def suppress_task_delivery(self, delivery_id: str) -> bool:
+        """Retire a legacy control-free terminal notice without claiming a send."""
+        self.database.ensure_schema()
+        with self.database.write_connection() as connection:
+            row = connection.execute(
+                "SELECT event_kind,payload_json,status FROM bunshin_delivery_outbox WHERE delivery_id=?",
+                (str(delivery_id),),
+            ).fetchone()
+            if row is None:
+                return False
+            payload = dict(json.loads(str(row["payload_json"])).get("payload") or {})
+            if not terminal_is_control_only(row["event_kind"], payload) or terminal_has_user_actions(payload):
+                raise ValueError("delivery is not a suppressible terminal notice")
+            if row["status"] == "suppressed":
+                return True
+            return connection.execute(
+                "UPDATE bunshin_delivery_outbox SET status='suppressed', updated_at=? WHERE delivery_id=? AND status='pending'",
+                (utc_now(), str(delivery_id)),
+            ).rowcount == 1
 
     def delivered_task_delivery_parts(self, delivery_id: str) -> tuple[str, ...]:
         """Return durable sub-deliveries already accepted by the channel."""

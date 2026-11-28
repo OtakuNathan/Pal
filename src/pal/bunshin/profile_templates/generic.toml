@@ -12,7 +12,7 @@ output_contract_fragment = """
 Write the contracted product artifact in the owned workspace. Use update_checklist as a compact work ledger, run one focused self-check with ordinary available
 tools, complete the checklist, then call submit_candidate with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself.
 """
-capability_groups = ["generic_producer", "v2_candidate_builder"]
+capability_groups = ["generic_producer", "v2_candidate_builder", "web_research"]
 
 [capability_policy]
 mode = "profile_only"

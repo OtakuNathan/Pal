@@ -451,6 +451,18 @@ General Direct submission accepts `result_text`, `next_steps`, and
 No independent verification is represented as not required. The ordinary
 SWE patch delivery contract remains available.
 
+Worker termination is recorded in the run ledger, not posted as a chat
+notification. Only interaction closure and memory review retain role-level
+delivery; normal channel output comes from workflow terminal publication.
+General Direct defaults to Resident-only results; `result_recipient=channel`
+opts into the current Task channel for user delivery. The choice is frozen per
+workflow; task interaction bindings remain available independently. General
+file delivery remains explicit through deliverable paths. Scheduled
+Proactive channel output is text-only, with follow-ups and file references
+kept in the durable handoff instead of attached to the channel. Previously
+queued scheduled packets are projected from the accepted receipt before send,
+without changing their original row identity or part acknowledgements. A legacy
+role-only notice with no user action is suppressed, not recorded as delivered.
 The durable background inbox carries General and scheduled terminal results to
 Resident independently of its active conversation. Channel confirmation and
 resident consumption have separate records. The runtime upgrade is an offline

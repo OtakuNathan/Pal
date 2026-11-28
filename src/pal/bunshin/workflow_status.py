@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from pal.bunshin.event_contracts import channel_result_requested
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.contracts import AggregateSnapshot, AggregateType
 from pal.bunshin.human_review import human_review_card_is_current
@@ -65,6 +66,8 @@ class WorkflowStatusReader:
             **({"replacement_workflow_id": workflow.payload["replacement_workflow_id"]} if workflow is not None and workflow.payload.get("replacement_workflow_id") else {}),
             "current_phase": projection["current_phase"],
             "workflow_state": projection["workflow_state"],
+            "result_recipient": "channel" if workflow is None or channel_result_requested(workflow.payload) else "resident",
+            "background_handoff": bool(workflow is not None and workflow.payload.get("background_handoff")),
             "archived": bool(workflow is not None and workflow.payload.get("archived")),
             "active_aggregate_type": projection["active_aggregate_type"],
             "active_aggregate_id": active_id,

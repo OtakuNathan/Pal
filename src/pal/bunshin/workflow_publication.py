@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 
 from pal.bunshin.contracts import ActionEnvelope, AggregateType
 from pal.bunshin.delivery import DeliveryReceipt, DirectDeliveryReceipt
+from pal.bunshin.event_contracts import channel_result_requested
 from pal.bunshin.workflow_effect_context import WorkflowEffectContext
 
 
@@ -31,6 +32,8 @@ class WorkflowPublication(WorkflowEffectContext):
             return
         if workflow.payload.get("scheduled_run_id") and workflow.payload.get("replacement_workflow_id"):
             return
+        scheduled = bool(workflow.payload.get("scheduled_run_id"))
+        send_to_channel = channel_result_requested(workflow.payload)
         normalized_status = workflow.state.lower()
         result_artifact_ref = dict(
             workflow.payload.get("result_artifact_ref") or {}
@@ -49,7 +52,7 @@ class WorkflowPublication(WorkflowEffectContext):
                     verification_ref_value = payload["verification_ref"]
                     background_result = {key: payload[key] for key in ("result_text", "next_steps", "verification_status", "files")}
                     summary = str(payload["result_text"])
-                    if payload.get("next_steps"):
+                    if send_to_channel and not scheduled and payload.get("next_steps"):
                         summary += "\n\nNext steps:\n" + "\n".join(str(item) for item in payload["next_steps"])
                     for item in payload["files"]:
                         content = self.service.artifacts.read_bytes(item["artifact_ref"])
@@ -58,9 +61,13 @@ class WorkflowPublication(WorkflowEffectContext):
                         file_record = self.repository.artifacts.read_artifact_record(item["artifact_ref"]["sha256"])
                         if not file_record or file_record["artifact_type"] != "TaskDeliverableArtifact":
                             raise ValueError("task deliverable metadata unavailable")
-                        attachments.append({"path": str(file_record["storage_path"]),
-                            "file_name": Path(item["repository_path"]).name, "mime_type": item["mime_type"],
-                            "caption": f"Task deliverable: {item['repository_path']}"})
+                        # Scheduled work writes private business data as well
+                        # as products. Its channel output is the text only;
+                        # the immutable receipt and inbox retain file refs.
+                        if send_to_channel and not scheduled:
+                            attachments.append({"path": str(file_record["storage_path"]),
+                                "file_name": Path(item["repository_path"]).name, "mime_type": item["mime_type"],
+                                "caption": f"Task deliverable: {item['repository_path']}"})
                 elif payload.get("schema_version") == "4":
                     direct_receipt = DirectDeliveryReceipt.model_validate(payload)
                     verification_ref_value = direct_receipt.verification_ref
@@ -114,7 +121,7 @@ class WorkflowPublication(WorkflowEffectContext):
                         }
                     )
                 report_attachment = self._verification_report_attachment(verification_ref_value)
-                if report_attachment is not None:
+                if report_attachment is not None and send_to_channel and not (scheduled and payload.get("schema_version") == "5"):
                     attachments.append(report_attachment)
         revision_id = str(workflow.payload.get("architecture_revision_id") or "").strip()
         resolved_interactions = (
@@ -136,6 +143,7 @@ class WorkflowPublication(WorkflowEffectContext):
             "resolved_interactions": resolved_interactions,
             "result_artifact_ref": result_artifact_ref,
             **({"background_handoff": True} if workflow.payload.get("background_handoff") else {}),
+            **({"channel_delivery_requested": False} if not send_to_channel else {}),
         }
         if attachments:
             event["attachments"] = attachments
@@ -147,7 +155,7 @@ class WorkflowPublication(WorkflowEffectContext):
                  "status": normalized_status, "result_text": summary,
                  "result_artifact_ref": result_artifact_ref, **background_result},
                 delivery_status=("discarded" if workflow.payload.get("discard_output") else "not_requested")
-                if workflow.payload.get("scheduled_run_id") and not workflow.payload.get("channel_delivery_requested") else "pending",
+                if not send_to_channel else "pending",
             )
         self.publish_workflow_event(event)
 

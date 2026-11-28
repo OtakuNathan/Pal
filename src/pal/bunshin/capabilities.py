@@ -16,6 +16,9 @@ from uuid import uuid4
 from pal.control import ControlAction
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
+from pal.foundation.diagnostics import exception_reason
+from pal.bunshin.artifacts import ContentAddressedArtifactStore
+from pal.bunshin.contracts import AggregateType
 from pal.bunshin.ipc import (
     BUNSHIN_RUNTIME_DB_PATH_ENV,
     BunshinManagerClient,
@@ -27,6 +30,7 @@ from pal.bunshin.paths import BunshinRuntimeBusy, bunshin_runtime_ownership
 from pal.bunshin.repository import BunshinRepository
 
 from pal.bunshin.source import BunshinControlEventHandler, BunshinEventSource
+from pal.bunshin.event_contracts import channel_result_requested, scheduled_terminal_presentation, terminal_has_user_actions, terminal_is_control_only
 from pal.bunshin.workflow_capabilities import BunshinPublicProvider
 from pal.bunshin.service import BunshinWorkflowService
 from pal.shared import EventKind
@@ -79,6 +83,7 @@ class BunshinManagerProvider:
         self.client = BunshinManagerClient(self.runtime_root)
         self._lifecycle_client = BunshinManagerClient(self.runtime_root, request_timeout_seconds=5.0)
         self._event_repository = BunshinRepository(self.runtime_root)
+        self._event_artifacts = ContentAddressedArtifactStore(self.runtime_root, self._event_repository.artifacts)
 
     def _process_status(self) -> tuple[int, int | None] | None:
         process = self.process
@@ -228,7 +233,7 @@ class BunshinManagerProvider:
         key = self._buffered_event_key(event)
         delivery_id = str(event.get("delivery_id") or "")
         if not accepted:
-            if event.get("background_handoff") and event.get("event_kind") == "workflow_terminal":
+            if event.get("background_handoff") and event.get("event_kind") == "workflow_terminal" and channel_result_requested(event):
                 from pal.foundation.background_inbox import BackgroundInbox
                 BackgroundInbox(self.runtime_root).update_delivery(str(event.get("workflow_id") or ""), "failed")
             if delivery_id:
@@ -251,13 +256,14 @@ class BunshinManagerProvider:
                 with contextlib.suppress(Exception):
                     self.event_notify()
             return False
-        if event.get("event_kind") == "workflow_terminal" or event.get("role") == "workflow":
+        if (event.get("event_kind") == "workflow_terminal" or event.get("role") == "workflow") and channel_result_requested(event):
             from pal.foundation.background_inbox import BackgroundInbox
             BackgroundInbox(self.runtime_root).update_delivery(str(event.get("workflow_id") or ""), "delivered")
         try:
             if delivery_id:
+                suppress = terminal_is_control_only(event.get("event_kind"), event) and not terminal_has_user_actions(event)
                 result = self.client.request_sync(
-                    "ack_task_delivery",
+                    "suppress_task_delivery" if suppress else "ack_task_delivery",
                     {"delivery_id": delivery_id},
                 )
                 # An already acknowledged row is still settled locally; the
@@ -340,11 +346,23 @@ class BunshinManagerProvider:
 
     def _prepare_delivery_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
         item = dict(event)
+        # Retire previously queued internal terminal notices without requiring
+        # a live channel or falling back to a recovery socket.
+        if terminal_is_control_only(item.get("event_kind"), item.get("payload") or {}) and not terminal_has_user_actions(item.get("payload") or {}):
+            return item
         delivery_id = str(item.get("delivery_id") or "")
         if not delivery_id:
             return item
         if not self.may_send_event(item):
             return None
+        if item.get("event_kind") == "workflow_terminal" and item.get("frozen_delivery_binding"):
+            try:
+                item = self._scheduled_terminal_projection(item)
+            except Exception as exc:
+                # Never fall back to the stale rendered packet when the bound
+                # immutable receipt cannot be read. Leave the outbox pending.
+                self.last_error = exception_reason(exc)
+                return None
         task_id = str(item.get("task_id") or "")
         binding_row = self._event_repository.delivery_bindings.read_task_delivery(task_id)
         binding = dict(item.get("frozen_delivery_binding") or (binding_row or {}).get("current") or {})
@@ -357,6 +375,32 @@ class BunshinManagerProvider:
         payload["route"] = route
         item["payload"] = payload
         return item
+
+    def _scheduled_terminal_projection(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Render scheduled channel text from the accepted immutable receipt.
+
+        Old outbox packets may still contain private file attachments and an
+        appended internal follow-up. Keep their identity and part receipts,
+        but use the same presentation contract as newly published results.
+        """
+        payload = dict(item.get("payload") or {})
+        payload.pop("attachments", None)
+        if payload.get("status") == "completed":
+            if not scheduled_terminal_presentation(item):
+                raise ValueError("scheduled completion has no bound delivery receipt")
+            workflow = self._event_repository.snapshots.read_snapshot(
+                AggregateType.WORKFLOW, str(item.get("workflow_id") or ""),
+            )
+            ref = dict(payload["result_artifact_ref"])
+            if (workflow is None or workflow.state != "COMPLETED" or not workflow.payload.get("scheduled_run_id")
+                    or dict(workflow.payload.get("result_artifact_ref") or {}) != ref
+                    or dict(workflow.payload.get("frozen_delivery_binding") or {}) != item["frozen_delivery_binding"]):
+                raise ValueError("scheduled terminal receipt does not match the workflow")
+            receipt = self._event_artifacts.read_json(ref)
+            if receipt.get("schema_version") != "5" or not isinstance(receipt.get("result_text"), str):
+                raise ValueError("scheduled terminal receipt does not contain result text")
+            payload["summary"] = receipt["result_text"]
+        return {**item, "payload": payload}
 
     def _live_route_for_binding(
         self,
