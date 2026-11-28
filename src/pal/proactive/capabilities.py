@@ -25,9 +25,8 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
-from pal.proactive.runtime import ProactiveManager, ProactiveRunner
+from pal.proactive.runtime import ProactiveManager
 from pal.shared.proactive_protocol import SILENT_ONCE_SCHEDULER
-from pal.proactive.source import ProactiveEventSource
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -108,7 +107,6 @@ class ProactiveTaskRunsInput(ProactiveCapabilitiesProactiveIntrospectionProvider
 @dataclass
 class ProactiveIntrospectionProvider:
     manager: ProactiveManager
-    runner: ProactiveRunner | None = None
     module_id: str = PROACTIVE_MODULE_ID
     mounted: bool = True
     degraded: bool = False
@@ -179,10 +177,7 @@ class ProactiveIntrospectionProvider:
         _ = call
         snapshot = inspect_proactive(self)
         payload = inspection_snapshot({**snapshot.__dict__,
-            "runner_available": self.runner is not None,
-            "recent_failures": [{key: result.get(key) for key in ("proactive_id", "turn_id", "error_text")}
-                                for result in (self.runner.results if self.runner is not None else ())
-                                if result.get("error_text")][-4:],
+            "dispatch_available": self.manager.repository is not None,
         })
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -282,7 +277,7 @@ class ProactiveIntrospectionProvider:
         target = self._require_proactive_target(call, include_history=False)
         repository = self.manager.repository
         if repository is None:
-            payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "run": None,
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None,
                        "history_status": "unavailable", "reason": "Run history repository is not configured; this does not establish that the task has never run."}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
@@ -295,14 +290,14 @@ class ProactiveIntrospectionProvider:
         except Exception as exc:
             return self._history_error(target.proactive_id, exc)
         if run is None:
-            payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "run": None, "history_status": "empty"}
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None, "history_status": "empty"}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="no durable proactive run record",
                 structured=payload,
                 llm_text=render_diagnostic_record_for_llm("Proactive latest run", payload),
             )
-        payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "run": self._render_run(run), "history_status": "available"}
+        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": self._render_run(run), "history_status": "available"}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive latest run",
@@ -330,7 +325,7 @@ class ProactiveIntrospectionProvider:
         target = self._require_proactive_target(call, include_history=False)
         repository = self.manager.repository
         if repository is None:
-            payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "items": [],
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": [],
                        "history_status": "unavailable", "reason": "Run history repository is not configured; this does not establish that the task has never run."}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
@@ -343,7 +338,7 @@ class ProactiveIntrospectionProvider:
             items = [self._render_run(item) for item in repository.list_runs(target.proactive_id, limit=limit)]
         except Exception as exc:
             return self._history_error(target.proactive_id, exc)
-        payload = {"runtime_failures": self._runtime_failures(target.proactive_id), "name": target.proactive_id, "proactive_id": target.proactive_id, "items": items, "history_status": "available" if items else "empty"}
+        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": items, "history_status": "available" if items else "empty"}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive run history",
@@ -664,16 +659,9 @@ class ProactiveIntrospectionProvider:
             return None
         return latest.completed_at or latest.started_at
 
-    def _runtime_failures(self, proactive_id: str) -> list[dict[str, object]]:
-        if self.runner is None:
-            return []
-        return [dict(item) for item in self.runner.results
-                if item.get("proactive_id") == proactive_id and item.get("error_text")]
-
     def _history_error(self, proactive_id: str, exc: Exception) -> CapabilityResult:
         payload = {"proactive_id": proactive_id, "history_status": "unavailable",
-                   "error_code": "proactive_history_read_failed", "error": exception_reason(exc),
-                   "runtime_failures": self._runtime_failures(proactive_id)}
+                   "error_code": "proactive_history_read_failed", "error": exception_reason(exc)}
         return CapabilityResult(status=RuntimeStatus.ERROR, text="proactive run history could not be read",
             structured=payload, llm_text=render_diagnostic_record_for_llm("Proactive history read failed", payload),
             effect_receipt=EffectReceipt(outcome=EffectOutcome.NONE))
@@ -684,7 +672,7 @@ class ProactiveIntrospectionProvider:
             "proactive_id": run.proactive_id,
             "trigger_kind": run.trigger_kind,
             "status": run.status,
-            "completion_scope": "turn_execution",
+            "completion_scope": "workflow_execution" if run.trigger_metadata.get("background_protocol") else "turn_execution",
             "delivery_confirmation": "not_recorded",
             "trigger_metadata": dict(run.trigger_metadata or {}),
             "turn_id": run.turn_id,
@@ -798,10 +786,11 @@ def _invalid_result(text: str, *, structured: dict[str, object] | None = None) -
 
 
 def inspect_proactive(provider: ProactiveIntrospectionProvider) -> ProactiveSnapshot:
+    repository = provider.manager.repository
     return ProactiveSnapshot(
         registered_proactive_tasks=len(provider.manager.registered),
         pending_triggers=len(provider.manager.pending_triggers),
-        triggered_runs=len(provider.runner.triggered) if provider.runner is not None else 0,
+        triggered_runs=repository.run_count() if repository is not None else 0,
         mounted=provider.mounted,
         degraded=provider.degraded,
     )
@@ -810,9 +799,8 @@ def inspect_proactive(provider: ProactiveIntrospectionProvider) -> ProactiveSnap
 def register_with_core(
     context: MainContext,
     manager: ProactiveManager,
-    runner: ProactiveRunner | None = None,
 ) -> ModuleHandle:
-    from pal.proactive.handler import ProactiveTriggerHandler
+    from pal.proactive.background_dispatch import BackgroundScheduleSource, BackgroundScheduleHandler
 
     def refresh_capabilities() -> None:
         handle = context.module_registry.get(PROACTIVE_MODULE_ID)
@@ -822,37 +810,39 @@ def register_with_core(
         context.publish_module_capabilities(handle)
 
     manager.on_change = refresh_capabilities
-    provider = ProactiveIntrospectionProvider(manager=manager, runner=runner, refresh_capabilities=refresh_capabilities, context=context)
+    provider = ProactiveIntrospectionProvider(manager=manager, refresh_capabilities=refresh_capabilities, context=context)
     from pal.control.runtime_contracts import CORE_CONTROL
 
     host = context.port_registry.observe(CORE_CONTROL)
     timers = host.current.open_timer_scope()
-    source = ProactiveEventSource(manager=manager, timers=timers)
     manager.on_ready = host.current.notify_ready
 
     def cleanup_callbacks() -> None:
         manager.on_ready = None
         manager.on_change = None
 
-    event_handler = ProactiveTriggerHandler(manager=manager, runner=runner)
+    # Definition-only managers have no execution authority. Production always
+    # supplies the durable repository, and there is no resident-turn fallback.
+    source = BackgroundScheduleSource(manager=manager, timers=timers) if manager.repository is not None else None
+    event_handler = BackgroundScheduleHandler(repository=manager.repository) if manager.repository is not None else None
     handle = ModuleHandle(
         module_id=PROACTIVE_MODULE_ID,
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
         introspection_provider=provider,
-        event_sources=[source],
+        event_sources=[source] if source is not None else [],
         timer_scope=timers,
         cleanup_callbacks=[cleanup_callbacks],
-        shutdown_async=event_handler.shutdown,
-        event_handlers={EventKind.PROACTIVE_TRIGGER: [event_handler]},
-        ports={"proactive_manager": manager, "proactive_runner": runner,
+        shutdown_async=event_handler.shutdown if event_handler is not None else None,
+        event_handlers={EventKind.PROACTIVE_TRIGGER: [event_handler]} if event_handler is not None else {},
+        ports={"proactive_manager": manager,
                "silent_once_scheduler": manager},
         port_contracts=(SILENT_ONCE_SCHEDULER,),
     )
-    event_handler.owner = handle
     context.register_module(handle)
-    context.event_source_registry.attach(PROACTIVE_MODULE_ID, source)
-    context.event_handler_registry.register(EventKind.PROACTIVE_TRIGGER, event_handler, owner=handle, module_id=PROACTIVE_MODULE_ID)
+    if source is not None and event_handler is not None:
+        context.event_source_registry.attach(PROACTIVE_MODULE_ID, source)
+        context.event_handler_registry.register(EventKind.PROACTIVE_TRIGGER, event_handler, owner=handle, module_id=PROACTIVE_MODULE_ID)
     return handle
 
 

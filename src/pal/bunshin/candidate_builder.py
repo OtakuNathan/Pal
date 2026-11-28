@@ -58,7 +58,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "use_when": (
                 "Use after focused checks pass. Complete the initial implementation checklist; during repair, "
                 "address the full RepairBill and submit for automated precheck when the "
-                "implementation is ready for independent verification. Takes no arguments; "
+                "implementation is ready for independent verification. For general direct tasks, submit result_text, optional next_steps and deliverable_paths; for software tasks omit arguments; "
                 "the Manager derives Git delta and journal fields. A software module may "
                 "submit an unchanged baseline when it already satisfies the bound contract "
                 "and focused checks pass; do not manufacture changes for submission."
@@ -214,9 +214,10 @@ def _submit_candidate(
     store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
     snapshot = store.read(context, seed={})
     work_view = _bound_candidate_work_view(workspace)
+    general_direct = work_view.get("execution_mode") == "direct" and work_view.get("domain") == "general"
     if status == "candidate_ready":
         try:
-            work_items = read_work_items(workspace) if precheck is not None else assert_work_items_complete(workspace)
+            work_items = read_work_items(workspace) if precheck is not None or general_direct else assert_work_items_complete(workspace)
         except ValueError as exc:
             ledger = read_work_items(workspace)
             raise ToolRejectedError(
@@ -245,23 +246,24 @@ def _submit_candidate(
             ) from exc
         if work_view.get("execution_mode") == "direct":
             repo = Path(str(workspace["repo_path"])).resolve()
-            for relative in work_view.get("deliverable_paths", []):
+            from pal.bunshin.direct_contract import deliverable_paths
+            paths = deliverable_paths({"deliverable_paths": [*work_view.get("deliverable_paths", []), *(args.get("deliverable_paths") or [])]})
+            eligible = set(subprocess.run(
+                ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                cwd=repo, capture_output=True, text=True, check=True,
+            ).stdout.split("\0")) if paths else set()
+            for relative in paths:
                 target = repo / relative
                 if target.is_symlink() or not target.is_file() or not target.resolve().is_relative_to(repo):
                     raise ValueError(f"required deliverable is missing or unsafe: {relative}")
-                eligible = subprocess.run(
-                    ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z",
-                     "--", f":(literal){relative}"],
-                    cwd=repo, capture_output=True, text=True, check=True,
-                ).stdout.split("\0")
                 if relative not in eligible:
                     raise ValueError(
                         f"required deliverable is excluded from the Git candidate: {relative}; "
                         "update the repository ignore rules so the declared file is included"
                     )
-        if args:
+        if args and not general_direct:
             raise ToolRejectedError(
-                "submit_candidate takes no arguments",
+                "submit_candidate takes no arguments for this task",
                 error_code="invalid_arguments",
             )
     else:
@@ -293,6 +295,13 @@ def _submit_candidate(
         "files_changed": files_changed,
         "status": status,
     }
+    if status == "candidate_ready" and work_view.get("execution_mode") == "direct" and work_view.get("domain") == "general":
+        from pal.bunshin.direct_contract import deliverable_paths
+        if not isinstance(args.get("result_text"), str) or not args["result_text"].strip():
+            raise ValueError("general direct submission requires result_text")
+        paths = deliverable_paths({"deliverable_paths": args.get("deliverable_paths") or []})
+        report.update(result_text=args["result_text"], next_steps=list(args.get("next_steps") or []),
+                      deliverable_paths=list(dict.fromkeys([*work_view.get("deliverable_paths", []), *paths])))
     if precheck is not None:
         report["repair_precheck"] = dict(precheck)
     if status != "candidate_ready":
@@ -377,6 +386,13 @@ def validate_candidate_submission(
     if status not in {"candidate_ready", "architecture_defect", "module_split_request", "task_blocked"}:
         raise ValueError("candidate report has invalid status")
     _validate_reported_changed_paths(value.get("files_changed"), work_view=work_view)
+    if status == "candidate_ready" and work_view.get("domain") == "general" and work_view.get("execution_mode") == "direct":
+        from pal.bunshin.direct_contract import deliverable_paths
+        if not isinstance(value.get("result_text"), str) or not value["result_text"].strip():
+            raise ValueError("general direct submission requires result_text")
+        deliverable_paths(value)
+        if not isinstance(value.get("next_steps"), list) or any(not isinstance(item, str) for item in value["next_steps"]):
+            raise ValueError("next_steps must be a string array")
     if status != "candidate_ready":
         if not str(value.get("summary") or "").strip():
             raise ValueError(f"status={status} requires summary")

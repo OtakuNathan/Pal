@@ -29,33 +29,54 @@ class WorkflowPublication(WorkflowEffectContext):
             "CANCELLED",
         }:
             return
+        if workflow.payload.get("scheduled_run_id") and workflow.payload.get("replacement_workflow_id"):
+            return
         normalized_status = workflow.state.lower()
         result_artifact_ref = dict(
             workflow.payload.get("result_artifact_ref") or {}
         )
         summary = f"Bunshin workflow {normalized_status}."
         attachments: list[dict[str, str]] = []
+        background_result: dict[str, Any] = {}
         result_sha = str(result_artifact_ref.get("sha256") or "")
         if normalized_status == "completed" and result_sha:
             record = self.repository.artifacts.read_artifact_record(result_sha)
             if record and str(record.get("artifact_type") or "") == "DeliveryReceiptArtifact":
                 payload = self.service.artifacts.read_json(result_artifact_ref)
                 verification_ref_value: Mapping[str, Any] = {}
-                if payload.get("schema_version") == "4":
+                if payload.get("schema_version") == "5":
+                    delivery_receipt = None
+                    verification_ref_value = payload["verification_ref"]
+                    background_result = {key: payload[key] for key in ("result_text", "next_steps", "verification_status", "files")}
+                    summary = str(payload["result_text"])
+                    if payload.get("next_steps"):
+                        summary += "\n\nNext steps:\n" + "\n".join(str(item) for item in payload["next_steps"])
+                    for item in payload["files"]:
+                        content = self.service.artifacts.read_bytes(item["artifact_ref"])
+                        if hashlib.sha256(content).hexdigest() != item["content_sha256"]:
+                            raise IOError("delivery file content hash mismatch")
+                        file_record = self.repository.artifacts.read_artifact_record(item["artifact_ref"]["sha256"])
+                        if not file_record or file_record["artifact_type"] != "TaskDeliverableArtifact":
+                            raise ValueError("task deliverable metadata unavailable")
+                        attachments.append({"path": str(file_record["storage_path"]),
+                            "file_name": Path(item["repository_path"]).name, "mime_type": item["mime_type"],
+                            "caption": f"Task deliverable: {item['repository_path']}"})
+                elif payload.get("schema_version") == "4":
                     direct_receipt = DirectDeliveryReceipt.model_validate(payload)
                     verification_ref_value = direct_receipt.verification_ref
+                    independently_verified = verification_ref_value.get("artifact_type") != "NullVerificationReceiptArtifact"
                     for item in direct_receipt.files:
                         content = self.service.artifacts.read_bytes(item.artifact_ref)
                         if hashlib.sha256(content).hexdigest() != item.content_sha256:
                             raise IOError("delivery file content hash does not match its receipt")
                         file_record = self.repository.artifacts.read_artifact_record(item.artifact_ref["sha256"])
-                        if not file_record or file_record["artifact_type"] != "VerifiedReportArtifact":
+                        if not file_record or file_record["artifact_type"] != ("VerifiedReportArtifact" if independently_verified else "TaskDeliverableArtifact"):
                             raise ValueError("verified report artifact metadata is unavailable")
                         attachments.append({"path": str(file_record["storage_path"]),
                             "file_name": Path(item.repository_path).name, "mime_type": item.mime_type,
-                            "caption": f"Verified report: {item.repository_path}"})
+                            "caption": f"{'Verified report' if independently_verified else 'Deliverable (no independent verification)'}: {item.repository_path}"})
                     delivery_receipt = direct_receipt.patch_receipt
-                    summary = "Bunshin workflow completed. Verified reports attached."
+                    summary = "Bunshin workflow completed. Verified reports attached." if independently_verified else "Bunshin completed; reports attached without independent verification."
                 else:
                     delivery_receipt = DeliveryReceipt.model_validate(payload)
                     verification_ref_value = delivery_receipt.verification_ref
@@ -79,15 +100,16 @@ class WorkflowPublication(WorkflowEffectContext):
                     if not patch_path.is_file():
                         raise FileNotFoundError("delivery patch artifact file is unavailable")
                     friendly_name = Path(delivery_receipt.patch_path).name
-                    summary = "Bunshin workflow completed. Verified reports and Git patch attached." if attachments else "Bunshin workflow completed. Verified Git patch attached."
+                    independently_verified = verification_ref_value.get("artifact_type") != "NullVerificationReceiptArtifact"
+                    summary = ("Bunshin workflow completed. Verified reports and Git patch attached." if attachments else "Bunshin workflow completed. Verified Git patch attached.") if independently_verified else "Bunshin completed; Git patch attached without independent verification."
                     attachments.append(
                         {
                             "path": str(patch_path),
                             "file_name": friendly_name,
                             "mime_type": "text/x-patch",
                             "caption": (
-                                "Bunshin verified patch for commit "
-                                f"{delivery_receipt.commit_sha[:12]}"
+                                ("Bunshin verified patch for commit " if independently_verified else "Bunshin patch (no independent verification) for commit ")
+                                + f"{delivery_receipt.commit_sha[:12]}"
                             ),
                         }
                     )
@@ -113,9 +135,20 @@ class WorkflowPublication(WorkflowEffectContext):
             "terminal_at": workflow.updated_at,
             "resolved_interactions": resolved_interactions,
             "result_artifact_ref": result_artifact_ref,
+            **({"background_handoff": True} if workflow.payload.get("background_handoff") else {}),
         }
         if attachments:
             event["attachments"] = attachments
+        if workflow.payload.get("background_handoff"):
+            from pal.foundation.background_inbox import BackgroundInbox
+            BackgroundInbox(self.service.runtime_root).publish(
+                normalized_workflow_id,
+                {"task": workflow.payload.get("scheduled_task_name") or workflow.payload.get("workflow_name"), "run_id": workflow.payload.get("scheduled_run_id", normalized_workflow_id),
+                 "status": normalized_status, "result_text": summary,
+                 "result_artifact_ref": result_artifact_ref, **background_result},
+                delivery_status=("discarded" if workflow.payload.get("discard_output") else "not_requested")
+                if workflow.payload.get("scheduled_run_id") and not workflow.payload.get("channel_delivery_requested") else "pending",
+            )
         self.publish_workflow_event(event)
 
     def _verification_report_attachment(
@@ -155,6 +188,9 @@ class WorkflowPublication(WorkflowEffectContext):
 
     def publish_memory_candidate(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
+        workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, node.workflow_id)
+        if workflow is not None and (workflow.payload.get("memory_policy") == "disabled" or workflow.payload.get("scheduled_run_id")):
+            return {}
         if node.state != "ACCEPTED" or str(node.payload.get("node_kind") or "unit") != "unit":
             return {}
         if node.payload.get("memory_candidate_ref"):

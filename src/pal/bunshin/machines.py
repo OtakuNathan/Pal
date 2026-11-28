@@ -889,6 +889,11 @@ def _architecture_transitions() -> list[TransitionSpec]:
     S = ArchitectureRevisionState
     transitions = [
         _spec(kind, None, "CREATE_ARCHITECTURE_REVISION", S.ARCHITECT_QUEUED, effects=_effect("admit_architect_role")),
+        _spec(kind, S.ARCHITECT_QUEUED, "WAIT_EXTERNAL_PLAN", S.WAITING_PRODUCT),
+        _spec(kind, S.WAITING_PRODUCT, "IMPORT_EXTERNAL_PLAN", S.REVIEW_QUEUED,
+              guard=_required("architecture_manifest_ref", "requirements_ref"),
+              reducer=_architecture_submission_reducer,
+              effects=_effect("run_reviewer_role", role_mode="architecture")),
         _spec(kind, None, "IMPORT_ARCHITECTURE_REVISION", S.REVIEW_QUEUED, guard=_required("architecture_manifest_ref"), effects=_effect("run_reviewer_role", role_mode="architecture")),
         _spec(
             kind,
@@ -965,6 +970,10 @@ def _architecture_transitions() -> list[TransitionSpec]:
             guard=_required("finding_artifact_ref", "architecture_repair_baseline_ref"),
             effects=_effect("admit_architect_role"),
         ),
+        _spec(kind, S.REVIEW_QUEUED, "SKIP_PLAN_CHECKER", S.HUMAN_REVIEW,
+              guard=_required("review_artifact_ref", "architecture_manifest_ref"),
+              reducer=_architecture_review_passed_reducer,
+              effects=_effect("publish_architecture_review_request")),
         _spec(kind, S.REVIEW_QUEUED, "START_ARCHITECTURE_REVIEW", S.REVIEWING, guard=_lease_guard),
         _spec(kind, S.REVIEWING, "REBIND_ARCHITECTURE_REVIEW", S.REVIEWING, guard=_lease_guard),
         _spec(
@@ -1076,6 +1085,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
     ]
     pausable = {
         S.ARCHITECT_QUEUED,
+        S.WAITING_PRODUCT,
         S.ARCHITECT_RUNNING,
         S.REVIEW_QUEUED,
         S.REVIEWING,
@@ -1085,6 +1095,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
         transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_role")))
     architecture_resume = {
         str(S.ARCHITECT_QUEUED): str(S.ARCHITECT_QUEUED),
+        str(S.WAITING_PRODUCT): str(S.WAITING_PRODUCT),
         str(S.ARCHITECT_RUNNING): str(S.ARCHITECT_QUEUED),
         str(S.ARCHITECT_QUIESCING): str(S.ARCHITECT_QUIESCING),
         str(S.ARCHITECT_SNAPSHOTTING): str(S.ARCHITECT_SNAPSHOTTING),
@@ -1364,6 +1375,11 @@ def _node_transitions() -> list[TransitionSpec]:
             ),
         ),
         _spec(kind, S.BLOCKED_BY_DEPS, "DEPENDENCIES_ACCEPTED", S.QUEUED, guard=_all(_node_kind("unit"), _ready_producer_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
+        *(_spec(kind, state, "WAIT_EXTERNAL_PRODUCT", S.WAITING_PRODUCT)
+          for state in (S.QUEUED, S.REPAIR_QUEUED)),
+        _spec(kind, S.WAITING_PRODUCT, "IMPORT_EXTERNAL_PRODUCT", S.REVIEW_BLOCKED_BY_DEPS,
+              guard=_required("candidate_ref", "candidate_digest", "producer_report_ref"),
+              effects=_effect("schedule_ready_nodes"), reducer=_merge_payload),
         _spec(
             kind,
             S.QUEUED,
@@ -1424,6 +1440,12 @@ def _node_transitions() -> list[TransitionSpec]:
             S.REVIEW_QUEUED,
             guard=_all(_node_kind("unit"), _ready_dependencies),
             effects=_effect("admit_verifier_role", role_mode="module"),
+            reducer=_merge_payload,
+        ),
+        _spec(
+            kind, S.REVIEW_QUEUED, "SKIP_NODE_CHECKER", S.ACCEPTED,
+            guard=_required("verification_artifact_ref"),
+            effects=_effect("notify_node_accepted"),
             reducer=_merge_payload,
         ),
         _spec(kind, S.REVIEW_QUEUED, "START_REVIEW", S.REVIEWING, guard=_lease_guard, effects=_effect("run_verifier_role", role_mode="module"), reducer=_worker_started_reducer),
@@ -1502,6 +1524,7 @@ def _node_transitions() -> list[TransitionSpec]:
     pausable = {
         S.BLOCKED_BY_DEPS,
         S.QUEUED,
+        S.WAITING_PRODUCT,
         S.PRODUCING,
         S.REVIEW_BLOCKED_BY_DEPS,
         S.REVIEW_QUEUED,
@@ -1519,6 +1542,7 @@ def _node_transitions() -> list[TransitionSpec]:
     node_resume = {
         str(S.BLOCKED_BY_DEPS): str(S.BLOCKED_BY_DEPS),
         str(S.QUEUED): str(S.QUEUED),
+        str(S.WAITING_PRODUCT): str(S.WAITING_PRODUCT),
         str(S.PRODUCING): str(S.QUEUED),
         str(S.REVIEW_BLOCKED_BY_DEPS): str(S.REVIEW_BLOCKED_BY_DEPS),
         str(S.REVIEW_QUEUED): str(S.REVIEW_QUEUED),
@@ -1554,7 +1578,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 effects=_effect("cancel_role"),
             )
         )
-    directly_staleable = {S.BLOCKED_BY_DEPS, S.QUEUED, S.REVIEW_BLOCKED_BY_DEPS, S.REVIEW_QUEUED, S.REPAIR_QUEUED, S.ACCEPTED, S.CANCELLED}
+    directly_staleable = {S.BLOCKED_BY_DEPS, S.QUEUED, S.WAITING_PRODUCT, S.REVIEW_BLOCKED_BY_DEPS, S.REVIEW_QUEUED, S.REPAIR_QUEUED, S.ACCEPTED, S.CANCELLED}
     for state in directly_staleable:
         transitions.append(
             _spec(
@@ -1793,6 +1817,7 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
             },
             StateClass.HUMAN_WAIT: {
                 ArchitectureRevisionState.HUMAN_REVIEW,
+                ArchitectureRevisionState.WAITING_PRODUCT,
             },
             StateClass.PAUSED: {ArchitectureRevisionState.PAUSED},
             StateClass.TERMINAL: {
@@ -1856,6 +1881,7 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
                 DagNodeRunState.CANCELLED,
             },
             StateClass.OPERATOR_WAIT: {DagNodeRunState.TRIAGE_REQUIRED},
+            StateClass.HUMAN_WAIT: {DagNodeRunState.WAITING_PRODUCT},
         },
     )
     standalone_classes = _state_class_map(

@@ -1445,13 +1445,18 @@ class ExecutionRuntime(ExecutionRuntimePort):
         allow_tools: bool,
     ) -> Any:
         args = _invocation_args(validated)
-        result = binding.callable(
-            CapabilityCall(
-                name=record.canonical_path,
-                args=args,
-                meta=self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools),
-            )
+        capability_call = CapabilityCall(
+            name=record.canonical_path, args=args,
+            meta=self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools),
         )
+        if self.runtime_root is not None and record.canonical_path in {
+            "op_file_read", "op_file_write", "op_file_edit", "op_exec_shell",
+        } and args.get("target") in {None, 0, "0", "local"}:
+            from pal.foundation.managed_workspace_io import managed_workspace_sync_read_gate
+            with managed_workspace_sync_read_gate(self.runtime_root):
+                result = binding.callable(capability_call)
+        else:
+            result = binding.callable(capability_call)
         if inspect.isawaitable(result):
             raise RuntimeError(f"tool requires async execution: {record.alias}")
         return result
@@ -1472,11 +1477,20 @@ class ExecutionRuntime(ExecutionRuntimePort):
             args=args,
             meta=self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools),
         )
-        if binding.async_callable is not None:
-            result = binding.async_callable(capability_call)
+        async def invoke() -> Any:
+            if binding.async_callable is not None:
+                result = binding.async_callable(capability_call)
+                return await result if inspect.isawaitable(result) else result
+            result = await self._call_sync_handler_async(binding, capability_call)
             return await result if inspect.isawaitable(result) else result
-        result = await self._call_sync_handler_async(binding, capability_call)
-        return await result if inspect.isawaitable(result) else result
+
+        if self.runtime_root is not None and record.canonical_path in {
+            "op_file_read", "op_file_write", "op_file_edit", "op_exec_shell",
+        } and args.get("target") in {None, 0, "0", "local"}:
+            from pal.foundation.managed_workspace_io import managed_workspace_read_gate
+            async with managed_workspace_read_gate(self.runtime_root):
+                return await invoke()
+        return await invoke()
 
     async def _call_sync_handler_async(
         self, binding: BoundCapabilityAction, call: CapabilityCall,

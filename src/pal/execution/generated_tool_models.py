@@ -1138,6 +1138,9 @@ BunshinScopedExecutionOpBunshinArtifactWriteInput = _strict_model(
 BunshinCandidateBuilderOpBunshinCandidateSubmitInput = _strict_model(
     'BunshinCandidateBuilderOpBunshinCandidateSubmitInput',
     {
+        "result_text": (str, Field(None)),
+        "next_steps": (list[str], Field(None)),
+        "deliverable_paths": (list[str], Field(None)),
     },
 )
 

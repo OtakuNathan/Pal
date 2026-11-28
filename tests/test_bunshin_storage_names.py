@@ -186,7 +186,7 @@ def test_v30_requires_cutover_before_current_checkpoint_writes(tmp_path):
         assert db.execute("SELECT count(*) FROM bunshin_role_checkpoint_heads").fetchone() == (0,)
 
 
-@pytest.mark.parametrize("version", [29, 30])
+@pytest.mark.parametrize("version", [29, 30, 31])
 def test_cutover_waits_for_live_recorded_worker_without_manager_socket(tmp_path, version):
     import subprocess
 

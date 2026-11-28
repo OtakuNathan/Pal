@@ -65,3 +65,9 @@ tool = "submit_verification"
 
 [metadata]
 builtin = true
+direct_execution = true
+
+[metadata.direct_fragments]
+identity_fragment = "Independently verify the actual bound task result and its files."
+behavior_fragment = "Read the original task and accepted product. Check factual claims and file contents against available evidence. Use focused real checks appropriate to the task; do not invent a software test suite or entrypoint."
+output_contract_fragment = "Submit findings and counterexamples if the actual product is incorrect. Otherwise cite a successful focused check in system_test_calls and submit PASS."

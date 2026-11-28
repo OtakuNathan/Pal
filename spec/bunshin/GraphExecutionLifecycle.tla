@@ -17,7 +17,7 @@ AffectedConsumers(n, providers) ==
         \cup UNION {SemanticConsumers(p) : p \in providers}) \ providers
 States == {
     "Blocked", "ProducerReady", "Producing", "CheckerReady",
-    "Checking", "RepairReady", "Stale", "Accepted", "TriageRequired"
+    "Checking", "RepairReady", "Stale", "Accepted", "TriageRequired", "WaitingProduct"
 }
 
 VARIABLES graphState, nodeState, productReady, publishedSink, repairBarrier, repairs
@@ -53,6 +53,34 @@ SubmitProduct(n) ==
     /\ corrections' = [corrections EXCEPT ![n] = 0]
     /\ invalidSubmissionPreserved' = [invalidSubmissionPreserved EXCEPT ![n] = FALSE]
     /\ UNCHANGED <<graphState, publishedSink, repairBarrier, repairs>>
+
+\* A missing producer has no process assignment. Its actual product may
+\* appear only after the producer dependency boundary has been reached.
+WaitProduct(n) ==
+    /\ graphState = "Running"
+    /\ NodeRunnable(nodeState[n], repairBarrier[n] = {}, FALSE, "producer")
+    /\ nodeState' = [nodeState EXCEPT ![n] = "WaitingProduct"]
+    /\ UNCHANGED <<graphState, productReady, publishedSink, repairBarrier, repairs,
+                   corrections, invalidSubmissionPreserved>>
+
+ImportNodeProduct(n) ==
+    /\ graphState = "Running"
+    /\ nodeState[n] = "WaitingProduct"
+    /\ nodeState' = [nodeState EXCEPT ![n] = "CheckerReady"]
+    /\ productReady' = [productReady EXCEPT ![n] = TRUE]
+    /\ corrections' = [corrections EXCEPT ![n] = 0]
+    /\ invalidSubmissionPreserved' = [invalidSubmissionPreserved EXCEPT ![n] = FALSE]
+    /\ UNCHANGED <<graphState, publishedSink, repairBarrier, repairs>>
+
+SkipNodeChecker(n) ==
+    /\ graphState = "Running"
+    /\ productReady[n]
+    /\ NodeRunnable(nodeState[n], repairBarrier[n] = {} /\
+                    (\A m \in CheckerProviders(n) : nodeState[m] = "Accepted"), FALSE, "checker")
+    /\ nodeState' = [nodeState EXCEPT ![n] = "Accepted"]
+    /\ publishedSink' = IF n = Sink THEN TRUE ELSE publishedSink
+    /\ UNCHANGED <<graphState, productReady, repairBarrier, repairs,
+                   corrections, invalidSubmissionPreserved>>
 
 StartChecker(n) ==
     /\ graphState = "Running"
@@ -169,6 +197,9 @@ ArchitectureFinding(n) ==
 Next ==
     \/ \E n \in Nodes : StartProducer(n)
     \/ \E n \in Nodes : SubmitProduct(n)
+    \/ \E n \in Nodes : WaitProduct(n)
+    \/ \E n \in Nodes : ImportNodeProduct(n)
+    \/ \E n \in Nodes : SkipNodeChecker(n)
     \/ \E n \in Nodes : StartChecker(n)
     \/ \E n \in Nodes : AcceptNode(n)
     \/ \E n \in Nodes, providers \in SUBSET Nodes : DependencyFinding(n, providers)

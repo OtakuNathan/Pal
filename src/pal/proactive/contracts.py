@@ -22,11 +22,6 @@ class ScheduleEnginePort(Protocol):
         ...
 
 
-class ProactiveRunnerPort(Protocol):
-    def run(self, trigger: ProactiveTriggerEvent) -> None:
-        ...
-
-
 class ProactiveManagerPort(Protocol):
     def register(self, definition: ProactiveDefinition) -> None:
         ...

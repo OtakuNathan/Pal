@@ -52,10 +52,13 @@ def capture_direct_references(artifacts: ContentAddressedArtifactStore, referenc
 
 
 def validate_direct_binding(binding: Mapping[str, Any]) -> None:
-    if binding.get("family_id") != "software_engineering":
-        raise ValueError("direct mode requires the software_engineering family")
+    if binding.get("family_id") not in {"software_engineering", "general"}:
+        raise ValueError("direct mode requires a Git-capable family")
     for role in ("implementation", "verifier"):
-        profile = dict(dict(binding.get("role_bindings") or {}).get(role) or {}).get("role_profile") or {}
+        selected = dict(dict(binding.get("role_bindings") or {}).get(role) or {})
+        if selected.get("participant") == "null":
+            continue
+        profile = selected.get("role_profile") or {}
         if not dict(profile.get("metadata") or {}).get("direct_execution"):
             raise ValueError("pinned profiles do not support direct mode; create a new Task with current profiles")
 

@@ -10,11 +10,7 @@ from pal.core.scheduling import (
 )
 from pal.core.turns import TurnContinuation
 from pal.foundation import EventEnvelope
-from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRunner
-from pal.proactive.capabilities import register_with_core as register_proactive
-from pal.proactive.handler import ProactiveTriggerHandler
-from pal.proactive.source import ProactiveEventSource
-from pal.shared import EventKind, ProactiveTriggerEvent
+from pal.shared import EventKind
 from tests.test_btw import Model, make_core
 from tests.test_interjection_injection import _make_envelope
 
@@ -78,7 +74,7 @@ def test_reset_cannot_release_a_shutdown_barrier():
         assert await task
         assert core.state.resident_quiescing
         assert core.state.scheduler.state.barriers == {"quiescing:shutdown"}
-        assert not core.can_start_proactive_turn()
+        assert not core.control_runtime.can_start_background_turn()
     asyncio.run(scenario())
 
 
@@ -101,7 +97,7 @@ def test_cancelled_reset_notification_releases_its_barrier():
                 await task
             assert core.state.scheduler.state.barriers == {"quiescing:shutdown"}
             core.state.scheduler.set_barrier("quiescing:shutdown", False)
-            assert core.can_start_proactive_turn()
+            assert core.control_runtime.can_start_background_turn()
         finally:
             core.close()
             core.context.execution_runtime.shutdown()
@@ -119,7 +115,7 @@ def test_reset_setup_failure_releases_its_barrier(monkeypatch):
             with pytest.raises(OSError, match="cancellation unavailable"):
                 await core._execute_soft_reset_async(None)
             assert not core.state.scheduler.state.barriers
-            assert core.can_start_proactive_turn()
+            assert core.control_runtime.can_start_background_turn()
         finally:
             core.close()
             core.context.execution_runtime.shutdown()
@@ -148,132 +144,22 @@ def test_repeated_reset_cancellation_still_finishes_barrier_cleanup():
             with pytest.raises(asyncio.CancelledError):
                 await task
             assert not core.state.resident_quiescing
-            assert core.can_start_proactive_turn()
+            assert core.control_runtime.can_start_background_turn()
         finally:
             core.close()
             core.context.execution_runtime.shutdown()
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
-def test_user_input_in_pump_has_priority_over_proactive():
+def test_user_input_in_pump_has_priority_over_background_turn():
     core, _ = make_core(Model())
     core.receive_event(EventEnvelope(
         event_kind=EventKind.USER_MESSAGE, source_kind="channel",
         payload=_make_envelope(turn_id="next", text="user first"),
     ))
-    assert not core.can_start_proactive_turn()
-    assert core._admit_resident_turn("job", ResidentTurnKind.PROACTIVE) is None
+    assert not core.control_runtime.can_start_background_turn()
+    assert core._admit_resident_turn("job", ResidentTurnKind.BACKGROUND) is None
     assert core.state.scheduler.state.phase == CoreTurnPhase.IDLE
-
-
-def test_proactive_source_before_user_source_still_gives_user_priority():
-    async def scenario():
-        model = Model(blocked=True)
-        core, _ = make_core(model)
-        manager = ProactiveManager()
-        register_proactive(core.context, manager, ProactiveRunner())
-        manager.hydrate(ProactiveDefinition(proactive_id="quiz", goal="quiz"))
-        manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="quiz", trigger_kind="manual"))
-        class UserSource:
-            source_id = "test.user"
-            ready = True
-            def prepare(self, context):
-                return self.ready
-            def drain(self, context):
-                self.ready = False
-                return [EventEnvelope(
-                    event_kind=EventKind.USER_MESSAGE, source_kind="channel",
-                    payload=_make_envelope(turn_id="user", text="user first"),
-                )]
-        core.context.event_source_registry.attach("test", UserSource())
-        await core.drain_once_async()  # proactive was drained first, then requeued
-        assert len(manager.pending_triggers) == 1
-        assert core.state.scheduler.state.owner is None
-        await core.drain_once_async()
-        await asyncio.wait_for(model.entered.wait(), 2)
-        assert core.state.scheduler.state.owner.turn_id == "user"
-        assert len(manager.pending_triggers) == 1
-        model.release.set()
-        await asyncio.wait_for(core.run_until_idle_async(max_iterations=128), 5)
-        assert core.context.require_port("memory:memory").history.turns[0].turn_id == "user"
-        assert not manager.pending_triggers
-    asyncio.run(scenario())
-
-
-def test_proactive_waits_through_io_and_finalization_then_follows_user_queue():
-    async def scenario():
-        model = Model(blocked=True)
-        core, _ = make_core(model)
-        manager, runner = ProactiveManager(), ProactiveRunner()
-        register_proactive(core.context, manager, runner)
-        manager.hydrate(ProactiveDefinition(proactive_id="quiz", goal="QUIZ_SENTINEL"))
-        memory = core.context.require_port("memory:memory")
-        entered, release = asyncio.Event(), asyncio.Event()
-        commit = core._schedule_post_turn_commit_async
-
-        async def finalization(outcome, **kwargs):
-            if outcome.turn_id == "chat":
-                entered.set()
-                await release.wait()
-            return await commit(outcome, **kwargs)
-
-        core._schedule_post_turn_commit_async = finalization
-        await core.schedule_channel_turn_async(_make_envelope(turn_id="chat", text="CHAT_SENTINEL"))
-        task = core.state.turn_tasks["chat"]
-        await asyncio.wait_for(model.entered.wait(), 2)
-        manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="quiz", trigger_kind="manual"))
-        await core.drain_once_async()
-        assert len(manager.pending_triggers) == 1
-        assert [t.turn_id for t in memory.history.turns] == ["chat"]
-        assert not runner.results
-        model.release.set()
-        await asyncio.wait_for(entered.wait(), 2)
-        assert core.state.scheduler.state.phase == CoreTurnPhase.FINALIZING
-        assert core.turn_manager.latest_active_turn_id() == "chat"
-        assert not core.can_start_proactive_turn()
-        assert not core.state.resident_drained_event.is_set()
-        await core.schedule_channel_turn_async(_make_envelope(turn_id="next", text="USER_NEXT_SENTINEL"))
-        await core.drain_once_async()
-        assert len(manager.pending_triggers) == 1
-        release.set()
-        await asyncio.wait_for(task, 2)
-        await asyncio.wait_for(core.run_until_idle_async(max_iterations=128), 5)
-        turns = memory.history.turns
-        assert [t.turn_id for t in turns[:2]] == ["chat", "next"]
-        assert len(turns) == 3
-        assert all(t.state != "active" for t in turns)
-        assert "QUIZ_SENTINEL" in repr(turns[2].messages)
-        assert not manager.pending_triggers
-        assert core.state.scheduler.state.phase == CoreTurnPhase.IDLE
-        assert core.state.active_turn_id is None
-        assert core.state.resident_drained_event.is_set()
-        assert not core.state.diagnostics
-        proactive_requests = [r for r in model.requests if r.metadata.get("history_visibility") == "active_turn"]
-        assert len(proactive_requests) == 1
-        assert "CHAT_SENTINEL" not in repr(proactive_requests[0].messages)
-        assert "USER_NEXT_SENTINEL" not in repr(proactive_requests[0].messages)
-    asyncio.run(scenario())
-
-
-def test_already_drained_proactive_event_requeues_if_chat_won_admission():
-    async def scenario():
-        core, _ = make_core(Model())
-        manager = ProactiveManager()
-        manager.hydrate(ProactiveDefinition(proactive_id="quiz", goal="quiz"))
-        handler = ProactiveTriggerHandler(manager)
-        source = ProactiveEventSource(manager)
-        manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="quiz", trigger_kind="manual"))
-        assert source.prepare(core.context)
-        event, = source.drain(core.context)
-        lease = core._admit_resident_turn("chat", ResidentTurnKind.CHAT)
-        handler.handle(event, core.context)
-        assert len(manager.pending_triggers) == 1
-        assert not handler.tasks
-        assert not core.context.require_port("memory:memory").history.turns
-        assert not source.prepare(core.context)
-        core._finish_resident_turn(lease)
-        assert source.prepare(core.context)
-    asyncio.run(scenario())
 
 
 def test_cancellation_before_task_start_releases_lease_without_opening_l1():
@@ -282,7 +168,7 @@ def test_cancellation_before_task_start_releases_lease_without_opening_l1():
         continuation = TurnContinuation("job", iter(()), "job")
         task = core.start_background_turn(continuation, lambda: asyncio.sleep(60), owner=None)
         assert task is not None
-        assert not core.can_start_proactive_turn()
+        assert not core.control_runtime.can_start_background_turn()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -321,7 +207,7 @@ def test_task_creation_failure_rolls_back_only_its_reservation(monkeypatch):
             core.start_background_turn(continuation, lambda: asyncio.sleep(0), owner=None)
         assert core.state.scheduler.state.phase == CoreTurnPhase.IDLE
         assert not core.state.turn_tasks
-        assert core.can_start_proactive_turn()
+        assert core.control_runtime.can_start_background_turn()
     asyncio.run(scenario())
 
 
@@ -345,3 +231,65 @@ def test_sendable_gate_rejects_nonadjacent_anthropic_tool_pair(interruption):
     with pytest.raises(ProjectionContractError, match="immediately following"):
         PreparedRequest.build(key(session, "invalid"), session.frontier,
                               {"messages": [call, *interruption, result]})
+
+
+def test_proactive_plugin_dispatches_while_resident_awaits_model(tmp_path):
+    from pal.foundation import PalV2Database
+    from pal.plugins_builtin.proactive.runtime import ProactivePlugin
+    from pal.proactive.models import ProactiveDefinitionModel, ProactiveRunModel
+    from pal.shared.background_protocol import BACKGROUND_WORKFLOWS
+
+    async def scenario():
+        model = Model(blocked=True)
+        core, events = make_core(model)
+        requests = []
+
+        class Backend:
+            async def start_scheduled_run(self, request):
+                requests.append(request)
+                return {"workflow_id": "background-workflow"}
+
+            async def scheduled_run_status(self, workflow_id):
+                return {"workflow": {"workflow_state": "COMPLETED",
+                                     "delivery": {"result_text": "finished"}}}
+
+        core.context.port_registry.register(BACKGROUND_WORKFLOWS, Backend())
+        handle = ProactivePlugin().start(SimpleNamespace(context=core.context))
+        manager = handle.ports["proactive_manager"]
+        await core.schedule_channel_turn_async(_make_envelope(turn_id="chat", text="CHAT_SENTINEL"))
+        await asyncio.wait_for(model.entered.wait(), 2)
+        lease = core.state.scheduler.state.owner
+        manager.ensure_silent_once(proactive_id="scheduled", goal="BACKGROUND_SENTINEL", method="")
+        for _ in range(10):
+            await core.drain_once_async()
+            if requests:
+                break
+        assert len(requests) == 1
+        assert requests[0]["goal"] == "BACKGROUND_SENTINEL"
+        assert core.state.scheduler.state.owner == lease
+        assert manager.repository.latest_run("scheduled").status == "dispatched"
+        assert len(model.requests) == 1
+        memory = core.context.require_port("memory:memory")
+        assert [t.turn_id for t in memory.history.turns] == ["chat"]
+        # The durable reconciliation event completes without a Resident turn.
+        source, = handle.event_sources
+        source.next_poll = 0
+        for _ in range(10):
+            await core.drain_once_async()
+            if not manager.pending_triggers:
+                break
+        assert manager.repository.latest_run("scheduled").status == "completed"
+        assert core.state.scheduler.state.owner == lease
+        assert len(model.requests) == 1
+        model.release.set()
+        await asyncio.wait_for(core.run_until_idle_async(max_iterations=128), 5)
+        assert [t.turn_id for t in memory.history.turns] == ["chat"]
+        assert not core.state.active_turns
+        core.close()
+
+    db = PalV2Database(tmp_path / "runtime.sqlite3")
+    db.initialize([ProactiveDefinitionModel, ProactiveRunModel])
+    try:
+        asyncio.run(scenario())
+    finally:
+        db.close()

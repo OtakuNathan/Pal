@@ -3473,7 +3473,7 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
     def test_architecture_stage_resolves_snapshot_before_profile(self) -> None:
         worker = SemanticOrchestrator(BunshinWorkflowService(self.runtime_root))
         worker.components.effect_reads.effect_snapshot = lambda _effect: SimpleNamespace(
-            workflow_id="wf-order", payload={}
+            workflow_id="wf-order", state="ARCHITECT_RUNNING", payload={}
         )
 
         def stop_after_profile(workflow_id: str, role: str) -> str:
@@ -4819,6 +4819,8 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
                 canonical,
                 {
                     "op_bunshin_start_workflow",
+                    "op_bunshin_submit_external_product",
+                    "op_bunshin_read_task_result",
                     "op_bunshin_submit_artifact",
                     "intro_bunshin_task_search",
                     "intro_bunshin_task_status",
@@ -4836,6 +4838,7 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
                     descriptor.canonical_path: descriptor.InputModel.model_json_schema(mode="validation")
                     for descriptor in core.context.capability_registry.descriptors.values()
                     if descriptor.module_id == "bunshin"
+                    and descriptor.canonical_path != "op_bunshin_submit_external_product"
                 },
                 sort_keys=True,
             )
@@ -4850,6 +4853,10 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
                 "decision_token",
             ):
                 self.assertNotIn(f'"{forbidden}"', schemas)
+            external_descriptor = next(d for d in core.context.capability_registry.descriptors.values()
+                                       if d.canonical_path == "op_bunshin_submit_external_product")
+            external_schema = external_descriptor.InputModel.model_json_schema(mode="validation")
+            self.assertTrue({"workflow_id", "node_run_id", "generation", "submission_id"} <= set(external_schema["properties"]))
             start_descriptor = next(
                 descriptor
                 for descriptor in core.context.capability_registry.descriptors.values()
@@ -4886,7 +4893,7 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
             self.assertIn("kind", workspace_schema["required"])
             self.assertEqual(
                 workspace_schema["properties"]["kind"]["enum"],
-                ["new_project", "existing_repo"],
+                ["new_project", "existing_repo", "managed_git"],
             )
             self.assertIn(
                 "create a missing repo_path",

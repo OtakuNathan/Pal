@@ -427,3 +427,34 @@ acknowledges each accepted part before settling the event. Failed channel or
 manager acknowledgements preserve the pending event and accepted-part ledger.
 Manager startup reads prompt logging from the Core snapshot; subsequent changes
 arrive through the declared observer. Wakeups use Core's public interface.
+
+
+## General background tasks and managed Git
+
+Direct workflows pin an externally supplied task plan and independent role
+bindings. General defaults to no independent verifier; SWE retains its default
+verifier. A null checker settles the actual candidate with an explicit
+not-required receipt. A null producer waits for a real external product
+instead of assigning a worker. Planned workflows can skip independent plan
+review while preserving human approval.
+
+General Tasks may choose `workspace.kind=managed_git`. The canonical checkout
+is `data/bunshin/general/<semantic-task-name>`, or `proactive/` for the reserved
+scheduled Task. Workers edit isolated Git worktrees. A short shared/exclusive
+I/O gate serializes foreground local I/O against source capture and promotion.
+Publication captures foreground changes, merges disjoint path changes and
+preserves both commits on a conflict. The receipt distinguishes the accepted
+candidate commit from the promoted canonical commit.
+
+General Direct submission accepts `result_text`, `next_steps`, and
+`deliverable_paths`; actual files are extracted from the accepted Git commit.
+No independent verification is represented as not required. The ordinary
+SWE patch delivery contract remains available.
+
+The durable background inbox carries General and scheduled terminal results to
+Resident independently of its active conversation. Channel confirmation and
+resident consumption have separate records. The runtime upgrade is an offline
+v31-to-v32 migration, including proactive business-data import and compatibility
+links. Perform it using `pal setup --upgrade --runtime-root <dir>` with the host
+and manager stopped. A resident host restart is required for the new handoff
+path.

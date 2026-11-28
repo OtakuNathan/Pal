@@ -216,6 +216,8 @@ def _scoped_workspace_tool_spec(
     value = dict(spec)
     if name == "op_bunshin_verification_pass" and not workspace.get("verification_verdict_scope"):
         value["InputModel"] = EmptyToolInput
+    if name == "op_bunshin_candidate_submit" and workspace.get("domain") != "general":
+        value["InputModel"] = EmptyToolInput
     if name != ADD_FINDING_CAPABILITY:
         return value
     role = str(dict(workspace.get("bunshin") or {}).get("role") or "")

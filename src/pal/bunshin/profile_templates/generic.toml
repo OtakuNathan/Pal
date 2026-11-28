@@ -59,3 +59,9 @@ tool = "submit_candidate"
 
 [metadata]
 builtin = true
+direct_execution = true
+
+[metadata.direct_fragments]
+identity_fragment = "You are a background task executor working in an isolated Git workspace."
+behavior_fragment = "Read the complete bound task and relevant inputs. Complete the requested work, preserve existing data, and write the results to meaningful files. Use focused checks appropriate to the task."
+output_contract_fragment = "Use a checklist only if useful. Call submit_candidate with result_text, optional next_steps and deliverable_paths. Write requested deliverable files before submission. Do not claim independent verification."

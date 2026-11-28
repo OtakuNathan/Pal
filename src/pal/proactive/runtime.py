@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from collections.abc import Callable
-from typing import Any
 from datetime import datetime, timezone
 
-from pal.core.mailbox import Mailbox
 from pal.proactive.contracts import (
     ScheduleEnginePort,
     ProactiveDefinition,
     ProactiveManagerPort,
-    ProactiveRunnerPort,
     ProactiveTriggerEvent,
 )
 from pal.proactive.repository import ProactiveRepositoryPort
@@ -32,11 +29,6 @@ class ScheduleEngine(ScheduleEnginePort):
     def unregister(self, proactive_id: str) -> None:
         self.next_due_by_proactive_id.pop(proactive_id, None)
 
-    def mark_completed(self, definition: ProactiveDefinition, *, now_utc: datetime | None = None) -> str | None:
-        next_due = self._compute_next_due(definition, now_utc=now_utc)
-        self.next_due_by_proactive_id[definition.proactive_id] = next_due
-        return next_due
-
     def collect_due(self, definitions: dict[str, ProactiveDefinition], *, now_utc: datetime | None = None) -> list[ProactiveTriggerEvent]:
         reference = now_utc or utc_now_dt()
         due: list[ProactiveTriggerEvent] = []
@@ -57,7 +49,7 @@ class ScheduleEngine(ScheduleEnginePort):
                     metadata={"scheduled_for": next_due},
                 )
             )
-            self.mark_completed(definition, now_utc=reference)
+            self.register(definition, now_utc=reference)
         return due
 
     def _compute_next_due(self, definition: ProactiveDefinition, *, now_utc: datetime | None = None) -> str | None:
@@ -67,56 +59,19 @@ class ScheduleEngine(ScheduleEnginePort):
 
 
 @dataclass
-class ProactiveRunner(ProactiveRunnerPort):
-    triggered: list[ProactiveTriggerEvent] = field(default_factory=list)
-    results: list[dict[str, Any]] = field(default_factory=list)
-    repository: ProactiveRepositoryPort | None = None
-
-    def run(self, trigger: ProactiveTriggerEvent) -> None:
-        self.triggered.append(trigger)
-
-    def begin_run(self, trigger: ProactiveTriggerEvent) -> str | None:
-        self.run(trigger)
-        if self.repository is None:
-            return None
-        return self.repository.begin_run(trigger)
-
-    def complete_run(self, proactive_run_id: str | None, *, turn_id: str, final_reply: str) -> None:
-        if proactive_run_id is not None and self.repository is not None:
-            self.repository.complete_run(proactive_run_id, turn_id=turn_id, final_reply=final_reply)
-        self.results.append(
-            {
-                "proactive_run_id": proactive_run_id,
-                "turn_id": turn_id,
-                "final_reply": final_reply,
-            }
-        )
-
-    def fail_run(self, proactive_run_id: str | None, *, error_text: str) -> None:
-        self.results.append(
-            {
-                "proactive_run_id": proactive_run_id,
-                "error_text": error_text,
-            }
-        )
-        if proactive_run_id is not None and self.repository is not None:
-            self.repository.fail_run(proactive_run_id, error_text=error_text)
-
-
-@dataclass
 class ProactiveManager(ProactiveManagerPort):
     registered: dict[str, ProactiveDefinition] = field(default_factory=dict)
-    trigger_mailbox: Mailbox[ProactiveTriggerEvent] = field(default_factory=Mailbox)
     schedule_engine: ScheduleEngine = field(default_factory=ScheduleEngine)
     repository: ProactiveRepositoryPort | None = None
     on_change: Callable[[], None] | None = None
     on_ready: Callable[[], None] | None = None
 
-    def __post_init__(self) -> None:
-        self.trigger_mailbox.on_put = self._notify_ready
-
     def register(self, definition: ProactiveDefinition) -> None:
-        next_due = self.schedule_engine._compute_next_due(definition)
+        previous = self.registered.get(definition.proactive_id)
+        if previous is not None and previous.schedule == definition.schedule and previous.enabled == definition.enabled:
+            next_due = self.schedule_engine.next_due_at(definition.proactive_id)
+        else:
+            next_due = self.schedule_engine._compute_next_due(definition)
         self._register_at(definition, next_due)
 
     def _register_at(self, definition: ProactiveDefinition, next_due: str | None) -> None:
@@ -148,27 +103,28 @@ class ProactiveManager(ProactiveManagerPort):
         self._notify_ready()
 
     def enqueue_trigger(self, trigger: ProactiveTriggerEvent) -> None:
-        self.trigger_mailbox.put(trigger)
+        if self.repository is None:
+            raise RuntimeError("proactive dispatch requires a repository")
+        definition = self.registered.get(trigger.proactive_id)
+        if definition is not None:
+            self.repository.queue_background_run(
+                trigger, definition, next_due=self.schedule_engine.next_due_at(trigger.proactive_id),
+            )
+            self._notify_ready()
 
     def enqueue_due_triggers(self, *, now_utc: datetime | None = None) -> tuple[ProactiveTriggerEvent, ...]:
+        if self.repository is None:
+            raise RuntimeError("proactive dispatch requires a repository")
+        before = dict(self.schedule_engine.next_due_by_proactive_id)
         due = self.schedule_engine.collect_due(self.registered, now_utc=now_utc)
-        for trigger in due:
-            self.trigger_mailbox.put(trigger)
+        for index, trigger in enumerate(due):
+            try:
+                self.enqueue_trigger(trigger)
+            except Exception:
+                for remaining in due[index:]:
+                    self.schedule_engine.next_due_by_proactive_id[remaining.proactive_id] = before[remaining.proactive_id]
+                raise
         return tuple(due)
-
-    def mark_run_completed(self, proactive_id: str, *, now_utc: datetime | None = None) -> str | None:
-        definition = self.registered.get(proactive_id)
-        if definition is None:
-            return None
-        next_due = self.schedule_engine.mark_completed(definition, now_utc=now_utc)
-        if self.repository is not None:
-            self.repository.update_schedule_state(
-                proactive_id,
-                next_due_at_utc=next_due,
-                last_run_at_utc=(now_utc or utc_now_dt()).isoformat(),
-            )
-        self._notify_ready()
-        return next_due
 
     def seconds_until_next_due(self, *, now_utc: datetime | None = None) -> float | None:
         reference = now_utc or utc_now_dt()
@@ -305,7 +261,10 @@ class ProactiveManager(ProactiveManagerPort):
 
     @property
     def pending_triggers(self) -> tuple[ProactiveTriggerEvent, ...]:
-        return self.trigger_mailbox.peek_all()
+        if self.repository is not None:
+            return tuple(ProactiveTriggerEvent(run.proactive_id, run.trigger_kind, run.trigger_metadata)
+                         for run in self.repository.pending_background_runs())
+        return ()
 
     def _notify_change(self) -> None:
         if self.on_change is not None:

@@ -375,10 +375,12 @@ def effective_verification_policy(
     ]
     entrypoint_kinds = {str(item.get("kind") or "").strip() for item in entrypoints}
     direct = work_view.get("execution_mode") == "direct"
-    if direct and delivery.get("report_only"):
+    if direct and (delivery.get("report_only") or work_view.get("domain") == "general"):
         source["require_warning_clean"] = False
         source["lsp_policy"] = "never"
         source["require_lsp"] = False
+        if work_view.get("domain") == "general":
+            source["require_focused_tests"] = False
     require_consumer_probe = False
     require_dogfood = sink and not direct
     require_platform_probe = sink and "platform_probe" in entrypoint_kinds
@@ -392,7 +394,7 @@ def effective_verification_policy(
         "warning_clean",
     }
     allowed_obligations.add("candidate_delta_review")
-    if ((direct and delivery.get("report_only")) or (
+    if ((direct and (delivery.get("report_only") or work_view.get("domain") == "general")) or (
             str(source.get("lsp_policy") or "") == "when_available" and not lsp_applicability["required"])):
         allowed_obligations.discard("lsp")
     if historical_regressions:

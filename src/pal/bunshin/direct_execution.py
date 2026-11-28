@@ -5,6 +5,7 @@ metadata, not an authored architecture or evidence of an architecture review.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
@@ -33,11 +34,17 @@ def prepare_direct_execution(
     outputs = deliverable_paths(dict(task.get("original") or {}))
     binding = artifacts.read_json(request["family_binding_ref"])
     validate_direct_binding(binding)
-    workspace = service.skeleton.provision_architecture_workspace(
-        workflow_id=workflow_id, workflow_name=str(request.get("workflow_name") or workflow_id),
-        revision_name="direct-input", workspace=dict(request.get("workspace") or {}),
-        requirements_ref=task_ref, base_artifact=base_artifact,
-    )
+    workspace_spec = dict(request.get("workspace") or {})
+    from pal.foundation.managed_workspace_io import managed_workspace_write_gate
+    from pal.bunshin.managed_workspace import capture_managed_head
+    with (managed_workspace_write_gate(service.runtime_root) if workspace_spec.get("managed_git") else nullcontext()):
+        if workspace_spec.get("managed_git"):
+            capture_managed_head(service.runtime_root, Path(workspace_spec["repo_path"]))
+        workspace = service.skeleton.provision_architecture_workspace(
+            workflow_id=workflow_id, workflow_name=str(request.get("workflow_name") or workflow_id),
+            revision_name="direct-input", workspace=dict(request.get("workspace") or {}),
+            requirements_ref=task_ref, base_artifact=base_artifact,
+        )
     # This worktree only captures the source baseline; no architect runs and
     # no declaration files or artificial architecture commit are produced.
     with tempfile.TemporaryDirectory(prefix="pal-direct-bundle-") as temporary:
@@ -58,8 +65,12 @@ def prepare_direct_execution(
         name=DIRECT_MODULE, responsibility="Complete the bound task in the repository",
         satellite_data={"execution_mode": "direct", "requirements_ref": task_ref.to_dict(),
                         "deliverable_paths": outputs},
-        producer_binding=RoleBinding("profile", roles["implementation"]["role_profile"]["canonical_profile_id"]),
-        checker_binding=RoleBinding("profile", roles["verifier"]["role_profile"]["canonical_profile_id"]),
+        producer_binding=(RoleBinding("null", reason=roles["implementation"]["reason"])
+                          if roles["implementation"]["participant"] == "null" else
+                          RoleBinding("profile", roles["implementation"]["role_profile"]["canonical_profile_id"])),
+        checker_binding=(RoleBinding("null", reason=roles["verifier"]["reason"])
+                         if roles["verifier"]["participant"] == "null" else
+                         RoleBinding("profile", roles["verifier"]["role_profile"]["canonical_profile_id"])),
         execution_adapter="software_git.v2", workspace_policy=policy,
         output_contract=tuple(outputs) or ("task_result",), is_sink=True,
     )
@@ -67,6 +78,9 @@ def prepare_direct_execution(
                     edges=(), sink=DIRECT_MODULE, source_ref=task_ref.sha256, source_map_ref=source_map.sha256)
     payload = {
         "schema_version": "1", "execution_mode": "direct", "requirements_ref": task_ref.to_dict(),
+        "domain": binding["family_id"],
+        "delivery_policy": request.get("delivery_policy") or ("files" if binding["family_id"] == "general" else "git"),
+        **({"scheduled_archive_snapshot": request["scheduled_archive_snapshot"]} if request.get("scheduled_archive_snapshot") else {}),
         "input_binding_ref": dict(request.get("input_binding_ref") or {}),
         "direct_reference_refs": dict(request.get("direct_reference_refs") or {}),
         "deliverable_paths": outputs, "graph_ir": graph.to_dict(),

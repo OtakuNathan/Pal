@@ -91,7 +91,11 @@ def _verification_workspace_from_prompt_pack(
     return review_workspace, review_scratch
 
 
-def _semantic_verifier_instruction(*, graph_sink: bool, direct: bool = False) -> str:
+def _semantic_verifier_instruction(*, graph_sink: bool, direct: bool = False, general: bool = False) -> str:
+    if direct and general:
+        return ("Check the current task product against reference:task. Use actual file/content checks and original evidence. "
+                "Report all findings together; for acceptance cite a focused successful command in system_test_calls. "
+                "Do not invent an executable entrypoint or software test suite.")
     scratch_rule = (
         "Put every transient configure, build, and test output under the exact "
         "workspace.build_scratch_dir from your invocation pack (for example, pass that path to "

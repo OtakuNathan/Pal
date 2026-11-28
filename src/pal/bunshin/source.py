@@ -98,6 +98,7 @@ class BunshinControlEventHandler(EventHandler):
         deliveries.append(("primary", delivery))
         accepted = True
         error = ""
+        background = payload.get("background_handoff") and payload.get("event_kind") == "workflow_terminal"
         try:
             completed_parts = self.provider.delivered_event_parts(payload)
             if event.event_kind == EventKind.BUNSHIN_TERMINAL and payload.get("memory_candidates") and "memory_proposals" not in completed_parts:
@@ -111,6 +112,9 @@ class BunshinControlEventHandler(EventHandler):
                         "invocation": payload.get("invocation_id") or payload.get("run_id"),
                         "workflow": payload.get("workflow_id"), "candidates": payload["memory_candidates"]})}
                 deliveries.append(("memory_proposals", memory.stage_memory_proposal(proposal, route)))
+            if background and any(part_key not in completed_parts for part_key, _ in deliveries):
+                if not self.provider.begin_background_delivery(payload):
+                    return []
             for part_key, part_delivery in deliveries:
                 if part_key in completed_parts:
                     continue
@@ -121,10 +125,16 @@ class BunshinControlEventHandler(EventHandler):
                     error = "channel provider did not accept bunshin delivery"
                     break
                 if not self.provider.settle_event_part(payload, part_key):
+                    if background:
+                        self.provider.mark_background_delivery_uncertain(payload)
+                        return []
                     accepted = False
                     error = "manager did not acknowledge bunshin delivery part"
                     break
         except Exception as exc:
+            if background:
+                self.provider.mark_background_delivery_uncertain(payload)
+                return []
             accepted = False
             error = exception_reason(exc)
         self.provider.settle_event(payload, accepted=accepted, error=error)

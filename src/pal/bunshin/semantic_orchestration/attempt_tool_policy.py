@@ -5,6 +5,7 @@ from typing import Any
 from pal.bunshin.artifacts import ContentAddressedArtifactStore
 from pal.bunshin.paths import invocation_root
 from pal.bunshin.repository import BunshinRepository
+from pal.bunshin.contracts import AggregateType
 from pal.bunshin.role_contracts import OrchestrationRole
 from typing import Mapping
 from pal.shared import BunshinInvocationPack
@@ -38,6 +39,7 @@ class ToolPolicy:
         run_id = stage_workspace_preparation.run_id
         snapshot = command.snapshot
         uses_bound_durable_workspace = stage_workspace_preparation.uses_bound_durable_workspace
+        pack = _apply_memory_policy(self.repository, snapshot.workflow_id, pack)
         if stage_workspace_preparation.retry_prompt_ref is not None:
             # The retry retains its pinned authoring policy and files. The
             # newly prepared pack supplies only refreshed execution inputs.
@@ -202,3 +204,13 @@ class ToolPolicy:
                 "workspace": bound_workspace,
             }
         )
+
+
+def _apply_memory_policy(repository: BunshinRepository, workflow_id: str, pack: BunshinInvocationPack) -> BunshinInvocationPack:
+    workflow = repository.snapshots.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+    if workflow is None or workflow.payload.get("memory_policy") != "disabled":
+        return pack
+    return BunshinInvocationPack.from_dict({
+        **pack.to_dict(),
+        "allowed_capabilities": [name for name in pack.allowed_capabilities if name != "op_bunshin_memory_candidate_write"],
+    })

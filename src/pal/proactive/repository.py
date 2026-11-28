@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import hashlib
 from typing import Protocol
 from uuid import uuid4
 
@@ -13,7 +14,7 @@ class ProactiveRepositoryPort(Protocol):
     def upsert_definition(self, definition: ProactiveDefinition, *, next_due_at_utc: str | None = None) -> object:
         ...
 
-    def list_definitions(self) -> list[object]:
+    def list_definitions(self) -> list[StoredProactiveDefinition]:
         ...
 
     def update_schedule_state(
@@ -25,14 +26,20 @@ class ProactiveRepositoryPort(Protocol):
     ) -> object | None:
         ...
 
-    def begin_run(self, trigger: ProactiveTriggerEvent) -> str:
-        ...
+    def queue_background_run(self, trigger: ProactiveTriggerEvent, definition: ProactiveDefinition,
+                             *, next_due: str | None) -> str: ...
 
-    def complete_run(self, proactive_run_id: str, *, turn_id: str, final_reply: str) -> None:
-        ...
+    def pending_background_runs(self) -> list[StoredProactiveRun]: ...
 
-    def fail_run(self, proactive_run_id: str, *, error_text: str) -> None:
-        ...
+    def run_count(self) -> int: ...
+
+    def list_runs(self, proactive_id: str, *, limit: int = 20) -> list[StoredProactiveRun]: ...
+
+    def latest_run(self, proactive_id: str) -> StoredProactiveRun | None: ...
+
+    def set_background_state(self, run_id: str, status: str, *, workflow_id: str = "",
+                             result: str | None = None, error: str | None = None,
+                             dispatch_request: dict | None = None) -> None: ...
 
     def delete_definition(self, proactive_id: str) -> bool:
         ...
@@ -126,49 +133,61 @@ class ProactiveRepository(ProactiveRepositoryPort):
         instance.save()
         return instance
 
-    def begin_run(self, trigger: ProactiveTriggerEvent) -> str:
-        run_id = str(uuid4())
-        now = utc_now()
-        ProactiveRunModel.create(
-            proactive_run_id=run_id,
-            proactive_id=trigger.proactive_id,
-            trigger_kind=trigger.trigger_kind,
-            status="running",
-            trigger_metadata=dict(trigger.metadata or {}),
-            started_at=now,
-            created_at=now,
-            updated_at=now,
-        )
+    def queue_background_run(self, trigger: ProactiveTriggerEvent, definition: ProactiveDefinition,
+                             *, next_due: str | None) -> str:
+        scheduled = str(trigger.metadata.get("scheduled_for") or "")
+        identity = scheduled if trigger.trigger_kind == "scheduled" else str(trigger.metadata.get("request_id") or uuid4())
+        run_id = "pr_" + hashlib.sha256(f"{trigger.proactive_id}:{trigger.trigger_kind}:{identity}".encode()).hexdigest()
+        with ProactiveRunModel._meta.database.atomic():
+            ProactiveRunModel.get_or_create(
+                proactive_run_id=run_id, defaults={"proactive_id": definition.proactive_id,
+                    "trigger_kind": trigger.trigger_kind, "status": "queued",
+                    "trigger_metadata": {**trigger.metadata, "background_protocol": 1, "definition": asdict(definition)}})
+            if trigger.trigger_kind == "scheduled":
+                self.update_schedule_state(definition.proactive_id, next_due_at_utc=next_due)
         return run_id
 
-    def complete_run(self, proactive_run_id: str, *, turn_id: str, final_reply: str) -> None:
-        row = ProactiveRunModel.get_or_none(ProactiveRunModel.proactive_run_id == proactive_run_id)
-        if row is None:
-            raise LookupError(f"Cannot complete missing proactive run: {proactive_run_id}")
-        now = utc_now()
-        row.status = "completed"
-        row.turn_id = turn_id
-        row.output_summary = final_reply
-        row.completed_at = now
-        row.updated_at = now
-        row.save()
+    def run_count(self) -> int:
+        return int(ProactiveRunModel.select().count())
 
-    def fail_run(self, proactive_run_id: str, *, error_text: str) -> None:
-        row = ProactiveRunModel.get_or_none(ProactiveRunModel.proactive_run_id == proactive_run_id)
-        if row is None:
-            raise LookupError(f"Cannot fail missing proactive run: {proactive_run_id}")
-        now = utc_now()
-        row.status = "failed"
-        row.error_text = error_text
-        row.completed_at = now
-        row.updated_at = now
-        row.save()
+    def pending_background_runs(self) -> list[StoredProactiveRun]:
+        return [self._to_stored_run(row) for row in ProactiveRunModel.select().where(
+            ProactiveRunModel.status.in_(("queued", "submitting", "dispatched"))
+        ).order_by(ProactiveRunModel.started_at, ProactiveRunModel.proactive_run_id)]
+
+    def set_background_state(self, run_id: str, status: str, *, workflow_id: str = "",
+                             result: str | None = None, error: str | None = None,
+                             dispatch_request: dict | None = None) -> None:
+        row = ProactiveRunModel.get_by_id(run_id)
+        metadata = dict(row.trigger_metadata)
+        if workflow_id:
+            metadata["workflow_id"] = workflow_id
+        if dispatch_request is not None:
+            metadata["dispatch_request"] = dispatch_request
+        row.trigger_metadata = metadata
+        row.status = status
+        row.updated_at = utc_now()
+        if result is not None:
+            row.output_summary = result
+        if error is not None:
+            row.error_text = error
+        if status in {"completed", "failed", "cancelled", "rejected"}:
+            row.completed_at = row.updated_at
+        with ProactiveRunModel._meta.database.atomic():
+            row.save()
+            if status in {"completed", "failed", "cancelled", "rejected"}:
+                ProactiveDefinitionModel.update(last_run_at_utc=row.updated_at).where(
+                    ProactiveDefinitionModel.proactive_id == row.proactive_id).execute()
 
     def delete_definition(self, proactive_id: str) -> bool:
         row = ProactiveDefinitionModel.get_or_none(ProactiveDefinitionModel.proactive_id == proactive_id)
         if row is None:
             return False
-        row.delete_instance()
+        with ProactiveDefinitionModel._meta.database.atomic():
+            ProactiveRunModel.update(status="cancelled", completed_at=utc_now()).where(
+                (ProactiveRunModel.proactive_id == proactive_id) & (ProactiveRunModel.status == "queued")
+            ).execute()
+            row.delete_instance()
         return True
 
     def list_runs(self, proactive_id: str, *, limit: int = 20) -> list[StoredProactiveRun]:

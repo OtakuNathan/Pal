@@ -140,6 +140,8 @@ def _role_mode_profile_payload(
             {"key": "perform_work", "instruction": "Implement or independently verify the bound task; maintain evidence and findings.", "done_when": "All required work and current-Candidate checks are complete."},
             {"key": "submit", "instruction": "Inspect final evidence before semantic submission.", "done_when": "The outcome matches the task and observed evidence."},
         ]}
+        if compiled.get("profile_group") == "general":
+            role["checklist"] = {**dict(role.get("checklist") or {}), "require_complete": False}
         compiled["role"] = role
     for name in (
         "identity_fragment",

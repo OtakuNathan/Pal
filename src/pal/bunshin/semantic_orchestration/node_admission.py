@@ -41,6 +41,14 @@ class NodeAdmission:
             raise DeferredEffectError("pending dependency repair fences role admission")
         return execution.cycles[name]
 
+    def _participant(self, node: AggregateSnapshot, slot: CycleSlot) -> str:
+        execution = WorkflowCoordinator(self.repository).execution(workflow_id=node.workflow_id)
+        name = str(node.payload.get("module_name") or node.payload.get("unit_id") or "")
+        if int(node.payload.get("graph_generation") or execution.graph.generation) != execution.graph.generation:
+            raise SubmissionInvariantError("role binding belongs to a stale graph")
+        spec = execution.graph.nodes[name]
+        return (spec.producer_binding if slot == CycleSlot.PRODUCER else spec.checker_binding).participant
+
     def resume_queued_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self.effect_reads.effect_snapshot(effect)
         cycle = self._cycle(node)
@@ -57,24 +65,18 @@ class NodeAdmission:
         action, activation = self._activation_for_work(work)
         if action not in self.repository.transitions.legal_actions(AggregateType.DAG_NODE_RUN, node.state):
             raise SubmissionInvariantError("queued node effect disagrees with its NodeCycle cursor")
-        if activation.mode == RoleMode.PRODUCE and self.workflow_facts.role_participant_kind(
-            node.workflow_id, OrchestrationRole.IMPLEMENTATION.value,
-        ) == "null":
-            return self.null_execution.accept_null_execution(effect)
+        if work.slot == CycleSlot.PRODUCER and self._participant(node, CycleSlot.PRODUCER) == "null":
+            return self.null_execution.admit_missing_producer(effect)
+        if work.slot == CycleSlot.CHECKER and self._participant(node, CycleSlot.CHECKER) == "null":
+            return self.null_execution.skip_checker(effect)
         extra = self.verifier_tests.install_verifier_tests_for_repair(node) if activation.mode == RoleMode.REPAIR else None
         return self.admit_node_worker(effect, action_type=action, activation=activation, extra_payload=extra)
 
     def admit_implementation_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         mode = RoleMode(self.effect_reads.effect_role_mode(effect))
-        if (
-            mode == RoleMode.PRODUCE
-            and self.workflow_facts.role_participant_kind(
-                self.effect_reads.effect_snapshot(effect).workflow_id,
-                OrchestrationRole.IMPLEMENTATION.value,
-            )
-            == "null"
-        ):
-            return self.null_execution.accept_null_execution(effect)
+        node = self.effect_reads.effect_snapshot(effect)
+        if mode in {RoleMode.PRODUCE, RoleMode.REPAIR} and self._participant(node, CycleSlot.PRODUCER) == "null":
+            return self.null_execution.admit_missing_producer(effect)
         if mode == RoleMode.PRODUCE:
             return self.admit_node_worker(
                 effect,
@@ -105,6 +107,9 @@ class NodeAdmission:
         mode = RoleMode(self.effect_reads.effect_role_mode(effect))
         if mode != RoleMode.MODULE:
             raise ValueError(f"unsupported verifier mode: {mode.value}")
+        node = self.effect_reads.effect_snapshot(effect)
+        if self._participant(node, CycleSlot.CHECKER) == "null":
+            return self.null_execution.skip_checker(effect)
         return self.admit_node_worker(
             effect,
             action_type="START_REVIEW",

@@ -62,6 +62,7 @@ class WorkflowStatusReader:
         result = {
             "status": "ok",
             "workflow_id": workflow_id,
+            **({"replacement_workflow_id": workflow.payload["replacement_workflow_id"]} if workflow is not None and workflow.payload.get("replacement_workflow_id") else {}),
             "current_phase": projection["current_phase"],
             "workflow_state": projection["workflow_state"],
             "archived": bool(workflow is not None and workflow.payload.get("archived")),
@@ -109,6 +110,27 @@ class WorkflowStatusReader:
                 workflow=workflow,
             ),
         }
+        external_waits = []
+        for item in snapshots:
+            if item.state != "WAITING_PRODUCT":
+                continue
+            if item.aggregate_type == AggregateType.DAG_NODE_RUN:
+                if workflow is None or item.payload.get("epoch_id") != workflow.payload.get("execution_epoch_id"):
+                    continue
+                external_waits.append({"target": "node", "node_run_id": item.aggregate_id,
+                                       "generation": item.payload.get("graph_generation"),
+                                       "base_commit": item.payload.get("base_sha"),
+                                       "module": item.payload.get("module_name")})
+            elif item.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+                if workflow is None or item.aggregate_id != workflow.payload.get("architecture_revision_id"):
+                    continue
+                cycle = self.repository.cycles.read_plan_cycle(workflow_id=workflow_id)
+                external_waits.append({"target": "plan", "node_run_id": item.aggregate_id,
+                                       "generation": cycle.generation if cycle else None,
+                                       "requirements_ref": item.payload.get("requirements_ref")})
+        if external_waits:
+            result["waiting_for_external_product"] = external_waits
+            result["next_legal_action"] = ["submit_bunshin_external_product", "control_workflow:cancel"]
         result_ref = dict((workflow.payload if workflow is not None else {}).get("result_artifact_ref") or {})
         if result_ref.get("sha256"):
             record = self.repository.artifacts.read_artifact_record(str(result_ref["sha256"]))

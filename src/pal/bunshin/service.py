@@ -117,10 +117,13 @@ class BunshinWorkflowService:
         task_id = str(data.get("task_id") or f"task_{uuid4().hex}").strip()
         title = str(data.get("title") or "").strip()
         objective = str(data.get("objective") or data.get("goal") or "").strip()
+        if title == "__PROACTIVE__" and task_id != "__PROACTIVE__":
+            raise ValueError("__PROACTIVE__ is a reserved system Task")
         primary_profile = self.catalog.profile(str(data.get("profile") or "").strip())
         primary_profile_id = primary_profile.canonical_profile_id
         family_id = primary_profile.profile_group.replace("/", ".")
-        workspace = _normalize_workspace(data.get("workspace"))
+        from pal.bunshin.managed_workspace import managed_workspace
+        workspace = managed_workspace(self.runtime_root, _normalize_workspace(data.get("workspace")), title, family_id)
         if not title or not objective or not workspace:
             raise ValueError("task requires title, objective, profile, and workspace")
         family_binding_ref = self.catalog.publish_family_binding(primary_profile_id)
@@ -153,6 +156,7 @@ class BunshinWorkflowService:
                 "family_id": family_id,
                 "family_binding_ref": family_binding_ref.to_dict(),
                 "workspace_key": _workspace_key(workspace),
+                **({"managed_git": True} if workspace.get("managed_git") else {}),
                 "task_revision": 1,
                 "task_revision_ref": revision_ref.to_dict(),
                 "owner": str(data.get("actor") or "pal"),
@@ -261,6 +265,8 @@ class BunshinWorkflowService:
         title = str(data.get("title") or previous.get("title") or "").strip()
         objective = str(data.get("objective") or previous.get("objective") or "").strip()
         workspace = _normalize_workspace(data.get("workspace") or previous.get("workspace"))
+        if data.get("workspace") and (dict(previous.get("workspace") or {}).get("managed_git") or workspace.get("kind") == "managed_git"):
+            raise ValueError("managed workspace identity is immutable; create or select its Task")
         references = (
             _normalize_references(data["references"])
             if "references" in data
@@ -327,6 +333,10 @@ class BunshinWorkflowService:
             )
         return {"status": "archived", "task_id": task_id, "state": result.snapshot.state}
 
+    def start_scheduled_run(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        from pal.bunshin.scheduled_workflows import start_scheduled_run
+        return start_scheduled_run(self, data)
+
     def start_workflow(self, request: Mapping[str, Any], *, replacing_workflow_id: str = "") -> dict[str, Any]:
         data = dict(request)
         _validate_start_workflow_shape(data)
@@ -360,6 +370,8 @@ class BunshinWorkflowService:
 
         task_id = str(data.get("task_id") or "").strip()
         task_was_selected = bool(task_id)
+        if task_id == "__PROACTIVE__" and not data.get("scheduled_run_id") and not replacing_workflow_id:
+            raise ValueError("scheduled Task execution is owned by Proactive")
         create_task = None
         if not task_id:
             if not delivery_binding:
@@ -379,17 +391,33 @@ class BunshinWorkflowService:
             raise ValueError("workflow workspace is owned by Task; update the Task instead")
         if task_was_selected and data.get("profile"):
             raise ValueError("workflow profile is owned by Task; create a new Task to change it")
-        task_revision_ref = dict(task_payload.get("task_revision_ref") or {})
+        frozen_execution_source = None
+        if replacing_workflow_id:
+            frozen_execution_source = self._workflow_snapshot(replacing_workflow_id)
+            if frozen_execution_source.payload.get("task_id") != task_id:
+                raise ValueError("execution restart belongs to another Task")
+            for field in ("scheduled_run_id", "scheduled_task_name", "scheduled_request_fingerprint",
+                          "frozen_delivery_binding", "channel_delivery_requested", "discard_output"):
+                if field in frozen_execution_source.payload:
+                    data[field] = frozen_execution_source.payload[field]
+            if data.get("frozen_delivery_binding"):
+                delivery_binding = dict(data["frozen_delivery_binding"])
+            data["memory_policy"] = frozen_execution_source.payload.get("memory_policy") or "enabled"
+        task_revision_ref = dict((frozen_execution_source.payload if frozen_execution_source else task_payload).get("task_revision_ref") or {})
+
         task_revision = dict(self.artifacts.read_json(task_revision_ref))
+        memory_policy = str(data.get("memory_policy") or dict(task_revision.get("policies") or {}).get("memory_policy") or "enabled")
+        if memory_policy not in {"enabled", "disabled"}:
+            raise ValueError("memory_policy must be enabled or disabled")
         workflow_name = str(
             task_revision.get("title") or goal or "Bunshin workflow"
         ).strip()
         workspace = _normalize_workspace(task_revision.get("workspace"))
-        family_binding_ref = _artifact_ref_mapping(task_payload.get("family_binding_ref"))
+        family_binding_ref = _artifact_ref_mapping((frozen_execution_source.payload if frozen_execution_source else task_payload).get("family_binding_ref"))
         if not family_binding_ref:
             raise ValueError("Task has no pinned FamilyBindingArtifact")
         primary_profile_id = str(task_payload.get("primary_profile_id") or "").strip()
-        if operation == "new_requirement" and not artifact_ref and primary_profile_id:
+        if frozen_execution_source is None and operation == "new_requirement" and not artifact_ref and primary_profile_id:
             try:
                 family_binding_ref = self.catalog.publish_family_binding(
                     primary_profile_id
@@ -399,9 +427,17 @@ class BunshinWorkflowService:
         validate_family_binding_payload(
             dict(self.artifacts.read_json(family_binding_ref))
         )
-        if execution_mode == "direct":
-            from pal.bunshin.direct_contract import validate_direct_binding
-            validate_direct_binding(self.artifacts.read_json(family_binding_ref))
+        if execution_mode == "direct" and frozen_execution_source is None:
+            family_binding_ref = self.catalog.bind_direct(
+                family_binding_ref, dict(data.get("role_overrides") or {}),
+            ).to_dict()
+        elif data.get("role_overrides") and frozen_execution_source is None:
+            family_binding_ref = self.catalog.bind_planned(family_binding_ref, dict(data["role_overrides"]), operation=operation).to_dict()
+        effective_binding = self.artifacts.read_json(family_binding_ref)
+        if workspace.get("managed_git") and execution_mode != "direct":
+            raise ValueError("managed Git tasks require direct execution; planned artifact tasks retain their existing workspace adapter")
+        delivery_policy = ("files" if execution_mode == "direct" and effective_binding.get("family_id") == "general"
+                           else "git" if effective_binding.get("execution_adapter") == "software_git.v2" else "artifact")
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
         task_spec = data.get("task_spec")
         if task_spec is not None and (not isinstance(task_spec, Mapping) or not task_spec):
@@ -478,6 +514,8 @@ class BunshinWorkflowService:
         if not frozen_source_id:
             references = _normalize_references([*list(task_revision.get("references") or []), *references])
         direct_source = self.artifacts.read_json(artifact_ref) if execution_mode == "direct" and artifact_ref else {}
+        if direct_source.get("scheduled_archive_snapshot"):
+            data["scheduled_archive_snapshot"] = direct_source["scheduled_archive_snapshot"]
         if direct_source and direct_source.get("execution_mode") != "direct":
             raise ValueError("direct restart requires a direct execution artifact")
         direct_references = {}
@@ -509,6 +547,12 @@ class BunshinWorkflowService:
             "family_binding_ref": family_binding_ref,
             "operation": operation,
             "execution_mode": execution_mode,
+            "memory_policy": memory_policy,
+            "delivery_policy": delivery_policy,
+            **({"scheduled_run_id": data["scheduled_run_id"], "scheduled_request_fingerprint": data.get("scheduled_request_fingerprint"), "scheduled_task_name": str(data.get("scheduled_task_name") or "__PROACTIVE__"), "frozen_delivery_binding": delivery_binding,
+                "channel_delivery_requested": bool(data.get("channel_delivery_requested")),
+                "discard_output": bool(data.get("discard_output"))} if data.get("scheduled_run_id") else {}),
+            **({"scheduled_archive_snapshot": data["scheduled_archive_snapshot"]} if data.get("scheduled_archive_snapshot") else {}),
             "goal": raw_goal,
             "workflow_name": workflow_name,
             "requirements_ref": requirements_ref,
@@ -598,6 +642,12 @@ class BunshinWorkflowService:
                         "family_binding_ref": family_binding_ref,
                         "operation": operation,
                         "execution_mode": execution_mode,
+                        "memory_policy": memory_policy,
+                        "delivery_policy": delivery_policy,
+                        **({"scheduled_run_id": data["scheduled_run_id"], "scheduled_request_fingerprint": data.get("scheduled_request_fingerprint"), "scheduled_task_name": str(data.get("scheduled_task_name") or "__PROACTIVE__"), "frozen_delivery_binding": delivery_binding,
+                            "channel_delivery_requested": bool(data.get("channel_delivery_requested")),
+                "discard_output": bool(data.get("discard_output"))} if data.get("scheduled_run_id") else {}),
+                        "background_handoff": delivery_policy == "files",
                         "research_mode": research_mode.value,
                         "owner": actor,
                         "desired_state": "ACTIVE",
@@ -727,6 +777,8 @@ class BunshinWorkflowService:
         primary_profile_id = primary_profile.canonical_profile_id
         workspace = _normalize_workspace(data.get("workspace"))
         title = str(data.get("title") or goal or "Bunshin workflow").strip()
+        from pal.bunshin.managed_workspace import managed_workspace
+        workspace = managed_workspace(self.runtime_root, workspace, title, primary_profile.profile_group)
         if not workspace:
             raise ValueError("one-click start_workflow requires workspace when task_id is omitted")
         owner = str(data.get("actor") or "pal")

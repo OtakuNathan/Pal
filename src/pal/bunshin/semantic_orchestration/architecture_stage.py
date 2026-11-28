@@ -58,6 +58,9 @@ class ArchitectureStage:
                 else RoleMode.AUTHOR
             ),
         )
+        if revision.state in {"ARCHITECT_QUEUED", "WAITING_PRODUCT"} and self.workflow_facts.role_participant_kind(revision.workflow_id, "architect") == "null":
+            from pal.bunshin.external_plan import wait_external_plan
+            return wait_external_plan(self.repository, revision)
         profile = self.workflow_facts.profile_for_role(revision.workflow_id, OrchestrationRole.ARCHITECT.value)
         if self.workflow_facts.architecture_worker_suppressed(revision, running_state=running_state, start_action=start_action):
             return {"status": "superseded"}

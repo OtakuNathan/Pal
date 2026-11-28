@@ -167,9 +167,9 @@ def verdict_pass_errors(
             errors.append("Add a discoverable verifier test or a run-tests.sh that exercises the complete verifier corpus.")
         elif not latest.get((command, workspace.get("repo_path"), None), {}).get("ok"):
             errors.append(f"Run the complete verifier suite successfully from the repository root: {command}")
-    elif not any(path != f"review_scratch/{VERIFICATION_REPORT_FILENAME}" for path in case_paths) or not any(
+    elif workspace.get("domain") != "general" and (not any(path != f"review_scratch/{VERIFICATION_REPORT_FILENAME}" for path in case_paths) or not any(
         item.get("ok") for item in latest.values()
-    ):
+    )):
         errors.append("PASS requires a durable verifier case and a fresh successful command.")
     if workspace.get("verification_verdict_scope") == "sink" and not system_test_calls:
         errors.append("Exercise the delivered entrypoint and cite its successful call ID in system_test_calls.")

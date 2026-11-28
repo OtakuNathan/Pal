@@ -90,7 +90,7 @@ from pal.memory import (
 from pal.plugins.host import PluginHost
 from pal.plugins.capabilities import register_with_core as register_plugins_with_core
 from pal.plugins.l3 import MockL3Plugin
-from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveRunner, ProactiveTriggerEvent, build_proactive_trigger_input, build_proactive_turn_continuation, register_with_core as register_proactive_with_core
+from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveTriggerEvent, register_with_core as register_proactive_with_core
 from pal.proactive.scheduling import compute_next_proactive_run_at_utc, utc_now_dt
 from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, EventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, TurnDeliveryBinding, capability_action, capability_node, default_tool_result_text
 from pal.shared.prompt_dates import today_for_timezone
@@ -507,7 +507,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "src/pal/core/turn_handler.py",
             "src/pal/control/routing.py",
             "src/pal/control/handler.py",
-            "src/pal/proactive/turns.py",
+            "src/pal/proactive/background_dispatch.py",
             "src/pal/bunshin/runner.py",
         ):
             self._assert_no_forbidden_imports(
@@ -1878,220 +1878,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
 
-    def test_pal_core_builds_proactive_trigger_prompt_as_single_user_input(self) -> None:
-        runtime_root, database = self._create_database()
-        try:
-            core = build_core()
-            register_core_with_core(core)
-            identity_service = IdentityService(repository=IdentityRepository())
-            identity_service.ensure_defaults()
-            register_identity_with_core(core.context, identity_service)
-            memory_service = MemoryService()
-            register_memory_with_core(core.context, memory_service)
-            memory_service.l1_store.append(
-                [
-                    L1TranscriptMessage(role="user", content="Remember the last digest."),
-                    L1TranscriptMessage(role="assistant", content="I will keep it in mind."),
-                ]
-            )
-            memory_service.l2_store.upsert_entries(
-                [
-                    L2Entry(
-                        entry_id="svc-summary",
-                        kind="fact",
-                        scope="system",
-                        title="Recent Digest Preference",
-                        summary="Prefer concise digests.",
-                        rendered="Prefer concise digests.",
-                        touched_at="2026-01-01T00:00:00+00:00",
-                    )
-                ],
-                touch=True,
-            )
-
-            definition = ProactiveDefinition(
-                proactive_id="daily_digest",
-                goal="Summarize repository updates",
-                method="Review recent changes and produce a concise digest.",
-                skill_refs=["git", "summary"],
-            )
-            register_proactive_with_core(core.context, ProactiveManager())
-            prompt = core.build_canonical_prompt(
-                PromptAssemblyContext(
-                    core_mode="default",
-                    turn_kind="proactive_trigger",
-                    metadata={
-                        "proactive_input": build_proactive_trigger_input(definition),
-                    },
-                )
-            )
-            chat_prompt = core.build_canonical_prompt(
-                PromptAssemblyContext(core_mode="default", turn_kind="chat")
-            )
-
-            self.assertEqual(prompt.messages[0].role.value, "system")
-            self.assertEqual(prompt.messages[0].text, chat_prompt.messages[0].text)
-            self.assertNotIn("Task Directive", prompt.messages[0].text)
-            self.assertNotIn("proactive task trigger", prompt.messages[0].text)
-            self.assertEqual(prompt.messages[-1].role.value, "user")
-            proactive_text = prompt.messages[-1].text
-            self.assertIn("<proactive_trigger>", proactive_text)
-            self.assertIn("</proactive_trigger>", proactive_text)
-            self.assertIn("Pal-authored self-initiated proactive turn", proactive_text)
-            self.assertIn("Treat this trigger as the current request and execute it now.", proactive_text)
-            self.assertIn("Goal: Summarize repository updates", proactive_text)
-            self.assertIn("Method: Review recent changes and produce a concise digest.", proactive_text)
-            self.assertIn("Do not create, configure, or describe proactive tasks.", proactive_text)
-            self.assertEqual(
-                [message.role.value for message in prompt.messages],
-                ["system", "developer", "user"],
-            )
-            self.assertNotIn("Remember the last digest.", proactive_text)
-            self.assertNotIn("Recent summaries", prompt.messages[0].text + "\n" + proactive_text)
-        finally:
-            database.close()
-            shutil.rmtree(runtime_root, ignore_errors=True)
-
-    def test_proactive_trigger_executes_turn_and_commits_transcript_to_l1(self) -> None:
-        runtime_root, database = self._create_database()
-        try:
-            core = build_core()
-            register_core_with_core(core)
-            register_execution_with_core(core.context)
-            identity_service = IdentityService(repository=IdentityRepository())
-            identity_service.ensure_defaults()
-            register_identity_with_core(core.context, identity_service)
-            memory_service = MemoryService()
-            register_memory_with_core(core.context, memory_service)
-            proactive_manager = ProactiveManager()
-            register_proactive_with_core(core.context, proactive_manager, None)
-            definition = ProactiveDefinition(
-                proactive_id="daily_digest",
-                goal="Summarize repository updates",
-                method="Review recent changes and produce a concise digest.",
-                skill_refs=["git", "summary"],
-            )
-            proactive_manager.register(definition)
-            core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
-                [generation_result_from_values(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
-            )
-            turn_events: list[tuple[str, dict[str, object]]] = []
-            for topic in (TURN_START, TURN_END):
-                core.context.turn_event_bus.subscribe(
-                    topic,
-                    lambda emitted_topic, event, sink=turn_events: sink.append(
-                        (emitted_topic, dict(event))
-                    ),
-                )
-
-            proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
-            processed = core.run_until_idle()
-
-            self.assertIn("proactive.trigger", [item.event_kind for item in processed])
-            transcript = [
-                message
-                for item in memory_service.l1_store.items
-                for message in item
-            ]
-            self.assertEqual(transcript[0].role, "user")
-            self.assertIn("<proactive_trigger>", transcript[0].content)
-            self.assertIn("</proactive_trigger>", transcript[0].content)
-            self.assertIn("Goal: Summarize repository updates", transcript[0].content)
-            self.assertEqual(transcript[-1].role, "assistant")
-            self.assertEqual(transcript[-1].content, "Daily digest complete.")
-            self.assertEqual([topic for topic, _ in turn_events], [TURN_START, TURN_END])
-            start_event = turn_events[0][1]
-            end_event = turn_events[1][1]
-            self.assertEqual(start_event["turn_id"], end_event["turn_id"])
-            self.assertEqual(start_event["scope_key"], "proactive:daily_digest")
-            self.assertEqual(start_event["endpoint_id"], "proactive:daily_digest")
-            self.assertEqual(start_event["channel_kind"], "proactive")
-            self.assertEqual(start_event["event_kind"], "proactive.trigger")
-            self.assertEqual(start_event["source_kind"], "proactive")
-            self.assertEqual(end_event["status"], "success")
-        finally:
-            database.close()
-            shutil.rmtree(runtime_root, ignore_errors=True)
-
-    def test_proactive_trigger_delivers_reply_to_persisted_output_target(self) -> None:
-        runtime_root, database = self._create_database()
-        try:
-            core = build_core()
-            register_core_with_core(core)
-            register_execution_with_core(core.context)
-            identity_service = IdentityService(repository=IdentityRepository())
-            identity_service.ensure_defaults()
-            register_identity_with_core(core.context, identity_service)
-            channel_runtime = ChannelRuntime()
-            register_channel_with_core(core.context, channel_runtime)
-            endpoint = StubEndpoint(EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:12345"))
-            channel_runtime.register_endpoint(endpoint)
-            memory_service = MemoryService()
-            register_memory_with_core(core.context, memory_service)
-            proactive_manager = ProactiveManager()
-            register_proactive_with_core(core.context, proactive_manager, None)
-            definition = ProactiveDefinition(
-                proactive_id="daily_digest",
-                goal="Summarize repository updates",
-                method="Review recent changes and produce a concise digest.",
-                out_channel_id="telegram_main",
-                out_reply_target={"chat_id": "12345", "thread_id": "7"},
-            )
-            proactive_manager.register(definition)
-            core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
-                [generation_result_from_values(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
-            )
-
-            proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="scheduled"))
-            core.run_until_idle()
-
-            self.assertEqual(endpoint.sent, [])
-            self.assertEqual(
-                endpoint.streamed,
-                [
-                    ("telegram_main", "text", "Daily digest complete."),
-                    ("telegram_main", "done", "stop"),
-                ],
-            )
-        finally:
-            database.close()
-            shutil.rmtree(runtime_root, ignore_errors=True)
-
-    def test_cancelled_proactive_turn_still_broadcasts_turn_end(self) -> None:
-        async def exercise() -> tuple[list[tuple[str, dict[str, object]]], PalCore, str]:
-            core = build_core()
-            definition = ProactiveDefinition(
-                proactive_id="daily_digest",
-                goal="Summarize repository updates",
-            )
-            continuation = build_proactive_turn_continuation(
-                core.context,
-                ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"),
-                definition,
-            )
-            turn_events: list[tuple[str, dict[str, object]]] = []
-            for topic in (TURN_START, TURN_END):
-                core.context.turn_event_bus.subscribe(
-                    topic,
-                    lambda emitted_topic, event, sink=turn_events: sink.append(
-                        (emitted_topic, dict(event))
-                    ),
-                )
-            task = core.start_background_turn(continuation, lambda: asyncio.sleep(60), owner=None)
-            self.assertIsNotNone(task)
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            await asyncio.sleep(0)
-            return turn_events, core, continuation.turn_id
-
-        turn_events, core, turn_id = asyncio.run(exercise())
-
-        self.assertEqual([topic for topic, _ in turn_events], [TURN_START, TURN_END])
-        self.assertEqual(turn_events[-1][1]["status"], "interrupted")
-        self.assertNotIn(turn_id, core.state.active_turns)
-        self.assertNotIn(turn_id, core.state.turn_scopes)
-
     def test_identity_prompt_includes_current_date(self) -> None:
         service = SimpleNamespace(
             get_persona=lambda: SimpleNamespace(
@@ -2180,74 +1966,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(today_for_timezone("Asia/Shanghai", now_utc=fixed_utc), "2026-07-03")
         self.assertEqual(today_for_timezone("UTC", now_utc=fixed_utc), "2026-07-02")
 
-    def test_proactive_trigger_delivers_and_settles_all_turn_replies(self) -> None:
-        runtime_root, database = self._create_database()
-        try:
-            core = build_core()
-            register_core_with_core(core)
-            register_execution_with_core(core.context)
-            register_test_tool(core.context.execution_runtime, EchoTool())
-            identity_service = IdentityService(repository=IdentityRepository())
-            identity_service.ensure_defaults()
-            register_identity_with_core(core.context, identity_service)
-            channel_runtime = ChannelRuntime()
-            register_channel_with_core(core.context, channel_runtime)
-            endpoint = StubEndpoint(EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:12345"))
-            channel_runtime.register_endpoint(endpoint)
-            memory_service = MemoryService()
-            register_memory_with_core(core.context, memory_service)
-            proactive_repository = ProactiveRepository()
-            proactive_manager = ProactiveManager(repository=proactive_repository)
-            proactive_runner = ProactiveRunner(repository=proactive_repository)
-            register_proactive_with_core(core.context, proactive_manager, proactive_runner)
-            definition = ProactiveDefinition(
-                proactive_id="daily_digest",
-                goal="Summarize repository updates",
-                method="Review recent changes and produce a concise digest.",
-                out_channel_id="telegram_main",
-                out_reply_target={"chat_id": "12345", "thread_id": "7"},
-            )
-            proactive_manager.register(definition)
-            core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
-                [
-                    generation_result_from_values(
-                        text="Starting digest.",
-                        tool_calls=[new_tool_call(name="echo", args={"value": "digest"})],
-                        finish_reason="tool_calls",
-                    ),
-                    generation_result_from_values(text="Daily digest complete.", tool_calls=[], finish_reason="stop"),
-                ]
-            )
-
-            proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="scheduled"))
-            core.run_until_idle()
-
-            self.assertEqual(endpoint.sent, [])
-            self.assertEqual(
-                endpoint.streamed,
-                [
-                    ("telegram_main", "text", "Starting digest."),
-                    ("telegram_main", "op_tool_call", "echo"),
-                    ("telegram_main", "done", "tool_calls"),
-                    ("telegram_main", "text", "Daily digest complete."),
-                    ("telegram_main", "done", "stop"),
-                ],
-            )
-            latest = proactive_repository.latest_run("daily_digest")
-            self.assertIsNotNone(latest)
-            self.assertEqual(latest.output_summary, "Starting digest.\n\nDaily digest complete.")
-            assistant_messages = [
-                message.content
-                for transcript in memory_service.l1_store.items
-                for message in transcript
-                if message.role == "assistant"
-            ]
-            self.assertEqual(assistant_messages, ["Starting digest.", "Daily digest complete."])
-        finally:
-            database.close()
-            shutil.rmtree(runtime_root, ignore_errors=True)
-
-    def test_proactive_manager_enqueues_due_scheduled_trigger(self) -> None:
+    def test_schedule_engine_collects_due_scheduled_trigger(self) -> None:
         manager = ProactiveManager()
         reference = utc_now_dt()
         definition = ProactiveDefinition(
@@ -2261,13 +1980,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
         manager.register(definition)
 
-        due = manager.enqueue_due_triggers(now_utc=reference + timedelta(minutes=2))
+        due = manager.schedule_engine.collect_due(manager.registered, now_utc=reference + timedelta(minutes=2))
 
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0].proactive_id, "heartbeat")
         self.assertEqual(due[0].trigger_kind, "scheduled")
         self.assertIn("scheduled_for", due[0].metadata)
-        self.assertEqual(len(manager.pending_triggers), 1)
         self.assertIsNotNone(manager.schedule_engine.next_due_at("heartbeat"))
 
     def test_compute_next_proactive_run_supports_cron_schedule(self) -> None:
@@ -2285,15 +2003,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_main_loop_type_is_available(self) -> None:
         self.assertIs(MainLoop, importlib.import_module("pal.core.runtime").MainLoop)
 
-    def test_main_loop_drains_channel_proactive_and_bunshin_sources(self) -> None:
+    def test_main_loop_drains_channel_and_bunshin_sources(self) -> None:
         core = build_core()
         from pal.core.capabilities import register_with_core as register_core
         register_core(core)
         channel_runtime = ChannelRuntime()
-        proactive_manager = ProactiveManager()
-
         register_channel_with_core(core.context, channel_runtime)
-        register_proactive_with_core(core.context, proactive_manager)
         register_bunshin_with_core(core.context)
         register_control_with_core(core.context, ControlPlane())
 
@@ -2308,7 +2023,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 response_handle=ResponseHandle(endpoint_id="stdio"),
             )
         )
-        proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="svc-1", trigger_kind="manual"))
         bunshin_provider = core.context.port_registry["bunshin:bunshin"]
         bunshin_provider._buffer_event(
             {"event_kind": "terminal", "work_order_id": "wf-1", "payload": {"summary": "completed"}}
@@ -2318,7 +2032,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         processed_kinds = [item.event_kind for item in processed]
         self.assertIn("slash_command", processed_kinds)
-        self.assertIn("proactive.trigger", processed_kinds)
         self.assertIn("bunshin.terminal", processed_kinds)
         self.assertIn("control.action", processed_kinds)
 
@@ -2640,26 +2353,31 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(compat.status, "unknown_tool")
 
     def test_detachable_proactive_module_round_trips_through_core_registry(self) -> None:
-        core = build_core()
-        manager = ProactiveManager()
-        register_proactive_with_core(core.context, manager)
-        core.publish_module_capabilities("proactive")
+        runtime_root, database = self._create_database()
+        try:
+            core = build_core()
+            manager = ProactiveManager(repository=ProactiveRepository())
+            register_proactive_with_core(core.context, manager)
+            core.publish_module_capabilities("proactive")
 
-        self.assertIn("inspect_proactive_status", core.context.capability_registry.descriptors)
-        self.assertIn("list_proactive_tasks", core.context.capability_registry.descriptors)
-        self.assertIn("upsert_proactive_task", core.context.capability_registry.descriptors)
-        self.assertIn("manage_proactive_task", core.context.capability_registry.descriptors)
-        self.assertNotIn("proactive_destroy", core.context.capability_registry.descriptors["manage_proactive_task"].aliases)
-        self.assertIn("set_proactive_destination", core.context.capability_registry.descriptors)
-        self.assertIn("update_proactive_schedule", core.context.capability_registry.descriptors)
-        self.assertNotIn("proactive_attach", core.context.capability_registry.descriptors)
-        self.assertNotIn("proactive_detach", core.context.capability_registry.descriptors)
-        self.assertIn("proactive.triggers", core.context.event_source_registry.sources)
-        self.assertIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
+            self.assertIn("inspect_proactive_status", core.context.capability_registry.descriptors)
+            self.assertIn("list_proactive_tasks", core.context.capability_registry.descriptors)
+            self.assertIn("upsert_proactive_task", core.context.capability_registry.descriptors)
+            self.assertIn("manage_proactive_task", core.context.capability_registry.descriptors)
+            self.assertNotIn("proactive_destroy", core.context.capability_registry.descriptors["manage_proactive_task"].aliases)
+            self.assertIn("set_proactive_destination", core.context.capability_registry.descriptors)
+            self.assertIn("update_proactive_schedule", core.context.capability_registry.descriptors)
+            self.assertNotIn("proactive_attach", core.context.capability_registry.descriptors)
+            self.assertNotIn("proactive_detach", core.context.capability_registry.descriptors)
+            self.assertIn("proactive.background", core.context.event_source_registry.sources)
+            self.assertIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
 
-        self.assertEqual(core.detach_module("proactive"), RuntimeStatus.FORBIDDEN)
-        self.assertIn("proactive.triggers", core.context.event_source_registry.sources)
-        self.assertIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
+            self.assertEqual(core.detach_module("proactive"), RuntimeStatus.FORBIDDEN)
+            self.assertIn("proactive.background", core.context.event_source_registry.sources)
+            self.assertIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
+        finally:
+            database.close()
+            shutil.rmtree(runtime_root, ignore_errors=True)
 
     def test_proactive_management_capabilities_create_update_and_delete(self) -> None:
         runtime_root, database = self._create_database()
@@ -2803,8 +2521,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         try:
             core = build_core()
             manager = ProactiveManager(repository=importlib.import_module("pal.proactive").ProactiveRepository())
-            runner = importlib.import_module("pal.proactive").ProactiveRunner(repository=manager.repository)
-            register_proactive_with_core(core.context, manager, runner)
+            register_proactive_with_core(core.context, manager)
             core.publish_module_capabilities("proactive")
 
             manager.create_task(
@@ -2814,8 +2531,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 out_channel_id="socket_default",
                 schedule={"cadence": "cron", "cron": "0 9 * * *", "timezone": "Asia/Shanghai"},
             )
-            run_id = runner.begin_run(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
-            runner.complete_run(run_id, turn_id="turn-123", final_reply="Digest sent.")
+            manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
+            run_id = manager.repository.pending_background_runs()[0].proactive_run_id
+            manager.repository.set_background_state(run_id, "completed", workflow_id="wf-123", result="Digest sent.")
 
             self.assertIn("read_proactive_task", core.context.capability_registry.descriptors)
             self.assertIn("read_proactive_task", core.context.capability_registry.descriptors)
@@ -2832,7 +2550,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 CapabilityCall(name="read_proactive_task", args={"name": "daily_digest"})
             )
             self.assertEqual(latest.status, "ok")
-            self.assertEqual(latest.structured["run"]["turn_id"], "turn-123")
+            self.assertEqual(latest.structured["run"]["trigger_metadata"]["workflow_id"], "wf-123")
+            self.assertEqual(latest.structured["run"]["completion_scope"], "workflow_execution")
             self.assertEqual(latest.structured["run"]["output_summary"], "Digest sent.")
 
             history = core.context.execution_runtime.execute(

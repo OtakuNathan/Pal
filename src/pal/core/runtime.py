@@ -632,7 +632,7 @@ class PalCore(MemoryMaintenanceMixin):
         from pal.core.interjection import inject_pending_interjection_async
 
         owner = self.state.scheduler.state.owner
-        if owner is not None and owner.kind == ResidentTurnKind.PROACTIVE:
+        if owner is not None and owner.kind != ResidentTurnKind.CHAT:
             return False
         before = len(self.state.pending_channel_turns)
         await inject_pending_interjection_async(
@@ -861,9 +861,6 @@ class PalCore(MemoryMaintenanceMixin):
             other_work=self._resident_other_work(),
         )
 
-    def can_start_proactive_turn(self) -> bool:
-        return not self.resident_admission_reason(ResidentTurnKind.PROACTIVE)
-
     def _admit_resident_turn(self, turn_id: str, kind: ResidentTurnKind) -> TurnLease | None:
         if self._compaction_gate_active():
             return None
@@ -889,7 +886,7 @@ class PalCore(MemoryMaintenanceMixin):
     def start_background_turn(
         self, continuation: TurnContinuation, run: Callable, *,
         owner: ModuleHandle | None,
-        kind: ResidentTurnKind = ResidentTurnKind.PROACTIVE,
+        kind: ResidentTurnKind = ResidentTurnKind.BACKGROUND,
     ) -> asyncio.Task | None:
         """Reserve before starting any asynchronous producer or opening L1."""
         ownership = None
@@ -1189,11 +1186,7 @@ class PalCore(MemoryMaintenanceMixin):
         owns_events = self.state.turn_tasks.get(continuation.turn_id) is not asyncio.current_task()
         lease = self.state.scheduler.state.owner
         if owns_events:
-            kind = (ResidentTurnKind.PROACTIVE
-                    if continuation.opening_event is not None
-                    and continuation.opening_event.event_kind == EventKind.PROACTIVE_TRIGGER
-                    else ResidentTurnKind.CHAT)
-            lease = self._admit_resident_turn(continuation.turn_id, kind)
+            lease = self._admit_resident_turn(continuation.turn_id, ResidentTurnKind.CHAT)
         if lease is None or lease.turn_id != continuation.turn_id:
             raise RuntimeError("resident turn admission is busy")
         payload = self._tracked_turn_event_payload(continuation)
@@ -2025,13 +2018,14 @@ class PalCore(MemoryMaintenanceMixin):
     ) -> TurnOutcome:
         current: EffectResult | None = None
         try:
-            self.turn_executor._begin_l1_turn(
-                continuation,
-                PromptAssemblyContext(
-                    event=continuation.opening_event,
-                    core_mode=self.state.mode,
-                ),
+            assembly_context = PromptAssemblyContext(
+                event=continuation.opening_event,
+                core_mode=self.state.mode,
             )
+            self.turn_executor._begin_l1_turn(continuation, assembly_context)
+            if (continuation.opening_event is not None
+                    and continuation.opening_event.event_kind == EventKind.USER_MESSAGE):
+                await self.turn_executor._append_background_handoffs(continuation, assembly_context)
             while True:
                 if continuation.stop_after_tool_batch and not continuation.accepted_tool_batch_open:
                     continuation.interrupted = True

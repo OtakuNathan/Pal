@@ -278,7 +278,6 @@ def _proactive_snapshot(proactive_manager: Any, proactive_repository: Any) -> di
     if proactive_manager is None:
         return {"available": False}
     registered = getattr(proactive_manager, "registered", {}) or {}
-    trigger_mailbox = getattr(proactive_manager, "trigger_mailbox", None)
     schedule_engine = getattr(proactive_manager, "schedule_engine", None)
     next_due = getattr(schedule_engine, "next_due_by_proactive_id", {}) or {}
     proactive_tasks = []
@@ -299,7 +298,7 @@ def _proactive_snapshot(proactive_manager: Any, proactive_repository: Any) -> di
     return {
         "available": True,
         "registered_count": len(registered),
-        "trigger_mailbox_size": _safe_len(getattr(trigger_mailbox, "peek_all", lambda: [])()),
+        "pending_run_count": _safe_call(lambda: len(proactive_manager.pending_triggers)),
         "proactive_tasks": proactive_tasks,
     }
 

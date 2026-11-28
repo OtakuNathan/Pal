@@ -275,6 +275,10 @@ class WorkflowEffects(WorkflowEffectContext):
         if effect_type == "submit_action":
             return self._submit_effect_action(effect, payload)
         if effect_type == "route_workflow":
+            workflow = self._effect_snapshot(effect)
+            if workflow.payload.get("delivery_policy") == "files":
+                from pal.foundation.workers import run_worker
+                return await run_worker(lambda: self._route_workflow(effect))
             return self._route_workflow(effect)
         if effect_type == "create_architecture_revision":
             return self._create_revision(effect)

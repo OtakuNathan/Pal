@@ -799,19 +799,11 @@
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
-  "src/pal/core/debug_dump.py:_proactive_snapshot:getattr(proactive_manager, 'trigger_mailbox', None)": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
   "src/pal/core/debug_dump.py:_proactive_snapshot:getattr(proactive_repository, 'latest_run', None)": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },
   "src/pal/core/debug_dump.py:_proactive_snapshot:getattr(schedule_engine, 'next_due_by_proactive_id', {})": {
-    "count": 1,
-    "reason": "Existing access; migrate with the owning domain before tightening its boundary."
-  },
-  "src/pal/core/debug_dump.py:_proactive_snapshot:getattr(trigger_mailbox, 'peek_all', lambda: [])": {
     "count": 1,
     "reason": "Existing access; migrate with the owning domain before tightening its boundary."
   },

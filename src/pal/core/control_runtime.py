@@ -118,7 +118,7 @@ class CoreControlRuntime:
                 raise ControlBusyError("Pal is busy; retry when idle")
             return operation()
 
-    def can_start_background_turn(self, *, kind: ResidentTurnKind = ResidentTurnKind.PROACTIVE) -> bool:
+    def can_start_background_turn(self, *, kind: ResidentTurnKind = ResidentTurnKind.BACKGROUND) -> bool:
         return not self._core.resident_admission_reason(kind)
 
     def delivery_binding_for_turn(self, turn_id: str | None) -> TurnDeliveryBinding | None:
@@ -131,7 +131,7 @@ class CoreControlRuntime:
     def start_background_turn(self, continuation: TurnContinuation,
                               runner: Callable[[], Awaitable[str]], *,
                               owner: ModuleHandle | None,
-                              kind: ResidentTurnKind = ResidentTurnKind.PROACTIVE) -> asyncio.Task[str] | None:
+                              kind: ResidentTurnKind = ResidentTurnKind.BACKGROUND) -> asyncio.Task[str] | None:
         return self._core.start_background_turn(continuation, runner, owner=owner, kind=kind)
 
     async def run_turn(self, continuation: TurnContinuation) -> TurnOutcome:

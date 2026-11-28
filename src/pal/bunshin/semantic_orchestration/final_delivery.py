@@ -40,12 +40,16 @@ class FinalDelivery:
         adapter = self.workflow_facts.execution_adapter(sink)
         if adapter == SOFTWARE_GIT_ADAPTER:
             repository = Path(str(sink.payload.get("workspace_path") or ""))
-            deliverable_ref = self.publish_verified_git_delivery(
-                epoch=epoch,
-                delivery_node=sink,
-                repository=repository,
-                verification_ref=verification_ref,
-            )
+            workflow = self.repository.snapshots.read_snapshot(AggregateType.WORKFLOW, epoch.workflow_id)
+            if workflow is not None and workflow.payload.get("delivery_policy") == "files":
+                from pal.foundation.workers import run_worker
+                deliverable_ref = await run_worker(lambda: self.publish_verified_git_delivery(
+                    epoch=epoch, delivery_node=sink, repository=repository, verification_ref=verification_ref,
+                ))
+            else:
+                deliverable_ref = self.publish_verified_git_delivery(
+                    epoch=epoch, delivery_node=sink, repository=repository, verification_ref=verification_ref,
+                )
         elif adapter == ARTIFACT_BUNDLE_ADAPTER:
             deliverable_ref = ArtifactBundleAdapter(
                 self.runtime_root,
@@ -149,6 +153,23 @@ class FinalDelivery:
             or "Bunshin delivery"
         )
         delivery = DeliveryService(self.runtime_root, self.artifacts)
+        if manifest.get("execution_mode") == "direct" and manifest.get("delivery_policy", "files" if manifest.get("domain") == "general" else "git") == "files":
+            report = self.artifacts.read_json(delivery_node.payload["producer_report_ref"])
+            workspace = dict(request.get("workspace") or {})
+            promotion = ""
+            # Validate/pin all delivery files before changing the canonical data.
+            kwargs = dict(workflow_id=epoch.workflow_id, repository=repository, commit_sha=commit_sha,
+                          source_snapshot=source_snapshot, verification_ref=verification_ref, report=report)
+            initial = delivery.publish_files(**kwargs)
+            if not workspace.get("managed_git"):
+                return initial
+            from pal.bunshin.managed_workspace import promote_managed_candidate
+            promotion = promote_managed_candidate(
+                self.runtime_root, Path(workspace["repo_path"]), repository,
+                str(source_snapshot["snapshot_commit_sha"]), commit_sha, epoch.workflow_id,
+            )
+            return delivery.publish_files(**kwargs, promotion_commit=promotion)
+
         publish = delivery.publish_direct if manifest.get("execution_mode") == "direct" else delivery.publish
         return publish(
             **({"deliverable_paths": list(manifest.get("deliverable_paths") or [])}

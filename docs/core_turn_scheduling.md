@@ -19,13 +19,13 @@ serialize the work started by those messages.
 
 ## Resident ownership
 
-One scheduler owns admission of resident chat and proactive turns. The event
+One scheduler owns admission of resident chat and generic background completion turns. The event
 pump remains available while effects await I/O. An admitted turn retains its
 identity through all three execution phases:
 
 | Phase | Entry | Allowed work | Exit |
 | --- | --- | --- | --- |
-| idle | matching task teardown completed | admit user first, otherwise proactive; admit maintenance | reserve one turn before creating its task |
+| idle | matching task teardown completed | admit user first, otherwise background completion; admit maintenance | reserve one turn before creating its task |
 | running | reservation accepted | append the owning turn's L1 records; execute effects; admit chat interjections at existing safe points | program completion, cancellation or failure |
 | finalizing | program ended or cancellation requested | finish L1 closure, post-commit work, presentation and execution cleanup | matching task completion |
 
@@ -51,16 +51,14 @@ This change does not turn the core into a second memory owner.
 
 ## Queues and exceptions
 
-Proactive already owns a trigger mailbox. Core backpressure leaves triggers
-there until admission is possible. Events already drained into the pump are
-requeued if admission was lost; the handler must recheck at actual start.
-Only admitted work begins a run record, produces a reply or opens L1.
-Definitions and destinations are resolved at admission, so queued work does
-not retain a detached plugin's continuation. User messages take priority.
+Resident background completion rechecks admission before starting a turn.
+Queued user input has priority; background completion never consumes user
+interjections. Chat preserves its existing safe-point interjection semantics.
 
-Proactive does not consume user interjections. While it owns the resident slot,
-new user input waits for the next chat turn. Chat preserves its current
-interjection semantics. Explicit `/btw` side turns retain their detached memory
+Proactive schedule occurrences are persisted before dispatch to Bunshin.
+They do not acquire a resident lease, and their terminal results are handed
+off through the durable inbox at the next ordinary user turn.
+Explicit `/btw` side turns retain their detached memory
 and execution branch; their local history must never publish into the resident
 L1. They remain tracked for maintenance/shutdown drain checks.
 
@@ -70,11 +68,11 @@ L1. They remain tracked for maintenance/shutdown drain checks.
 program completion, teardown, cancellation, maintenance, reset, compaction
 barriers and history publication. Positive invariants cover single resident
 ownership, ownership through teardown, maintenance exclusion and stable history
-visibility. Negative configurations must reproduce independent proactive
+visibility. Negative configurations must reproduce independent resident background
 execution, early-idle release and foreign history publication.
 Further counterexamples cover stale completion receipts and releasing another
 quiescence owner's barrier. User interjections consume queued input only at a
-chat safe point; they do not create a second running turn or enter proactive.
+chat safe point; they do not create a second running turn or enter a resident background completion.
 
 | Negative configuration | Expected violated invariant |
 | --- | --- |
@@ -101,7 +99,7 @@ Python execution. Runtime regression tests must exercise the corresponding
 production seams, including cancellation and events already in the pump.
 Fair progress additionally assumes effect cancellation/teardown and maintenance
 eventually finish and queued work is eventually dispatched; unlimited user
-traffic may intentionally delay proactive tasks.
+traffic may intentionally delay resident background completion turns.
 The liveness configuration bounds quiescence requests as well as turn arrivals.
 Without that premise, two control owners can take turns holding admission
 closed forever even though each individual hold eventually releases. That is

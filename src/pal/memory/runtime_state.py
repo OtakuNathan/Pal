@@ -19,7 +19,7 @@ from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
 from pal.shared.json_values import thaw_json
 
 
-MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "5"
+MEMORY_RUNTIME_STATE_SCHEMA_VERSION = "6"
 
 _RECEIPT_FIELDS = (
     "op_id", "status", "epoch_before", "epoch_after", "summary_source_id",
@@ -91,6 +91,7 @@ class _PreparedMemoryState:
     heat: dict[str, HeatState]
     context_epoch: int = 0
     compaction_receipts: dict[str, CompactionReceipt] = field(default_factory=dict)
+    background_handoff_ids: frozenset[str] = frozenset()
     # H02: (incarnation, cut, left_generation) — None means the payload
     # predates two-segment authority (explicit migration: fresh root).
     history_root: tuple[str, Any, int] | None = None
@@ -101,7 +102,7 @@ class MemoryRuntimeStatePort:
     service: MemoryService
     module_id: str = "memory"
     schema_version: str = MEMORY_RUNTIME_STATE_SCHEMA_VERSION
-    readable_schema_versions = ("1", "2", "3", "4", "5")
+    readable_schema_versions = ("1", "2", "3", "4", "5", "6")
     state_order: int = 100
 
     def finish_restore_state(self, ports) -> None:
@@ -132,6 +133,7 @@ class MemoryRuntimeStatePort:
                 for key, state in self.service.l2_store.heat_registry.items()
             },
             "context_epoch": int(getattr(self.service, "context_epoch", 0) or 0),
+            "background_handoff_ids": sorted(self.service.background_handoff_ids),
             "compaction_receipts": {
                 receipt.op_id: _receipt_to_payload(receipt)
                 for receipt in getattr(
@@ -158,6 +160,7 @@ class MemoryRuntimeStatePort:
             "l2_heat",
             "context_epoch",
             "compaction_receipts",
+            "background_handoff_ids",
             "history_root",
         }
         if extras := sorted(set(value) - allowed_fields):
@@ -174,6 +177,9 @@ class MemoryRuntimeStatePort:
         else:
             context_epoch = raw_epoch
         receipts: dict[str, CompactionReceipt] = {}
+        background_ids = value.get("background_handoff_ids", [])
+        if not isinstance(background_ids, list) or any(not isinstance(item, str) or not item for item in background_ids):
+            raise ValueError("memory runtime snapshot background_handoff_ids is invalid")
         raw_receipts = value.get("compaction_receipts")
         if raw_receipts is None:
             raw_receipts = {}
@@ -248,6 +254,7 @@ class MemoryRuntimeStatePort:
             heat=heat,
             context_epoch=context_epoch,
             compaction_receipts=receipts,
+            background_handoff_ids=frozenset(background_ids),
             history_root=_prepared_history_root(
                 value.get("history_root"), turns, original_turns=list(value.get("l1_turns") or ()),
             ),
@@ -265,6 +272,7 @@ class MemoryRuntimeStatePort:
         self.service.l2_store.heat_registry = prepared.heat
         self.service.context_epoch = int(prepared.context_epoch)
         self.service.compaction_receipts = dict(prepared.compaction_receipts)
+        self.service.background_handoff_ids = set(prepared.background_handoff_ids)
         if prepared.history_root is not None:
             from pal.memory.history_root import CutPosition
 

@@ -201,6 +201,15 @@ class DeliveriesStore:
             )
         return True
 
+    def mark_task_delivery_uncertain(self, delivery_id: str) -> bool:
+        self.database.ensure_schema()
+        with self.database.write_connection() as connection:
+            cursor = connection.execute(
+                "UPDATE bunshin_delivery_outbox SET status='uncertain', last_error=?, updated_at=? WHERE delivery_id=? AND status='pending'",
+                ("external channel acceptance is unknown", utc_now(), delivery_id),
+            )
+        return cursor.rowcount == 1
+
     def defer_task_delivery(self, delivery_id: str, *, error: str = "") -> bool:
         self.database.ensure_schema()
         now = _utc_datetime()

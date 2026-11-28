@@ -512,6 +512,20 @@ def _build_bwrap_invocation(
     if nvm_root.exists():
         append_bind_path(args, nvm_root, read_only=True)
     files = mount_role_workspace(args, workspace_path, pack.workspace)
+    if role_runtime and pack.profile_group == "general" and pack.profile_name == "proactive_worker":
+        from pal.foundation.proactive_workspace import proactive_workspace_aliases
+        for alias, source in proactive_workspace_aliases(Path(runtime_root).absolute(), workspace_path):
+            append_dir_scaffold(args, alias.parent)
+            args.extend(["--symlink", str(source), str(alias)])
+        archive = pack.workspace.get("scheduled_archive_snapshot")
+        if archive:
+            archive_path = Path(str(archive)).resolve(strict=True)
+            archive_root = (Path(runtime_root) / "data" / "bunshin" / "scheduled-inputs").resolve()
+            if not archive_path.is_relative_to(archive_root) or archive_path.name != "conversation-history":
+                raise ValueError("invalid scheduled archive snapshot")
+            runtime_mounts = (*runtime_mounts, ReadOnlyBind(archive_path,
+                Path(runtime_root).absolute() / "data" / "conversation-history"))
+
     reference_binds = [
         dict(item or {})
         for item in list(sandbox.get("reference_binds") or [])

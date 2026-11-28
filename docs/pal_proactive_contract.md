@@ -12,7 +12,7 @@
 - planned recaps or briefings
 - proactive push work
 
-It is not bunshin tasking and it is not channel transport. A proactive task may use normal Pal tools or bunshins during execution, but those remain owned by their modules.
+Proactive owns scheduling, not execution or channel transport. Each due occurrence is executed by Bunshin under the system Task `__PROACTIVE__`.
 
 ## Owns
 
@@ -53,7 +53,7 @@ Supported schedule shapes are implemented by `pal.proactive.scheduling`:
 
 ## ProactiveRun
 
-A run records one concrete execution attempt.
+A run records one durable schedule occurrence and its associated workflow.
 
 Current fields:
 
@@ -70,20 +70,19 @@ Current fields:
 
 ## Channel Output
 
-If `out_channel_id` is set, proactive execution resolves it through the channel runtime and emits intermediate/final output through that endpoint. `out_reply_target` is merged with endpoint defaults and trigger metadata, which allows a proactive task to reply into a specific socket request, Telegram thread, or other endpoint-specific target.
+When a channel is configured, the scheduler resolves its destination before
+workflow admission, freezes the route in the dispatch request and lets Bunshin
+publish the terminal result. A configured destination that cannot be resolved
+is recorded as a failure rather than silently discarded. Admission retries
+reuse the original run identity and routing request.
 
-If `out_channel_id` is unset, the proactive run still executes and records history, but it does not emit channel output.
+When no channel is configured, execution still produces a durable result for
+Resident. The string `"null"` explicitly discards channel output.
 
-A configured output channel that cannot be resolved is a run failure, not an
-implicit request to execute without output. Failures during run creation, turn
-execution, cleanup, and completion recording retain their exception chains.
-If durable failure recording also fails, run inspection exposes the in-process
-`runtime_failures` fallback for the current runtime lifetime.
-
-Run status `completed` confirms turn execution only. Run inspection explicitly
-reports `completion_scope=turn_execution` and
-`delivery_confirmation=not_recorded`; it is not a channel delivery receipt.
-Asynchronous delivery failures remain channel-owned failure events.
+Run inspection reports `completion_scope=workflow_execution` for new runs;
+historical resident records retain `turn_execution`. Workflow completion is
+not a channel delivery receipt. Delivery status is tracked independently in the
+background inbox and workflow delivery records.
 
 ## Tables
 
@@ -120,22 +119,20 @@ an invisible character to simulate silence, or use the recovery socket as a sink
 
 ## Admission And Context
 
-Due triggers wait in the existing mailbox until resident admission; no run row
-or L1 turn opens before admission. Pending user input has priority. Proactive
-runs use their own model-cache scope and isolated context, not the resident
-history projection or queued interjections. New user input waits for the next
-chat turn while proactive owns the resident slot.
+Due occurrences and schedule cursors are persisted atomically before dispatch.
+The scheduler submits one Direct workflow per occurrence; the system Task
+allows at most one active workflow. It can execute independently of Resident
+chat, and recovers by persisted run/workflow identity.
 
-Tool calls, results and output references use the shared L1 store and are visible
-to later ordinary chat after turn closure. An isolated proactive context-budget
-failure does not compact the resident conversation. See the
-[subsystem README](../src/pal/proactive/README.md) for destination validation and
-context/handoff details.
+Worker tool results and native replay remain in Bunshin. A model-neutral result
+enters Resident L1 only at the next ordinary user turn, with its receipt
+identity checkpointed before acknowledgement. Historical L1 and run records are
+not rewritten. See the [subsystem README](../src/pal/proactive/README.md).
 
 ## Invariants
 
 - A proactive definition must describe what to do; `goal` is required.
 - Disabled definitions do not generate due triggers.
 - Due triggers are materialized into the main loop as `ProactiveTriggerEvent`.
-- Execution side effects still go through the normal Pal turn runtime and execution module.
+- Execution side effects go through the normal Bunshin worker and execution module.
 - Run history is durable; transcript and memory projection remain owned by memory.

@@ -22,7 +22,7 @@ from pal.memory.dreaming.service import DreamingService
 from pal.memory.embedding import HashingEmbedder
 from pal.memory.storage import MemoryStorage
 from pal.plugins.l3.sqlite_vec import SQLiteVecL3Plugin
-from pal.proactive import ProactiveManager, ProactiveRepository, ProactiveRunner
+from pal.proactive import ProactiveManager, ProactiveRepository
 from pal.shared.proactive_protocol import SILENT_ONCE_SCHEDULER
 from pal.proactive.models import ProactiveDefinitionModel, ProactiveRunModel
 from tests.test_memory_dreaming import ReviewingLLM
@@ -114,7 +114,8 @@ def test_once_cursor_survives_restart_and_completed_task_is_not_rearmed(env):
     restarted.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
     due = restarted.enqueue_due_triggers(now_utc=datetime.now(timezone.utc)+timedelta(seconds=1))
     assert len(due) == 1
-    restarted.mark_run_completed(task_id)
+    run, = restarted.repository.pending_background_runs()
+    restarted.repository.set_background_state(run.proactive_run_id, "completed", workflow_id="wf", result="notice prepared")
     # Model a crash after creating the task but before updating the dreaming
     # report. Existing completed once definitions must not be overwritten.
     report = service.status()["report"]
@@ -146,58 +147,87 @@ def test_restart_interruption_records_failure_without_touching_published_memory(
 
 
 def test_silent_proactive_result_survives_l1_restore_and_enters_next_chat(tmp_path):
-    from types import SimpleNamespace
-    from pal.channel import ChannelRuntime
-    from pal.channel.contracts import EndpointConfig
-    from pal.plugins_builtin.null_channel.endpoint import NullChannelEndpoint
-    from pal.proactive import register_with_core as register_proactive
-    from pal.proactive.handler import ProactiveTriggerHandler
+    from pal.foundation.background_inbox import BackgroundInbox
     from pal.memory.dreaming.contracts import DreamingFailureNotice
-    from pal.runtime_app import PalRuntimeApp
-    from pal.shared import EventKind, ProactiveTriggerEvent
-    from tests.test_proactive_context_isolation import setup_core, begin, prompt
-    from tests.test_v3_n3_vertical_trace import _runtime, CapturingTransport
+    from pal.proactive import register_with_core as register_proactive
+    from pal.shared.background_protocol import BACKGROUND_WORKFLOWS
+    from tests.test_btw import Model, Output
+    from tests.test_interjection_injection import _make_envelope
     from tests.test_resident_checkpoint import _build_app
 
     async def run():
-        core, memory, _ = setup_core(tmp_path)
-        transport = CapturingTransport(["Pending notice: dreaming failed; user has not been told. See failure.json."])
-        core.context.port_registry['llm:llm'] = _runtime(transport)
-        channel = ChannelRuntime()
-        sink = NullChannelEndpoint(endpoint=EndpointConfig('null', 'null', '/dev/null'))
-        channel.register_endpoint(sink)
-        core.context.port_registry['channel:channel'] = channel
-        manager = ProactiveManager()
+        app = _build_app(tmp_path)
+        core = app.handle.core
+        memory = app.handle.memory_service
+        resident_model = Model()
+        core.context.port_registry["llm:llm"] = resident_model
+        manager = ProactiveManager(repository=ProactiveRepository())
         handle = register_proactive(core.context, manager)
-        notice = DreamingFailureNotice('dream-fixture', '2026-11-01T00:00:00+00:00',
-                                       'review failed', '/private/failure.json', False, True)
+        inbox = BackgroundInbox(tmp_path)
+        requests = []
+
+        class Backend:
+            async def start_scheduled_run(self, request):
+                requests.append(request)
+                return {"workflow_id": "notice-workflow"}
+
+            async def scheduled_run_status(self, workflow_id):
+                assert workflow_id == "notice-workflow"
+                inbox.publish(workflow_id, {
+                    "result_text": "Pending notice: dreaming failed; user has not been told.",
+                    "task_name": "dream-fixture",
+                }, delivery_status="discarded")
+                return {"workflow": {"workflow_state": "COMPLETED",
+                                     "delivery": {"result_text": "Pending notice: dreaming failed"}}}
+
+        core.context.port_registry.register(BACKGROUND_WORKFLOWS, Backend())
+        notice = DreamingFailureNotice("dream-fixture", "2026-11-01T00:00:00+00:00",
+                                       "review failed", "/private/failure.json", False, True)
         task_id = schedule_failure_reminder(core.control_runtime, notice)
-        handler = ProactiveTriggerHandler(manager, ProactiveRunner())
-        handler.owner = handle
-        handler.handle(EventEnvelope(event_kind=EventKind.PROACTIVE_TRIGGER, source_kind='proactive',
-            payload=ProactiveTriggerEvent(task_id, 'scheduled')), core.context)
-        assert handler.tasks
-        await asyncio.gather(*tuple(handler.tasks))
-        assert handler.runner.results[-1].get('status') != 'failed', handler.runner.results
-        assert len(transport.captured) == 1
-        assert 'dream-fixture' in repr(memory.history.turns)
-        assert 'Pending notice: dreaming failed' in repr(memory.history.turns)
+        source, = handle.event_sources
+        assert source.prepare(core.context)
+        event, = source.drain(core.context)
+        handler, = handle.event_handlers[event.event_kind]
+        await handler.handle(event, core.context)
+        assert requests[0]["discard_output"] is True
+        assert requests[0]["delivery_binding"] == {}
+        await handler.handle(event, core.context)
+        assert manager.repository.latest_run(task_id).status == "completed"
+        assert not resident_model.requests
+        assert not memory.history.turns
         assert manager.schedule_engine.next_due_at(task_id) is None
-        channel.flush_outbox()
-        assert not sink.outbox
-        # Use the resident checkpoint owner rather than introducing any special
-        # failure persistence or notification-consumption store.
-        app = PalRuntimeApp(handle=SimpleNamespace(configuration_service=None, core=core, memory_service=memory,
-            registration=SimpleNamespace(runtime=SimpleNamespace(runtime_root=tmp_path))))
+        assert len(inbox.pending()) == 1
         await app._publish_checkpoint_async()
+
         restored = _build_app(tmp_path)
         await restored._restore_checkpoint_async()
-        assert restored.last_checkpoint_status == 'restored', restored.last_checkpoint_error
+        assert restored.last_checkpoint_status == "restored", restored.last_checkpoint_error
         resumed = restored.handle.core
-        next_chat = begin(resumed, restored.handle.memory_service, 'next-user', 'What happened?')
-        request = prompt(resumed, next_chat)
-        assert 'Pending notice: dreaming failed' in repr(request.messages)
-        assert 'dream-fixture' in repr(request.messages)
+        model = Model()
+        resumed.context.port_registry["llm:llm"] = model
+        resumed.context.port_registry["channel:channel"] = Output()
+        await resumed.schedule_channel_turn_async(_make_envelope(turn_id="next-user", text="What happened?"))
+        await asyncio.wait_for(resumed.run_until_idle_async(max_iterations=128), 5)
+        assert model.requests
+        assert "Pending notice: dreaming failed" in repr(model.requests[0].messages)
+        assert "dream-fixture" in repr(model.requests[0].messages)
+        assert not inbox.pending()
+        assert len(restored.handle.memory_service.history.turns) == 1
+        assert sum(m.message_id == "background-result:notice-workflow"
+                   for t in restored.handle.memory_service.history.turns for m in t.messages) == 1
+        await restored._publish_checkpoint_async()
+        again = _build_app(tmp_path)
+        await again._restore_checkpoint_async()
+        assert not inbox.pending()
+        assert sum(m.message_id == "background-result:notice-workflow"
+                   for t in again.handle.memory_service.history.turns for m in t.messages) == 1
         core.context.execution_runtime.shutdown()
         resumed.context.execution_runtime.shutdown()
-    asyncio.run(run())
+        again.handle.core.context.execution_runtime.shutdown()
+
+    db = PalV2Database(tmp_path / "runtime.sqlite3")
+    db.initialize([ProactiveDefinitionModel, ProactiveRunModel])
+    try:
+        asyncio.run(run())
+    finally:
+        db.close()

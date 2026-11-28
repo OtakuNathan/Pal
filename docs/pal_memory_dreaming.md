@@ -178,11 +178,10 @@ written, the catalog report remains the diagnostic reference. After maintenance
 cleanup, Core schedules one immediate `once` proactive task with output `null`,
 keyed by the failed run id. Its instruction is to produce a short pending-user
 handoff containing the failure summary, run id and log path, without tools,
-repair, retry or channel delivery. The task's ordinary trigger/result enter shared
-L1 and use existing resident persistence; later ordinary chat can remind the user
-before addressing their message. Existing user-input priority still applies to
-proactive admission. No new notification queue or separate reminder database is
-introduced.
+repair, retry or channel delivery. The task runs in Bunshin and publishes its terminal result into the shared
+durable background inbox. At the next ordinary user turn, the result enters L1
+and uses existing resident persistence. No resident model request is made just
+to execute the reminder.
 
 The existing failure report records whether its proactive definition was
 registered. The dreaming source reconciles an unfinished registration even when

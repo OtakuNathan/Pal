@@ -58,10 +58,6 @@ class StubRuntimeHandle:
         return self._optional_port("proactive:proactive_manager")
 
     @property
-    def proactive_runner(self):
-        return self._optional_port("proactive:proactive_runner")
-
-    @property
     def proactive_repository(self):
         manager = self.proactive_manager
         return getattr(manager, "repository", None)

@@ -602,45 +602,52 @@ class WorkflowCoordinator:
             raise RuntimeError(
                 f"null node must start from a producer boundary, got {cycle.state.value}"
             )
-        cycle = cycle.transition(
-            CycleAction.START_PRODUCER,
-            assignment=CycleAssignment(
-                slot=CycleSlot.PRODUCER,
-                kind=(
-                    AssignmentKind.REPAIR
-                    if cycle.state == NodeCycleState.REPAIR_READY
-                    else AssignmentKind.INITIAL
-                ),
-                generation=cycle.generation,
-                input_fingerprint=input_fingerprint,
-            ),
-        )
-        cycle = cycle.transition(
-            CycleAction.PRODUCER_SUBMITTED,
-            product_ref=product_ref,
-        )
-        cycle = cycle.transition(
-            CycleAction.START_CHECKER,
-            assignment=CycleAssignment(
-                slot=CycleSlot.CHECKER,
-                kind=AssignmentKind.INITIAL,
-                generation=cycle.generation,
-                input_fingerprint=input_fingerprint,
-            ),
-        )
-        cycle = cycle.transition(
-            CycleAction.CHECKER_ACCEPTED,
-            verdict=CycleVerdict(
-                accepted=True,
-                generation=cycle.generation,
-            ),
-        )
+        spec = execution.graph.nodes[node_name]
+        if spec.producer_binding.participant != "null" or spec.checker_binding.participant != "null":
+            raise RuntimeError("plan-only delivery requires explicit null producer and checker")
+        cycle = cycle.transition(CycleAction.WAIT_PRODUCT)
+        cycle = cycle.transition(CycleAction.IMPORT_PRODUCT, product_ref=product_ref)
+        cycle = cycle.transition(CycleAction.SKIP_CHECKER)
         return self._store_cycle(
             workflow_id,
             execution,
             cycle,
             unit_of_work=unit_of_work,
         )
+
+    def external_product_transition(self, *, node: AggregateSnapshot,
+                                    action: CycleAction, unit_of_work: BunshinUnitOfWork,
+                                    product_ref: str = "") -> NodeCycle:
+        workflow = unit_of_work.snapshots.read_snapshot(AggregateType.WORKFLOW, node.workflow_id)
+        if (workflow is None or workflow.state != "ACTIVE"
+                or workflow.payload.get("execution_epoch_id") != node.payload.get("epoch_id")):
+            raise ValueError("external product requires the active workflow epoch")
+        execution = self.execution(workflow_id=node.workflow_id, unit_of_work=unit_of_work)
+        name = str(node.payload.get("module_name") or node.payload["unit_id"])
+        if execution.graph.nodes[name].producer_binding.participant != "null":
+            raise ValueError("external product requires a null producer binding")
+        if int(node.payload["graph_generation"]) != execution.graph.generation:
+            raise ValueError("external product belongs to a stale generation")
+        if action == CycleAction.WAIT_PRODUCT and name not in execution.runnable_nodes():
+            raise ValueError("external producer inputs are not ready")
+        if action == CycleAction.IMPORT_PRODUCT and execution.cycles[name].state != NodeCycleState.WAITING_PRODUCT:
+            raise ValueError("node is not waiting for an external product")
+        return self._store_cycle(node.workflow_id, execution, execution.cycles[name].transition(action, product_ref=product_ref),
+                                 unit_of_work=unit_of_work)
+
+    def skip_node_checker(
+        self, *, workflow_id: str, node_name: str,
+        unit_of_work: BunshinUnitOfWork,
+    ) -> NodeCycle:
+        execution = self.execution(workflow_id=workflow_id, unit_of_work=unit_of_work)
+        cycle = execution.cycles[node_name]
+        if execution.graph.nodes[node_name].checker_binding.participant != "null":
+            raise RuntimeError("cannot skip a bound checker")
+        if node_name not in execution.runnable_nodes() or cycle.state != NodeCycleState.CHECKER_READY:
+            raise RuntimeError("checker skip requires a runnable checker boundary")
+        return self._store_cycle(workflow_id, execution,
+                                 cycle.transition(CycleAction.SKIP_CHECKER),
+                                 unit_of_work=unit_of_work)
 
     def checker_verdict(
         self,

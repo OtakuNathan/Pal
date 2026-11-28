@@ -277,7 +277,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertIsNotNone(handle.proactive_manager)
         self.assertIsNotNone(handle.proactive_repository)
-        self.assertIsNotNone(handle.proactive_runner)
+        self.assertEqual([s.source_id for s in handle.core.context.module_registry.get("proactive").event_sources], ["proactive.background"])
         self.assertIn("proactive", handle.core.context.module_registry.modules)
 
     def test_composed_guidance_and_prompt_references_resolve_or_omit_unavailable_hints(self) -> None:

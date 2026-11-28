@@ -6,7 +6,7 @@ CONSTANTS MaxGeneration, CycleKind
 States == {
     "ProducerReady", "Producing", "CheckerReady", "Checking",
     "RepairReady", "HumanReview", "Accepted", "Rejected",
-    "TriageRequired", "Paused", "Cancelled"
+    "TriageRequired", "Paused", "Cancelled", "WaitingProduct"
 }
 Slots == {"None", "Producer", "Checker"}
 
@@ -26,20 +26,26 @@ Init ==
     /\ resultPending = FALSE
     /\ pauseRequested = FALSE
 
-\* Only a pristine PlanCycle can bind an imported architecture product.
+\* Plan import is initially pristine; external node products can bind at a producer boundary.
 \* productGeneration abstracts its nonempty durable product_ref. The router's
 \* provenance and transaction checks are refined by ImportedPlanLifecycle.
 ImportProduct ==
-    /\ CycleKind = "Plan"
-    /\ state = "ProducerReady"
-    /\ generation = 1
+    /\ (IF CycleKind = "Plan" THEN (state = "ProducerReady" /\ generation = 1 /\ productGeneration = 0 /\ verdictGeneration = 0) \/ state = "WaitingProduct"
+         ELSE state = "WaitingProduct")
     /\ activeSlot = "None"
-    /\ productGeneration = 0
-    /\ verdictGeneration = 0
     /\ state' = "CheckerReady"
     /\ productGeneration' = generation
-    /\ UNCHANGED <<generation, activeSlot, verdictGeneration, resumeState>>
+    /\ verdictGeneration' = 0
+    /\ UNCHANGED <<generation, activeSlot, resumeState>>
     /\ UNCHANGED <<resultPending, pauseRequested>>
+
+WaitProduct ==
+    /\ state \in {"ProducerReady", "RepairReady"}
+    /\ activeSlot = "None"
+    /\ ~pauseRequested
+    /\ state' = "WaitingProduct"
+    /\ UNCHANGED <<generation, activeSlot, productGeneration, verdictGeneration,
+                   resumeState, resultPending, pauseRequested>>
 
 StartProducer ==
     /\ state \in {"ProducerReady", "RepairReady"}
@@ -72,6 +78,16 @@ RejectProduct ==
     /\ UNCHANGED <<generation, productGeneration, verdictGeneration>>
     /\ resultPending' = FALSE
     /\ UNCHANGED pauseRequested
+
+SkipChecker ==
+    /\ state = "CheckerReady"
+    /\ productGeneration = generation
+    /\ activeSlot = "None"
+    /\ ~pauseRequested
+    /\ state' = IF CycleKind = "Plan" THEN "HumanReview" ELSE "Accepted"
+    /\ verdictGeneration' = 0
+    /\ UNCHANGED <<generation, activeSlot, productGeneration, resumeState,
+                   resultPending, pauseRequested>>
 
 StartChecker ==
     /\ state = "CheckerReady"
@@ -159,7 +175,7 @@ RecordResult ==
 RequestPause ==
     /\ CycleKind = "Node"
     /\ ~pauseRequested
-    /\ state \in {"ProducerReady", "Producing", "RepairReady", "CheckerReady", "Checking"}
+    /\ state \in {"ProducerReady", "Producing", "RepairReady", "CheckerReady", "Checking", "WaitingProduct"}
     /\ pauseRequested' = TRUE
     /\ IF resultPending
         THEN UNCHANGED <<state, activeSlot, resumeState>>
@@ -185,8 +201,8 @@ Cancel ==
     /\ pauseRequested' = FALSE
 
 Next ==
-    \/ ImportProduct \/ StartProducer \/ SubmitProduct \/ RejectProduct
-    \/ StartChecker \/ RejectByChecker \/ AcceptByChecker
+    \/ ImportProduct \/ WaitProduct \/ StartProducer \/ SubmitProduct \/ RejectProduct
+    \/ StartChecker \/ RejectByChecker \/ AcceptByChecker \/ SkipChecker
     \/ HumanAccept \/ HumanReject \/ HumanEdit
     \/ RequireTriage \/ ResolveTriage \/ Cancel
     \/ RecordResult \/ RequestPause \/ Resume
@@ -211,7 +227,7 @@ ExactlyOneRunningSlot ==
 AcceptedIsCurrent ==
     state \in {"HumanReview", "Accepted"} =>
         /\ productGeneration = generation
-        /\ verdictGeneration = generation
+        /\ verdictGeneration \in {0, generation}
 
 TriageResumesAtAssignmentBoundary ==
     state = "TriageRequired" =>

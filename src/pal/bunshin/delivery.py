@@ -150,7 +150,7 @@ class DeliveryService:
             content = subprocess.run(["git", "show", f"{commit}:{path}"], cwd=repository,
                                      capture_output=True, check=True).stdout
             mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-            ref = self.artifacts.put_bytes(content, artifact_type="VerifiedReportArtifact", media_type=mime,
+            ref = self.artifacts.put_bytes(content, artifact_type=("TaskDeliverableArtifact" if kwargs["verification_ref"].artifact_type == "NullVerificationReceiptArtifact" else "VerifiedReportArtifact"), media_type=mime,
                 child_refs=((kwargs["verification_ref"].sha256, "verification"),))
             files.append(DeliveredFile(repository_path=path, content_sha256=hashlib.sha256(content).hexdigest(),
                                        artifact_ref=ref.to_dict(), mime_type=mime))
@@ -164,6 +164,41 @@ class DeliveryService:
         return self.artifacts.put_json(receipt.model_dump(mode="json"), artifact_type="DeliveryReceiptArtifact",
             schema_version="4", child_refs=((patch_ref.sha256, "verified_tree"),
                 *((item.artifact_ref["sha256"], "delivered_file") for item in files)))
+
+    def publish_files(self, *, workflow_id: str, repository: Path, commit_sha: str,
+                      source_snapshot: Mapping[str, Any], verification_ref: ArtifactRef,
+                      report: Mapping[str, Any], promotion_commit: str = "") -> ArtifactRef:
+        """Publish general task output from the immutable accepted Git tree."""
+        import mimetypes
+        from pal.bunshin.direct_contract import deliverable_paths
+        base = str(source_snapshot.get("snapshot_commit_sha") or "")
+        if not base or not _is_ancestor(repository, base, commit_sha):
+            raise ValueError("file delivery requires the accepted source ancestry")
+        _pin_delivery_ref(repository, _delivery_commit_ref(workflow_id), commit_sha)
+        files = []
+        children = [(verification_ref.sha256, "acceptance")]
+        for path in deliverable_paths(report):
+            listing = _git(repository, "ls-tree", commit_sha, "--", f":(literal){path}").strip()
+            if not listing or listing.split(None, 1)[0] not in {"100644", "100755"}:
+                raise ValueError(f"deliverable must be a regular file: {path}")
+            content = subprocess.run(["git", "show", f"{commit_sha}:{path}"], cwd=repository,
+                                     capture_output=True, check=True).stdout
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            ref = self.artifacts.put_bytes(content, artifact_type="TaskDeliverableArtifact", media_type=mime)
+            files.append(DeliveredFile(repository_path=path, content_sha256=hashlib.sha256(content).hexdigest(),
+                                       artifact_ref=ref.to_dict(), mime_type=mime).model_dump(mode="json"))
+            children.append((ref.sha256, "delivered_file"))
+        result = str(report["result_text"])
+        result_ref = self.artifacts.put_bytes(result.encode("utf-8"), artifact_type="TaskResultArtifact", media_type="text/plain")
+        children.append((result_ref.sha256, "result"))
+        return self.artifacts.put_json(
+            {"schema_version": "5", "kind": "files", "commit_sha": commit_sha,
+             "promotion_commit": promotion_commit, "verification_ref": verification_ref.to_dict(),
+             "verification_status": "not_required" if verification_ref.artifact_type == "NullVerificationReceiptArtifact" else "accepted_by_verifier",
+             "files": files, "result_text": result, "result_ref": result_ref.to_dict(),
+             "next_steps": list(report.get("next_steps") or [])},
+            artifact_type="DeliveryReceiptArtifact", schema_version="5", child_refs=tuple(children),
+        )
 
     def _publish_patch_file(
         self,

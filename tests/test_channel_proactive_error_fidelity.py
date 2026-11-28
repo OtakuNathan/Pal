@@ -11,8 +11,6 @@ import pytest
 from pal.channel.contracts import ChannelDeliveryError
 from pal.execution.contracts import CapabilityResult
 from pal.proactive.contracts import ProactiveDefinition
-from pal.proactive.handler import ProactiveTriggerHandler
-from pal.proactive.runtime import ProactiveManager, ProactiveRunner
 from pal.shared import RuntimeStatus, ProactiveTriggerEvent
 from tests import test_channel_send_message as channel_tests
 from tests.test_proactive_destinations import env, invoke as proactive_invoke
@@ -92,123 +90,15 @@ def test_provider_attach_preserves_original_failed_result(channel_env, monkeypat
     assert result is original
 
 
-def make_handler(repository=None):
-    from pal.core.module_registry import ModuleHandle, MODULE_TIER_DETACHABLE
-    manager = ProactiveManager(repository=repository)
-    # Hydrate rather than persist; repository faults below concern execution.
-    manager.hydrate(ProactiveDefinition(proactive_id="job", goal="run check"))
-    runner = ProactiveRunner(repository=repository)
-    handler = ProactiveTriggerHandler(manager, runner)
-    handler.owner = ModuleHandle("proactive", MODULE_TIER_DETACHABLE, detachable=True)
-    core = SimpleNamespace(state=SimpleNamespace(diagnostics=[]),
-        can_start_background_turn=lambda: True,
-        finish_interrupted_turn=Mock(),
-        run_turn=AsyncMock())
-    core.record_diagnostic = lambda kind, payload: core.state.diagnostics.append({"kind": kind, **payload})
-    continuation = SimpleNamespace(turn_id="job-turn")
-    trigger = ProactiveTriggerEvent(proactive_id="job", trigger_kind="manual")
-    return handler, core, trigger, continuation
-
-
-def test_proactive_failure_retains_cause_in_read_latest_run(env):
-    runtime, manager, _ = env
-    manager.create_task(proactive_id="job", goal="check")
-    handler, core, trigger, continuation = make_handler(manager.repository)
-    async def run(_):
-        fail_with_cause("proactive execution failed")
-    core.run_turn = run
-    assert asyncio.run(handler._run_trigger_async(core, trigger, continuation)) == "failed"
-    result = proactive_invoke(runtime, "read_proactive_task", {"name": "job"})
-    assert result.ok
-    assert "transport root cause" in result.llm_text
-    assert "private-value" not in result.llm_text
-    assert result.structured["run"]["status"] == "failed"
-
-
-@pytest.mark.parametrize("stage", ["begin_run", "complete_run", "update_schedule_state"])
-def test_proactive_recording_failures_are_observable(stage):
-    repository = SimpleNamespace(begin_run=Mock(return_value="run-id"), complete_run=Mock(),
-        fail_run=Mock(), update_schedule_state=Mock())
-    getattr(repository, stage).side_effect = lambda *a, **k: fail_with_cause(f"{stage} failed")
-    handler, core, trigger, continuation = make_handler(repository)
-    core.run_turn.return_value = SimpleNamespace(turn_id="job-turn", final_reply="done", reply_texts=())
-    result = asyncio.run(handler._run_trigger_async(core, trigger, continuation))
-    assert result == "failed"
-    assert stage in core.state.diagnostics[-1]["error"]
-    assert "transport root cause" in core.state.diagnostics[-1]["error"]
-    assert not any("final_reply" in item for item in handler.runner.results)
-
-
-def test_proactive_cleanup_and_failure_storage_do_not_replace_original_failure():
-    repository = SimpleNamespace(begin_run=Mock(return_value="run-id"), fail_run=Mock(
-        side_effect=lambda *a, **k: fail_with_cause("failure storage failed")))
-    handler, core, trigger, continuation = make_handler(repository)
-    core.run_turn.side_effect = lambda *a: fail_with_cause("original run failure")
-    core.finish_interrupted_turn.side_effect = lambda *a, **k: fail_with_cause("cleanup failed")
-    assert asyncio.run(handler._run_trigger_async(core, trigger, continuation)) == "failed"
-    diagnostic = core.state.diagnostics[-1]["error"]
-    assert all(text in diagnostic for text in ("original run failure", "cleanup failed", "failure storage failed"))
-
-
 def test_completed_proactive_run_does_not_imply_delivery(env):
     runtime, manager, _ = env
     manager.create_task(proactive_id="job", goal="check")
-    run_id = manager.repository.begin_run(ProactiveTriggerEvent(proactive_id="job", trigger_kind="manual"))
-    manager.repository.complete_run(run_id, turn_id="job-turn", final_reply="done")
+    manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="job", trigger_kind="manual"))
+    run_id = manager.repository.pending_background_runs()[0].proactive_run_id
+    manager.repository.set_background_state(run_id, "completed", workflow_id="wf", result="done")
     result = proactive_invoke(runtime, "read_proactive_task", {"name": "job"})
-    assert result.structured["run"]["completion_scope"] == "turn_execution"
+    assert result.structured["run"]["completion_scope"] == "workflow_execution"
     assert result.structured["run"]["delivery_confirmation"] == "not_recorded"
-
-
-@pytest.mark.parametrize("destination", ["runtime_missing", "endpoint_missing", "socket_target_missing"])
-def test_unresolved_proactive_output_is_recorded_as_failure(destination):
-    from pal.foundation import EventEnvelope
-    from pal.shared import EventKind
-    repository = SimpleNamespace(begin_run=Mock(return_value="run-id"), fail_run=Mock())
-    handler, core, trigger, _ = make_handler(repository)
-    handler.manager.hydrate(ProactiveDefinition(proactive_id="job", goal="report", out_channel_id="out"))
-    endpoint = SimpleNamespace(endpoint=SimpleNamespace(channel_kind="socket"), derive_default_reply_target=lambda: {})
-    channel = SimpleNamespace(get_endpoint=lambda _: endpoint if destination == "socket_target_missing" else None)
-    core.context = SimpleNamespace(require_port=lambda _: core,
-        port_registry={} if destination == "runtime_missing" else {"channel:channel": channel})
-    core.turn_execution_options = lambda: {}
-    event = EventEnvelope(event_kind=EventKind.PROACTIVE_TRIGGER, source_kind="proactive", payload=trigger)
-    assert handler.handle(event, core.context) == []
-    core.run_turn.assert_not_called()
-    assert "Proactive output channel 'out'" in repository.fail_run.call_args.kwargs["error_text"]
-
-
-@pytest.mark.parametrize("alias", ["read_proactive_task", "list_proactive_runs"])
-@pytest.mark.parametrize("history_read_fails", [False, True])
-def test_history_inspection_exposes_failure_when_begin_run_cannot_be_saved(env, monkeypatch, alias, history_read_fails, caplog):
-    runtime, manager, _ = env
-    manager.create_task(proactive_id="job", goal="check")
-    from pal.core.runtime import PalCore
-    from pal.execution import register_with_core as register_execution
-    from pal.proactive import register_with_core as register_proactive
-    handler, core, trigger, continuation = make_handler(manager.repository)
-    monkeypatch.setattr(manager.repository, "begin_run", lambda *a: fail_with_cause("begin run storage unavailable"))
-    assert asyncio.run(handler._run_trigger_async(core, trigger, continuation)) == "failed"
-    model_core = build_core()
-    register_execution(model_core.context)
-    register_proactive(model_core.context, manager, handler.runner)
-    model_core.publish_module_capabilities("execution")
-    model_core.publish_module_capabilities("proactive")
-    if history_read_fails:
-        for method in ("latest_run", "list_runs"):
-            monkeypatch.setattr(manager.repository, method, lambda *a, **k: fail_with_cause("history read unavailable"))
-    try:
-        result = proactive_invoke(model_core.context.execution_runtime, alias, {"name": "job"})
-    finally:
-        model_core.close()
-    assert result.ok is not history_read_fails, result.llm_text
-    assert "begin run storage unavailable" in caplog.text
-    assert "transport root cause" in result.llm_text
-    assert "private-value" not in result.llm_text
-    assert "runtime_failures" in result.llm_text
-    if history_read_fails:
-        assert "history read unavailable" in caplog.text
-        assert metadata(result)["effect"] == "none"
 
 
 @pytest.mark.parametrize("operation", ["register", "delete"])
@@ -224,16 +114,6 @@ def test_proactive_persistence_failure_preserves_registered_task(env, monkeypatc
     assert not result.ok and "transport root cause" in result.llm_text
     assert manager.registered["job"] == before
     assert manager.schedule_engine.next_due_by_proactive_id == due_before
-
-
-def test_cancellation_survives_secondary_cleanup_failure():
-    handler, core, trigger, continuation = make_handler()
-    core.run_turn.side_effect = asyncio.CancelledError("shutdown requested")
-    core.finish_interrupted_turn.side_effect = lambda *a, **k: fail_with_cause("cleanup failed")
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(handler._run_trigger_async(core, trigger, continuation))
-    assert "shutdown requested" in core.state.diagnostics[-1]["error"]
-    assert "cleanup failed" in core.state.diagnostics[-1]["error"]
 
 
 def test_attachment_precondition_has_honest_receipt(channel_env, tmp_path):
@@ -307,14 +187,6 @@ def test_channel_module_lifecycle_owner_preserves_model_facing_error(channel_env
     assert "lifecycle structured cause" in result.error
 
 
-@pytest.mark.parametrize("method", ["complete_run", "fail_run"])
-def test_missing_proactive_run_is_not_silently_accepted(env, method):
-    _, manager, _ = env
-    arguments = {"turn_id": "turn", "final_reply": "done"} if method == "complete_run" else {"error_text": "failure"}
-    with pytest.raises(LookupError, match="missing proactive run"):
-        getattr(manager.repository, method)("missing-run", **arguments)
-
-
 def test_delivery_failure_does_not_claim_retry_is_safe():
     from pal.failure.handler import FailureEventHandler
     from pal.foundation import EventEnvelope
@@ -353,3 +225,75 @@ def test_channel_management_missing_endpoint_reports_not_started(channel_env, mo
     assert metadata(result)["kind"] == "rejected"
     assert metadata(result)["effect"] == "not_started"
     assert metadata(result)["retry"] == "correct_input"
+
+
+def test_background_admission_retries_same_request_and_keeps_error(env):
+    from pal.foundation import EventEnvelope
+    from pal.proactive.background_dispatch import BackgroundScheduleHandler
+    from pal.shared.background_protocol import BACKGROUND_WORKFLOWS
+    from pal.shared import EventKind
+
+    runtime, manager, _ = env
+    manager.create_task(proactive_id="job", goal="check")
+    manager.enqueue_trigger(ProactiveTriggerEvent("job", "manual"))
+    repo = manager.repository
+    run, = repo.pending_background_runs()
+    attempted = []
+
+    class Backend:
+        async def start_scheduled_run(self, request):
+            attempted.append(request)
+            if len(attempted) == 1:
+                fail_with_cause("workflow acknowledgement lost")
+            return {"workflow_id": "wf"}
+
+    backend = Backend()
+    context = SimpleNamespace(port_registry=SimpleNamespace(
+        optional=lambda key: backend if key == BACKGROUND_WORKFLOWS else None,
+    ))
+    event = EventEnvelope(event_kind=EventKind.PROACTIVE_TRIGGER, source_kind="proactive", payload={})
+    asyncio.run(BackgroundScheduleHandler(repo).handle(event, context))
+    result = proactive_invoke(runtime, "read_proactive_task", {"name": "job"})
+    assert result.structured["run"]["status"] == "submitting"
+    assert "transport root cause" in result.llm_text
+    assert "private-value" not in result.llm_text
+
+    # A fresh handler after reload consumes exactly the persisted request.
+    asyncio.run(BackgroundScheduleHandler(repo).handle(event, context))
+    assert attempted[0] == attempted[1]
+    assert attempted[0]["run_id"] == run.proactive_run_id
+    assert repo.latest_run("job").status == "dispatched"
+
+
+def test_unresolved_background_destination_is_not_silently_discarded(env):
+    from pal.foundation import EventEnvelope
+    from pal.proactive.background_dispatch import BackgroundScheduleHandler
+    from pal.shared import EventKind
+
+    runtime, manager, _ = env
+    manager.create_task(proactive_id="job", goal="check", out_channel_id="missing")
+    manager.enqueue_trigger(ProactiveTriggerEvent("job", "manual"))
+    backend = SimpleNamespace(start_scheduled_run=AsyncMock())
+    context = SimpleNamespace(port_registry=SimpleNamespace(
+        optional=lambda key: backend, get=lambda key: None,
+    ))
+    event = EventEnvelope(event_kind=EventKind.PROACTIVE_TRIGGER, source_kind="proactive", payload={})
+    asyncio.run(BackgroundScheduleHandler(manager.repository).handle(event, context))
+    backend.start_scheduled_run.assert_not_awaited()
+    result = proactive_invoke(runtime, "read_proactive_task", {"name": "job"})
+    assert result.structured["run"]["status"] == "failed"
+    assert "Proactive output channel 'missing'" in result.llm_text
+
+
+def test_historical_resident_runs_remain_readable_but_not_dispatchable(env):
+    from pal.proactive.models import ProactiveRunModel
+
+    runtime, manager, _ = env
+    manager.create_task(proactive_id="job", goal="check")
+    ProactiveRunModel.create(proactive_run_id="legacy", proactive_id="job", trigger_kind="manual",
+                             status="completed", turn_id="old-turn", output_summary="historical result")
+    result = proactive_invoke(runtime, "read_proactive_task", {"name": "job"})
+    assert result.structured["run"]["turn_id"] == "old-turn"
+    assert result.structured["run"]["completion_scope"] == "turn_execution"
+    assert result.structured["run"]["output_summary"] == "historical result"
+    assert not manager.pending_triggers

@@ -925,6 +925,16 @@
       "module": "spec/core/CooperativeToolBatch.tla",
       "kind": "negative",
       "invariant": "NoPartialClose"
+    },
+    {
+      "config": "spec/bunshin/BackgroundHandoffLifecycle.cfg",
+      "module": "spec/bunshin/BackgroundHandoffLifecycle.tla",
+      "kind": "positive"
+    },
+    {
+      "config": "spec/bunshin/ManagedTaskPromotion.cfg",
+      "module": "spec/bunshin/ManagedTaskPromotion.tla",
+      "kind": "positive"
     }
   ],
   "support_modules": [

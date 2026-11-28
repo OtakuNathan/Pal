@@ -89,6 +89,23 @@ class BunshinManagerProvider:
             self.process = None
         return int(process.pid), returncode
 
+    async def start_scheduled_run(self, request: dict[str, Any]) -> dict[str, Any]:
+        return await self.client.request("start_scheduled_run", request)
+
+    async def scheduled_run_status(self, workflow_id: str) -> dict[str, Any]:
+        # A deliberately requested execution restart replaces the workflow,
+        # not the original scheduler occurrence.
+        seen = set()
+        while workflow_id not in seen:
+            seen.add(workflow_id)
+            status = await self.client.request("task_status", {"task_id": "__PROACTIVE__", "workflow_id": workflow_id})
+            workflow = status.get("workflow") or {}
+            replacement = workflow.get("replacement_workflow_id")
+            if not replacement:
+                return status
+            workflow_id = str(replacement)
+        raise RuntimeError("scheduled workflow replacement cycle")
+
     def attach_manager(self) -> dict[str, Any]:
         with self._lifecycle_lock:
             if self._attached:
@@ -182,6 +199,19 @@ class BunshinManagerProvider:
             remaining = len(self._buffered_events)
         return {"events": events, "remaining": remaining}
 
+    def begin_background_delivery(self, event: dict[str, Any]) -> bool:
+        from pal.foundation.background_inbox import BackgroundInbox
+        if BackgroundInbox(self.runtime_root).begin_delivery(str(event["workflow_id"])):
+            return True
+        self.mark_background_delivery_uncertain(event)
+        return False
+
+    def mark_background_delivery_uncertain(self, event: dict[str, Any]) -> None:
+        from pal.foundation.background_inbox import BackgroundInbox
+        BackgroundInbox(self.runtime_root).update_delivery(str(event["workflow_id"]), "unknown")
+        self.client.request_sync("mark_task_delivery_uncertain", {"delivery_id": event["delivery_id"]})
+        self._discard_buffered_event(event)
+
     def settle_event(
         self,
         event: dict[str, Any],
@@ -198,6 +228,9 @@ class BunshinManagerProvider:
         key = self._buffered_event_key(event)
         delivery_id = str(event.get("delivery_id") or "")
         if not accepted:
+            if event.get("background_handoff") and event.get("event_kind") == "workflow_terminal":
+                from pal.foundation.background_inbox import BackgroundInbox
+                BackgroundInbox(self.runtime_root).update_delivery(str(event.get("workflow_id") or ""), "failed")
             if delivery_id:
                 with contextlib.suppress(Exception):
                     self.client.request_sync(
@@ -218,6 +251,9 @@ class BunshinManagerProvider:
                 with contextlib.suppress(Exception):
                     self.event_notify()
             return False
+        if event.get("event_kind") == "workflow_terminal" or event.get("role") == "workflow":
+            from pal.foundation.background_inbox import BackgroundInbox
+            BackgroundInbox(self.runtime_root).update_delivery(str(event.get("workflow_id") or ""), "delivered")
         try:
             if delivery_id:
                 result = self.client.request_sync(
@@ -311,9 +347,9 @@ class BunshinManagerProvider:
             return None
         task_id = str(item.get("task_id") or "")
         binding_row = self._event_repository.delivery_bindings.read_task_delivery(task_id)
-        binding = dict((binding_row or {}).get("current") or {})
+        binding = dict(item.get("frozen_delivery_binding") or (binding_row or {}).get("current") or {})
         route = self._live_route_for_binding(binding)
-        if route is None:
+        if route is None and not item.get("frozen_delivery_binding"):
             route = self._recovery_socket_route(delivery_id)
         if route is None:
             return None
@@ -351,7 +387,7 @@ class BunshinManagerProvider:
             return None
         return {
             "endpoint_id": channel_id,
-            "channel_kind": str(binding.get("channel_kind") or endpoint.endpoint.channel_kind),
+            "channel_kind": str(endpoint.endpoint.channel_kind if binding.get("channel_kind") == "unknown" else binding.get("channel_kind") or endpoint.endpoint.channel_kind),
             "reply_target": target,
             "control_scope_key": str(
                 binding.get("control_scope_key")
@@ -711,6 +747,7 @@ def register_with_core(
     from pal.core.control_action_registry import ControlActionSpec
     _ = service
     controls = context.port_registry.observe(CORE_CONTROL)
+    from pal.shared.background_protocol import BACKGROUND_WORKFLOWS
     resolved_root = Path(runtime_root or context.execution_runtime.runtime_root or Path.cwd() / ".pal-bunshin")
     manager = BunshinManagerProvider(
         runtime_root=resolved_root,
@@ -762,7 +799,8 @@ def register_with_core(
         },
         control_observers={"llm.endpoints.changed": refresh_endpoints,
                            "core.prompt_log.changed": update_logging},
-        ports={"bunshin": manager, "bunshin_workflows": public, "bunshin_v2": public},  # installed workflow consumers
+        ports={"bunshin": manager, "bunshin_workflows": public, "bunshin_v2": public, "background_workflows": manager},
+        port_contracts=(BACKGROUND_WORKFLOWS,),  # installed workflow consumers
         shutdown_sync=manager._stop_manager,
     )
 

@@ -92,11 +92,13 @@ class VerificationRun:
             instruction=_semantic_verifier_instruction(
                 graph_sink=bool(node.payload.get("graph_sink")),
                 direct=node.payload.get("execution_mode") == "direct",
+                general=work_view.get("domain") == "general",
             ),
             reference_refs=verifier_references,
             workspace_override={
                 "kind": "existing_repo",
-                "repair_suite_required": adapter == SOFTWARE_GIT_ADAPTER,
+                "repair_suite_required": adapter == SOFTWARE_GIT_ADAPTER and work_view.get("domain") != "general",
+                "domain": str(work_view.get("domain") or ""),
                 "repo_path": str(review_workspace),
                 "workspace_binding": (
                     "canonical"

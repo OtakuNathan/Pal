@@ -407,6 +407,27 @@ class BunshinManager:
                 workflow_id=str(params.get("workflow_id") or ""),
                 view=str(params.get("view") or "status"),
             )
+        if workflow_method == "submit_external_product":
+            from pal.bunshin.external_products import submit_external_product
+            from pal.foundation.workers import run_worker
+            if params.get("target") == "plan":
+                from pal.bunshin.external_plan import submit_external_plan
+                result = await run_worker(lambda: submit_external_plan(self.workflow_service, params))
+            else:
+                result = await run_worker(lambda: submit_external_product(
+                    self.workflow_service.repository, self.workflow_service.artifacts, params))
+            self._wake_event.set()
+            return result
+        if workflow_method == "start_scheduled_run":
+            from pal.foundation.workers import run_worker
+            try:
+                result = await run_worker(lambda: self.workflow_service.start_scheduled_run(params))
+            except ValueError as exc:
+                # A validation rejection before any workflow is admitted is a
+                # terminal trigger outcome, distinct from a lost IPC response.
+                return {"status": "rejected", "error": str(exc)}
+            self._wake_event.set()
+            return result
         if workflow_method == "start_workflow":
             from pal.foundation.workers import run_worker
             result = await run_worker(lambda: self.workflow_service.start_workflow(params))
@@ -447,6 +468,9 @@ class BunshinManager:
                     str(params.get("part_key") or ""),
                 )
             }
+        if workflow_method == "mark_task_delivery_uncertain":
+            return {"settled": self.workflow_service.repository.deliveries.mark_task_delivery_uncertain(
+                str(params.get("delivery_id") or ""))}
         if workflow_method == "defer_task_delivery":
             return {
                 "deferred": self.workflow_service.repository.deliveries.defer_task_delivery(
@@ -669,6 +693,11 @@ class BunshinManager:
             # Assignment identity is Manager-owned; worker output cannot change it.
             payload.pop("source_dependencies", None)
             if payload.get("memory_candidates"):
+                workflow = self.workflow_service.repository.snapshots.read_snapshot(
+                    AggregateType.WORKFLOW, str(binding.get("workflow_id") or ""))
+                if workflow is not None and workflow.payload.get("memory_policy") == "disabled":
+                    payload.pop("memory_candidates", None)
+            if payload.get("memory_candidates"):
                 dependencies = {}
                 if str(binding.get("aggregate_type") or "") == AggregateType.DAG_NODE_RUN.value:
                     dependencies = {"node_run_id": str(binding.get("aggregate_id") or "")}
@@ -778,6 +807,10 @@ class BunshinManager:
             )
             return
         item["task_id"] = task_id
+        if workflow is not None and workflow.payload.get("scheduled_run_id"):
+            item["frozen_delivery_binding"] = workflow.payload["frozen_delivery_binding"]
+            if item.get("event_kind") == "workflow_terminal" and not workflow.payload.get("channel_delivery_requested"):
+                return
         row = self.workflow_service.repository.deliveries.enqueue_task_delivery(
             task_id=task_id,
             workflow_id=workflow_id,

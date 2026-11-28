@@ -13,6 +13,8 @@ fi
 
 models=(
     ModuleLifecycle
+    BackgroundHandoffLifecycle
+    ManagedTaskPromotion
     ProduceCheckCycle
     VerifierDraftLifecycle
     VerifierFindingUpsert

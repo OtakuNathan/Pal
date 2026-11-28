@@ -39,6 +39,7 @@ class ProduceCheckState(StrEnum):
     REPAIR_READY = "REPAIR_READY"
     ACCEPTED = "ACCEPTED"
     WAITING_EXTERNAL = "WAITING_EXTERNAL"
+    WAITING_PRODUCT = "WAITING_PRODUCT"
     PAUSE_REQUESTED = "PAUSE_REQUESTED"
     PAUSED = "PAUSED"
     CANCEL_REQUESTED = "CANCEL_REQUESTED"
@@ -55,6 +56,7 @@ class PlanCycleState(StrEnum):
     HUMAN_REVIEW = "HUMAN_REVIEW"
     ACCEPTED = ProduceCheckState.ACCEPTED
     REJECTED = "REJECTED"
+    WAITING_PRODUCT = ProduceCheckState.WAITING_PRODUCT
     WAITING_EXTERNAL = ProduceCheckState.WAITING_EXTERNAL
     PAUSE_REQUESTED = ProduceCheckState.PAUSE_REQUESTED
     PAUSED = ProduceCheckState.PAUSED
@@ -72,6 +74,7 @@ class NodeCycleState(StrEnum):
     REPAIR_READY = ProduceCheckState.REPAIR_READY
     ACCEPTED = ProduceCheckState.ACCEPTED
     STALE = "STALE"
+    WAITING_PRODUCT = ProduceCheckState.WAITING_PRODUCT
     WAITING_EXTERNAL = ProduceCheckState.WAITING_EXTERNAL
     PAUSE_REQUESTED = ProduceCheckState.PAUSE_REQUESTED
     PAUSED = ProduceCheckState.PAUSED
@@ -85,6 +88,7 @@ class CycleAction(StrEnum):
     START_PRODUCER = "start_producer"
     PRODUCER_SUBMITTED = "producer_submitted"
     IMPORT_PRODUCT = "import_product"
+    SKIP_CHECKER = "skip_checker"
     PRODUCER_REJECTED = "producer_rejected"
     START_CHECKER = "start_checker"
     CHECKER_ACCEPTED = "checker_accepted"
@@ -97,6 +101,7 @@ class CycleAction(StrEnum):
     MARK_STALE = "mark_stale"
     REQUEST_STALE = "request_stale"
     STALE_CONFIRMED = "stale_confirmed"
+    WAIT_PRODUCT = "wait_product"
     WAIT_EXTERNAL = "wait_external"
     EXTERNAL_RESUMED = "external_resumed"
     REQUEST_PAUSE = "request_pause"
@@ -162,6 +167,7 @@ _QUIESCENT = frozenset(
         "BLOCKED",
         "STALE",
         "WAITING_EXTERNAL",
+        "WAITING_PRODUCT",
         "PAUSED",
         "CANCELLED",
         "REJECTED",
@@ -420,6 +426,13 @@ def _transition_plan(
     verdict: CycleVerdict | None,
 ) -> PlanCycle:
     state = cycle.state.value
+    if action == CycleAction.WAIT_PRODUCT and state in {"PRODUCER_READY", "REPAIR_READY"}:
+        return replace(cycle, state=PlanCycleState.WAITING_PRODUCT, active_assignment=None)
+    if action == CycleAction.IMPORT_PRODUCT and state == "WAITING_PRODUCT":
+        if not product_ref or cycle.active_assignment is not None or assignment is not None or verdict is not None:
+            raise CycleTransitionError("external plan replacement requires an immutable product")
+        return replace(cycle, state=PlanCycleState.CHECKER_READY, product_ref=product_ref,
+                       accepted_product_ref="", last_verdict=None)
     if action == CycleAction.IMPORT_PRODUCT:
         # An externally supplied immutable plan is a product, not a fictitious
         # producer process. Only initial empty PlanCycles can import it.
@@ -429,6 +442,11 @@ def _transition_plan(
                 or cycle.resume_state is not None or assignment is not None or verdict is not None):
             raise CycleTransitionError("plan import requires an empty initial producer-ready cycle")
         return replace(cycle, state=PlanCycleState.CHECKER_READY, product_ref=product_ref)
+    if action == CycleAction.SKIP_CHECKER and state == "CHECKER_READY":
+        if not cycle.product_ref or cycle.active_assignment is not None or assignment is not None or verdict is not None:
+            raise CycleTransitionError("skipping a checker requires a settled product and no assignment")
+        return replace(cycle, state=PlanCycleState.ACCEPTED,
+                       accepted_product_ref=cycle.product_ref, last_verdict=None)
     if action == CycleAction.REQUEST_HUMAN_REVIEW and state == "ACCEPTED":
         return replace(cycle, state=PlanCycleState.HUMAN_REVIEW)
     if action == CycleAction.HUMAN_ACCEPTED and state == "HUMAN_REVIEW":
@@ -509,6 +527,18 @@ def _transition_node(
     verdict: CycleVerdict | None,
 ) -> NodeCycle:
     state = cycle.state.value
+    if action == CycleAction.WAIT_PRODUCT and state in {"PRODUCER_READY", "REPAIR_READY"}:
+        return replace(cycle, state=NodeCycleState.WAITING_PRODUCT, active_assignment=None)
+    if action == CycleAction.IMPORT_PRODUCT and state == "WAITING_PRODUCT":
+        if not product_ref or cycle.active_assignment is not None or assignment is not None or verdict is not None:
+            raise CycleTransitionError("external product import requires a settled producer boundary")
+        return replace(cycle, state=NodeCycleState.CHECKER_READY, product_ref=product_ref,
+                       accepted_product_ref="", last_verdict=None)
+    if action == CycleAction.SKIP_CHECKER and state == "CHECKER_READY":
+        if not cycle.product_ref or cycle.active_assignment is not None or assignment is not None or verdict is not None:
+            raise CycleTransitionError("skipping a checker requires a settled product and no assignment")
+        return replace(cycle, state=NodeCycleState.ACCEPTED,
+                       accepted_product_ref=cycle.product_ref, last_verdict=None)
     if action == CycleAction.REQUEST_STALE and state not in {"CANCELLED", "CANCEL_REQUESTED"}:
         # Preserve the exact admitted assignment until its owner is retired.
         # resume_state distinguishes dependency invalidation from user cancel.

@@ -3,8 +3,8 @@ from __future__ import annotations
 import sqlite3
 
 
-BUNSHIN_SCHEMA_VERSION = 31
-BUNSHIN_IN_PLACE_VERSIONS = frozenset({29, 30})
+BUNSHIN_SCHEMA_VERSION = 32
+BUNSHIN_IN_PLACE_VERSIONS = frozenset({29, 30, 31})
 
 
 def schema_meta_table(connection: sqlite3.Connection) -> str:

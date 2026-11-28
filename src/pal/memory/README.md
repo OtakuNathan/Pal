@@ -80,7 +80,8 @@ Interaction rule:
 Dreaming enters maintenance silently after idle admission. Failures retain the
 existing run report and private diagnostic log, then request an idempotent silent
 once proactive handoff through Core. Notification transport is not a precondition
-for sleep. The handoff uses existing proactive persistence and shared L1; see
+for sleep. The handoff uses the Proactive scheduler and Bunshin, with a durable result
+appended to L1 on the next ordinary resident turn; see
 [Dreaming](../../../docs/pal_memory_dreaming.md).
 
 Dreaming is a first-party optional plugin dependent on `sqlite_vec_l3`. PluginHost

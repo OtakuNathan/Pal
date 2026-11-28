@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
+    INDIRECT_LOCAL_READ,
     INDIRECT_LOCAL_WRITE,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
@@ -61,8 +62,8 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
         "Use when the requested work is identity-light executor work: a medium-to-large or long-running project, work "
         "that benefits from architect/coder/verifier gates, or sandboxed changes and investigation delegated to Bunshin. "
         "Select execution_mode=direct for a clear task or agreed plan; use planned when architecture design is needed. "
-        "Direct mode supports software_engineering new_requirement workflows: it skips Architect and Architect Reviewer, "
-        "and gives Coder and Verifier the same complete task and frozen source inputs in an isolated repository workspace. "
+        "Direct supports general and software_engineering new_requirement workflows: it skips Architect and Architect Reviewer, "
+        "and gives Executor and any configured Verifier the same complete task and frozen source inputs in an isolated repository workspace. For recurring general work, select workspace.kind=managed_git to keep a semantic Task directory. "
         "Choose by identity binding and task nature, not by prose length or step count. Reuse known skill contracts, "
         "discovery results, and the user's existing approval for this workflow. Use search_skills only when relevant "
         "manuals still need discovery; read_tool is needed only for missing contract information. For newly selected "
@@ -85,10 +86,10 @@ BUNSHIN_START_WORKFLOW_GUIDANCE = ToolGuidance(
 
 
 class BunshinStartWorkflowWorkspace(StrictToolModel):
-    kind: Literal["new_project", "existing_repo"] = Field(
+    kind: Literal["new_project", "existing_repo", "managed_git"] = Field(
         description=(
             "Required workspace intent. Use new_project when Pal should create a "
-            "missing repo_path; use existing_repo only when repo_path already exists."
+            "missing repo_path; use existing_repo only when repo_path already exists. Use managed_git for a General Direct Task whose files persist across workflows; the Task title determines its workspace."
         ),
     )
     repo_path: str | None = Field(
@@ -109,6 +110,25 @@ class BunshinStartWorkflowWorkspace(StrictToolModel):
         ),
     )
     primary_language: str | None = None
+
+
+class BackgroundResultInput(StrictToolModel):
+    task: str
+    wait_seconds: float = Field(default=0, ge=0, le=60)
+
+
+class ExternalProductInput(StrictToolModel):
+    workflow_id: str = Field(description="Exact workflow ID returned by read_bunshin_task_status.")
+    node_run_id: str = Field(description="Exact node or plan revision ID returned by waiting_for_external_product in workflow status.")
+    generation: int = Field(description="Current generation from the same external product wait record.")
+    submission_id: str = Field(description="Choose a stable unique submission identity once; reuse the exact ID returned by this tool for retries.")
+    target: Literal["node", "plan"] = "node"
+    repository: str | None = None
+    artifact: str | None = None
+    commit_sha: str | None = None
+    result_text: str | None = None
+    next_steps: list[str] | None = None
+    deliverable_paths: list[str] | None = None
 
 
 class BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput(StrictToolModel):
@@ -132,8 +152,10 @@ class BunshinCapabilitiesBunshinPublicProviderStartWorkflowInput(StrictToolModel
         ),
     )
     execution_mode: Literal["planned", "direct"] = Field(
-        default="planned", description="For software_engineering new_requirement: direct runs one repository Coder/Verifier pair with the same full task and frozen inputs, skipping Architect and Architect Reviewer. Choose it for bounded changes, an agreed plan, or investigation; planned designs and reviews module contracts first. In task_spec, deliverable_paths optionally lists repository-relative report files to verify and deliver as attachments.",
+        default="planned", description="Direct uses an externally supplied task plan and one repository execution cycle. General Direct defaults to no independent verifier; software engineering retains its verifier. Planned designs and reviews contracts first. In task_spec, deliverable_paths lists repository-relative files that must be delivered.",
     )
+    memory_policy: Literal["enabled", "disabled"] | None = None
+    role_overrides: dict[str, str | None] | None = Field(default=None, description="Override role profiles; null verifier/reviewer skips independent verification/review. Null executor requires an external product.")
     operation: Literal[
         "new_requirement",
         "execute_trusted",
@@ -388,6 +410,25 @@ class BunshinPublicProvider:
             return _error("bunshin catalog refresh failed", exc)
 
     @capability_action(
+        namespace=OPERATION_NAMESPACE, scope="bunshin", action_name="submit_external_product",
+        InputModel=ExternalProductInput, aliases=("submit_bunshin_external_product",),
+        guidance=ToolGuidance(purpose="Import a real Git commit into a node waiting for an external executor.",
+            use_when="The bound external producer has completed a product.",
+            do_not_use_when="A Bunshin worker is still responsible for production.",
+            failure_next_steps="Inspect the workflow and current generation before retrying."),
+        execution=INDIRECT_CONTROL,
+    )
+    def submit_external_product(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, _ = self._actor_and_channel(call)
+            args = {**dict(call.args or {}), "actor": actor}
+            if args.get("target") == "plan":
+                args["artifact_ref"] = self.service.resolve_artifact_name(name=str(args.get("artifact") or ""), actor=actor)
+            return _public_result("external product imported", self._request_manager("submit_external_product", args))
+        except Exception as exc:
+            return _error("external product import failed", exc)
+
+    @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="bunshin",
         action_name="start_workflow",
@@ -562,6 +603,44 @@ class BunshinPublicProvider:
             return _invalid("bunshin task selection invalid", exc)
         except Exception as exc:
             return _error("Bunshin workflow status failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE, scope="bunshin", action_name="read_task_result",
+        InputModel=BackgroundResultInput, aliases=("read_bunshin_task_result",),
+        guidance=ToolGuidance(purpose="Read a completed background task's actual result; optionally wait briefly.",
+            use_when="The current conversation needs the background task result.",
+            do_not_use_when="Only inspecting progress; use read_bunshin_task_status instead.",
+            failure_next_steps="Inspect the Task status and try again after it settles."),
+        execution=INDIRECT_LOCAL_READ,
+    )
+    async def read_task_result(self, call: CapabilityCall) -> CapabilityResult:
+        import asyncio
+        import time
+        from dataclasses import replace
+        from pal.shared.tool_protocol import ToolContextMessageIR
+        try:
+            actor, _ = self._actor_and_channel(call)
+            task_id, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args["task"]), actor=actor, include_terminal=True)
+            deadline = time.monotonic() + float(call.args.get("wait_seconds") or 0)
+            while True:
+                status = await asyncio.to_thread(self.service.task_status, task_id, workflow_id=workflow_id)
+                workflow = dict(status.get("workflow") or {})
+                if workflow.get("workflow_state") in {"COMPLETED", "REJECTED", "CANCELLED"}:
+                    delivery = dict(workflow.get("delivery") or {})
+                    result = _public_result("bunshin task result", {"workflow_id": workflow_id, "state": workflow["workflow_state"], "delivery": delivery})
+                    if delivery.get("kind") == "files":
+                        result = replace(result, context_messages=(ToolContextMessageIR(
+                            content="Background task result has been explicitly read.",
+                            semantic_kind="runtime_context",
+                            metadata={"background_workflow_id": workflow_id},
+                        ),))
+                    return result
+                if time.monotonic() >= deadline:
+                    return _public_result("background task is not terminal", status)
+                await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
+        except Exception as exc:
+            return _error("bunshin result read failed", exc)
 
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:

@@ -151,7 +151,7 @@ class PromptCompiler:
 
         ordered_system_blocks = self._order_system_blocks(system_blocks)
         ordered_developer_blocks = self._order_developer_blocks(developer_blocks)
-        ordered_user_blocks = self._order_user_context_blocks(user_context_blocks, turn_kind=assembly_context.turn_kind)
+        ordered_user_blocks = self._order_user_context_blocks(user_context_blocks)
         ordered_reminder_blocks = self._order_runtime_reminder_blocks(runtime_reminder_blocks)
         primary_input = self._extract_primary_input_text(assembly_context)
         return PromptIR(
@@ -546,7 +546,7 @@ class PromptCompiler:
             )
         return blocks
 
-    def _order_user_context_blocks(self, blocks: list[PromptIRBlock], *, turn_kind: str) -> list[PromptIRBlock]:
+    def _order_user_context_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         l1_blocks = [block for block in blocks if block.block_id.startswith("l1_recent_context")]
         summary_blocks = [block for block in blocks if block.block_id == "memory_current_summary"]
         working_memory_blocks = [block for block in blocks if block.block_id == "memory_working_memory"]
@@ -559,8 +559,6 @@ class PromptCompiler:
                 "memory_working_memory",
             }
         ]
-        if turn_kind == "proactive_trigger":
-            return []
         return [*summary_blocks, *l1_blocks, *working_memory_blocks, *trailing_blocks]
 
     def _order_runtime_reminder_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
@@ -887,17 +885,13 @@ class PromptCompiler:
     def _extract_primary_input_text(self, assembly_context: PromptAssemblyContext) -> str:
         if assembly_context.metadata.get("active_l1_owns_primary_input"):
             return ""
-        if assembly_context.turn_kind == "proactive_trigger":
-            proactive_input = assembly_context.metadata.get("proactive_input")
-            if isinstance(proactive_input, str) and proactive_input.strip():
-                return proactive_input.strip()
         return self._extract_user_message_text(assembly_context.event)
 
     def _extract_user_message_text(self, event) -> str:
         return extract_text_from_payload(event.payload if event is not None else None)
 
     def _ensure_memory_pack(self, assembly_context: PromptAssemblyContext) -> PromptAssemblyContext:
-        if assembly_context.turn_kind in {"failure", "proactive_trigger"}:
+        if assembly_context.turn_kind == "failure":
             return assembly_context
         if "memory_pack" in assembly_context.metadata:
             return assembly_context

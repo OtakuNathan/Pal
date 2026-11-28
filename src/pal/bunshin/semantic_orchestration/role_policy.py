@@ -114,7 +114,8 @@ def apply_role_capability_policy(
         primary_artifact = "verification_submission.json"
         allowed_output_types = ["SemanticVerificationSubmissionArtifact"]
     else:
-        software_implementation = str(pack.profile_group or "") == "software_engineering"
+        software_implementation = (str(pack.profile_group or "") == "software_engineering"
+                                   or dict(pack.workspace or {}).get("execution_mode") == "direct")
         primary_artifact = (
             "coder_report.json" if software_implementation else "producer_report.json"
         )

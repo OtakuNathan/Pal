@@ -36,8 +36,8 @@ def background_host(tmp_path, monkeypatch):
     core.context.execution_runtime.shutdown()
 
 
-@pytest.mark.parametrize("kind", [ResidentTurnKind.PROACTIVE, ResidentTurnKind.BACKGROUND])
-def test_background_can_manage_another_plugin_and_retains_its_own_module(background_host, kind):
+def test_background_can_manage_another_plugin_and_retains_its_own_module(background_host):
+    kind = ResidentTurnKind.BACKGROUND
     core, host = background_host
     owner = host.generations["background_owner"].handle
 

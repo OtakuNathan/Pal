@@ -156,5 +156,10 @@
   "worker_processes.py",
   "workflow_request_values.py",
   "workspace_git.py",
-  "workspace_resources.py"
+  "workspace_resources.py",
+  "managed_workspace.py",
+  "external_products.py",
+  "external_plan.py",
+  "scheduled_inputs.py",
+  "scheduled_workflows.py"
 ]

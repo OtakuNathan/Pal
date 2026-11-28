@@ -119,21 +119,6 @@ def validate_role_bindings(
         if extra:
             details.append("unknown " + ", ".join(extra))
         raise ValueError("family role_bindings must define exactly four roles: " + "; ".join(details))
-    for role in (
-        OrchestrationRole.ARCHITECT.value,
-        OrchestrationRole.REVIEWER.value,
-    ):
-        if bindings[role].participant != "profile":
-            raise ValueError(f"family role {role} requires a profile participant")
-    implementation_participant = bindings[
-        OrchestrationRole.IMPLEMENTATION.value
-    ].participant
-    verifier_participant = bindings[OrchestrationRole.VERIFIER.value].participant
-    if implementation_participant != verifier_participant:
-        raise ValueError(
-            "family implementation and verifier participants must both be profile "
-            "or both be null"
-        )
     return {role: bindings[role] for role in sorted(bindings)}
 
 
@@ -143,7 +128,7 @@ def validate_family_binding_payload(
     """Validate the immutable, fully resolved FamilyBindingArtifact contract."""
 
     payload = dict(value or {})
-    if str(payload.get("schema_version") or "") != FAMILY_BINDING_SCHEMA_VERSION:
+    if str(payload.get("schema_version") or "") not in {FAMILY_BINDING_SCHEMA_VERSION, "8"}:
         raise ValueError(
             "FamilyBindingArtifact must use schema_version "
             f"{FAMILY_BINDING_SCHEMA_VERSION}"
@@ -253,6 +238,9 @@ def validate_family_binding_payload(
                 "must not pin a role profile"
             )
         bindings[role] = binding
+
+    if payload.get("schema_version") == "8":
+        return bindings
 
     if bindings[OrchestrationRole.ARCHITECT.value]["participant"] != "profile":
         raise ValueError("FamilyBindingArtifact architect requires a profile participant")

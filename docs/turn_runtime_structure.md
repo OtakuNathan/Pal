@@ -154,10 +154,10 @@ All normal channel messages share one resident mailbox, conversation and
 execution lifetime. The opening message's `TurnDeliveryBinding` retains reply
 authority. Later interjections do not create per-channel agent scopes.
 
-The [resident scheduler](core_turn_scheduling.md) admits chat, proactive and
-background completion work. Proactive waits while resident work is busy and
-queued user input takes priority. Admitted proactive runs use isolated model
-context; they cannot compact resident history to make room for themselves.
+The [resident scheduler](core_turn_scheduling.md) admits chat and resident
+background completion work, giving queued user input priority. Proactive runs
+as independent Bunshin workflows with their own context and execution lifetime;
+their results join the resident L1 only at a new ordinary user turn.
 
 `/btw` uses an immutable captured L and independent temporary history/execution
 state. It does not claim the resident writer or publish into resident L1.

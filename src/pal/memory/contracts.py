@@ -375,6 +375,8 @@ class MemoryServicePort(Protocol):
 
     async def append_interjection(self, turn_id: str, message: LLMMessageIR) -> L1TurnIR: ...
 
+    background_handoff_ids: set[str]
+
     def append_l1_user_contexts(
         self,
         turn_id: str,

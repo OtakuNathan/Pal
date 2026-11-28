@@ -322,6 +322,7 @@ class MemoryService:
     review_storage: Any = None
     context_epoch: int = 0
     compaction_receipts: dict[str, CompactionReceipt] = field(default_factory=dict)
+    background_handoff_ids: set[str] = field(default_factory=set)
     _reviews: Any = field(default=None, init=False, repr=False)
     _conversation_turns: set[str] = field(default_factory=set, init=False, repr=False)
     _conversation_times: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
@@ -1010,8 +1011,6 @@ class MemoryService:
             deleted = catalog.deleted_refs()
             self.remove_projected_entries([key for key, entry in self.l2_store.items.items()
                                            if key in deleted or entry.source_ref in deleted])
-        if request.turn_kind == "proactive_trigger":
-            return MemoryPack(metadata={"turn_kind": request.turn_kind})
         continuity = self.l1_store.turns.continuity
         current_summary = continuity.entry if continuity is not None else None
         hot_entries = self.l2_store.list_hot_entries()

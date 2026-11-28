@@ -191,41 +191,16 @@ class BunshinCatalogTests(unittest.TestCase):
                 }
             )
 
-    def test_family_override_rejects_unexecutable_role_combinations(self) -> None:
+    def test_family_override_accepts_independent_role_combinations(self) -> None:
         service = BunshinCatalogService(self.root)
         service.bootstrap()
-        with self.assertRaisesRegex(
-            ValueError,
-            "reviewer requires a profile participant",
-        ):
-            service.set_family_override(
-                family="lifestyle",
-                changes={
-                    "role_bindings": {
-                        "reviewer": {
-                            "participant": "null",
-                            "profile": None,
-                            "reason": "missing_reviewer",
-                        }
-                    }
-                },
+        for family, role in (("lifestyle", "reviewer"), ("software_engineering", "verifier")):
+            result = service.set_family_override(
+                family=family,
+                changes={"role_bindings": {role: {"participant": "null", "profile": None,
+                                                  "reason": "independent_check_not_requested"}}},
             )
-        with self.assertRaisesRegex(
-            ValueError,
-            "implementation and verifier participants must both",
-        ):
-            service.set_family_override(
-                family="software_engineering",
-                changes={
-                    "role_bindings": {
-                        "verifier": {
-                            "participant": "null",
-                            "profile": None,
-                            "reason": "missing_verifier",
-                        }
-                    }
-                },
-            )
+            self.assertEqual(result["definition"]["role_bindings"][role]["participant"], "null")
         updated = service.set_family_override(
             family="software_engineering",
             changes={

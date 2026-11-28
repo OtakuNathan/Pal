@@ -54,8 +54,11 @@ class ResolvedFamilyBinding:
     metadata: Mapping[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        legacy_combo = (self.role_bindings["architect"].participant == "profile"
+                        and self.role_bindings["reviewer"].participant == "profile"
+                        and self.role_bindings["implementation"].participant == self.role_bindings["verifier"].participant)
         return {
-            "schema_version": "7",
+            "schema_version": "7" if legacy_combo else "8",
             "family_id": self.family_id,
             "display_name": self.display_name,
             "domain": self.domain,
@@ -97,6 +100,64 @@ class BunshinWorkflowCatalog:
         if profile is None:
             raise ValueError(f"unknown bunshin profile: {profile_id or '<empty>'}")
         return profile
+
+    def bind_planned(self, base: Mapping[str, Any], overrides: Mapping[str, Any],
+                     *, operation: str) -> ArtifactRef:
+        from pal.bunshin.role_contracts import validate_family_binding_payload
+        payload = dict(self.artifacts.read_json(base))
+        family = str(payload["family_id"])
+        roles = dict(payload["role_bindings"])
+        for role, selector in overrides.items():
+            if role not in roles:
+                raise ValueError(f"unknown role: {role}")
+            if selector is None:
+                roles[role] = ResolvedRoleBinding("null", "", reason="external_product" if role == "implementation" else "not_requested").to_dict()
+            else:
+                profile = self.profile(str(selector))
+                if profile.profile_group != family or profile.role_protocol is None or profile.role_protocol.kind != role:
+                    raise ValueError("role override must select a compatible family role profile")
+                roles[role] = ResolvedRoleBinding("profile", str(selector), profile.to_dict()).to_dict()
+        payload.update(schema_version="8", role_bindings=roles)
+        validate_family_binding_payload(payload)
+        return self.artifacts.put_json(payload, artifact_type="FamilyBindingArtifact", schema_version="8",
+                                      child_refs=((str(base["sha256"]), "family_defaults"),))
+
+    def bind_direct(
+        self, base: Mapping[str, Any], overrides: Mapping[str, Any],
+    ) -> ArtifactRef:
+        """Pin effective roles for an externally supplied task plan."""
+        payload = dict(self.artifacts.read_json(base))
+        family = str(payload["family_id"])
+        if family not in {"general", "software_engineering"}:
+            raise ValueError("direct mode requires a Git-capable family")
+        bindings = dict(payload["role_bindings"])
+        for role in ("architect", "reviewer"):
+            bindings[role] = ResolvedRoleBinding(
+                "null", "", reason="externally_supplied_task_plan"
+            ).to_dict()
+        if family == "general":
+            bindings["verifier"] = ResolvedRoleBinding(
+                "null", "", reason="independent_verification_not_requested"
+            ).to_dict()
+        for role, selector in overrides.items():
+            if role in {"architect", "reviewer"} and selector is None:
+                continue
+            if role not in {"implementation", "verifier"}:
+                raise ValueError("direct mode uses an externally supplied plan without a plan reviewer")
+            if selector is None:
+                bindings[role] = ResolvedRoleBinding("null", "", reason="not_requested").to_dict()
+                continue
+            profile = self.profile(str(selector))
+            if profile.profile_group != family or profile.role_protocol is None or profile.role_protocol.kind != role:
+                raise ValueError("role override must select a compatible family role profile")
+            bindings[role] = ResolvedRoleBinding("profile", str(selector), profile.to_dict()).to_dict()
+        payload.update(schema_version="8", role_bindings=bindings, execution_adapter="software_git.v2")
+        from pal.bunshin.role_contracts import validate_family_binding_payload
+        from pal.bunshin.direct_contract import validate_direct_binding
+        validate_family_binding_payload(payload)
+        validate_direct_binding(payload)
+        return self.artifacts.put_json(payload, artifact_type="FamilyBindingArtifact",
+                                      schema_version="8", child_refs=((str(base["sha256"]), "family_defaults"),))
 
     def publish_family_binding(self, primary_profile_id: str) -> ArtifactRef:
         profile_registry = BunshinProfileRegistry(runtime_root=Path(self.runtime_root))
@@ -237,7 +298,7 @@ class BunshinWorkflowCatalog:
         return self.artifacts.put_json(
             binding.to_dict(),
             artifact_type="FamilyBindingArtifact",
-            schema_version="7",
+            schema_version=binding.to_dict()["schema_version"],
             provenance={
                 "family_id": family.family_id,
                 "primary_profile": primary_profile.canonical_profile_id,

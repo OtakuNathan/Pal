@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Mapping
 from uuid import uuid4
-from pal.bunshin.contracts import ActionEnvelope, AggregateType, DispatchResult, DomainEvent
+from pal.bunshin.contracts import AggregateSnapshot, ActionEnvelope, AggregateType, DispatchResult, DomainEvent
 from pal.bunshin.engine import TransitionEngine
 from pal.bunshin.storage.artifacts import ArtifactsStore
 from pal.bunshin.storage.connection_contracts import DatabasePort
@@ -88,6 +88,7 @@ class TransitionsStore:
             self.role_submissions.assert_action_receipt_boundary_locked(connection, action, current, settlement)
             self.human_decisions.consume_human_decision_locked(connection, action)
             self.artifacts.assert_artifact_refs_durable(connection, action.payload)
+            _check_managed_workspace_identity(connection, current, action)
             outcome = self.engine.transition(current, action)
             self.snapshots.write_snapshot_locked(connection, current, outcome.snapshot)
 
@@ -263,3 +264,19 @@ class TransitionsStore:
             )
             events.append(event)
         return events
+
+
+def _check_managed_workspace_identity(connection: sqlite3.Connection, current: AggregateSnapshot | None, action: ActionEnvelope) -> None:
+    if action.aggregate_type == AggregateType.TASK and action.action_type in {"CREATE_TASK", "UPDATE_TASK_CONTEXT"}:
+        workspace_key = str(action.payload.get("workspace_key") or "")
+        managed = bool(action.payload.get("managed_git") or (current.payload.get("managed_git") if current else False))
+        if workspace_key:
+            collision = connection.execute(
+                """SELECT 1 FROM bunshin_task_projection AS t
+                   JOIN bunshin_aggregate_snapshots AS s ON s.aggregate_type='task' AND s.aggregate_id=t.task_id
+                   WHERE t.state='ACTIVE' AND t.workspace_key=? AND t.task_id<>?
+                     AND (? OR json_extract(s.payload_json,'$.managed_git')=1) LIMIT 1""",
+                (workspace_key, action.aggregate_id, int(managed)),
+            ).fetchone()
+            if collision:
+                raise ValueError("managed workspace already belongs to another active Task")

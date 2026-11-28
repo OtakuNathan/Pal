@@ -94,7 +94,7 @@ class DebugDumpTests(unittest.TestCase):
         )
         proactive_manager = SimpleNamespace(
             registered={},
-            trigger_mailbox=_Mailbox(0),
+            pending_triggers=(),
             schedule_engine=SimpleNamespace(next_due_by_proactive_id={}),
         )
         return SimpleNamespace(

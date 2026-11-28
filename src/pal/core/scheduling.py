@@ -19,7 +19,6 @@ class CoreTurnPhase(str, Enum):
 
 class ResidentTurnKind(str, Enum):
     CHAT = "chat"
-    PROACTIVE = "proactive"
     BACKGROUND = "background"
 
 

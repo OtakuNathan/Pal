@@ -115,32 +115,3 @@ def test_sink_cannot_overwrite_an_existing_endpoint_of_another_kind(env):
     assert result["status"] != "ok"
     assert "different channel kind" in result["error"]
     assert env.repository.get("null").binding_key == "keep-me"
-
-
-def test_proactive_sink_keeps_execution_history_without_delivering_to_another_channel(env):
-    from pal.llm import generation_result_from_values
-    from pal.memory import MemoryService, register_with_core as register_memory
-    from pal.proactive import ProactiveDefinition, ProactiveManager, register_with_core as register_proactive
-    from pal.shared import ProactiveTriggerEvent
-    from tests.test_architecture_skeleton import ScriptedLLMRuntime
-
-    core = env.core
-    register_core(core)
-    memory = MemoryService()
-    register_memory(core.context, memory)
-    manager = ProactiveManager()
-    register_proactive(core.context, manager)
-    manager.register(ProactiveDefinition("silent", "Run a silent check", out_channel_id="null"))
-    core.context.port_registry["llm:llm"] = ScriptedLLMRuntime([
-        generation_result_from_values(text="\u200b", tool_calls=[], finish_reason="stop"),
-    ])
-    manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="silent", trigger_kind="manual"))
-    processed = core.run_until_idle()
-    assert EventKind.PROACTIVE_TRIGGER in [event.event_kind for event in processed]
-    assert not [event for event in processed if event.event_kind == EventKind.REPLY_FAILED]
-    assert any(message.content == "\u200b" for turn in memory.l1_store.items for message in turn)
-    endpoint = env.channel.get_endpoint("null")
-    assert endpoint is not None
-    assert not endpoint.outbox and not endpoint.stream_update_outbox and not endpoint.status_outbox
-    for other in env.channel.list_endpoints():
-        assert not other.outbox and not other.stream_update_outbox

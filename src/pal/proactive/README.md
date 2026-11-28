@@ -16,31 +16,35 @@ Exposes:
 - `ProactiveTriggerEvent`
 - `ProactiveManager`
 - `ScheduleEngine`
-- `ProactiveEventSource`
+- `BackgroundScheduleSource`
 
-## Context and handoff
+## Background execution and handoff
 
-Triggers wait in the existing mailbox until core admits a resident turn.
-Running/finalizing chat, dreaming, quiescence and compaction apply backpressure;
-pending user input has priority. Admission is rechecked after event dispatch.
-No run record, L1 turn or user reply is created before admission. While a
-proactive turn runs, new user input remains queued for the next chat turn.
+The built-in plugin admits occurrences durably into `proactive_runs` in the
+same transaction that advances the schedule cursor. The original definition,
+skills and route are frozen in the occurrence record. The shared background
+workflow port starts one idempotent workflow under the system `__PROACTIVE__`
+Task. Independent Tasks can run concurrently; this Task serializes scheduled
+runs. Scheduler reload reattaches by run/workflow identity.
 
-Each run uses a new model-cache scope and sees only its trigger and its own
-active L1 turn. It does not consume queued user interjections or reuse the
-resident history projection, including the projection's left-history bootstrap.
-The ordinary codec sends the complete isolated request on every round.
+The dedicated `general.proactive_worker` profile uses the normal Bunshin LLM
+broker, worktree, tool permissions, interaction and recovery protocols. It has
+no independent verifier by default and cannot propose long-term memories.
+Resident does not run an LLM turn at admission or when a workflow finishes.
+There is no resident-turn execution fallback. Historical definitions and run
+records remain readable without being re-executed.
 
-Tool calls, results and output-snapshot references already belong to the shared
-L1 store. Closing the turn makes these records available to later ordinary chat
-requests; no summary-only handoff or duplicate transcript copy is needed.
-Artifact ownership and file version/edit authority remain resident-owned.
-File-read suppression additionally requires the source results to be visible in
-the requesting model context, so another run's reads cannot hide file content.
+The canonical business-data repository is `RUNTIME_ROOT/proactive`. Each
+workflow gets an isolated Git worktree. Existing deployed business-data paths
+are migrated by the offline runtime upgrade and remain compatibility links.
+Memory conversation history is separate and can be captured as an immutable
+read-only input when named in a scheduled task.
 
-A proactive run that exceeds its own context budget stops with its work recorded.
-It must not compact the resident conversation to make space for an isolated
-request. Independent proactive compaction is not implemented by this path.
+A workflow terminal result is appended to the durable background inbox, with
+channel delivery tracked independently. The resident consumes pending neutral
+results in its next ordinary user turn and checkpoints the consumption
+identity with L1. No worker reasoning or model-native replay enters resident
+history. Explicit result retrieval can consume the same receipt.
 
 ## Output destination tool
 
@@ -92,14 +96,13 @@ The stable shared `SilentOnceSchedulerPort` publishes
 `ensure_silent_once(proactive_id, goal, method)`. It persists an immediately due
 `once` definition targeting `null`; existing ids are preserved, including completed
 or intentionally disabled tasks. Dreaming uses Core’s generic silent-task facility for failed dreaming handoffs. The
-ordinary task execution writes shared L1, whose existing resident persistence owns
-recovery and subsequent conversational visibility. Task definitions/cursors remain
+workflow produces a model-neutral result, which the resident consumes through
+the same durable inbox at its next normal turn. Task definitions/cursors remain
 in the existing proactive repository. This port's identity survives plugin reload.
 
-The event source owns a timer scope and translates its next schedule deadline
-into a one-shot Core timer. Maintenance pauses this timer; wakeup rechecks due
-work and resident admission. An active run retains its module generation; finish
-or interrupt that run before unloading. Successful unload cancels pending timers
-and drains remaining task bookkeeping.
+The event source owns a timer scope and translates schedule deadlines and pending
+workflow reconciliation into one-shot Core timers. Memory maintenance pauses
+admission. Plugin unload cancels timer ownership; it does not cancel the
+independent Bunshin workflow.
 Handlers use the public Core control port, without accessing Core state or its
 turn manager.

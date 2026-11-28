@@ -2,10 +2,10 @@
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 (* Core's resident scheduler, including asynchronous task teardown.
-   Awaiting I/O does not release ownership. Proactive triggers are queued,
+   Awaiting I/O does not release ownership. Resident background requests are queued,
    not started by their producer. Foreign history publication and maintenance
    require a closed resident boundary. Current-turn L1 appends are allowed.
-   Unsafe switches reproduce the previous independent proactive path and
+   Unsafe switches reproduce the previous independent background-turn path and
    premature program-exit release; these are expected-counterexample cases.
 *)
 CONSTANTS Users, Jobs, UnsafeStart, UnsafeRelease, UnsafePublish, UnsafeCompletion, UnsafeBarrierRelease

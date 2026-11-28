@@ -466,3 +466,23 @@ machine. `tests/test_bunshin_workflow_selection.py` bridges SQL fixtures to the
 service, including 25 newer archived rows, multiple restarting rows, scope,
 archive filters, deterministic latest-first fallback, and duplicate detection.
 Existing archive contract tests cover task reuse and public status projection.
+
+
+- `BackgroundHandoffLifecycle.tla` abstracts the durable occurrence admission,
+  stable workflow binding, explicit result observation, checkpoint/ack cut and
+  uncertain external delivery. Runtime regressions in
+  `tests/test_bunshin_background_engine.py` exercise the SQLite trigger cursor,
+  durable consumption tombstone and Memory snapshot restoration at these cuts.
+- `ManagedTaskPromotion.tla` abstracts the foreground capture, accepted
+  candidate, promotion intent, canonical ref advancement and receipt. The same
+  runtime test file injects interruption on both sides of the Git advancement
+  and verifies that the accepted commit is preserved and reused. A genuinely
+  dirty interrupted checkout is conservatively fenced for explicit resolution.
+
+The optional producer/checker states in `ProduceCheckCycle` and
+`GraphExecutionLifecycle` model possible profile/null bindings. The production
+`NodeSchedulingReducer` includes the external-product wait, which has no
+pending assignment and retains no slot. `ImplementationTopology` is regenerated
+from the same production machine specs that handle external import, checker
+skip, pause and cancel. The two additional hand-written lifecycle models are
+abstractions of the persistence protocol, not generated proofs of Git or SQLite.

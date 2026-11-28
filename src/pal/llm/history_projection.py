@@ -56,9 +56,8 @@ class HistoryProjection:
         touches the session (J5).
         """
 
-        # Proactive requests deliberately exclude resident history. The shared
-        # history root (including its left bootstrap) cannot encode this view.
-        # Use the ordinary codec with the complete, isolated current request.
+        # An explicitly isolated request cannot be encoded from the shared
+        # history root. Use the complete request with the ordinary codec.
         if request.metadata.get("history_visibility") == "active_turn":
             return None
         from pal.llm.compaction import is_native_window

@@ -23,12 +23,12 @@ def test_failed_memory_close_is_retained_and_retried_before_next_admission():
         assert core.turn_manager.cleanup_interrupted(turn.turn_id) is False
         assert core.state.active_turns[turn.turn_id] is turn
         assert memory.active_l1_turn(turn.turn_id) is not None
-        assert not core.can_start_proactive_turn()
+        assert not core.control_runtime.can_start_background_turn()
         assert len(core.state.diagnostics) == 1
         assert core.state.diagnostics[-1]["cleanup_pending"] is True
         assert "memory publication unavailable" in core.state.diagnostics[-1]["error"]
         memory.history.remove_change_listener(changed)
-        assert core.can_start_proactive_turn()
+        assert core.control_runtime.can_start_background_turn()
         assert not core.state.active_turns
         assert not core.turn_manager.pending_closures
         saved, = memory.history.turns
@@ -69,9 +69,9 @@ def test_stop_cancels_model_even_when_memory_cannot_close():
                        for topic, payload in events) == 1
             assert "running" not in core.state.turn_scopes
             assert core.turn_manager.pending_closures
-            assert not core.can_start_proactive_turn()
+            assert not core.control_runtime.can_start_background_turn()
             memory.history.remove_change_listener(changed)
-            assert core.can_start_proactive_turn()
+            assert core.control_runtime.can_start_background_turn()
             assert memory.active_l1_turn("running") is None
         finally:
             memory.history.remove_change_listener(changed)

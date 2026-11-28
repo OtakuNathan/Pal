@@ -594,6 +594,8 @@ def _run_setup_upgrade_offline(*, runtime_root: Path, embedding_remote_only: boo
         return 2
     web_fetch_result = migrate_web_fetch_schema(db_path)
     result = cutover_bunshin_runtime(resolved_root)
+    from pal.bunshin.managed_workspace import migrate_proactive_data
+    migrate_proactive_data(resolved_root)
     from pal.memory.embedding_migration import upgrade_legacy_embeddings
     from pal.memory.storage import MemoryStorage
 

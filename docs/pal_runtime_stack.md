@@ -50,8 +50,8 @@ Core owns the event main loop, resident admission, turn continuation, effect dis
 prompt assembly, and the `AgentTurnRuntime` shared by Pal and Bunshin. It coordinates runtime-state
 snapshot/restore/reset, but does not directly own other domains' databases or platform SDKs.
 
-Resident chat, proactive, and background completion messages share
-the admission state machine in [`scheduling.py`](../src/pal/core/scheduling.py).
+Resident chat and background completion messages share
+the admission state machine in [`scheduling.py`](../src/pal/core/scheduling.py). Proactive schedules dispatch independent Bunshin workflows.
 All normal channel inputs belong to the same resident conversation and execution lifetime;
 channels do not create independent personas or session scopes. Recognized control commands bypass the normal reasoning path;
 `/btw` uses an isolated temporary branch and does not occupy the resident writer.
@@ -148,7 +148,7 @@ Entrypoints: [execution README](../src/pal/execution/README.md),
 | Plugin domain | Owned sources of truth and boundaries |
 | --- | --- |
 | Bunshin | Task, workflow graph, role leases, checkpoints, review, and delivery outbox in a standalone manager/database; not the old work-order API |
-| Proactive | definition, schedule, due-trigger mailbox, run history, and output destination; waits for resident admission and uses an isolated context during execution |
+| Proactive | definition, durable occurrence admission, run history, and output destination; dispatches independent Bunshin workflows |
 | Skill | Searchable and injectable manual/playbook; not execution authority, and no independent behavior advisor |
 | Artifact | Lifecycle, representation, and visibility of conversation attachments; distinct from long-term memory or ordinary file tools |
 | LSP / MCP | Their respective manager sidecars, external connections, and Pal-native capability projection |

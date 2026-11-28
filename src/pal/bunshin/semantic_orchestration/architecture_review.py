@@ -61,6 +61,9 @@ class ArchitectureReview:
             raise SubmissionInvariantError(
                 "architecture review requires the current ContractArtifact"
             )
+        if revision.state == "REVIEW_QUEUED" and self.workflow_facts.role_participant_kind(revision.workflow_id, "reviewer") == "null":
+            from pal.bunshin.semantic_orchestration.optional_plan_review import skip_plan_review
+            return skip_plan_review(self.repository, self.artifacts, revision, manifest_ref)
         return await self.run_contract_architecture_review(
             effect, revision, manifest_ref
         )

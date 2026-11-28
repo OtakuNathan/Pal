@@ -28,11 +28,12 @@ def invoke(runtime, alias, args):
     return runtime.execute_tool(new_tool_call(name='call_tool', args={'name': alias, 'args': args}))
 
 
-def test_eleven_tools_and_only_start_remains_direct(env):
+def test_background_result_and_import_keep_only_start_direct(env):
     runtime, _ = env
     generation = runtime.registry_generation
     names = {name for name, record in generation.search_records.items() if record['module_id'] == 'bunshin'}
-    assert len(names) == 11
+    assert len(names) == 13
+    assert {"read_bunshin_task_result", "submit_bunshin_external_product"} <= names
     assert names.intersection(generation.direct_aliases) == {'start_bunshin_workflow'}
     assert 'rebind_bunshin_task_delivery' in generation.indirect_aliases
     assert generation.record_for_alias('rebind_bunshin_task_delivery').execution.effect_kind is EffectKind.CONTROL
