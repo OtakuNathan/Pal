@@ -4923,7 +4923,10 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
             self.assertIn("cannot substitute for the full task specification", start_descriptor.guidance.use_when)
             self.assertIn("Do not inspect or implement", start_descriptor.guidance.do_not_use_when)
             self.assertIn("do not poll status", start_descriptor.guidance.do_not_use_when)
-            self.assertIn("callbacks deliver", start_descriptor.guidance.do_not_use_when)
+            self.assertIn("Clarification and review use callbacks", start_descriptor.guidance.do_not_use_when)
+            self.assertIn("final results follow result_recipient", start_descriptor.guidance.do_not_use_when)
+            self.assertIn("result_recipient", start_schema["properties"])
+            self.assertIn("read_bunshin_task_result", start_descriptor.guidance.use_when)
             self.assertIn("identity-light executor work", start_descriptor.guidance.use_when)
             self.assertIn("not by prose length or step count", start_descriptor.guidance.use_when)
             self.assertIn("strongly bound to Pal's relationship with the user", start_descriptor.guidance.do_not_use_when)
@@ -5558,9 +5561,9 @@ class BunshinPublicSurfaceTests(unittest.TestCase):
         delivery = service.repository.deliveries.enqueue_task_delivery(
             task_id=task_id,
             workflow_id="",
-            event_kind="terminal",
-            payload={"event_kind": "terminal", "payload": {"summary": "done"}},
-            dedup_key="terminal:durable-socket-fallback",
+            event_kind="workflow_terminal",
+            payload={"event_kind": "workflow_terminal", "payload": {"summary": "done"}},
+            dedup_key="workflow-terminal:durable-socket-fallback",
         )
 
         self.assertEqual(

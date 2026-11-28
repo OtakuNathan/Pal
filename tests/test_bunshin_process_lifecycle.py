@@ -740,9 +740,11 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
             await self.manager._publish_worker_event({
                 "run_id": "run", "event_kind": "clarification_requested", "payload": {"clarification_id": "late"},
             })
-            self.assertEqual(deliver.call_count, 1)
-            self.assertEqual(deliver.call_args.args[0]["payload"]["status"], "failed")
+            # Role termination updates the ledger, not the user channel;
+            # the subsequent late clarification must not enqueue anything.
+            deliver.assert_not_called()
         self.assertEqual(state.last_event["event_kind"], "terminal")
+        self.assertEqual(state.last_event["payload"]["status"], "failed")
         self.assertFalse(state.pending_clarification)
         self.manager._unregister_broker_run("run", True)
         self.assertEqual(state.summary()["status"], "failed")
