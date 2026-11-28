@@ -425,8 +425,11 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
             await self.click(provider, "control.model.set", endpoint_id="b")
             self.assertIn("Compact is not required", bot.edit_message_text.await_args.kwargs["text"])
             await self.click(provider, "control.model.cancel")
-            self.assertIn("Model: a", bot.edit_message_text.await_args.kwargs["text"])
-            self.assertIsNotNone(bot.edit_message_text.await_args.kwargs["reply_markup"])
+            panel = bot.edit_message_text.await_args.kwargs
+            self.assertEqual(panel["parse_mode"], "MarkdownV2")
+            self.assertIn("Active: *a*", panel["text"])
+            self.assertEqual([row[0].text for row in panel["reply_markup"].inline_keyboard],
+                             ["> a", "b", "Back"])
             await self.click(provider, "control.model.set", endpoint_id="b")
             await self.click(provider, "control.model.think", think_level="high")
             bot.send_message.assert_awaited_once()
@@ -499,7 +502,11 @@ class ModelSwitchControlTests(unittest.IsolatedAsyncioTestCase):
                 await self.step(request, "cancel", interaction_origin="button",
                                 interaction_id=panel_id, interaction_kind="control_panel")
                 returned = provider._restore_interaction(panel_id)
-                self.assertIn("Model: a", bot.edit_message_text.await_args.kwargs["text"])
+                panel = bot.edit_message_text.await_args.kwargs
+                self.assertEqual(panel["parse_mode"], "MarkdownV2")
+                self.assertIn("Active: *a*", panel["text"])
+                self.assertEqual([row[0].text for row in panel["reply_markup"].inline_keyboard],
+                                 ["> a", "b", "Back"])
             finally:
                 self.compact_release.set()
                 await task
