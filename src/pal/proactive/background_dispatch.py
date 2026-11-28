@@ -26,6 +26,7 @@ class BackgroundScheduleSource(EventSource):
         from pal.control.runtime_contracts import CORE_CONTROL
         host = context.port_registry.optional(CORE_CONTROL)
         if host is not None and host.snapshot().memory_maintenance:
+            self._arm_timer(None)
             return False
         try:
             self.manager.enqueue_due_triggers()

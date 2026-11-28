@@ -189,28 +189,35 @@ def test_failed_timer_records_cause_and_loop_continues_with_next_event():
     asyncio.run(run())
 
 
-def test_proactive_owns_deadline_timer_and_pauses_it_during_maintenance():
-    from pal.proactive import ProactiveManager, register_with_core
+def test_proactive_owns_deadline_timer_and_pauses_it_during_maintenance(tmp_path):
+    from pal.proactive import ProactiveManager, ProactiveRepository, register_with_core
+    from pal.proactive.models import ProactiveDefinitionModel, ProactiveRunModel
+    from pal.foundation import PalV2Database
     core = build_core()
-    manager = ProactiveManager()
-    handle = register_with_core(core.context, manager)
-    source = handle.event_sources[0]
-    manager.create_task(proactive_id="timer-job", goal="fixture", schedule={
-        "cadence": "once", "run_at_utc": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()})
-    assert not source.prepare(core.context)
-    assert 0 < core.next_wakeup_timeout_seconds() <= 300
-    core.state.memory_maintenance = True
-    assert not source.prepare(core.context)
-    assert core.next_wakeup_timeout_seconds() is None
-    core.state.memory_maintenance = False
-    assert not source.prepare(core.context)
-    assert core.next_wakeup_timeout_seconds() is not None
-    manager.destroy_task("timer-job")
-    source.prepare(core.context)
-    assert core.next_wakeup_timeout_seconds() is None
-    manager.create_task(proactive_id="new-job", goal="fixture", schedule={
-        "cadence": "once", "run_at_utc": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()})
-    source.prepare(core.context)
-    core.context.unregister_module(handle)
-    assert core.next_wakeup_timeout_seconds() is None
-    core.close()
+    db = PalV2Database(tmp_path / "pal.sqlite3")
+    db.initialize([ProactiveDefinitionModel, ProactiveRunModel])
+    try:
+        manager = ProactiveManager(repository=ProactiveRepository())
+        handle = register_with_core(core.context, manager)
+        source = handle.event_sources[0]
+        manager.create_task(proactive_id="timer-job", goal="fixture", schedule={
+            "cadence": "once", "run_at_utc": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()})
+        assert not source.prepare(core.context)
+        assert 0 < core.next_wakeup_timeout_seconds() <= 300
+        core.state.memory_maintenance = True
+        assert not source.prepare(core.context)
+        assert core.next_wakeup_timeout_seconds() is None
+        core.state.memory_maintenance = False
+        assert not source.prepare(core.context)
+        assert core.next_wakeup_timeout_seconds() is not None
+        manager.destroy_task("timer-job")
+        source.prepare(core.context)
+        assert core.next_wakeup_timeout_seconds() is None
+        manager.create_task(proactive_id="new-job", goal="fixture", schedule={
+            "cadence": "once", "run_at_utc": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()})
+        source.prepare(core.context)
+        core.context.unregister_module(handle)
+        assert core.next_wakeup_timeout_seconds() is None
+    finally:
+        core.close()
+        db.close()

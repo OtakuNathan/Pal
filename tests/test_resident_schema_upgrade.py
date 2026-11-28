@@ -10,6 +10,7 @@ from pal.checklist import ChecklistService, register_with_core
 from pal.llm.compaction_engine import CompactionEngine
 from pal.llm.resident_compaction import PalCompactionPolicy
 from pal.memory.persistence.journal import ResidentJournalStore
+from pal.memory.runtime_state import MEMORY_RUNTIME_STATE_SCHEMA_VERSION
 from tests.test_resident_history import app, begin, answer
 from tests.test_runtime_compaction import _valid_pal_payload
 from tests.test_two_segment_executor_flow import _Transport, _ScriptedLLM
@@ -46,11 +47,16 @@ def test_readable_checkpoint_and_journal_restore_then_compact(tmp_path, old_sche
         source = _app(tmp_path, checklist == "existing")
         port = source.handle.core.context.module_registry.modules["memory"].runtime_state_port
         port.schema_version = old_schema
-        memory = begin(source, "original before upgrade")
-        assert await source.history.checkpoint_async("submission")
-        answer(memory, "reply after base checkpoint")
-        memory.settle_l1_turn("t")
-        assert await source.history.checkpoint_async("round")
+        # Write the actual old payload shape, not a v6 payload with an old label.
+        snapshot_state = port.snapshot_state
+        with patch.object(port, "snapshot_state", side_effect=lambda: {
+            key: value for key, value in snapshot_state().items() if key != "background_handoff_ids"
+        }):
+            memory = begin(source, "original before upgrade")
+            assert await source.history.checkpoint_async("submission")
+            answer(memory, "reply after base checkpoint")
+            memory.settle_l1_turn("t")
+            assert await source.history.checkpoint_async("round")
         assert source.history.store.path.stat().st_size > 0
 
         target = _app(tmp_path, checklist != "none")
@@ -63,7 +69,9 @@ def test_readable_checkpoint_and_journal_restore_then_compact(tmp_path, old_sche
         assert restored.messages[-1].reasoning_text == "PRIVATE REASONING"
         assert restored.messages[-1].replay.payload["message"]["signature"] == "opaque"
         saved = ResidentJournalStore(tmp_path).read()
-        assert saved["modules"]["memory"]["schema_version"] == "5"
+        assert saved["modules"]["memory"]["schema_version"] == MEMORY_RUNTIME_STATE_SCHEMA_VERSION
+        assert saved["modules"]["memory"]["payload"]["background_handoff_ids"] == []
+        assert target.handle.memory_service.background_handoff_ids == set()
         assert saved["runtime_spec_hash"] == target._runtime_spec_hash()
 
         result = await _executor(target).compaction.run(

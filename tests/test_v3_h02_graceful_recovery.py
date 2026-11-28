@@ -261,7 +261,7 @@ class H02GracefulRecoveryTests(unittest.TestCase):
         original_incarnation = root.incarnation
         payload = dict(MemoryRuntimeStatePort(service).snapshot_state())
         self.assertIn("history_root", payload)
-        legacy = {k: v for k, v in payload.items() if k != "history_root"}
+        legacy = {k: v for k, v in payload.items() if k not in {"history_root", "background_handoff_ids"}}
 
         restored_service = MemoryService()
         port = MemoryRuntimeStatePort(restored_service)
@@ -274,7 +274,8 @@ class H02GracefulRecoveryTests(unittest.TestCase):
         fresh_root = restored_service.history_root
         self.assertNotEqual(fresh_root.incarnation, original_incarnation)
         self.assertEqual(fresh_root.cut.turn_count, sum(t.state != L1TurnState.ACTIVE for t in restored_service.l1_store.turns.turns))
-        self.assertEqual(MEMORY_RUNTIME_STATE_SCHEMA_VERSION, "5")
+        self.assertEqual(MEMORY_RUNTIME_STATE_SCHEMA_VERSION, "6")
+        self.assertEqual(restored_service.background_handoff_ids, set())
 
     def test_H03_failed_publish_keeps_previous_checkpoint_readable(self):
         """H03: a shutdown write that fails mid-replace leaves the previous
